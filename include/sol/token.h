@@ -1,0 +1,86 @@
+#ifndef SOL_TOKEN_H
+#define SOL_TOKEN_H
+
+#include "sol/source.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+
+typedef enum {
+    SOL_TOKEN_EOF,
+    SOL_TOKEN_INVALID,
+    SOL_TOKEN_WHITESPACE,
+    SOL_TOKEN_NEWLINE,
+    SOL_TOKEN_LINE_COMMENT,
+    SOL_TOKEN_BLOCK_COMMENT,
+    SOL_TOKEN_IDENTIFIER,
+    SOL_TOKEN_INTEGER,
+    SOL_TOKEN_STRING,
+
+    SOL_TOKEN_MODULE,
+    SOL_TOKEN_EDITION,
+    SOL_TOKEN_USE,
+    SOL_TOKEN_PUBLIC,
+    SOL_TOKEN_PRIVATE,
+    SOL_TOKEN_RECORD,
+    SOL_TOKEN_ENUM,
+    SOL_TOKEN_OPEN,
+    SOL_TOKEN_CAPABILITY,
+    SOL_TOKEN_FUNCTION,
+    SOL_TOKEN_EFFECTS,
+    SOL_TOKEN_REQUIRES,
+    SOL_TOKEN_ENSURES,
+    SOL_TOKEN_PURE,
+    SOL_TOKEN_LET,
+    SOL_TOKEN_RETURN,
+    SOL_TOKEN_IF,
+    SOL_TOKEN_ELSE,
+    SOL_TOKEN_MATCH,
+    SOL_TOKEN_TRUE,
+    SOL_TOKEN_FALSE,
+
+    SOL_TOKEN_LEFT_PAREN,
+    SOL_TOKEN_RIGHT_PAREN,
+    SOL_TOKEN_LEFT_BRACE,
+    SOL_TOKEN_RIGHT_BRACE,
+    SOL_TOKEN_LEFT_BRACKET,
+    SOL_TOKEN_RIGHT_BRACKET,
+    SOL_TOKEN_LESS,
+    SOL_TOKEN_GREATER,
+    SOL_TOKEN_LESS_EQUAL,
+    SOL_TOKEN_GREATER_EQUAL,
+    SOL_TOKEN_EQUAL,
+    SOL_TOKEN_EQUAL_EQUAL,
+    SOL_TOKEN_BANG,
+    SOL_TOKEN_BANG_EQUAL,
+    SOL_TOKEN_PLUS,
+    SOL_TOKEN_MINUS,
+    SOL_TOKEN_STAR,
+    SOL_TOKEN_SLASH,
+    SOL_TOKEN_PERCENT,
+    SOL_TOKEN_AMP_AMP,
+    SOL_TOKEN_PIPE_PIPE,
+    SOL_TOKEN_DOT,
+    SOL_TOKEN_COMMA,
+    SOL_TOKEN_COLON,
+    SOL_TOKEN_AT,
+    SOL_TOKEN_ARROW,
+    SOL_TOKEN_FAT_ARROW,
+} SolTokenKind;
+
+typedef struct {
+    SolTokenKind kind;
+    SolSpan span;
+} SolToken;
+
+typedef struct {
+    SolToken *items;
+    size_t count;
+    size_t capacity;
+} SolTokens;
+
+bool sol_token_is_trivia(SolTokenKind kind);
+const char *sol_token_kind_name(SolTokenKind kind);
+bool sol_token_text_equal(const SolSource *source, SolToken token, const char *text);
+
+#endif

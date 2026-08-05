@@ -2,7 +2,7 @@
 
 **A programming language for explicit intent, safe implementation, progressive verification, and reliable change.**
 
-> **Project status:** Sol is currently a language-design and compiler-research project. The specification is under active development; no production-ready compiler or stable toolchain exists yet.
+> **Project status:** Sol is currently a language-design and compiler-research project. A bootstrap compiler front end is under development, but no production-ready compiler or stable toolchain exists yet.
 
 Sol is designed for software written and maintained collaboratively by humans and AI systems. It treats effects, authority, contracts, resource behavior, semantic identity, and change consequences as first-class parts of the program rather than context that must be reconstructed from conventions, comments, and repository archaeology.
 
@@ -338,6 +338,19 @@ sol explain             Expand a structured diagnostic
 ```
 
 The language server is expected to expose typed syntax, inferred effects, ownership state, contract obligations, semantic references, API compatibility, and suggested repair classes directly to editors and agents.
+
+## Bootstrap Compiler
+
+The bootstrap compiler is written in C17 and currently provides a lossless lexer, a recovering parser for core declarations, and structured human or JSON diagnostics through `sol check`.
+
+```text
+cmake -S . -B build -G Ninja -DSOL_ENABLE_SANITIZERS=ON
+cmake --build build
+cmake --build build --target test
+./build/sol check tests/valid.sol
+```
+
+This implementation is an experimental edition-2027 front end. Function bodies, effects, and contract blocks are currently retained and delimiter-checked but are not yet semantically analyzed or executed.
 
 ## Compiler Architecture
 
