@@ -1,6 +1,7 @@
 #ifndef SOL_PARSER_H
 #define SOL_PARSER_H
 
+#include "sol/ast.h"
 #include "sol/diagnostic.h"
 #include "sol/token.h"
 
@@ -19,6 +20,7 @@ typedef struct {
     SolSpan name;
     SolSpan span;
     bool is_public;
+    SolExprId body;
 } SolSyntaxItem;
 
 typedef struct {
@@ -27,6 +29,15 @@ typedef struct {
     SolSyntaxItem *items;
     size_t item_count;
     size_t item_capacity;
+    SolExpr *expressions;
+    size_t expression_count;
+    size_t expression_capacity;
+    SolStatement *statements;
+    size_t statement_count;
+    size_t statement_capacity;
+    SolArgument *arguments;
+    size_t argument_count;
+    size_t argument_capacity;
 } SolSyntaxTree;
 
 void sol_syntax_tree_init(SolSyntaxTree *tree);

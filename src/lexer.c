@@ -266,6 +266,7 @@ bool sol_lex(
             case ',': SOL_ADD_SINGLE(SOL_TOKEN_COMMA); break;
             case ':': SOL_ADD_SINGLE(SOL_TOKEN_COLON); break;
             case '@': SOL_ADD_SINGLE(SOL_TOKEN_AT); break;
+            case '?': SOL_ADD_SINGLE(SOL_TOKEN_QUESTION); break;
             case '/': SOL_ADD_SINGLE(SOL_TOKEN_SLASH); break;
             case '-':
                 if (cursor + 1 < source->length && source->text[cursor + 1] == '>') {
@@ -349,7 +350,7 @@ const char *sol_token_kind_name(SolTokenKind kind) {
         "function", "effects", "requires", "ensures", "pure", "let", "return",
         "if", "else", "match", "true", "false", "(", ")", "{", "}", "[",
         "]", "<", ">", "<=", ">=", "=", "==", "!", "!=", "+", "-", "*",
-        "/", "%", "&&", "||", ".", ",", ":", "@", "->", "=>",
+        "/", "%", "&&", "||", ".", ",", ":", "@", "?", "->", "=>",
     };
     size_t count = sizeof(names) / sizeof(names[0]);
     size_t index = (size_t)kind;

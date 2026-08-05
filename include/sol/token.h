@@ -64,6 +64,7 @@ typedef enum {
     SOL_TOKEN_COMMA,
     SOL_TOKEN_COLON,
     SOL_TOKEN_AT,
+    SOL_TOKEN_QUESTION,
     SOL_TOKEN_ARROW,
     SOL_TOKEN_FAT_ARROW,
 } SolTokenKind;
