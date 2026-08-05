@@ -341,7 +341,7 @@ The language server is expected to expose typed syntax, inferred effects, owners
 
 ## Bootstrap Compiler
 
-The bootstrap compiler is written in C17 and currently provides a lossless lexer, a recovering parser for core declarations and function-body expressions, an arena-backed syntax AST, and structured human or JSON diagnostics through `sol check`.
+The bootstrap compiler is written in C17 and currently provides a lossless lexer, a recovering parser for core declarations and function-body expressions, an arena-backed syntax AST, deterministic definition IDs, lexical name resolution, and structured human or JSON diagnostics through `sol check`.
 
 ```text
 cmake -S . -B build -G Ninja -DSOL_ENABLE_SANITIZERS=ON
@@ -350,7 +350,7 @@ cmake --build build --target test
 ./build/sol check tests/valid.sol
 ```
 
-This implementation is an experimental edition-2027 front end. Function bodies are parsed into a syntax AST; effect and contract blocks are currently retained and delimiter-checked. No source is semantically analyzed or executed yet.
+This implementation is an experimental edition-2027 front end. Function bodies are parsed and names are resolved into an initial HIR; effect and contract blocks are currently retained and delimiter-checked. Types, effects, ownership, and execution are not implemented yet.
 
 ## Compiler Architecture
 

@@ -21,6 +21,7 @@ typedef struct {
     SolSpan span;
     bool is_public;
     SolExprId body;
+    SolParameterId first_parameter;
 } SolSyntaxItem;
 
 typedef struct {
@@ -38,6 +39,9 @@ typedef struct {
     SolArgument *arguments;
     size_t argument_count;
     size_t argument_capacity;
+    SolParameter *parameters;
+    size_t parameter_count;
+    size_t parameter_capacity;
 } SolSyntaxTree;
 
 void sol_syntax_tree_init(SolSyntaxTree *tree);

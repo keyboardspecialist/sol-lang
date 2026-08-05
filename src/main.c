@@ -1,4 +1,5 @@
 #include "sol/diagnostic.h"
+#include "sol/hir.h"
 #include "sol/lexer.h"
 #include "sol/parser.h"
 #include "sol/source.h"
@@ -26,13 +27,18 @@ static int sol_check_file(const char *path, bool json) {
     SolDiagnostics diagnostics;
     SolTokens tokens;
     SolSyntaxTree tree;
+    SolHirModule hir;
     sol_diagnostics_init(&diagnostics);
     sol_tokens_init(&tokens);
     sol_syntax_tree_init(&tree);
+    sol_hir_module_init(&hir);
 
     bool completed = sol_lex(&source, &tokens, &diagnostics);
     if (completed) {
         completed = sol_parse(&source, &tokens, &tree, &diagnostics);
+    }
+    if (completed && !sol_diagnostics_has_errors(&diagnostics)) {
+        completed = sol_hir_lower(&source, &tree, &hir, &diagnostics);
     }
     bool failed = !completed || sol_diagnostics_has_errors(&diagnostics);
 
@@ -46,6 +52,7 @@ static int sol_check_file(const char *path, bool json) {
         printf("checked %s: %zu declaration%s\n", path, tree.item_count, tree.item_count == 1 ? "" : "s");
     }
 
+    sol_hir_module_free(&hir);
     sol_syntax_tree_free(&tree);
     sol_tokens_free(&tokens);
     sol_diagnostics_free(&diagnostics);

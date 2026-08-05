@@ -18,6 +18,12 @@ static int failures = 0;
     } while (0)
 
 static void check_ast_links(const SolSyntaxTree *tree) {
+    for (size_t index = 0; index < tree->item_count; ++index) {
+        CHECK(tree->items[index].body == SOL_AST_NONE
+            || tree->items[index].body < tree->expression_count);
+        CHECK(tree->items[index].first_parameter == SOL_AST_NONE
+            || tree->items[index].first_parameter < tree->parameter_count);
+    }
     for (size_t index = 0; index < tree->expression_count; ++index) {
         const SolExpr *expression = &tree->expressions[index];
         switch (expression->kind) {
@@ -70,6 +76,10 @@ static void check_ast_links(const SolSyntaxTree *tree) {
         } else {
             CHECK(statement->as.expression < tree->expression_count);
         }
+    }
+    for (size_t index = 0; index < tree->parameter_count; ++index) {
+        CHECK(tree->parameters[index].next == SOL_AST_NONE
+            || tree->parameters[index].next < tree->parameter_count);
     }
 }
 
@@ -499,6 +509,65 @@ static void test_capability_member_body_rejected(void) {
     sol_source_free(&source);
 }
 
+static void test_failed_function_parameter_rollback(void) {
+    static const char source_text[] =
+        "module parameter_recovery\n"
+        "function broken(value: Int64) ->\n"
+        "function recovered(actual: Int64) -> Int64 { return actual }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "parameter_recovery.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.item_count == 1);
+    CHECK(tree.parameter_count == 1);
+    if (tree.item_count == 1) {
+        CHECK(tree.items[0].first_parameter == 0);
+    }
+    check_ast_links(&tree);
+
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_multiline_record_return_rejected(void) {
+    static const char source_text[] =
+        "module multiline_record\n"
+        "record Pair {}\n"
+        "function make() -> Pair {\n"
+        "    return Pair\n"
+        "    {}\n"
+        "}\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "multiline_record.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    bool found = false;
+    for (size_t index = 0; index < diagnostics.count; ++index) {
+        found = found || strcmp(diagnostics.items[index].code, "SOL-PARSE-015") == 0;
+    }
+    CHECK(found);
+
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
 int main(void) {
     test_valid_declarations();
     test_missing_module();
@@ -513,6 +582,8 @@ int main(void) {
     test_expression_depth_limit();
     test_malformed_expression_delimiters();
     test_capability_member_body_rejected();
+    test_failed_function_parameter_rollback();
+    test_multiline_record_return_rejected();
     if (failures != 0) {
         fprintf(stderr, "%d frontend test failure(s)\n", failures);
         return 1;

@@ -9,6 +9,6 @@ if(NOT result EQUAL 1)
     message(FATAL_ERROR "expected compiler exit code 1, got ${result}: ${error}")
 endif()
 
-if(NOT output MATCHES "\"code\":\"SOL-PARSE-004\"")
-    message(FATAL_ERROR "expected SOL-PARSE-004 JSON diagnostic, got: ${output}")
+if(NOT output MATCHES "\"code\":\"${EXPECTED_CODE}\"")
+    message(FATAL_ERROR "expected ${EXPECTED_CODE} JSON diagnostic, got: ${output}")
 endif()

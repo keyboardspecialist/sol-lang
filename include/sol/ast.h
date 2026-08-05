@@ -11,6 +11,7 @@
 typedef size_t SolExprId;
 typedef size_t SolStatementId;
 typedef size_t SolArgumentId;
+typedef size_t SolParameterId;
 
 #define SOL_AST_NONE SIZE_MAX
 
@@ -95,5 +96,11 @@ typedef struct {
         SolExprId expression;
     } as;
 } SolStatement;
+
+typedef struct {
+    SolSpan name;
+    SolSpan type;
+    SolParameterId next;
+} SolParameter;
 
 #endif

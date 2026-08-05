@@ -25,6 +25,7 @@ void sol_syntax_tree_free(SolSyntaxTree *tree) {
     free(tree->expressions);
     free(tree->statements);
     free(tree->arguments);
+    free(tree->parameters);
     memset(tree, 0, sizeof(*tree));
 }
 
@@ -205,6 +206,24 @@ static SolArgumentId sol_parser_add_argument(SolParser *parser, SolArgument argu
     return id;
 }
 
+static SolParameterId sol_parser_add_parameter(SolParser *parser, SolParameter parameter) {
+    if (parser->tree->parameter_count == parser->tree->parameter_capacity) {
+        SolParameter *parameters = sol_parser_grow(
+            parser,
+            parser->tree->parameters,
+            &parser->tree->parameter_capacity,
+            sizeof(*parser->tree->parameters)
+        );
+        if (parameters == NULL) {
+            return SOL_AST_NONE;
+        }
+        parser->tree->parameters = parameters;
+    }
+    SolParameterId id = parser->tree->parameter_count++;
+    parser->tree->parameters[id] = parameter;
+    return id;
+}
+
 static bool sol_parser_path(SolParser *parser, SolSpan *span, const char *description) {
     SolToken first = sol_parser_current(parser);
     if (!sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER, description)) {
@@ -221,7 +240,7 @@ static bool sol_parser_path(SolParser *parser, SolSpan *span, const char *descri
     return true;
 }
 
-static bool sol_parser_type(SolParser *parser);
+static bool sol_parser_type(SolParser *parser, SolSpan *span);
 
 static bool sol_parser_type_arguments(SolParser *parser) {
     if (!sol_parser_match(parser, SOL_TOKEN_LESS)) {
@@ -238,7 +257,7 @@ static bool sol_parser_type_arguments(SolParser *parser) {
         return false;
     }
     for (;;) {
-        if (!sol_parser_type(parser)) {
+        if (!sol_parser_type(parser, NULL)) {
             return false;
         }
         if (sol_parser_match(parser, SOL_TOKEN_GREATER)) {
@@ -253,7 +272,8 @@ static bool sol_parser_type_arguments(SolParser *parser) {
     }
 }
 
-static bool sol_parser_type(SolParser *parser) {
+static bool sol_parser_type(SolParser *parser, SolSpan *span) {
+    SolToken first = sol_parser_current(parser);
     if (parser->type_depth >= 256) {
         sol_diagnostics_add(
             parser->diagnostics,
@@ -280,6 +300,15 @@ static bool sol_parser_type(SolParser *parser) {
             && sol_parser_type_arguments(parser);
     }
     --parser->type_depth;
+    if (parsed && span != NULL) {
+        size_t last_index = parser->cursor;
+        do {
+            --last_index;
+        } while (last_index > 0
+            && sol_token_is_trivia(parser->tokens->items[last_index].kind));
+        SolToken last = parser->tokens->items[last_index];
+        *span = (SolSpan){.start = first.span.start, .end = last.span.end};
+    }
     return parsed;
 }
 
@@ -317,6 +346,16 @@ static unsigned int sol_parser_binary_precedence(SolTokenKind kind) {
         case SOL_TOKEN_PERCENT: return 6;
         default: return 0;
     }
+}
+
+static bool sol_parser_has_line_break(SolParser *parser, size_t start, size_t end) {
+    for (size_t index = start; index < end; ++index) {
+        char byte = parser->source->text[index];
+        if (byte == '\n' || byte == '\r') {
+            return true;
+        }
+    }
+    return false;
 }
 
 static SolParsedArguments sol_parser_argument_list(SolParser *parser, SolTokenKind closing) {
@@ -580,7 +619,13 @@ static SolExprId sol_parser_postfix_expression(SolParser *parser) {
                 },
                 .as.field = {.base = expression, .name = name.span},
             });
-        } else if (kind == SOL_TOKEN_LEFT_BRACE && !parser->suppress_record_literal) {
+        } else if (kind == SOL_TOKEN_LEFT_BRACE
+            && !parser->suppress_record_literal
+            && !sol_parser_has_line_break(
+                parser,
+                parser->tree->expressions[expression].span.end,
+                sol_parser_current(parser).span.start
+            )) {
             SolExprKind expression_kind = parser->tree->expressions[expression].kind;
             if (expression_kind != SOL_EXPR_PATH && expression_kind != SOL_EXPR_FIELD) {
                 break;
@@ -688,6 +733,26 @@ static SolExprId sol_parser_expression(SolParser *parser, unsigned int minimum_p
     return left;
 }
 
+static void sol_parser_check_multiline_record(SolParser *parser, SolExprId value) {
+    if (value != SOL_AST_NONE
+        && sol_parser_kind(parser) == SOL_TOKEN_LEFT_BRACE
+        && (parser->tree->expressions[value].kind == SOL_EXPR_PATH
+            || parser->tree->expressions[value].kind == SOL_EXPR_FIELD)
+        && sol_parser_has_line_break(
+            parser,
+            parser->tree->expressions[value].span.end,
+            sol_parser_current(parser).span.start
+        )) {
+        sol_diagnostics_add(
+            parser->diagnostics,
+            "SOL-PARSE-015",
+            SOL_SEVERITY_ERROR,
+            sol_parser_current(parser).span,
+            "a record literal's opening brace must be on the same line as its type"
+        );
+    }
+}
+
 static SolStatementId sol_parser_statement(SolParser *parser) {
     SolToken start = sol_parser_current(parser);
     SolStatement statement = {.next = SOL_AST_NONE};
@@ -696,6 +761,7 @@ static SolStatementId sol_parser_statement(SolParser *parser) {
         sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER, "expected a binding name after 'let'");
         sol_parser_expect(parser, SOL_TOKEN_EQUAL, "expected '=' after binding name");
         SolExprId value = sol_parser_expression(parser, 1);
+        sol_parser_check_multiline_record(parser, value);
         statement.kind = SOL_STATEMENT_LET;
         statement.as.let_statement.name = name.span;
         statement.as.let_statement.value = value;
@@ -705,6 +771,7 @@ static SolStatementId sol_parser_statement(SolParser *parser) {
         };
     } else if (sol_parser_match(parser, SOL_TOKEN_RETURN)) {
         SolExprId value = sol_parser_expression(parser, 1);
+        sol_parser_check_multiline_record(parser, value);
         statement.kind = SOL_STATEMENT_RETURN;
         statement.as.expression = value;
         statement.span = (SolSpan){
@@ -713,6 +780,7 @@ static SolStatementId sol_parser_statement(SolParser *parser) {
         };
     } else {
         SolExprId value = sol_parser_expression(parser, 1);
+        sol_parser_check_multiline_record(parser, value);
         statement.kind = SOL_STATEMENT_EXPRESSION;
         statement.as.expression = value;
         statement.span = value == SOL_AST_NONE ? start.span : parser->tree->expressions[value].span;
@@ -797,7 +865,7 @@ static bool sol_parser_named_type_list(SolParser *parser, SolTokenKind closing) 
         if (!sol_parser_expect(parser, SOL_TOKEN_COLON, "expected ':' after the name")) {
             return false;
         }
-        if (!sol_parser_type(parser)) {
+        if (!sol_parser_type(parser, NULL)) {
             return false;
         }
         if (sol_parser_match(parser, closing)) {
@@ -812,14 +880,66 @@ static bool sol_parser_named_type_list(SolParser *parser, SolTokenKind closing) 
     }
 }
 
+static bool sol_parser_parameters(
+    SolParser *parser,
+    bool retain,
+    SolParameterId *first_parameter
+) {
+    *first_parameter = SOL_AST_NONE;
+    SolParameterId last_parameter = SOL_AST_NONE;
+    if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+        return true;
+    }
+    for (;;) {
+        SolToken name = sol_parser_current(parser);
+        if (!sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER, "expected a parameter name")) {
+            return false;
+        }
+        if (!sol_parser_expect(parser, SOL_TOKEN_COLON, "expected ':' after the parameter name")) {
+            return false;
+        }
+        SolSpan type;
+        if (!sol_parser_type(parser, &type)) {
+            return false;
+        }
+        if (retain) {
+            SolParameterId parameter = sol_parser_add_parameter(parser, (SolParameter){
+                .name = name.span,
+                .type = type,
+                .next = SOL_AST_NONE,
+            });
+            if (parameter == SOL_AST_NONE) {
+                return false;
+            }
+            if (*first_parameter == SOL_AST_NONE) {
+                *first_parameter = parameter;
+            } else {
+                parser->tree->parameters[last_parameter].next = parameter;
+            }
+            last_parameter = parameter;
+        }
+        if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+            return true;
+        }
+        if (!sol_parser_expect(parser, SOL_TOKEN_COMMA, "expected ',' between parameters")) {
+            return false;
+        }
+        if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+            return true;
+        }
+    }
+}
+
 static bool sol_parser_function(
     SolParser *parser,
     bool member,
     SolSpan *name,
     SolSpan *whole,
-    SolExprId *body
+    SolExprId *body,
+    SolParameterId *first_parameter
 ) {
     *body = SOL_AST_NONE;
+    *first_parameter = SOL_AST_NONE;
     SolToken function_token = sol_parser_current(parser);
     if (!sol_parser_expect(parser, SOL_TOKEN_FUNCTION, "expected 'function'")) {
         return false;
@@ -830,13 +950,13 @@ static bool sol_parser_function(
     if (!sol_parser_expect(parser, SOL_TOKEN_LEFT_PAREN, "expected '(' after the function name")) {
         return false;
     }
-    if (!sol_parser_named_type_list(parser, SOL_TOKEN_RIGHT_PAREN)) {
+    if (!sol_parser_parameters(parser, !member, first_parameter)) {
         return false;
     }
     if (!sol_parser_expect(parser, SOL_TOKEN_ARROW, "expected '->' after function parameters")) {
         return false;
     }
-    if (!sol_parser_type(parser)) {
+    if (!sol_parser_type(parser, NULL)) {
         return false;
     }
 
@@ -975,7 +1095,15 @@ static bool sol_parser_capability(SolParser *parser, SolSpan *name, SolSpan *who
         SolSpan member_name;
         SolSpan member_span;
         SolExprId member_body;
-        if (!sol_parser_function(parser, true, &member_name, &member_span, &member_body)) {
+        SolParameterId member_parameters;
+        if (!sol_parser_function(
+            parser,
+            true,
+            &member_name,
+            &member_span,
+            &member_body,
+            &member_parameters
+        )) {
             if (sol_parser_kind(parser) != SOL_TOKEN_EOF) {
                 sol_parser_advance(parser);
             }
@@ -1025,6 +1153,7 @@ static void sol_parser_recover_declaration(SolParser *parser, size_t failed_at) 
 
 static void sol_parser_declaration(SolParser *parser) {
     size_t failed_at = sol_parser_significant_index(parser);
+    size_t parameter_mark = parser->tree->parameter_count;
     size_t start = sol_parser_current(parser).span.start;
     while (sol_parser_kind(parser) == SOL_TOKEN_AT) {
         sol_parser_annotation(parser);
@@ -1038,6 +1167,7 @@ static void sol_parser_declaration(SolParser *parser) {
     SolSpan name = {0};
     SolSpan whole = {0};
     SolExprId body = SOL_AST_NONE;
+    SolParameterId first_parameter = SOL_AST_NONE;
     bool parsed = false;
     SolTokenKind kind = sol_parser_kind(parser);
     if (kind == SOL_TOKEN_RECORD) {
@@ -1063,7 +1193,14 @@ static void sol_parser_declaration(SolParser *parser) {
         parsed = sol_parser_capability(parser, &name, &whole);
     } else if (kind == SOL_TOKEN_FUNCTION) {
         item_kind = SOL_ITEM_FUNCTION;
-        parsed = sol_parser_function(parser, false, &name, &whole, &body);
+        parsed = sol_parser_function(
+            parser,
+            false,
+            &name,
+            &whole,
+            &body,
+            &first_parameter
+        );
     } else {
         sol_parser_error(
             parser,
@@ -1081,8 +1218,10 @@ static void sol_parser_declaration(SolParser *parser) {
             .span = whole,
             .is_public = is_public,
             .body = body,
+            .first_parameter = first_parameter,
         });
     } else {
+        parser->tree->parameter_count = parameter_mark;
         sol_parser_recover_declaration(parser, failed_at);
     }
 }
