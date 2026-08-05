@@ -145,6 +145,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         if ((int)item->kind < 0 || item->kind > SOL_ITEM_FUNCTION
             || !sol_span_valid(resolver->source, item->name)
             || !sol_span_valid(resolver->source, item->span)
+            || !sol_span_valid(resolver->source, item->return_type)
             || (item->body != SOL_AST_NONE && item->body >= syntax->expression_count)
             || (item->first_parameter != SOL_AST_NONE
                 && item->first_parameter >= syntax->parameter_count)) {

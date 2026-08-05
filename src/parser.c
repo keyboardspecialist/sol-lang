@@ -936,10 +936,12 @@ static bool sol_parser_function(
     SolSpan *name,
     SolSpan *whole,
     SolExprId *body,
-    SolParameterId *first_parameter
+    SolParameterId *first_parameter,
+    SolSpan *return_type
 ) {
     *body = SOL_AST_NONE;
     *first_parameter = SOL_AST_NONE;
+    *return_type = (SolSpan){0};
     SolToken function_token = sol_parser_current(parser);
     if (!sol_parser_expect(parser, SOL_TOKEN_FUNCTION, "expected 'function'")) {
         return false;
@@ -956,7 +958,7 @@ static bool sol_parser_function(
     if (!sol_parser_expect(parser, SOL_TOKEN_ARROW, "expected '->' after function parameters")) {
         return false;
     }
-    if (!sol_parser_type(parser, NULL)) {
+    if (!sol_parser_type(parser, return_type)) {
         return false;
     }
 
@@ -1096,13 +1098,15 @@ static bool sol_parser_capability(SolParser *parser, SolSpan *name, SolSpan *who
         SolSpan member_span;
         SolExprId member_body;
         SolParameterId member_parameters;
+        SolSpan member_return_type;
         if (!sol_parser_function(
             parser,
             true,
             &member_name,
             &member_span,
             &member_body,
-            &member_parameters
+            &member_parameters,
+            &member_return_type
         )) {
             if (sol_parser_kind(parser) != SOL_TOKEN_EOF) {
                 sol_parser_advance(parser);
@@ -1168,6 +1172,7 @@ static void sol_parser_declaration(SolParser *parser) {
     SolSpan whole = {0};
     SolExprId body = SOL_AST_NONE;
     SolParameterId first_parameter = SOL_AST_NONE;
+    SolSpan return_type = {0};
     bool parsed = false;
     SolTokenKind kind = sol_parser_kind(parser);
     if (kind == SOL_TOKEN_RECORD) {
@@ -1199,7 +1204,8 @@ static void sol_parser_declaration(SolParser *parser) {
             &name,
             &whole,
             &body,
-            &first_parameter
+            &first_parameter,
+            &return_type
         );
     } else {
         sol_parser_error(
@@ -1219,6 +1225,7 @@ static void sol_parser_declaration(SolParser *parser) {
             .is_public = is_public,
             .body = body,
             .first_parameter = first_parameter,
+            .return_type = return_type,
         });
     } else {
         parser->tree->parameter_count = parameter_mark;

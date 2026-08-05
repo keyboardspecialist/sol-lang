@@ -22,6 +22,7 @@ typedef struct {
     bool is_public;
     SolExprId body;
     SolParameterId first_parameter;
+    SolSpan return_type;
 } SolSyntaxItem;
 
 typedef struct {
