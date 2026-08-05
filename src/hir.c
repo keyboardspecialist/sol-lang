@@ -132,11 +132,17 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         || syntax->argument_count > syntax->argument_capacity
         || syntax->statement_count > syntax->statement_capacity
         || syntax->expression_count > syntax->expression_capacity
+        || syntax->type_count > syntax->type_capacity
+        || syntax->type_argument_count > syntax->type_argument_capacity
+        || syntax->field_count > syntax->field_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
         || (syntax->parameter_count != 0 && syntax->parameters == NULL)
         || (syntax->argument_count != 0 && syntax->arguments == NULL)
         || (syntax->statement_count != 0 && syntax->statements == NULL)
-        || (syntax->expression_count != 0 && syntax->expressions == NULL)) {
+        || (syntax->expression_count != 0 && syntax->expressions == NULL)
+        || (syntax->type_count != 0 && syntax->types == NULL)
+        || (syntax->type_argument_count != 0 && syntax->type_arguments == NULL)
+        || (syntax->field_count != 0 && syntax->fields == NULL)) {
         sol_resolver_malformed(resolver);
         return false;
     }
@@ -148,7 +154,10 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || !sol_span_valid(resolver->source, item->return_type)
             || (item->body != SOL_AST_NONE && item->body >= syntax->expression_count)
             || (item->first_parameter != SOL_AST_NONE
-                && item->first_parameter >= syntax->parameter_count)) {
+                && item->first_parameter >= syntax->parameter_count)
+            || (item->return_type_id != SOL_AST_NONE
+                && item->return_type_id >= syntax->type_count)
+            || (item->first_field != SOL_AST_NONE && item->first_field >= syntax->field_count)) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -157,7 +166,38 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         const SolParameter *parameter = &syntax->parameters[index];
         if (!sol_span_valid(resolver->source, parameter->name)
             || !sol_span_valid(resolver->source, parameter->type)
+            || parameter->type_id >= syntax->type_count
             || (parameter->next != SOL_AST_NONE && parameter->next >= syntax->parameter_count)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->type_count; ++index) {
+        const SolSyntaxType *type = &syntax->types[index];
+        if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_UNIT
+            || !sol_span_valid(resolver->source, type->span)
+            || !sol_span_valid(resolver->source, type->name)
+            || (type->first_argument != SOL_AST_NONE
+                && type->first_argument >= syntax->type_argument_count)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->type_argument_count; ++index) {
+        const SolTypeArgument *argument = &syntax->type_arguments[index];
+        if (argument->type >= syntax->type_count
+            || (argument->next != SOL_AST_NONE
+                && argument->next >= syntax->type_argument_count)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->field_count; ++index) {
+        const SolField *field = &syntax->fields[index];
+        if (!sol_span_valid(resolver->source, field->name)
+            || !sol_span_valid(resolver->source, field->span)
+            || field->type >= syntax->type_count
+            || (field->next != SOL_AST_NONE && field->next >= syntax->field_count)) {
             sol_resolver_malformed(resolver);
             return false;
         }

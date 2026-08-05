@@ -23,6 +23,10 @@ static void check_ast_links(const SolSyntaxTree *tree) {
             || tree->items[index].body < tree->expression_count);
         CHECK(tree->items[index].first_parameter == SOL_AST_NONE
             || tree->items[index].first_parameter < tree->parameter_count);
+        CHECK(tree->items[index].return_type_id == SOL_AST_NONE
+            || tree->items[index].return_type_id < tree->type_count);
+        CHECK(tree->items[index].first_field == SOL_AST_NONE
+            || tree->items[index].first_field < tree->field_count);
     }
     for (size_t index = 0; index < tree->expression_count; ++index) {
         const SolExpr *expression = &tree->expressions[index];
@@ -78,8 +82,23 @@ static void check_ast_links(const SolSyntaxTree *tree) {
         }
     }
     for (size_t index = 0; index < tree->parameter_count; ++index) {
+        CHECK(tree->parameters[index].type_id < tree->type_count);
         CHECK(tree->parameters[index].next == SOL_AST_NONE
             || tree->parameters[index].next < tree->parameter_count);
+    }
+    for (size_t index = 0; index < tree->type_count; ++index) {
+        CHECK(tree->types[index].first_argument == SOL_AST_NONE
+            || tree->types[index].first_argument < tree->type_argument_count);
+    }
+    for (size_t index = 0; index < tree->type_argument_count; ++index) {
+        CHECK(tree->type_arguments[index].type < tree->type_count);
+        CHECK(tree->type_arguments[index].next == SOL_AST_NONE
+            || tree->type_arguments[index].next < tree->type_argument_count);
+    }
+    for (size_t index = 0; index < tree->field_count; ++index) {
+        CHECK(tree->fields[index].type < tree->type_count);
+        CHECK(tree->fields[index].next == SOL_AST_NONE
+            || tree->fields[index].next < tree->field_count);
     }
 }
 

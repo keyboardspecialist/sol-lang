@@ -23,6 +23,8 @@ typedef struct {
     SolExprId body;
     SolParameterId first_parameter;
     SolSpan return_type;
+    SolTypeId return_type_id;
+    SolFieldId first_field;
 } SolSyntaxItem;
 
 typedef struct {
@@ -43,6 +45,15 @@ typedef struct {
     SolParameter *parameters;
     size_t parameter_count;
     size_t parameter_capacity;
+    SolSyntaxType *types;
+    size_t type_count;
+    size_t type_capacity;
+    SolTypeArgument *type_arguments;
+    size_t type_argument_count;
+    size_t type_argument_capacity;
+    SolField *fields;
+    size_t field_count;
+    size_t field_capacity;
 } SolSyntaxTree;
 
 void sol_syntax_tree_init(SolSyntaxTree *tree);

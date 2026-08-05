@@ -33,6 +33,8 @@ typedef struct {
     size_t local_count;
     SolType *definitions;
     size_t definition_count;
+    SolType *declared_types;
+    size_t declared_type_count;
 } SolTypeTable;
 
 void sol_type_table_init(SolTypeTable *table);

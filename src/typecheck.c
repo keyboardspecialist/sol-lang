@@ -12,6 +12,7 @@ typedef struct {
     SolTypeTable *types;
     SolDiagnostics *diagnostics;
     unsigned char *states;
+    unsigned char *declared_states;
     size_t depth;
     SolDefId current_definition;
     SolType expected_return;
@@ -52,11 +53,17 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || syntax->argument_count > syntax->argument_capacity
         || syntax->statement_count > syntax->statement_capacity
         || syntax->expression_count > syntax->expression_capacity
+        || syntax->type_count > syntax->type_capacity
+        || syntax->type_argument_count > syntax->type_argument_capacity
+        || syntax->field_count > syntax->field_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
         || (syntax->parameter_count != 0 && syntax->parameters == NULL)
         || (syntax->argument_count != 0 && syntax->arguments == NULL)
         || (syntax->statement_count != 0 && syntax->statements == NULL)
         || (syntax->expression_count != 0 && syntax->expressions == NULL)
+        || (syntax->type_count != 0 && syntax->types == NULL)
+        || (syntax->type_argument_count != 0 && syntax->type_arguments == NULL)
+        || (syntax->field_count != 0 && syntax->fields == NULL)
         || hir->definition_count != syntax->item_count
         || hir->resolution_count != syntax->expression_count
         || hir->local_count > hir->local_capacity
@@ -76,6 +83,9 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || (item->body != SOL_AST_NONE && item->body >= syntax->expression_count)
             || (item->first_parameter != SOL_AST_NONE
                 && item->first_parameter >= syntax->parameter_count)
+            || (item->return_type_id != SOL_AST_NONE
+                && item->return_type_id >= syntax->type_count)
+            || (item->first_field != SOL_AST_NONE && item->first_field >= syntax->field_count)
             || definition->syntax_item != index
             || definition->kind != item->kind
             || !sol_type_span_valid(checker->source, definition->name)) {
@@ -87,7 +97,38 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         const SolParameter *parameter = &syntax->parameters[index];
         if (!sol_type_span_valid(checker->source, parameter->name)
             || !sol_type_span_valid(checker->source, parameter->type)
+            || parameter->type_id >= syntax->type_count
             || (parameter->next != SOL_AST_NONE && parameter->next >= syntax->parameter_count)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->type_count; ++index) {
+        const SolSyntaxType *type = &syntax->types[index];
+        if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_UNIT
+            || !sol_type_span_valid(checker->source, type->span)
+            || !sol_type_span_valid(checker->source, type->name)
+            || (type->first_argument != SOL_AST_NONE
+                && type->first_argument >= syntax->type_argument_count)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->type_argument_count; ++index) {
+        const SolTypeArgument *argument = &syntax->type_arguments[index];
+        if (argument->type >= syntax->type_count
+            || (argument->next != SOL_AST_NONE
+                && argument->next >= syntax->type_argument_count)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->field_count; ++index) {
+        const SolField *field = &syntax->fields[index];
+        if (!sol_type_span_valid(checker->source, field->name)
+            || !sol_type_span_valid(checker->source, field->span)
+            || field->type >= syntax->type_count
+            || (field->next != SOL_AST_NONE && field->next >= syntax->field_count)) {
             sol_type_malformed(checker);
             return false;
         }
@@ -197,6 +238,7 @@ void sol_type_table_free(SolTypeTable *table) {
     free(table->expressions);
     free(table->locals);
     free(table->definitions);
+    free(table->declared_types);
     memset(table, 0, sizeof(*table));
 }
 
@@ -211,46 +253,6 @@ static bool sol_type_name_equal(const SolSource *source, SolSpan left, SolSpan r
     size_t right_length = right.end - right.start;
     return left_length == right_length
         && memcmp(source->text + left.start, source->text + right.start, left_length) == 0;
-}
-
-static int sol_type_next_byte(const SolSource *source, SolSpan span, size_t *cursor) {
-    while (*cursor < span.end) {
-        unsigned char byte = (unsigned char)source->text[*cursor];
-        if (byte == ' ' || byte == '\t' || byte == '\r' || byte == '\n') {
-            ++*cursor;
-            continue;
-        }
-        ++*cursor;
-        return (int)byte;
-    }
-    return -1;
-}
-
-static bool sol_type_normalized_prefix(
-    const SolSource *source,
-    SolSpan span,
-    const char *prefix
-) {
-    size_t cursor = span.start;
-    for (size_t index = 0; prefix[index] != '\0'; ++index) {
-        if (sol_type_next_byte(source, span, &cursor) != (unsigned char)prefix[index]) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static size_t sol_type_normalized_hash(const SolSource *source, SolSpan span) {
-    size_t hash = (size_t)1469598103934665603ULL;
-    size_t cursor = span.start;
-    for (;;) {
-        int byte = sol_type_next_byte(source, span, &cursor);
-        if (byte < 0) {
-            return hash;
-        }
-        hash ^= (size_t)(unsigned int)byte;
-        hash *= (size_t)1099511628211ULL;
-    }
 }
 
 static bool sol_type_equal(SolType left, SolType right) {
@@ -280,55 +282,91 @@ static const char *sol_type_name(SolType type) {
     }
 }
 
-static SolType sol_type_from_span(SolTypeChecker *checker, SolSpan span) {
-    if (sol_type_span_equal(checker->source, span, "Int64")) {
-        return (SolType){.kind = SOL_TYPE_INT64};
+static SolType sol_type_from_id(SolTypeChecker *checker, SolTypeId type_id) {
+    if (type_id >= checker->syntax->type_count) {
+        sol_type_malformed(checker);
+        return (SolType){.kind = SOL_TYPE_ERROR};
     }
-    if (sol_type_span_equal(checker->source, span, "Bool")) {
-        return (SolType){.kind = SOL_TYPE_BOOL};
+    if (checker->declared_states[type_id] == 2) {
+        return checker->types->declared_types[type_id];
     }
-    if (sol_type_span_equal(checker->source, span, "Text")) {
-        return (SolType){.kind = SOL_TYPE_TEXT};
+    if (checker->declared_states[type_id] == 1) {
+        sol_type_malformed(checker);
+        return (SolType){.kind = SOL_TYPE_ERROR};
     }
-    if (sol_type_span_equal(checker->source, span, "()")) {
-        return (SolType){.kind = SOL_TYPE_UNIT};
-    }
-    for (size_t index = 0; index < checker->hir->definition_count; ++index) {
-        const SolHirDefinition *definition = &checker->hir->definitions[index];
-        if (definition->kind != SOL_ITEM_FUNCTION
-            && sol_type_name_equal(checker->source, definition->name, span)) {
-            return (SolType){.kind = SOL_TYPE_NOMINAL, .definition = index};
+    checker->declared_states[type_id] = 1;
+    const SolSyntaxType *syntax_type = &checker->syntax->types[type_id];
+    SolType type = {.kind = SOL_TYPE_ERROR};
+    if (syntax_type->kind == SOL_SYNTAX_TYPE_UNIT) {
+        type = (SolType){.kind = SOL_TYPE_UNIT};
+    } else if (syntax_type->first_argument != SOL_AST_NONE) {
+        bool result_type = sol_type_span_equal(checker->source, syntax_type->name, "Result");
+        bool option_type = sol_type_span_equal(checker->source, syntax_type->name, "Option");
+        size_t expected_count = result_type ? 2 : option_type ? 1 : 0;
+        size_t count = 0;
+        size_t hash = result_type ? (size_t)0x52534c54 : (size_t)0x4f50544e;
+        bool valid = expected_count != 0;
+        SolTypeArgumentId argument_id = syntax_type->first_argument;
+        while (argument_id != SOL_AST_NONE) {
+            if (count++ >= checker->syntax->type_argument_count) {
+                sol_type_malformed(checker);
+                valid = false;
+                break;
+            }
+            const SolTypeArgument *argument = &checker->syntax->type_arguments[argument_id];
+            SolType argument_type = sol_type_from_id(checker, argument->type);
+            valid = valid && argument_type.kind != SOL_TYPE_ERROR;
+            hash ^= (size_t)argument_type.kind + (argument_type.definition << 4);
+            hash *= (size_t)1099511628211ULL;
+            argument_id = argument->next;
         }
-    }
-    if (sol_type_normalized_prefix(checker->source, span, "capability")) {
+        if (!valid || count != expected_count) {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-009",
+                syntax_type->span,
+                "unsupported generic type or incorrect generic arity"
+            );
+        } else {
+            type = (SolType){.kind = SOL_TYPE_OPAQUE, .definition = hash};
+        }
+    } else if (!syntax_type->is_capability
+        && sol_type_span_equal(checker->source, syntax_type->name, "Int64")) {
+        type = (SolType){.kind = SOL_TYPE_INT64};
+    } else if (!syntax_type->is_capability
+        && sol_type_span_equal(checker->source, syntax_type->name, "Bool")) {
+        type = (SolType){.kind = SOL_TYPE_BOOL};
+    } else if (!syntax_type->is_capability
+        && sol_type_span_equal(checker->source, syntax_type->name, "Text")) {
+        type = (SolType){.kind = SOL_TYPE_TEXT};
+    } else {
         for (size_t index = 0; index < checker->hir->definition_count; ++index) {
             const SolHirDefinition *definition = &checker->hir->definitions[index];
-            size_t name_length = definition->name.end - definition->name.start;
-            if (definition->kind == SOL_ITEM_CAPABILITY
-                && span.end >= name_length
+            bool capability_matches = !syntax_type->is_capability
+                || definition->kind == SOL_ITEM_CAPABILITY;
+            if (definition->kind != SOL_ITEM_FUNCTION
+                && capability_matches
                 && sol_type_name_equal(
                     checker->source,
                     definition->name,
-                    (SolSpan){.start = span.end - name_length, .end = span.end}
+                    syntax_type->name
                 )) {
-                return (SolType){.kind = SOL_TYPE_NOMINAL, .definition = index};
+                type = (SolType){.kind = SOL_TYPE_NOMINAL, .definition = index};
+                break;
             }
         }
+        if (type.kind == SOL_TYPE_ERROR) {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-009",
+                syntax_type->span,
+                "unresolved declared type"
+            );
+        }
     }
-    if (sol_type_normalized_prefix(checker->source, span, "Result<")
-        || sol_type_normalized_prefix(checker->source, span, "Option<")) {
-        return (SolType){
-            .kind = SOL_TYPE_OPAQUE,
-            .definition = sol_type_normalized_hash(checker->source, span),
-        };
-    }
-    sol_type_error(
-        checker,
-        "SOL-TYPE-009",
-        span,
-        "unresolved declared type"
-    );
-    return (SolType){.kind = SOL_TYPE_ERROR};
+    checker->declared_states[type_id] = 2;
+    checker->types->declared_types[type_id] = type;
+    return type;
 }
 
 static bool sol_type_allocate(SolTypeChecker *checker) {
@@ -337,7 +375,8 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     size_t definition_count = checker->hir->definition_count;
     if (expression_count > SIZE_MAX / sizeof(*checker->types->expressions)
         || local_count > SIZE_MAX / sizeof(*checker->types->locals)
-        || definition_count > SIZE_MAX / sizeof(*checker->types->definitions)) {
+        || definition_count > SIZE_MAX / sizeof(*checker->types->definitions)
+        || checker->syntax->type_count > SIZE_MAX / sizeof(*checker->types->declared_types)) {
         return false;
     }
     checker->types->expressions = calloc(expression_count, sizeof(*checker->types->expressions));
@@ -346,16 +385,29 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         definition_count,
         sizeof(*checker->types->definitions)
     );
+    checker->types->declared_types = calloc(
+        checker->syntax->type_count,
+        sizeof(*checker->types->declared_types)
+    );
     checker->states = calloc(expression_count, sizeof(*checker->states));
+    checker->declared_states = calloc(
+        checker->syntax->type_count,
+        sizeof(*checker->declared_states)
+    );
     if ((expression_count != 0
             && (checker->types->expressions == NULL || checker->states == NULL))
         || (local_count != 0 && checker->types->locals == NULL)
         || (definition_count != 0 && checker->types->definitions == NULL)) {
         return false;
     }
+    if (checker->syntax->type_count != 0
+        && (checker->types->declared_types == NULL || checker->declared_states == NULL)) {
+        return false;
+    }
     checker->types->expression_count = expression_count;
     checker->types->local_count = local_count;
     checker->types->definition_count = definition_count;
+    checker->types->declared_type_count = checker->syntax->type_count;
     return true;
 }
 
@@ -586,7 +638,7 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
             }
             used[matched] = true;
             const SolParameter *parameter = &checker->syntax->parameters[parameter_ids[matched]];
-            SolType expected = sol_type_from_span(checker, parameter->type);
+            SolType expected = sol_type_from_id(checker, parameter->type_id);
             if (!sol_type_equal(expected, actual)) {
                 sol_type_error(
                     checker,
@@ -614,6 +666,144 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
     free(parameter_ids);
     free(used);
     return checker->types->definitions[target];
+}
+
+static SolFieldId sol_type_find_field(
+    SolTypeChecker *checker,
+    SolDefId definition,
+    SolSpan name
+) {
+    if (definition >= checker->syntax->item_count
+        || checker->syntax->items[definition].kind != SOL_ITEM_RECORD) {
+        return SOL_AST_NONE;
+    }
+    SolFieldId field_id = checker->syntax->items[definition].first_field;
+    size_t traversed = 0;
+    while (field_id != SOL_AST_NONE) {
+        if (traversed++ >= checker->syntax->field_count) {
+            sol_type_malformed(checker);
+            return SOL_AST_NONE;
+        }
+        const SolField *field = &checker->syntax->fields[field_id];
+        if (sol_type_name_equal(checker->source, field->name, name)) {
+            return field_id;
+        }
+        field_id = field->next;
+    }
+    return SOL_AST_NONE;
+}
+
+static SolType sol_type_record(SolTypeChecker *checker, const SolExpr *record) {
+    SolExprId type_expression = record->as.record.type;
+    SolResolution resolution = checker->hir->resolutions[type_expression];
+    sol_type_expression(checker, type_expression);
+    if (resolution.kind != SOL_RESOLUTION_DEFINITION
+        || resolution.target >= checker->types->definition_count
+        || checker->syntax->items[resolution.target].kind != SOL_ITEM_RECORD) {
+        sol_type_arguments(checker, record->as.record.first_field);
+        sol_type_error(
+            checker,
+            "SOL-TYPE-011",
+            record->span,
+            "record construction requires a record type"
+        );
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+
+    size_t field_count = 0;
+    SolFieldId field_id = checker->syntax->items[resolution.target].first_field;
+    while (field_id != SOL_AST_NONE) {
+        if (field_count++ >= checker->syntax->field_count) {
+            sol_type_malformed(checker);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        field_id = checker->syntax->fields[field_id].next;
+    }
+    if (field_count > SIZE_MAX / sizeof(SolFieldId)) {
+        checker->allocation_failed = true;
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    bool *used = field_count == 0 ? NULL : calloc(field_count, sizeof(*used));
+    SolFieldId *field_ids = field_count == 0
+        ? NULL
+        : malloc(field_count * sizeof(*field_ids));
+    if (field_count != 0 && (used == NULL || field_ids == NULL)) {
+        free(used);
+        free(field_ids);
+        checker->allocation_failed = true;
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    field_id = checker->syntax->items[resolution.target].first_field;
+    for (size_t index = 0; index < field_count; ++index) {
+        field_ids[index] = field_id;
+        field_id = checker->syntax->fields[field_id].next;
+    }
+
+    SolArgumentId argument_id = record->as.record.first_field;
+    size_t traversed = 0;
+    while (argument_id != SOL_AST_NONE) {
+        if (traversed++ >= checker->syntax->argument_count) {
+            sol_type_malformed(checker);
+            break;
+        }
+        const SolArgument *argument = &checker->syntax->arguments[argument_id];
+        SolType actual = sol_type_expression(checker, argument->value);
+        size_t matched = SIZE_MAX;
+        for (size_t index = 0; index < field_count; ++index) {
+            if (sol_type_name_equal(
+                checker->source,
+                checker->syntax->fields[field_ids[index]].name,
+                argument->name
+            )) {
+                matched = index;
+                break;
+            }
+        }
+        if (matched == SIZE_MAX) {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-013",
+                argument->name,
+                "record literal contains an unknown field"
+            );
+        } else if (used[matched]) {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-013",
+                argument->name,
+                "record literal supplies a field more than once"
+            );
+        } else {
+            used[matched] = true;
+            SolType expected = sol_type_from_id(
+                checker,
+                checker->syntax->fields[field_ids[matched]].type
+            );
+            if (!sol_type_equal(expected, actual)) {
+                sol_type_error(
+                    checker,
+                    "SOL-TYPE-013",
+                    checker->syntax->expressions[argument->value].span,
+                    "record field value has the wrong type"
+                );
+            }
+        }
+        argument_id = argument->next;
+    }
+    for (size_t index = 0; index < field_count; ++index) {
+        if (!used[index]) {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-013",
+                record->span,
+                "record literal is missing a required field"
+            );
+            break;
+        }
+    }
+    free(used);
+    free(field_ids);
+    return (SolType){.kind = SOL_TYPE_NOMINAL, .definition = resolution.target};
 }
 
 static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression_id) {
@@ -732,29 +922,40 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
                     ? (SolType){.kind = SOL_TYPE_FUNCTION, .definition = definition}
                     : checker->types->definitions[definition];
             } else {
-                sol_type_expression(checker, expression->as.field.base);
+                SolType base = sol_type_expression(checker, expression->as.field.base);
+                if (base.kind == SOL_TYPE_NOMINAL
+                    && base.definition < checker->syntax->item_count
+                    && checker->syntax->items[base.definition].kind == SOL_ITEM_RECORD) {
+                    SolFieldId field = sol_type_find_field(
+                        checker,
+                        base.definition,
+                        expression->as.field.name
+                    );
+                    if (field == SOL_AST_NONE) {
+                        sol_type_error(
+                            checker,
+                            "SOL-TYPE-013",
+                            expression->as.field.name,
+                            "record type has no field with this name"
+                        );
+                        type = (SolType){.kind = SOL_TYPE_ERROR};
+                    } else {
+                        type = sol_type_from_id(checker, checker->syntax->fields[field].type);
+                    }
+                } else if (base.kind != SOL_TYPE_UNKNOWN && base.kind != SOL_TYPE_ERROR) {
+                    sol_type_error(
+                        checker,
+                        "SOL-TYPE-013",
+                        expression->span,
+                        "field access requires a record value"
+                    );
+                    type = (SolType){.kind = SOL_TYPE_ERROR};
+                }
             }
             break;
-        case SOL_EXPR_RECORD: {
-            SolExprId type_expression = expression->as.record.type;
-            SolResolution resolution = checker->hir->resolutions[type_expression];
-            sol_type_expression(checker, type_expression);
-            sol_type_arguments(checker, expression->as.record.first_field);
-            if (resolution.kind == SOL_RESOLUTION_DEFINITION
-                && resolution.target < checker->types->definition_count
-                && checker->syntax->items[resolution.target].kind == SOL_ITEM_RECORD) {
-                type = (SolType){.kind = SOL_TYPE_NOMINAL, .definition = resolution.target};
-            } else {
-                sol_type_error(
-                    checker,
-                    "SOL-TYPE-011",
-                    expression->span,
-                    "record construction requires a record type"
-                );
-                type = (SolType){.kind = SOL_TYPE_ERROR};
-            }
+        case SOL_EXPR_RECORD:
+            type = sol_type_record(checker, expression);
             break;
-        }
         case SOL_EXPR_IF: {
             SolType condition = sol_type_expression(checker, expression->as.if_expr.condition);
             if (!sol_type_equal(condition, (SolType){.kind = SOL_TYPE_BOOL})) {
@@ -826,8 +1027,9 @@ bool sol_type_check(
         .diagnostics = diagnostics,
     };
     if (types->expressions != NULL || types->locals != NULL || types->definitions != NULL
+        || types->declared_types != NULL
         || types->expression_count != 0 || types->local_count != 0
-        || types->definition_count != 0) {
+        || types->definition_count != 0 || types->declared_type_count != 0) {
         sol_type_malformed(&checker);
         return false;
     }
@@ -836,6 +1038,7 @@ bool sol_type_check(
             sol_type_malformed(&checker);
         }
         free(checker.states);
+        free(checker.declared_states);
         return false;
     }
 
@@ -843,15 +1046,50 @@ bool sol_type_check(
         const SolSyntaxItem *item = &syntax->items[index];
         checker.current_definition = index;
         checker.types->definitions[index] = item->kind == SOL_ITEM_FUNCTION
-            ? sol_type_from_span(&checker, item->return_type)
+            ? sol_type_from_id(&checker, item->return_type_id)
             : (SolType){.kind = SOL_TYPE_NOMINAL, .definition = index};
+        if (item->kind == SOL_ITEM_RECORD) {
+            SolFieldId field_id = item->first_field;
+            size_t traversed = 0;
+            while (field_id != SOL_AST_NONE) {
+                if (traversed++ >= syntax->field_count) {
+                    sol_type_malformed(&checker);
+                    break;
+                }
+                const SolField *field = &syntax->fields[field_id];
+                sol_type_from_id(&checker, field->type);
+                SolFieldId previous = item->first_field;
+                size_t previous_count = 0;
+                while (previous != field_id) {
+                    if (previous == SOL_AST_NONE || previous_count++ >= syntax->field_count) {
+                        sol_type_malformed(&checker);
+                        break;
+                    }
+                    if (sol_type_name_equal(
+                        source,
+                        syntax->fields[previous].name,
+                        field->name
+                    )) {
+                        sol_type_error(
+                            &checker,
+                            "SOL-TYPE-013",
+                            field->name,
+                            "record declares the same field more than once"
+                        );
+                        break;
+                    }
+                    previous = syntax->fields[previous].next;
+                }
+                field_id = field->next;
+            }
+        }
     }
     for (size_t index = 0; index < hir->local_count; ++index) {
         const SolHirLocal *local = &hir->locals[index];
         if (local->kind == SOL_LOCAL_PARAMETER && local->syntax_id < syntax->parameter_count) {
-            checker.types->locals[index] = sol_type_from_span(
+            checker.types->locals[index] = sol_type_from_id(
                 &checker,
-                syntax->parameters[local->syntax_id].type
+                syntax->parameters[local->syntax_id].type_id
             );
         }
     }
@@ -879,6 +1117,7 @@ bool sol_type_check(
     }
 
     free(checker.states);
+    free(checker.declared_states);
     return !checker.allocation_failed
         && !checker.malformed
         && !diagnostics->allocation_failed;

@@ -12,6 +12,9 @@ typedef size_t SolExprId;
 typedef size_t SolStatementId;
 typedef size_t SolArgumentId;
 typedef size_t SolParameterId;
+typedef size_t SolTypeId;
+typedef size_t SolTypeArgumentId;
+typedef size_t SolFieldId;
 
 #define SOL_AST_NONE SIZE_MAX
 
@@ -100,7 +103,33 @@ typedef struct {
 typedef struct {
     SolSpan name;
     SolSpan type;
+    SolTypeId type_id;
     SolParameterId next;
 } SolParameter;
+
+typedef enum {
+    SOL_SYNTAX_TYPE_PATH,
+    SOL_SYNTAX_TYPE_UNIT,
+} SolSyntaxTypeKind;
+
+typedef struct {
+    SolSyntaxTypeKind kind;
+    SolSpan span;
+    SolSpan name;
+    SolTypeArgumentId first_argument;
+    bool is_capability;
+} SolSyntaxType;
+
+typedef struct {
+    SolTypeId type;
+    SolTypeArgumentId next;
+} SolTypeArgument;
+
+typedef struct {
+    SolSpan name;
+    SolSpan span;
+    SolTypeId type;
+    SolFieldId next;
+} SolField;
 
 #endif

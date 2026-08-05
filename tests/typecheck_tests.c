@@ -258,6 +258,70 @@ static void test_malformed_hir_rejected(void) {
     free_compilation(&compilation);
 }
 
+static void test_structural_generic_types(void) {
+    static const char text[] =
+        "module generic_types\n"
+        "enum Failure { invalid }\n"
+        "function option(value: Option<Int64>) -> Option<Int64> { return value }\n"
+        "function result(value: Result<Int64, Failure>) -> Result<Int64, Failure> {\n"
+        "    return value\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+}
+
+static void test_invalid_generic_component(void) {
+    static const char text[] =
+        "module invalid_generic\n"
+        "function missing(value: Option<Missing>) -> Option<Missing> { return value }\n"
+        "function arity(value: Result<Int64>) -> Result<Int64> { return value }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-009"));
+    free_compilation(&compilation);
+}
+
+static void test_record_fields(void) {
+    static const char text[] =
+        "module record_fields\n"
+        "record Pair { left: Int64, ready: Bool, }\n"
+        "function make() -> Pair { return Pair { ready = true, left = 1, } }\n"
+        "function read(pair: Pair) -> Int64 { return pair.left }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+}
+
+static void test_invalid_record_fields(void) {
+    static const char text[] =
+        "module invalid_record_fields\n"
+        "record Pair { left: Int64, ready: Bool, }\n"
+        "function missing() -> Pair { return Pair { left = 1, } }\n"
+        "function unknown() -> Pair { return Pair { left = 1, ready = true, extra = 2, } }\n"
+        "function duplicate() -> Pair { return Pair { left = 1, left = 2, ready = true, } }\n"
+        "function wrong() -> Pair { return Pair { left = true, ready = true, } }\n"
+        "function access(pair: Pair) -> Int64 { return pair.missing }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-013"));
+    free_compilation(&compilation);
+}
+
+static void test_invalid_record_declaration(void) {
+    static const char text[] =
+        "module invalid_record_declaration\n"
+        "record Duplicate { value: Int64, value: Bool, }\n"
+        "record Missing { value: Unknown, }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-013"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-009"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -271,6 +335,11 @@ int main(void) {
     test_local_function_call_and_unreachable();
     test_invalid_named_arguments();
     test_malformed_hir_rejected();
+    test_structural_generic_types();
+    test_invalid_generic_component();
+    test_record_fields();
+    test_invalid_record_fields();
+    test_invalid_record_declaration();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;
