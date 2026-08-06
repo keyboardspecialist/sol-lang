@@ -346,8 +346,10 @@ void sol_type_table_init(SolTypeTable *table) {
 
 void sol_type_table_free(SolTypeTable *table) {
     free(table->expressions);
+    free(table->expression_operation_origins);
     free(table->locals);
     free(table->local_capability_origins);
+    free(table->local_operation_origins);
     free(table->definitions);
     free(table->declared_types);
     memset(table, 0, sizeof(*table));
@@ -496,9 +498,15 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         return false;
     }
     checker->types->expressions = calloc(expression_count, sizeof(*checker->types->expressions));
+    checker->types->expression_operation_origins = malloc(
+        expression_count * sizeof(*checker->types->expression_operation_origins)
+    );
     checker->types->locals = calloc(local_count, sizeof(*checker->types->locals));
     checker->types->local_capability_origins = malloc(
         local_count * sizeof(*checker->types->local_capability_origins)
+    );
+    checker->types->local_operation_origins = malloc(
+        local_count * sizeof(*checker->types->local_operation_origins)
     );
     checker->types->definitions = calloc(
         definition_count,
@@ -514,10 +522,13 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         sizeof(*checker->declared_states)
     );
     if ((expression_count != 0
-            && (checker->types->expressions == NULL || checker->states == NULL))
+            && (checker->types->expressions == NULL
+                || checker->types->expression_operation_origins == NULL
+                || checker->states == NULL))
         || (local_count != 0
             && (checker->types->locals == NULL
-                || checker->types->local_capability_origins == NULL))
+                || checker->types->local_capability_origins == NULL
+                || checker->types->local_operation_origins == NULL))
         || (definition_count != 0 && checker->types->definitions == NULL)) {
         return false;
     }
@@ -529,8 +540,12 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     checker->types->local_count = local_count;
     checker->types->definition_count = definition_count;
     checker->types->declared_type_count = checker->syntax->type_count;
+    for (size_t index = 0; index < expression_count; ++index) {
+        checker->types->expression_operation_origins[index] = SOL_AST_NONE;
+    }
     for (size_t index = 0; index < local_count; ++index) {
         checker->types->local_capability_origins[index] = SOL_AST_NONE;
+        checker->types->local_operation_origins[index] = SOL_AST_NONE;
     }
     return true;
 }
@@ -597,6 +612,27 @@ static SolParameterId sol_type_capability_origin(
     return checker->types->local_capability_origins[resolution.target];
 }
 
+static SolParameterId sol_type_operation_origin(
+    SolTypeChecker *checker,
+    SolExprId expression_id,
+    SolType type
+) {
+    if (type.kind != SOL_TYPE_CAPABILITY_OPERATION) return SOL_AST_NONE;
+    const SolExpr *expression = &checker->syntax->expressions[expression_id];
+    if (expression->kind == SOL_EXPR_FIELD) {
+        return sol_type_capability_origin(checker, expression->as.field.base);
+    }
+    if (expression->kind == SOL_EXPR_PATH) {
+        SolResolution resolution = checker->hir->resolutions[expression_id];
+        if (resolution.kind == SOL_RESOLUTION_LOCAL
+            && resolution.target < checker->types->local_count
+            && checker->hir->locals[resolution.target].owner == checker->current_definition) {
+            return checker->types->local_operation_origins[resolution.target];
+        }
+    }
+    return SOL_AST_NONE;
+}
+
 static SolType sol_type_arguments(SolTypeChecker *checker, SolArgumentId argument_id) {
     SolType last = {.kind = SOL_TYPE_UNIT};
     size_t traversed = 0;
@@ -632,6 +668,10 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
                         checker,
                         statement->as.let_statement.value
                     );
+                checker->types->local_operation_origins[local]
+                    = checker->types->expression_operation_origins[
+                        statement->as.let_statement.value
+                    ];
             }
             if (!terminated) {
                 result = value.kind == SOL_TYPE_NEVER
@@ -686,6 +726,7 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
     SolResolution resolution = sol_type_callee_resolution(checker, call->as.call.callee);
     SolDefId target = SOL_AST_NONE;
     SolCapabilityMemberId operation = SOL_AST_NONE;
+    bool invalid_operation_origin = false;
     if (resolution.kind == SOL_RESOLUTION_DEFINITION
         && resolution.target < checker->syntax->item_count
         && checker->syntax->items[resolution.target].kind == SOL_ITEM_FUNCTION) {
@@ -702,20 +743,17 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
     }
     if (operation != SOL_AST_NONE) {
         const SolExpr *callee = &checker->syntax->expressions[call->as.call.callee];
-        bool known_authority = false;
-        if (callee->kind == SOL_EXPR_FIELD) {
-            SolExprId receiver_id = callee->as.field.base;
-            known_authority = sol_type_capability_origin(checker, receiver_id) != SOL_AST_NONE;
-        }
+        bool known_authority = checker->types->expression_operation_origins[
+            call->as.call.callee
+        ] != SOL_AST_NONE;
         if (!known_authority) {
-            sol_type_arguments(checker, call->as.call.first_argument);
             sol_type_error(
                 checker,
                 "SOL-TYPE-015",
                 callee->span,
                 "capability operation receiver has no known parameter authority"
             );
-            return (SolType){.kind = SOL_TYPE_ERROR};
+            invalid_operation_origin = true;
         }
     }
     if (target == SOL_AST_NONE && operation == SOL_AST_NONE) {
@@ -856,7 +894,7 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
     }
     free(parameter_ids);
     free(used);
-    return result;
+    return invalid_operation_origin ? (SolType){.kind = SOL_TYPE_ERROR} : result;
 }
 
 static SolFieldId sol_type_find_field(
@@ -1624,6 +1662,8 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
     --checker->depth;
     checker->states[expression_id] = 2;
     checker->types->expressions[expression_id] = type;
+    checker->types->expression_operation_origins[expression_id]
+        = sol_type_operation_origin(checker, expression_id, type);
     return type;
 }
 
@@ -1654,8 +1694,9 @@ bool sol_type_check(
         .types = types,
         .diagnostics = diagnostics,
     };
-    if (types->expressions != NULL || types->locals != NULL
-        || types->local_capability_origins != NULL || types->definitions != NULL
+    if (types->expressions != NULL || types->expression_operation_origins != NULL
+        || types->locals != NULL || types->local_capability_origins != NULL
+        || types->local_operation_origins != NULL || types->definitions != NULL
         || types->declared_types != NULL
         || types->expression_count != 0 || types->local_count != 0
         || types->definition_count != 0 || types->declared_type_count != 0) {
@@ -1881,25 +1922,31 @@ bool sol_type_check(
             sol_type_error(&checker, "SOL-TYPE-004", item->span, message);
         }
     }
-    for (size_t index = 0; index < syntax->expression_count; ++index) {
-        if (checker.types->expressions[index].kind != SOL_TYPE_CAPABILITY_OPERATION) continue;
-        bool direct_callee = false;
-        for (size_t candidate = 0; candidate < syntax->expression_count; ++candidate) {
-            const SolExpr *expression = &syntax->expressions[candidate];
-            if (expression->kind == SOL_EXPR_CALL && expression->as.call.callee == index) {
-                direct_callee = true;
-                break;
+    unsigned char *call_callees = calloc(syntax->expression_count, sizeof(*call_callees));
+    if (syntax->expression_count != 0 && call_callees == NULL) {
+        checker.allocation_failed = true;
+    } else {
+        for (size_t index = 0; index < syntax->expression_count; ++index) {
+            const SolExpr *expression = &syntax->expressions[index];
+            if (expression->kind == SOL_EXPR_CALL) {
+                call_callees[expression->as.call.callee] = 1;
             }
         }
-        if (!direct_callee) {
+        for (size_t index = 0; index < syntax->expression_count; ++index) {
+            if (checker.types->expressions[index].kind != SOL_TYPE_CAPABILITY_OPERATION
+                || checker.types->expression_operation_origins[index] != SOL_AST_NONE
+                || call_callees[index]) {
+                continue;
+            }
             sol_type_error(
                 &checker,
                 "SOL-TYPE-015",
                 syntax->expressions[index].span,
-                "capability operations must be called directly"
+                "capability operation has no known receiver authority"
             );
         }
     }
+    free(call_callees);
 
     free(checker.states);
     free(checker.declared_states);

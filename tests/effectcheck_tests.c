@@ -341,7 +341,13 @@ static void test_capability_operation_effects(void) {
         "function inferred_alias(actual: capability Clock) -> Int64 {\n"
         "    let first = actual\n"
         "    let second = first\n"
-        "    return second.now() + helper(count = 1, clock = second)\n"
+        "    let operation = second.now\n"
+        "    let operation_alias = operation\n"
+        "    return operation_alias() + helper(count = 1, clock = second)\n"
+        "}\n"
+        "function unused_operation(actual: capability Clock) -> Int64 {\n"
+        "    let operation = actual.now\n"
+        "    return 1\n"
         "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
@@ -361,6 +367,8 @@ static void test_capability_operation_effects(void) {
         CHECK(compilation.effects.functions[6].atoms[0].parameter
             == compilation.syntax.items[6].first_parameter);
     }
+    CHECK(compilation.effects.functions[7].inferred);
+    CHECK(compilation.effects.functions[7].count == 0);
     free_compilation(&compilation);
 }
 
@@ -431,10 +439,12 @@ static void test_missing_capability_operation_effects(void) {
         "    return clock.now()\n"
         "}\n"
         "function wrong(clock: capability Clock, other: capability Clock) -> Int64\n"
-        "effects { clock.read<other> } { return clock.now() }\n";
+        "effects { clock.read<other> } { return clock.now() }\n"
+        "function bound_wrong(clock: capability Clock, other: capability Clock) -> Int64\n"
+        "effects { clock.read<other> } { let operation = clock.now return operation() }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
-    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-002") == 2);
+    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-002") == 3);
     free_compilation(&compilation);
 }
 
@@ -460,8 +470,10 @@ static void test_malformed_capability_arena_rejected(void) {
         "    second: capability Clock,\n"
         ") -> Int64 effects { pure } {\n"
         "    let selected = if flag { first } else { first }\n"
+        "    let operation = first.now\n"
         "    return 1\n"
-        "}\n";
+        "}\n"
+        "function foreign(other: capability Clock) -> Int64 effects { pure } { return 1 }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
     if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
@@ -535,6 +547,84 @@ static void test_malformed_capability_arena_rejected(void) {
             ));
             origins[binding] = origin;
         }
+    }
+    SolParameterId *expression_operation_origins
+        = compilation.types.expression_operation_origins;
+    compilation.types.expression_operation_origins = NULL;
+    CHECK(!sol_effect_check(
+        &compilation.source,
+        &compilation.syntax,
+        &compilation.hir,
+        &compilation.types,
+        &compilation.effects,
+        &compilation.diagnostics
+    ));
+    compilation.types.expression_operation_origins = expression_operation_origins;
+    SolParameterId *local_operation_origins = compilation.types.local_operation_origins;
+    compilation.types.local_operation_origins = NULL;
+    CHECK(!sol_effect_check(
+        &compilation.source,
+        &compilation.syntax,
+        &compilation.hir,
+        &compilation.types,
+        &compilation.effects,
+        &compilation.diagnostics
+    ));
+    compilation.types.local_operation_origins = local_operation_origins;
+    SolLocalId operation_local = SOL_AST_NONE;
+    for (size_t index = 0; index < compilation.hir.local_count; ++index) {
+        if (compilation.types.locals[index].kind == SOL_TYPE_CAPABILITY_OPERATION) {
+            operation_local = index;
+        }
+    }
+    CHECK(operation_local != SOL_AST_NONE);
+    if (operation_local != SOL_AST_NONE) {
+        SolParameterId origin = local_operation_origins[operation_local];
+        SolParameterId first = compilation.syntax.items[1].first_parameter;
+        SolParameterId second = compilation.syntax.parameters[first].next;
+        second = compilation.syntax.parameters[second].next;
+        local_operation_origins[operation_local] = second;
+        CHECK(!sol_effect_check(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.diagnostics
+        ));
+        local_operation_origins[operation_local] = origin;
+    }
+    SolParameterId consume_parameter = compilation.syntax.items[1].first_parameter;
+    consume_parameter = compilation.syntax.parameters[consume_parameter].next;
+    SolParameterId foreign_parameter = compilation.syntax.items[2].first_parameter;
+    SolLocalId consume_local = SOL_AST_NONE;
+    for (size_t index = 0; index < compilation.hir.local_count; ++index) {
+        if (compilation.hir.locals[index].owner == 1
+            && compilation.hir.locals[index].kind == SOL_LOCAL_PARAMETER
+            && compilation.hir.locals[index].syntax_id == consume_parameter) {
+            consume_local = index;
+        }
+    }
+    CHECK(consume_local != SOL_AST_NONE);
+    if (consume_local != SOL_AST_NONE) {
+        compilation.hir.locals[consume_local].syntax_id = foreign_parameter;
+        origins[consume_local] = foreign_parameter;
+        for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+            if (expression_operation_origins[index] != SOL_AST_NONE) {
+                expression_operation_origins[index] = foreign_parameter;
+            }
+        }
+        if (operation_local != SOL_AST_NONE) {
+            local_operation_origins[operation_local] = foreign_parameter;
+        }
+        CHECK(!sol_effect_check(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.diagnostics
+        ));
     }
     free_compilation(&compilation);
 }

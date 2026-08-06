@@ -420,7 +420,13 @@ static void test_capability_operation_calls(void) {
         "function read(clock: capability Clock) -> Int64 {\n"
         "    let first = clock\n"
         "    let second = first\n"
-        "    return second.offset(delta = 1)\n"
+        "    let operation = second.offset\n"
+        "    let alias = operation\n"
+        "    return alias(delta = 1)\n"
+        "}\n"
+        "function unused(clock: capability Clock) -> Int64 {\n"
+        "    let operation = clock.offset\n"
+        "    return 1\n"
         "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
@@ -434,13 +440,21 @@ static void test_capability_operation_calls(void) {
     CHECK(found_operation);
     SolParameterId origin = compilation.syntax.items[1].first_parameter;
     size_t capability_locals = 0;
+    size_t operation_locals = 0;
     for (size_t index = 0; index < compilation.hir.local_count; ++index) {
         if (compilation.hir.locals[index].owner == 1) {
-            CHECK(compilation.types.local_capability_origins[index] == origin);
-            ++capability_locals;
+            if (compilation.types.local_capability_origins[index] != SOL_AST_NONE) {
+                CHECK(compilation.types.local_capability_origins[index] == origin);
+                ++capability_locals;
+            }
+            if (compilation.types.local_operation_origins[index] != SOL_AST_NONE) {
+                CHECK(compilation.types.local_operation_origins[index] == origin);
+                ++operation_locals;
+            }
         }
     }
     CHECK(capability_locals == 3);
+    CHECK(operation_locals == 2);
     free_compilation(&compilation);
 }
 
@@ -474,10 +488,15 @@ static void test_computed_capability_provenance_rejected(void) {
         "function computed(flag: Bool, clock: capability Clock) -> Int64 {\n"
         "    let selected = if flag { clock } else { clock }\n"
         "    return selected.offset(1)\n"
+        "}\n"
+        "function computed_operation(flag: Bool, clock: capability Clock) -> Int64 {\n"
+        "    let selected = if flag { clock.offset } else { clock.offset }\n"
+        "    return selected()\n"
         "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
     CHECK(has_diagnostic(&compilation, "SOL-TYPE-015"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-006"));
     free_compilation(&compilation);
 }
 
