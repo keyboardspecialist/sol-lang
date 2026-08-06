@@ -60,6 +60,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || syntax->pattern_count > syntax->pattern_capacity
         || syntax->pattern_binding_count > syntax->pattern_binding_capacity
         || syntax->match_arm_count > syntax->match_arm_capacity
+        || syntax->effect_count > syntax->effect_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
         || (syntax->parameter_count != 0 && syntax->parameters == NULL)
         || (syntax->argument_count != 0 && syntax->arguments == NULL)
@@ -72,6 +73,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || (syntax->pattern_count != 0 && syntax->patterns == NULL)
         || (syntax->pattern_binding_count != 0 && syntax->pattern_bindings == NULL)
         || (syntax->match_arm_count != 0 && syntax->match_arms == NULL)
+        || (syntax->effect_count != 0 && syntax->effects == NULL)
         || hir->definition_count != syntax->item_count
         || hir->resolution_count != syntax->expression_count
         || hir->local_count > hir->local_capacity
@@ -96,6 +98,8 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || (item->first_field != SOL_AST_NONE && item->first_field >= syntax->field_count)
             || (item->first_variant != SOL_AST_NONE
                 && item->first_variant >= syntax->variant_count)
+            || (item->first_effect != SOL_AST_NONE
+                && item->first_effect >= syntax->effect_count)
             || definition->syntax_item != index
             || definition->kind != item->kind
             || !sol_type_span_valid(checker->source, definition->name)) {
@@ -182,6 +186,17 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || arm->value >= syntax->expression_count
             || !sol_type_span_valid(checker->source, arm->span)
             || (arm->next != SOL_AST_NONE && arm->next >= syntax->match_arm_count)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->effect_count; ++index) {
+        const SolEffect *effect = &syntax->effects[index];
+        if (!sol_type_span_valid(checker->source, effect->name)
+            || !sol_type_span_valid(checker->source, effect->argument)
+            || !sol_type_span_valid(checker->source, effect->span)
+            || (effect->next != SOL_AST_NONE && effect->next >= syntax->effect_count)
+            || effect->owner_item >= syntax->item_count) {
             sol_type_malformed(checker);
             return false;
         }

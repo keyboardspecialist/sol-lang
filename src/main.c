@@ -1,4 +1,5 @@
 #include "sol/diagnostic.h"
+#include "sol/effectcheck.h"
 #include "sol/hir.h"
 #include "sol/lexer.h"
 #include "sol/parser.h"
@@ -45,6 +46,9 @@ static int sol_check_file(const char *path, bool json) {
     }
     if (completed && !sol_diagnostics_has_errors(&diagnostics)) {
         completed = sol_type_check(&source, &tree, &hir, &types, &diagnostics);
+    }
+    if (completed && !sol_diagnostics_has_errors(&diagnostics)) {
+        completed = sol_effect_check(&source, &tree, &hir, &diagnostics);
     }
     bool failed = !completed || sol_diagnostics_has_errors(&diagnostics);
 

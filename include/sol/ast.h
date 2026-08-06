@@ -19,6 +19,7 @@ typedef size_t SolVariantId;
 typedef size_t SolPatternId;
 typedef size_t SolPatternBindingId;
 typedef size_t SolMatchArmId;
+typedef size_t SolEffectId;
 
 #define SOL_AST_NONE SIZE_MAX
 
@@ -174,5 +175,15 @@ typedef struct {
     SolSpan span;
     SolMatchArmId next;
 } SolMatchArm;
+
+typedef struct {
+    SolSpan name;
+    SolSpan argument;
+    SolSpan span;
+    SolEffectId next;
+    size_t owner_item;
+    bool is_pure;
+    bool has_argument;
+} SolEffect;
 
 #endif

@@ -27,6 +27,8 @@ typedef struct {
     SolFieldId first_field;
     SolVariantId first_variant;
     bool is_open;
+    SolEffectId first_effect;
+    bool has_effect_clause;
 } SolSyntaxItem;
 
 typedef struct {
@@ -68,6 +70,9 @@ typedef struct {
     SolMatchArm *match_arms;
     size_t match_arm_count;
     size_t match_arm_capacity;
+    SolEffect *effects;
+    size_t effect_count;
+    size_t effect_capacity;
 } SolSyntaxTree;
 
 void sol_syntax_tree_init(SolSyntaxTree *tree);
