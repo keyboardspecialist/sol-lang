@@ -56,6 +56,10 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || syntax->type_count > syntax->type_capacity
         || syntax->type_argument_count > syntax->type_argument_capacity
         || syntax->field_count > syntax->field_capacity
+        || syntax->variant_count > syntax->variant_capacity
+        || syntax->pattern_count > syntax->pattern_capacity
+        || syntax->pattern_binding_count > syntax->pattern_binding_capacity
+        || syntax->match_arm_count > syntax->match_arm_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
         || (syntax->parameter_count != 0 && syntax->parameters == NULL)
         || (syntax->argument_count != 0 && syntax->arguments == NULL)
@@ -64,6 +68,10 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || (syntax->type_count != 0 && syntax->types == NULL)
         || (syntax->type_argument_count != 0 && syntax->type_arguments == NULL)
         || (syntax->field_count != 0 && syntax->fields == NULL)
+        || (syntax->variant_count != 0 && syntax->variants == NULL)
+        || (syntax->pattern_count != 0 && syntax->patterns == NULL)
+        || (syntax->pattern_binding_count != 0 && syntax->pattern_bindings == NULL)
+        || (syntax->match_arm_count != 0 && syntax->match_arms == NULL)
         || hir->definition_count != syntax->item_count
         || hir->resolution_count != syntax->expression_count
         || hir->local_count > hir->local_capacity
@@ -86,6 +94,8 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || (item->return_type_id != SOL_AST_NONE
                 && item->return_type_id >= syntax->type_count)
             || (item->first_field != SOL_AST_NONE && item->first_field >= syntax->field_count)
+            || (item->first_variant != SOL_AST_NONE
+                && item->first_variant >= syntax->variant_count)
             || definition->syntax_item != index
             || definition->kind != item->kind
             || !sol_type_span_valid(checker->source, definition->name)) {
@@ -129,6 +139,49 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || !sol_type_span_valid(checker->source, field->span)
             || field->type >= syntax->type_count
             || (field->next != SOL_AST_NONE && field->next >= syntax->field_count)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->variant_count; ++index) {
+        const SolVariant *variant = &syntax->variants[index];
+        if (!sol_type_span_valid(checker->source, variant->name)
+            || !sol_type_span_valid(checker->source, variant->span)
+            || (variant->first_field != SOL_AST_NONE
+                && variant->first_field >= syntax->field_count)
+            || (variant->next != SOL_AST_NONE && variant->next >= syntax->variant_count)
+            || variant->owner_item >= syntax->item_count
+            || syntax->items[variant->owner_item].kind != SOL_ITEM_ENUM) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->pattern_count; ++index) {
+        const SolPattern *pattern = &syntax->patterns[index];
+        if ((int)pattern->kind < 0 || pattern->kind > SOL_PATTERN_BOOL
+            || !sol_type_span_valid(checker->source, pattern->span)
+            || !sol_type_span_valid(checker->source, pattern->name)
+            || (pattern->first_binding != SOL_AST_NONE
+                && pattern->first_binding >= syntax->pattern_binding_count)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->pattern_binding_count; ++index) {
+        const SolPatternBinding *binding = &syntax->pattern_bindings[index];
+        if (!sol_type_span_valid(checker->source, binding->name)
+            || (binding->next != SOL_AST_NONE
+                && binding->next >= syntax->pattern_binding_count)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->match_arm_count; ++index) {
+        const SolMatchArm *arm = &syntax->match_arms[index];
+        if (arm->pattern >= syntax->pattern_count
+            || arm->value >= syntax->expression_count
+            || !sol_type_span_valid(checker->source, arm->span)
+            || (arm->next != SOL_AST_NONE && arm->next >= syntax->match_arm_count)) {
             sol_type_malformed(checker);
             return false;
         }
@@ -188,6 +241,12 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                     && expression->as.if_expr.then_branch < syntax->expression_count
                     && expression->as.if_expr.else_branch < syntax->expression_count;
                 break;
+            case SOL_EXPR_MATCH:
+                valid = valid
+                    && expression->as.match_expr.scrutinee < syntax->expression_count
+                    && (expression->as.match_expr.first_arm == SOL_AST_NONE
+                        || expression->as.match_expr.first_arm < syntax->match_arm_count);
+                break;
             case SOL_EXPR_BLOCK:
                 valid = valid
                     && (expression->as.block.first_statement == SOL_AST_NONE
@@ -217,12 +276,14 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     }
     for (size_t index = 0; index < hir->local_count; ++index) {
         const SolHirLocal *local = &hir->locals[index];
-        if ((int)local->kind < 0 || local->kind > SOL_LOCAL_BINDING
+        if ((int)local->kind < 0 || local->kind > SOL_LOCAL_PATTERN
             || local->owner >= hir->definition_count
             || (local->kind == SOL_LOCAL_PARAMETER
                 && local->syntax_id >= syntax->parameter_count)
             || (local->kind == SOL_LOCAL_BINDING
-                && local->syntax_id >= syntax->statement_count)) {
+                && local->syntax_id >= syntax->statement_count)
+            || (local->kind == SOL_LOCAL_PATTERN
+                && local->syntax_id >= syntax->pattern_binding_count)) {
             sol_type_malformed(checker);
             return false;
         }
@@ -257,13 +318,15 @@ static bool sol_type_name_equal(const SolSource *source, SolSpan left, SolSpan r
 
 static bool sol_type_equal(SolType left, SolType right) {
     if (left.kind == SOL_TYPE_UNKNOWN || right.kind == SOL_TYPE_UNKNOWN
-        || left.kind == SOL_TYPE_ERROR || right.kind == SOL_TYPE_ERROR) {
+        || left.kind == SOL_TYPE_ERROR || right.kind == SOL_TYPE_ERROR
+        || left.kind == SOL_TYPE_NEVER || right.kind == SOL_TYPE_NEVER) {
         return true;
     }
     return left.kind == right.kind
         && ((left.kind != SOL_TYPE_NOMINAL
                 && left.kind != SOL_TYPE_OPAQUE
-                && left.kind != SOL_TYPE_FUNCTION)
+                && left.kind != SOL_TYPE_FUNCTION
+                && left.kind != SOL_TYPE_VARIANT)
             || left.definition == right.definition);
 }
 
@@ -276,6 +339,7 @@ static const char *sol_type_name(SolType type) {
         case SOL_TYPE_NOMINAL: return "nominal type";
         case SOL_TYPE_OPAQUE: return "generic type";
         case SOL_TYPE_FUNCTION: return "function";
+        case SOL_TYPE_VARIANT: return "enum constructor";
         case SOL_TYPE_NEVER: return "Never";
         case SOL_TYPE_ERROR: return "error";
         default: return "unknown type";
@@ -428,6 +492,11 @@ static void sol_type_error(
 }
 
 static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression_id);
+static SolType sol_type_variant_call(
+    SolTypeChecker *checker,
+    SolVariantId variant,
+    const SolExpr *call
+);
 
 static SolLocalId sol_type_find_local(
     SolTypeChecker *checker,
@@ -535,6 +604,9 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
     } else if (callee_type.kind == SOL_TYPE_FUNCTION
         && callee_type.definition < checker->syntax->item_count) {
         target = callee_type.definition;
+    }
+    if (callee_type.kind == SOL_TYPE_VARIANT) {
+        return sol_type_variant_call(checker, callee_type.definition, call);
     }
     if (target == SOL_AST_NONE) {
         sol_type_arguments(checker, call->as.call.first_argument);
@@ -693,6 +765,159 @@ static SolFieldId sol_type_find_field(
     return SOL_AST_NONE;
 }
 
+static SolVariantId sol_type_find_variant(
+    SolTypeChecker *checker,
+    SolDefId definition,
+    SolSpan name
+) {
+    if (definition >= checker->syntax->item_count
+        || checker->syntax->items[definition].kind != SOL_ITEM_ENUM) {
+        return SOL_AST_NONE;
+    }
+    SolVariantId variant_id = checker->syntax->items[definition].first_variant;
+    size_t traversed = 0;
+    while (variant_id != SOL_AST_NONE) {
+        if (traversed++ >= checker->syntax->variant_count) {
+            sol_type_malformed(checker);
+            return SOL_AST_NONE;
+        }
+        const SolVariant *variant = &checker->syntax->variants[variant_id];
+        if (sol_type_name_equal(checker->source, variant->name, name)) return variant_id;
+        variant_id = variant->next;
+    }
+    return SOL_AST_NONE;
+}
+
+static SolDefId sol_type_variant_owner(SolTypeChecker *checker, SolVariantId variant_id) {
+    if (variant_id >= checker->syntax->variant_count) return SOL_AST_NONE;
+    return checker->syntax->variants[variant_id].owner_item;
+}
+
+static SolType sol_type_variant_call(
+    SolTypeChecker *checker,
+    SolVariantId variant_id,
+    const SolExpr *call
+) {
+    if (variant_id >= checker->syntax->variant_count) {
+        sol_type_malformed(checker);
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    SolDefId owner = sol_type_variant_owner(checker, variant_id);
+    if (owner == SOL_AST_NONE) return (SolType){.kind = SOL_TYPE_ERROR};
+    const SolVariant *variant = &checker->syntax->variants[variant_id];
+    size_t field_count = 0;
+    SolFieldId field_id = variant->first_field;
+    while (field_id != SOL_AST_NONE) {
+        if (field_count++ >= checker->syntax->field_count) {
+            sol_type_malformed(checker);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        field_id = checker->syntax->fields[field_id].next;
+    }
+    if (field_count > SIZE_MAX / sizeof(SolFieldId)) {
+        checker->allocation_failed = true;
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    SolFieldId *field_ids = field_count == 0
+        ? NULL
+        : malloc(field_count * sizeof(*field_ids));
+    bool *used = field_count == 0 ? NULL : calloc(field_count, sizeof(*used));
+    if (field_count != 0 && (field_ids == NULL || used == NULL)) {
+        free(field_ids);
+        free(used);
+        checker->allocation_failed = true;
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    field_id = variant->first_field;
+    for (size_t index = 0; index < field_count; ++index) {
+        field_ids[index] = field_id;
+        field_id = checker->syntax->fields[field_id].next;
+    }
+
+    SolArgumentId argument_id = call->as.call.first_argument;
+    size_t argument_count = 0;
+    size_t positional = 0;
+    bool seen_named = false;
+    while (argument_id != SOL_AST_NONE) {
+        if (argument_count++ >= checker->syntax->argument_count) {
+            sol_type_malformed(checker);
+            break;
+        }
+        const SolArgument *argument = &checker->syntax->arguments[argument_id];
+        size_t matched = SIZE_MAX;
+        if (argument->is_named) {
+            seen_named = true;
+            for (size_t index = 0; index < field_count; ++index) {
+                if (sol_type_name_equal(
+                    checker->source,
+                    checker->syntax->fields[field_ids[index]].name,
+                    argument->name
+                )) {
+                    matched = index;
+                    break;
+                }
+            }
+        } else if (seen_named) {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-014",
+                checker->syntax->expressions[argument->value].span,
+                "positional payload arguments cannot follow named arguments"
+            );
+        } else if (positional < field_count) {
+            matched = positional++;
+        }
+        SolType actual = sol_type_expression(checker, argument->value);
+        if (matched == SIZE_MAX) {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-014",
+                argument->is_named
+                    ? argument->name
+                    : checker->syntax->expressions[argument->value].span,
+                "enum constructor has an unknown payload argument"
+            );
+        } else if (used[matched]) {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-014",
+                argument->is_named
+                    ? argument->name
+                    : checker->syntax->expressions[argument->value].span,
+                "enum constructor supplies a payload field more than once"
+            );
+        } else {
+            used[matched] = true;
+            SolType expected = sol_type_from_id(
+                checker,
+                checker->syntax->fields[field_ids[matched]].type
+            );
+            if (!sol_type_equal(expected, actual)) {
+                sol_type_error(
+                    checker,
+                    "SOL-TYPE-014",
+                    checker->syntax->expressions[argument->value].span,
+                    "enum constructor payload has the wrong type"
+                );
+            }
+        }
+        argument_id = argument->next;
+    }
+    bool missing = false;
+    for (size_t index = 0; index < field_count; ++index) missing = missing || !used[index];
+    if (missing || argument_count != field_count) {
+        sol_type_error(
+            checker,
+            "SOL-TYPE-014",
+            call->span,
+            "enum constructor has the wrong number of payload arguments"
+        );
+    }
+    free(field_ids);
+    free(used);
+    return (SolType){.kind = SOL_TYPE_NOMINAL, .definition = owner};
+}
+
 static SolType sol_type_record(SolTypeChecker *checker, const SolExpr *record) {
     SolExprId type_expression = record->as.record.type;
     SolResolution resolution = checker->hir->resolutions[type_expression];
@@ -804,6 +1029,203 @@ static SolType sol_type_record(SolTypeChecker *checker, const SolExpr *record) {
     free(used);
     free(field_ids);
     return (SolType){.kind = SOL_TYPE_NOMINAL, .definition = resolution.target};
+}
+
+static SolType sol_type_match(SolTypeChecker *checker, const SolExpr *match_expression) {
+    SolType scrutinee = sol_type_expression(checker, match_expression->as.match_expr.scrutinee);
+    size_t case_count = scrutinee.kind == SOL_TYPE_BOOL ? 2 : 0;
+    SolVariantId *variants = NULL;
+    if (scrutinee.kind == SOL_TYPE_NOMINAL
+        && scrutinee.definition < checker->syntax->item_count
+        && checker->syntax->items[scrutinee.definition].kind == SOL_ITEM_ENUM) {
+        SolVariantId variant = checker->syntax->items[scrutinee.definition].first_variant;
+        while (variant != SOL_AST_NONE) {
+            if (case_count++ >= checker->syntax->variant_count) {
+                sol_type_malformed(checker);
+                return (SolType){.kind = SOL_TYPE_ERROR};
+            }
+            variant = checker->syntax->variants[variant].next;
+        }
+        if (case_count > SIZE_MAX / sizeof(*variants)) {
+            checker->allocation_failed = true;
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        variants = case_count == 0 ? NULL : malloc(case_count * sizeof(*variants));
+        if (case_count != 0 && variants == NULL) {
+            checker->allocation_failed = true;
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        variant = checker->syntax->items[scrutinee.definition].first_variant;
+        for (size_t index = 0; index < case_count; ++index) {
+            variants[index] = variant;
+            variant = checker->syntax->variants[variant].next;
+        }
+    }
+    bool *covered = case_count == 0 ? NULL : calloc(case_count, sizeof(*covered));
+    if (case_count != 0 && covered == NULL) {
+        free(variants);
+        checker->allocation_failed = true;
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+
+    bool wildcard = false;
+    bool enum_scrutinee = scrutinee.kind == SOL_TYPE_NOMINAL
+        && scrutinee.definition < checker->syntax->item_count
+        && checker->syntax->items[scrutinee.definition].kind == SOL_ITEM_ENUM;
+    bool open_enum = enum_scrutinee
+        && checker->syntax->items[scrutinee.definition].is_open;
+    bool finite_domain = scrutinee.kind == SOL_TYPE_BOOL || (enum_scrutinee && !open_enum);
+    bool have_result = false;
+    SolType result = {.kind = SOL_TYPE_UNKNOWN};
+    SolMatchArmId arm_id = match_expression->as.match_expr.first_arm;
+    size_t arm_count = 0;
+    while (arm_id != SOL_AST_NONE) {
+        if (arm_count++ >= checker->syntax->match_arm_count) {
+            sol_type_malformed(checker);
+            break;
+        }
+        const SolMatchArm *arm = &checker->syntax->match_arms[arm_id];
+        const SolPattern *pattern = &checker->syntax->patterns[arm->pattern];
+        bool complete_before_arm = case_count != 0 && !open_enum;
+        for (size_t index = 0; index < case_count; ++index) {
+            complete_before_arm = complete_before_arm && covered[index];
+        }
+        if (wildcard || complete_before_arm) {
+            sol_type_error(
+                checker,
+                "SOL-MATCH-001",
+                pattern->span,
+                "match arm is unreachable because previous arms are exhaustive"
+            );
+        }
+        SolVariantId matched_variant = SOL_AST_NONE;
+        if (pattern->kind == SOL_PATTERN_WILDCARD) {
+            wildcard = true;
+        } else if (pattern->kind == SOL_PATTERN_BOOL) {
+            if (scrutinee.kind != SOL_TYPE_BOOL) {
+                sol_type_error(
+                    checker,
+                    "SOL-MATCH-001",
+                    pattern->span,
+                    "boolean pattern requires a Bool match value"
+                );
+            } else {
+                size_t index = pattern->bool_value ? 1 : 0;
+                if (covered[index]) {
+                    sol_type_error(
+                        checker,
+                        "SOL-MATCH-001",
+                        pattern->span,
+                        "duplicate match case"
+                    );
+                }
+                covered[index] = true;
+            }
+        } else if (scrutinee.kind == SOL_TYPE_NOMINAL
+            && scrutinee.definition < checker->syntax->item_count
+            && checker->syntax->items[scrutinee.definition].kind == SOL_ITEM_ENUM) {
+            matched_variant = sol_type_find_variant(
+                checker,
+                scrutinee.definition,
+                pattern->name
+            );
+            if (matched_variant == SOL_AST_NONE) {
+                sol_type_error(
+                    checker,
+                    "SOL-MATCH-001",
+                    pattern->name,
+                    "enum has no variant with this name"
+                );
+            } else {
+                for (size_t index = 0; index < case_count; ++index) {
+                    if (variants[index] == matched_variant) {
+                        if (covered[index]) {
+                            sol_type_error(
+                                checker,
+                                "SOL-MATCH-001",
+                                pattern->span,
+                                "duplicate match case"
+                            );
+                        }
+                        covered[index] = true;
+                        break;
+                    }
+                }
+            }
+        } else {
+            sol_type_error(
+                checker,
+                "SOL-MATCH-001",
+                pattern->span,
+                "variant pattern requires an enum match value"
+            );
+        }
+
+        SolPatternBindingId binding = pattern->first_binding;
+        SolFieldId payload = matched_variant == SOL_AST_NONE
+            ? SOL_AST_NONE
+            : checker->syntax->variants[matched_variant].first_field;
+        size_t binding_count = 0;
+        while (binding != SOL_AST_NONE && payload != SOL_AST_NONE) {
+            if (binding_count++ >= checker->syntax->pattern_binding_count) {
+                sol_type_malformed(checker);
+                break;
+            }
+            SolLocalId local = sol_type_find_local(checker, SOL_LOCAL_PATTERN, binding);
+            if (local != SOL_AST_NONE) {
+                checker->types->locals[local] = sol_type_from_id(
+                    checker,
+                    checker->syntax->fields[payload].type
+                );
+            }
+            binding = checker->syntax->pattern_bindings[binding].next;
+            payload = checker->syntax->fields[payload].next;
+        }
+        if (binding != SOL_AST_NONE || payload != SOL_AST_NONE) {
+            sol_type_error(
+                checker,
+                "SOL-MATCH-001",
+                pattern->span,
+                "pattern binding count does not match variant payload"
+            );
+        }
+
+        SolType arm_type = sol_type_expression(checker, arm->value);
+        if (!have_result || result.kind == SOL_TYPE_NEVER) {
+            result = arm_type;
+            have_result = true;
+        } else if (arm_type.kind != SOL_TYPE_NEVER && !sol_type_equal(result, arm_type)) {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-008",
+                arm->span,
+                "match arms must produce the same type"
+            );
+            result = (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        arm_id = arm->next;
+    }
+    if (!wildcard) {
+        bool exhaustive = finite_domain;
+        for (size_t index = 0; index < case_count; ++index) exhaustive = exhaustive && covered[index];
+        if (open_enum) {
+            exhaustive = false;
+        }
+        if (!exhaustive) {
+            sol_type_error(
+                checker,
+                "SOL-MATCH-001",
+                match_expression->span,
+                "match expression is not exhaustive"
+            );
+        }
+    }
+    free(covered);
+    free(variants);
+    if (have_result) return result;
+    return finite_domain && case_count == 0
+        ? (SolType){.kind = SOL_TYPE_NEVER}
+        : (SolType){.kind = SOL_TYPE_ERROR};
 }
 
 static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression_id) {
@@ -942,6 +1364,41 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
                     } else {
                         type = sol_type_from_id(checker, checker->syntax->fields[field].type);
                     }
+                } else if (base.kind == SOL_TYPE_NOMINAL
+                    && base.definition < checker->syntax->item_count
+                    && checker->syntax->items[base.definition].kind == SOL_ITEM_ENUM) {
+                    SolResolution base_resolution = checker->hir->resolutions[
+                        expression->as.field.base
+                    ];
+                    if (base_resolution.kind != SOL_RESOLUTION_DEFINITION
+                        || base_resolution.target != base.definition) {
+                        sol_type_error(
+                            checker,
+                            "SOL-TYPE-014",
+                            expression->span,
+                            "enum constructors must be selected through the enum type"
+                        );
+                        type = (SolType){.kind = SOL_TYPE_ERROR};
+                    } else {
+                        SolVariantId variant = sol_type_find_variant(
+                            checker,
+                            base.definition,
+                            expression->as.field.name
+                        );
+                        if (variant == SOL_AST_NONE) {
+                            sol_type_error(
+                                checker,
+                                "SOL-TYPE-014",
+                                expression->as.field.name,
+                                "enum type has no variant with this name"
+                            );
+                            type = (SolType){.kind = SOL_TYPE_ERROR};
+                        } else if (checker->syntax->variants[variant].first_field == SOL_AST_NONE) {
+                            type = base;
+                        } else {
+                            type = (SolType){.kind = SOL_TYPE_VARIANT, .definition = variant};
+                        }
+                    }
                 } else if (base.kind != SOL_TYPE_UNKNOWN && base.kind != SOL_TYPE_ERROR) {
                     sol_type_error(
                         checker,
@@ -985,6 +1442,9 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
             }
             break;
         }
+        case SOL_EXPR_MATCH:
+            type = sol_type_match(checker, expression);
+            break;
         case SOL_EXPR_BLOCK:
             type = sol_type_block(checker, expression);
             break;
@@ -1081,6 +1541,68 @@ bool sol_type_check(
                     previous = syntax->fields[previous].next;
                 }
                 field_id = field->next;
+            }
+        } else if (item->kind == SOL_ITEM_ENUM) {
+            SolVariantId variant_id = item->first_variant;
+            size_t variant_count = 0;
+            while (variant_id != SOL_AST_NONE) {
+                if (variant_count++ >= syntax->variant_count) {
+                    sol_type_malformed(&checker);
+                    break;
+                }
+                const SolVariant *variant = &syntax->variants[variant_id];
+                SolVariantId previous = item->first_variant;
+                size_t previous_count = 0;
+                while (previous != variant_id) {
+                    if (previous == SOL_AST_NONE
+                        || previous_count++ >= syntax->variant_count) {
+                        sol_type_malformed(&checker);
+                        break;
+                    }
+                    if (sol_type_name_equal(
+                        source,
+                        syntax->variants[previous].name,
+                        variant->name
+                    )) {
+                        sol_type_error(
+                            &checker,
+                            "SOL-TYPE-014",
+                            variant->name,
+                            "enum declares the same variant more than once"
+                        );
+                        break;
+                    }
+                    previous = syntax->variants[previous].next;
+                }
+                SolFieldId payload = variant->first_field;
+                size_t payload_count = 0;
+                while (payload != SOL_AST_NONE) {
+                    if (payload_count++ >= syntax->field_count) {
+                        sol_type_malformed(&checker);
+                        break;
+                    }
+                    const SolField *payload_field = &syntax->fields[payload];
+                    sol_type_from_id(&checker, payload_field->type);
+                    SolFieldId previous_payload = variant->first_field;
+                    while (previous_payload != payload) {
+                        if (sol_type_name_equal(
+                            source,
+                            syntax->fields[previous_payload].name,
+                            payload_field->name
+                        )) {
+                            sol_type_error(
+                                &checker,
+                                "SOL-TYPE-014",
+                                payload_field->name,
+                                "enum payload declares the same field more than once"
+                            );
+                            break;
+                        }
+                        previous_payload = syntax->fields[previous_payload].next;
+                    }
+                    payload = syntax->fields[payload].next;
+                }
+                variant_id = variant->next;
             }
         }
     }

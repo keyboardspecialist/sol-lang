@@ -15,6 +15,10 @@ typedef size_t SolParameterId;
 typedef size_t SolTypeId;
 typedef size_t SolTypeArgumentId;
 typedef size_t SolFieldId;
+typedef size_t SolVariantId;
+typedef size_t SolPatternId;
+typedef size_t SolPatternBindingId;
+typedef size_t SolMatchArmId;
 
 #define SOL_AST_NONE SIZE_MAX
 
@@ -31,6 +35,7 @@ typedef enum {
     SOL_EXPR_FIELD,
     SOL_EXPR_RECORD,
     SOL_EXPR_IF,
+    SOL_EXPR_MATCH,
     SOL_EXPR_BLOCK,
     SOL_EXPR_PROPAGATE,
 } SolExprKind;
@@ -67,6 +72,10 @@ typedef struct {
             SolExprId then_branch;
             SolExprId else_branch;
         } if_expr;
+        struct {
+            SolExprId scrutinee;
+            SolMatchArmId first_arm;
+        } match_expr;
         struct {
             SolStatementId first_statement;
         } block;
@@ -131,5 +140,39 @@ typedef struct {
     SolTypeId type;
     SolFieldId next;
 } SolField;
+
+typedef struct {
+    SolSpan name;
+    SolSpan span;
+    SolFieldId first_field;
+    SolVariantId next;
+    size_t owner_item;
+} SolVariant;
+
+typedef enum {
+    SOL_PATTERN_WILDCARD,
+    SOL_PATTERN_VARIANT,
+    SOL_PATTERN_BOOL,
+} SolPatternKind;
+
+typedef struct {
+    SolPatternKind kind;
+    SolSpan span;
+    SolSpan name;
+    SolPatternBindingId first_binding;
+    bool bool_value;
+} SolPattern;
+
+typedef struct {
+    SolSpan name;
+    SolPatternBindingId next;
+} SolPatternBinding;
+
+typedef struct {
+    SolPatternId pattern;
+    SolExprId value;
+    SolSpan span;
+    SolMatchArmId next;
+} SolMatchArm;
 
 #endif

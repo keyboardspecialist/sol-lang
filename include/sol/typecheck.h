@@ -18,6 +18,7 @@ typedef enum {
     SOL_TYPE_NOMINAL,
     SOL_TYPE_OPAQUE,
     SOL_TYPE_FUNCTION,
+    SOL_TYPE_VARIANT,
     SOL_TYPE_NEVER,
 } SolTypeKind;
 

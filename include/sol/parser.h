@@ -25,6 +25,8 @@ typedef struct {
     SolSpan return_type;
     SolTypeId return_type_id;
     SolFieldId first_field;
+    SolVariantId first_variant;
+    bool is_open;
 } SolSyntaxItem;
 
 typedef struct {
@@ -54,6 +56,18 @@ typedef struct {
     SolField *fields;
     size_t field_count;
     size_t field_capacity;
+    SolVariant *variants;
+    size_t variant_count;
+    size_t variant_capacity;
+    SolPattern *patterns;
+    size_t pattern_count;
+    size_t pattern_capacity;
+    SolPatternBinding *pattern_bindings;
+    size_t pattern_binding_count;
+    size_t pattern_binding_capacity;
+    SolMatchArm *match_arms;
+    size_t match_arm_count;
+    size_t match_arm_capacity;
 } SolSyntaxTree;
 
 void sol_syntax_tree_init(SolSyntaxTree *tree);

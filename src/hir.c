@@ -135,6 +135,10 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         || syntax->type_count > syntax->type_capacity
         || syntax->type_argument_count > syntax->type_argument_capacity
         || syntax->field_count > syntax->field_capacity
+        || syntax->variant_count > syntax->variant_capacity
+        || syntax->pattern_count > syntax->pattern_capacity
+        || syntax->pattern_binding_count > syntax->pattern_binding_capacity
+        || syntax->match_arm_count > syntax->match_arm_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
         || (syntax->parameter_count != 0 && syntax->parameters == NULL)
         || (syntax->argument_count != 0 && syntax->arguments == NULL)
@@ -142,7 +146,11 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         || (syntax->expression_count != 0 && syntax->expressions == NULL)
         || (syntax->type_count != 0 && syntax->types == NULL)
         || (syntax->type_argument_count != 0 && syntax->type_arguments == NULL)
-        || (syntax->field_count != 0 && syntax->fields == NULL)) {
+        || (syntax->field_count != 0 && syntax->fields == NULL)
+        || (syntax->variant_count != 0 && syntax->variants == NULL)
+        || (syntax->pattern_count != 0 && syntax->patterns == NULL)
+        || (syntax->pattern_binding_count != 0 && syntax->pattern_bindings == NULL)
+        || (syntax->match_arm_count != 0 && syntax->match_arms == NULL)) {
         sol_resolver_malformed(resolver);
         return false;
     }
@@ -157,7 +165,9 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                 && item->first_parameter >= syntax->parameter_count)
             || (item->return_type_id != SOL_AST_NONE
                 && item->return_type_id >= syntax->type_count)
-            || (item->first_field != SOL_AST_NONE && item->first_field >= syntax->field_count)) {
+            || (item->first_field != SOL_AST_NONE && item->first_field >= syntax->field_count)
+            || (item->first_variant != SOL_AST_NONE
+                && item->first_variant >= syntax->variant_count)) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -198,6 +208,49 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || !sol_span_valid(resolver->source, field->span)
             || field->type >= syntax->type_count
             || (field->next != SOL_AST_NONE && field->next >= syntax->field_count)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->variant_count; ++index) {
+        const SolVariant *variant = &syntax->variants[index];
+        if (!sol_span_valid(resolver->source, variant->name)
+            || !sol_span_valid(resolver->source, variant->span)
+            || (variant->first_field != SOL_AST_NONE
+                && variant->first_field >= syntax->field_count)
+            || (variant->next != SOL_AST_NONE && variant->next >= syntax->variant_count)
+            || variant->owner_item >= syntax->item_count
+            || syntax->items[variant->owner_item].kind != SOL_ITEM_ENUM) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->pattern_count; ++index) {
+        const SolPattern *pattern = &syntax->patterns[index];
+        if ((int)pattern->kind < 0 || pattern->kind > SOL_PATTERN_BOOL
+            || !sol_span_valid(resolver->source, pattern->span)
+            || !sol_span_valid(resolver->source, pattern->name)
+            || (pattern->first_binding != SOL_AST_NONE
+                && pattern->first_binding >= syntax->pattern_binding_count)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->pattern_binding_count; ++index) {
+        const SolPatternBinding *binding = &syntax->pattern_bindings[index];
+        if (!sol_span_valid(resolver->source, binding->name)
+            || (binding->next != SOL_AST_NONE
+                && binding->next >= syntax->pattern_binding_count)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->match_arm_count; ++index) {
+        const SolMatchArm *arm = &syntax->match_arms[index];
+        if (arm->pattern >= syntax->pattern_count
+            || arm->value >= syntax->expression_count
+            || !sol_span_valid(resolver->source, arm->span)
+            || (arm->next != SOL_AST_NONE && arm->next >= syntax->match_arm_count)) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -269,6 +322,12 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                     && expression->as.if_expr.then_branch < syntax->expression_count
                     && expression->as.if_expr.else_branch < syntax->expression_count;
                 break;
+            case SOL_EXPR_MATCH:
+                valid = valid
+                    && expression->as.match_expr.scrutinee < syntax->expression_count
+                    && (expression->as.match_expr.first_arm == SOL_AST_NONE
+                        || expression->as.match_expr.first_arm < syntax->match_arm_count);
+                break;
             case SOL_EXPR_BLOCK:
                 valid = valid
                     && (expression->as.block.first_statement == SOL_AST_NONE
@@ -322,6 +381,10 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
         return false;
     }
     size_t local_capacity = syntax->parameter_count + syntax->statement_count;
+    if (local_capacity > SIZE_MAX - syntax->pattern_binding_count) {
+        return false;
+    }
+    local_capacity += syntax->pattern_binding_count;
     if (local_capacity > SIZE_MAX / sizeof(*resolver->module->locals)
         || local_capacity > SIZE_MAX / sizeof(*resolver->bindings)) {
         return false;
@@ -444,6 +507,42 @@ static bool sol_resolver_add_binding(
 }
 
 static void sol_resolver_expression(SolResolver *resolver, SolExprId expression_id);
+
+static void sol_resolver_match(SolResolver *resolver, const SolExpr *expression) {
+    sol_resolver_expression(resolver, expression->as.match_expr.scrutinee);
+    SolMatchArmId arm_id = expression->as.match_expr.first_arm;
+    size_t arm_count = 0;
+    while (arm_id != SOL_AST_NONE) {
+        if (arm_count++ >= resolver->syntax->match_arm_count) {
+            sol_resolver_malformed(resolver);
+            return;
+        }
+        const SolMatchArm *arm = &resolver->syntax->match_arms[arm_id];
+        const SolPattern *pattern = &resolver->syntax->patterns[arm->pattern];
+        size_t binding_mark = resolver->binding_count;
+        ++resolver->scope_depth;
+        SolPatternBindingId binding_id = pattern->first_binding;
+        size_t binding_count = 0;
+        while (binding_id != SOL_AST_NONE) {
+            if (binding_count++ >= resolver->syntax->pattern_binding_count) {
+                sol_resolver_malformed(resolver);
+                break;
+            }
+            const SolPatternBinding *binding = &resolver->syntax->pattern_bindings[binding_id];
+            sol_resolver_add_binding(
+                resolver,
+                binding->name,
+                SOL_LOCAL_PATTERN,
+                binding_id
+            );
+            binding_id = binding->next;
+        }
+        sol_resolver_expression(resolver, arm->value);
+        resolver->binding_count = binding_mark;
+        --resolver->scope_depth;
+        arm_id = arm->next;
+    }
+}
 
 static void sol_resolver_arguments(SolResolver *resolver, SolArgumentId argument_id) {
     size_t traversed = 0;
@@ -574,6 +673,9 @@ static void sol_resolver_expression(SolResolver *resolver, SolExprId expression_
             sol_resolver_expression(resolver, expression->as.if_expr.condition);
             sol_resolver_expression(resolver, expression->as.if_expr.then_branch);
             sol_resolver_expression(resolver, expression->as.if_expr.else_branch);
+            break;
+        case SOL_EXPR_MATCH:
+            sol_resolver_match(resolver, expression);
             break;
         case SOL_EXPR_BLOCK:
             sol_resolver_block(resolver, expression);

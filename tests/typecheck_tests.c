@@ -103,6 +103,9 @@ static void test_valid_types(void) {
         "function make() -> Pair { return Pair {} }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
     CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
     bool found_binary = false;
     for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
@@ -322,6 +325,91 @@ static void test_invalid_record_declaration(void) {
     free_compilation(&compilation);
 }
 
+static void test_enum_constructors_and_match(void) {
+    static const char text[] =
+        "module enum_match\n"
+        "enum State { idle, running(speed: Int64), failed(message: Text), pair(left: Int64, ready: Bool), }\n"
+        "function running() -> State { return State.running(speed = 10) }\n"
+        "function pair() -> State { return State.pair(ready = true, left = 10) }\n"
+        "function idle() -> State { return State.idle }\n"
+        "function code(state: State) -> Int64 {\n"
+        "    return match state {\n"
+        "        idle => 0\n"
+        "        running(speed) => speed\n"
+        "        failed(message) => 1\n"
+        "        pair(left, ready) => left\n"
+        "    }\n"
+        "}\n"
+        "function bool_code(value: Bool) -> Int64 {\n"
+        "    return match value { true => 1 false => 0 }\n"
+        "}\n"
+        "open enum Wire { known, }\n"
+        "function wire(value: Wire) -> Int64 { return match value { known => 1 _ => 0 } }\n"
+        "enum Empty {}\n"
+        "function absurd(value: Empty) -> Int64 { return match value {} }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+}
+
+static void test_invalid_match(void) {
+    static const char text[] =
+        "module invalid_match\n"
+        "enum State { idle, running(speed: Int64), }\n"
+        "function incomplete(state: State) -> Int64 {\n"
+        "    return match state { idle => 0 }\n"
+        "}\n"
+        "function duplicate(state: State) -> Int64 {\n"
+        "    return match state { idle => 0 idle => 1 running(speed) => speed }\n"
+        "}\n"
+        "function unknown(state: State) -> Int64 {\n"
+        "    return match state { missing => 0 _ => 1 }\n"
+        "}\n"
+        "function payload(state: State) -> Int64 {\n"
+        "    return match state { idle => 0 running => 1 }\n"
+        "}\n"
+        "function branch(state: State) -> Int64 {\n"
+        "    return match state { idle => 0 running(speed) => \"bad\" }\n"
+        "}\n"
+        "function unreachable(state: State) -> Int64 {\n"
+        "    return match state { _ => 0 idle => 1 }\n"
+        "}\n"
+        "function complete_then_wildcard(state: State) -> Int64 {\n"
+        "    return match state { idle => 0 running(speed) => speed _ => 1 }\n"
+        "}\n"
+        "open enum Wire { known, }\n"
+        "function open_incomplete(value: Wire) -> Int64 { return match value { known => 1 } }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-MATCH-001"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-008"));
+    free_compilation(&compilation);
+}
+
+static void test_invalid_enum_constructor(void) {
+    static const char text[] =
+        "module invalid_constructor\n"
+        "enum State { idle, running(speed: Int64), pair(left: Int64, ready: Bool), }\n"
+        "function wrong_type() -> State { return State.running(speed = true) }\n"
+        "function wrong_count() -> State { return State.running() }\n"
+        "function wrong_name() -> State { return State.running(value = 1) }\n"
+        "function mixed() -> State { return State.pair(left = 1, true) }\n"
+        "function runtime(state: State) -> State { return state.running(1) }\n"
+        "function unknown() -> State { return State.missing }\n"
+        "function constructor_choice(flag: Bool) -> State {\n"
+        "    let constructor = if flag { State.running } else { State.pair }\n"
+        "    return constructor(1)\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-014"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -340,6 +428,9 @@ int main(void) {
     test_record_fields();
     test_invalid_record_fields();
     test_invalid_record_declaration();
+    test_enum_constructors_and_match();
+    test_invalid_match();
+    test_invalid_enum_constructor();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;

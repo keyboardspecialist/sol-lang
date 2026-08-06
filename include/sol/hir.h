@@ -19,6 +19,7 @@ typedef struct {
 typedef enum {
     SOL_LOCAL_PARAMETER,
     SOL_LOCAL_BINDING,
+    SOL_LOCAL_PATTERN,
 } SolLocalKind;
 
 typedef struct {

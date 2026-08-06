@@ -29,6 +29,10 @@ void sol_syntax_tree_free(SolSyntaxTree *tree) {
     free(tree->types);
     free(tree->type_arguments);
     free(tree->fields);
+    free(tree->variants);
+    free(tree->patterns);
+    free(tree->pattern_bindings);
+    free(tree->match_arms);
     memset(tree, 0, sizeof(*tree));
 }
 
@@ -281,6 +285,73 @@ static SolFieldId sol_parser_add_field(SolParser *parser, SolField field) {
     }
     SolFieldId id = parser->tree->field_count++;
     parser->tree->fields[id] = field;
+    return id;
+}
+
+static SolVariantId sol_parser_add_variant(SolParser *parser, SolVariant variant) {
+    if (parser->tree->variant_count == parser->tree->variant_capacity) {
+        SolVariant *variants = sol_parser_grow(
+            parser,
+            parser->tree->variants,
+            &parser->tree->variant_capacity,
+            sizeof(*parser->tree->variants)
+        );
+        if (variants == NULL) return SOL_AST_NONE;
+        parser->tree->variants = variants;
+    }
+    SolVariantId id = parser->tree->variant_count++;
+    parser->tree->variants[id] = variant;
+    return id;
+}
+
+static SolPatternId sol_parser_add_pattern(SolParser *parser, SolPattern pattern) {
+    if (parser->tree->pattern_count == parser->tree->pattern_capacity) {
+        SolPattern *patterns = sol_parser_grow(
+            parser,
+            parser->tree->patterns,
+            &parser->tree->pattern_capacity,
+            sizeof(*parser->tree->patterns)
+        );
+        if (patterns == NULL) return SOL_AST_NONE;
+        parser->tree->patterns = patterns;
+    }
+    SolPatternId id = parser->tree->pattern_count++;
+    parser->tree->patterns[id] = pattern;
+    return id;
+}
+
+static SolPatternBindingId sol_parser_add_pattern_binding(
+    SolParser *parser,
+    SolPatternBinding binding
+) {
+    if (parser->tree->pattern_binding_count == parser->tree->pattern_binding_capacity) {
+        SolPatternBinding *bindings = sol_parser_grow(
+            parser,
+            parser->tree->pattern_bindings,
+            &parser->tree->pattern_binding_capacity,
+            sizeof(*parser->tree->pattern_bindings)
+        );
+        if (bindings == NULL) return SOL_AST_NONE;
+        parser->tree->pattern_bindings = bindings;
+    }
+    SolPatternBindingId id = parser->tree->pattern_binding_count++;
+    parser->tree->pattern_bindings[id] = binding;
+    return id;
+}
+
+static SolMatchArmId sol_parser_add_match_arm(SolParser *parser, SolMatchArm arm) {
+    if (parser->tree->match_arm_count == parser->tree->match_arm_capacity) {
+        SolMatchArm *arms = sol_parser_grow(
+            parser,
+            parser->tree->match_arms,
+            &parser->tree->match_arm_capacity,
+            sizeof(*parser->tree->match_arms)
+        );
+        if (arms == NULL) return SOL_AST_NONE;
+        parser->tree->match_arms = arms;
+    }
+    SolMatchArmId id = parser->tree->match_arm_count++;
+    parser->tree->match_arms[id] = arm;
     return id;
 }
 
@@ -575,6 +646,128 @@ static SolParsedArguments sol_parser_record_fields(SolParser *parser) {
     }
 }
 
+static SolPatternId sol_parser_pattern(SolParser *parser) {
+    SolToken token = sol_parser_current(parser);
+    if (token.kind == SOL_TOKEN_TRUE || token.kind == SOL_TOKEN_FALSE) {
+        sol_parser_advance(parser);
+        return sol_parser_add_pattern(parser, (SolPattern){
+            .kind = SOL_PATTERN_BOOL,
+            .span = token.span,
+            .bool_value = token.kind == SOL_TOKEN_TRUE,
+            .first_binding = SOL_AST_NONE,
+        });
+    }
+    if (token.kind != SOL_TOKEN_IDENTIFIER) {
+        sol_parser_error(parser, "SOL-PARSE-016", token, "expected a match pattern");
+        if (token.kind != SOL_TOKEN_EOF) sol_parser_advance(parser);
+        return SOL_AST_NONE;
+    }
+    sol_parser_advance(parser);
+    if (sol_token_text_equal(parser->source, token, "_")) {
+        return sol_parser_add_pattern(parser, (SolPattern){
+            .kind = SOL_PATTERN_WILDCARD,
+            .span = token.span,
+            .first_binding = SOL_AST_NONE,
+        });
+    }
+
+    SolPatternBindingId first_binding = SOL_AST_NONE;
+    SolPatternBindingId last_binding = SOL_AST_NONE;
+    size_t end = token.span.end;
+    if (sol_parser_match(parser, SOL_TOKEN_LEFT_PAREN)) {
+        if (!sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+            for (;;) {
+                SolToken binding_name = sol_parser_current(parser);
+                if (!sol_parser_expect(
+                    parser,
+                    SOL_TOKEN_IDENTIFIER,
+                    "expected a pattern binding"
+                )) {
+                    return SOL_AST_NONE;
+                }
+                SolPatternBindingId binding = sol_parser_add_pattern_binding(
+                    parser,
+                    (SolPatternBinding){
+                        .name = binding_name.span,
+                        .next = SOL_AST_NONE,
+                    }
+                );
+                if (binding == SOL_AST_NONE) return SOL_AST_NONE;
+                if (first_binding == SOL_AST_NONE) {
+                    first_binding = binding;
+                } else {
+                    parser->tree->pattern_bindings[last_binding].next = binding;
+                }
+                last_binding = binding;
+                if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) break;
+                if (!sol_parser_expect(
+                    parser,
+                    SOL_TOKEN_COMMA,
+                    "expected ',' between pattern bindings"
+                )) {
+                    return SOL_AST_NONE;
+                }
+                if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) break;
+            }
+        }
+        end = parser->tokens->items[parser->cursor - 1].span.end;
+    }
+    return sol_parser_add_pattern(parser, (SolPattern){
+        .kind = SOL_PATTERN_VARIANT,
+        .span = {.start = token.span.start, .end = end},
+        .name = token.span,
+        .first_binding = first_binding,
+    });
+}
+
+static SolExprId sol_parser_match_expression(SolParser *parser) {
+    SolToken match_token = sol_parser_advance(parser);
+    bool previous_suppression = parser->suppress_record_literal;
+    parser->suppress_record_literal = true;
+    SolExprId scrutinee = sol_parser_expression(parser, 1);
+    parser->suppress_record_literal = previous_suppression;
+    if (!sol_parser_expect(parser, SOL_TOKEN_LEFT_BRACE, "expected '{' after match value")) {
+        return sol_parser_add_expression(parser, (SolExpr){
+            .kind = SOL_EXPR_ERROR,
+            .span = match_token.span,
+        });
+    }
+
+    SolMatchArmId first_arm = SOL_AST_NONE;
+    SolMatchArmId last_arm = SOL_AST_NONE;
+    while (sol_parser_kind(parser) != SOL_TOKEN_RIGHT_BRACE
+        && sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+        SolPatternId pattern = sol_parser_pattern(parser);
+        if (pattern == SOL_AST_NONE) break;
+        sol_parser_expect(parser, SOL_TOKEN_FAT_ARROW, "expected '=>' after match pattern");
+        SolExprId value = sol_parser_nested_expression(parser, 1);
+        SolSpan arm_span = {
+            .start = parser->tree->patterns[pattern].span.start,
+            .end = value == SOL_AST_NONE
+                ? parser->tree->patterns[pattern].span.end
+                : parser->tree->expressions[value].span.end,
+        };
+        SolMatchArmId arm = sol_parser_add_match_arm(parser, (SolMatchArm){
+            .pattern = pattern,
+            .value = value,
+            .span = arm_span,
+            .next = SOL_AST_NONE,
+        });
+        if (arm == SOL_AST_NONE) break;
+        if (first_arm == SOL_AST_NONE) first_arm = arm;
+        else parser->tree->match_arms[last_arm].next = arm;
+        last_arm = arm;
+        sol_parser_match(parser, SOL_TOKEN_COMMA);
+    }
+    SolToken closing = sol_parser_current(parser);
+    sol_parser_expect(parser, SOL_TOKEN_RIGHT_BRACE, "expected '}' after match arms");
+    return sol_parser_add_expression(parser, (SolExpr){
+        .kind = SOL_EXPR_MATCH,
+        .span = {.start = match_token.span.start, .end = closing.span.end},
+        .as.match_expr = {.scrutinee = scrutinee, .first_arm = first_arm},
+    });
+}
+
 static SolExprId sol_parser_primary_expression(SolParser *parser) {
     SolToken token = sol_parser_current(parser);
     if (token.kind == SOL_TOKEN_INTEGER) {
@@ -662,6 +855,9 @@ static SolExprId sol_parser_primary_expression(SolParser *parser) {
                 .else_branch = else_branch,
             },
         });
+    }
+    if (token.kind == SOL_TOKEN_MATCH) {
+        return sol_parser_match_expression(parser);
     }
 
     sol_parser_error(parser, "SOL-PARSE-011", token, "expected an expression");
@@ -1182,7 +1378,14 @@ static bool sol_parser_record(
     return true;
 }
 
-static bool sol_parser_enum(SolParser *parser, SolSpan *name, SolSpan *whole) {
+static bool sol_parser_enum(
+    SolParser *parser,
+    SolSpan *name,
+    SolSpan *whole,
+    SolVariantId *first_variant
+) {
+    *first_variant = SOL_AST_NONE;
+    SolVariantId last_variant = SOL_AST_NONE;
     SolToken opening = sol_parser_advance(parser);
     SolToken name_token = sol_parser_current(parser);
     if (!sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER, "expected an enum name")) {
@@ -1198,21 +1401,38 @@ static bool sol_parser_enum(SolParser *parser, SolSpan *name, SolSpan *whole) {
         return true;
     }
     for (;;) {
+        SolToken variant_name = sol_parser_current(parser);
         if (!sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER, "expected an enum variant")) {
             return false;
         }
+        SolFieldId variant_fields = SOL_AST_NONE;
+        size_t variant_end = variant_name.span.end;
         if (sol_parser_match(parser, SOL_TOKEN_LEFT_PAREN)
         ) {
-            SolFieldId ignored_fields;
             if (!sol_parser_named_type_list(
                 parser,
                 SOL_TOKEN_RIGHT_PAREN,
-                false,
-                &ignored_fields
+                true,
+                &variant_fields
             )) {
                 return false;
             }
+            variant_end = parser->tokens->items[parser->cursor - 1].span.end;
         }
+        SolVariantId variant = sol_parser_add_variant(parser, (SolVariant){
+            .name = variant_name.span,
+            .span = {.start = variant_name.span.start, .end = variant_end},
+            .first_field = variant_fields,
+            .next = SOL_AST_NONE,
+            .owner_item = parser->tree->item_count,
+        });
+        if (variant == SOL_AST_NONE) return false;
+        if (*first_variant == SOL_AST_NONE) {
+            *first_variant = variant;
+        } else {
+            parser->tree->variants[last_variant].next = variant;
+        }
+        last_variant = variant;
         if (sol_parser_match(parser, SOL_TOKEN_RIGHT_BRACE)) {
             break;
         }
@@ -1309,6 +1529,7 @@ static void sol_parser_declaration(SolParser *parser) {
     size_t type_mark = parser->tree->type_count;
     size_t type_argument_mark = parser->tree->type_argument_count;
     size_t field_mark = parser->tree->field_count;
+    size_t variant_mark = parser->tree->variant_count;
     size_t start = sol_parser_current(parser).span.start;
     while (sol_parser_kind(parser) == SOL_TOKEN_AT) {
         sol_parser_annotation(parser);
@@ -1326,6 +1547,8 @@ static void sol_parser_declaration(SolParser *parser) {
     SolSpan return_type = {0};
     SolTypeId return_type_id = SOL_AST_NONE;
     SolFieldId first_field = SOL_AST_NONE;
+    SolVariantId first_variant = SOL_AST_NONE;
+    bool is_open = false;
     bool parsed = false;
     SolTokenKind kind = sol_parser_kind(parser);
     if (kind == SOL_TOKEN_RECORD) {
@@ -1333,6 +1556,7 @@ static void sol_parser_declaration(SolParser *parser) {
         parsed = sol_parser_record(parser, &name, &whole, &first_field);
     } else if (kind == SOL_TOKEN_OPEN || kind == SOL_TOKEN_ENUM) {
         if (kind == SOL_TOKEN_OPEN) {
+            is_open = true;
             sol_parser_advance(parser);
             if (sol_parser_kind(parser) != SOL_TOKEN_ENUM) {
                 sol_parser_error(
@@ -1345,7 +1569,7 @@ static void sol_parser_declaration(SolParser *parser) {
             }
         }
         item_kind = SOL_ITEM_ENUM;
-        parsed = sol_parser_enum(parser, &name, &whole);
+        parsed = sol_parser_enum(parser, &name, &whole, &first_variant);
     } else if (kind == SOL_TOKEN_CAPABILITY) {
         item_kind = SOL_ITEM_CAPABILITY;
         parsed = sol_parser_capability(parser, &name, &whole);
@@ -1382,12 +1606,15 @@ static void sol_parser_declaration(SolParser *parser) {
             .return_type = return_type,
             .return_type_id = return_type_id,
             .first_field = first_field,
+            .first_variant = first_variant,
+            .is_open = is_open,
         });
     } else {
         parser->tree->parameter_count = parameter_mark;
         parser->tree->type_count = type_mark;
         parser->tree->type_argument_count = type_argument_mark;
         parser->tree->field_count = field_mark;
+        parser->tree->variant_count = variant_mark;
         sol_parser_recover_declaration(parser, failed_at);
     }
 }

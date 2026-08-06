@@ -27,6 +27,8 @@ static void check_ast_links(const SolSyntaxTree *tree) {
             || tree->items[index].return_type_id < tree->type_count);
         CHECK(tree->items[index].first_field == SOL_AST_NONE
             || tree->items[index].first_field < tree->field_count);
+        CHECK(tree->items[index].first_variant == SOL_AST_NONE
+            || tree->items[index].first_variant < tree->variant_count);
     }
     for (size_t index = 0; index < tree->expression_count; ++index) {
         const SolExpr *expression = &tree->expressions[index];
@@ -55,6 +57,11 @@ static void check_ast_links(const SolSyntaxTree *tree) {
                 CHECK(expression->as.if_expr.condition < tree->expression_count);
                 CHECK(expression->as.if_expr.then_branch < tree->expression_count);
                 CHECK(expression->as.if_expr.else_branch < tree->expression_count);
+                break;
+            case SOL_EXPR_MATCH:
+                CHECK(expression->as.match_expr.scrutinee < tree->expression_count);
+                CHECK(expression->as.match_expr.first_arm == SOL_AST_NONE
+                    || expression->as.match_expr.first_arm < tree->match_arm_count);
                 break;
             case SOL_EXPR_BLOCK:
                 CHECK(expression->as.block.first_statement == SOL_AST_NONE
@@ -99,6 +106,26 @@ static void check_ast_links(const SolSyntaxTree *tree) {
         CHECK(tree->fields[index].type < tree->type_count);
         CHECK(tree->fields[index].next == SOL_AST_NONE
             || tree->fields[index].next < tree->field_count);
+    }
+    for (size_t index = 0; index < tree->variant_count; ++index) {
+        CHECK(tree->variants[index].first_field == SOL_AST_NONE
+            || tree->variants[index].first_field < tree->field_count);
+        CHECK(tree->variants[index].next == SOL_AST_NONE
+            || tree->variants[index].next < tree->variant_count);
+    }
+    for (size_t index = 0; index < tree->pattern_count; ++index) {
+        CHECK(tree->patterns[index].first_binding == SOL_AST_NONE
+            || tree->patterns[index].first_binding < tree->pattern_binding_count);
+    }
+    for (size_t index = 0; index < tree->pattern_binding_count; ++index) {
+        CHECK(tree->pattern_bindings[index].next == SOL_AST_NONE
+            || tree->pattern_bindings[index].next < tree->pattern_binding_count);
+    }
+    for (size_t index = 0; index < tree->match_arm_count; ++index) {
+        CHECK(tree->match_arms[index].pattern < tree->pattern_count);
+        CHECK(tree->match_arms[index].value < tree->expression_count);
+        CHECK(tree->match_arms[index].next == SOL_AST_NONE
+            || tree->match_arms[index].next < tree->match_arm_count);
     }
 }
 
