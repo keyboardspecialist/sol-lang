@@ -341,7 +341,7 @@ The language server is expected to expose typed syntax, inferred effects, owners
 
 ## Bootstrap Compiler
 
-The bootstrap compiler is written in C17 and currently provides a lossless lexer, a recovering parser for core declarations and function-body expressions, an arena-backed syntax AST, deterministic definition IDs, lexical name resolution, structural `Option`/`Result` types, checked records and enums, exhaustive matching, direct-call effect propagation, and structured human or JSON diagnostics through `sol check`.
+The bootstrap compiler is written in C17 and currently provides a lossless lexer, a recovering parser for core declarations and function-body expressions, an arena-backed syntax AST, deterministic definition IDs, lexical name resolution, structural `Option`/`Result` types, checked records and enums, exhaustive matching, statically known call-effect propagation, and structured human or JSON diagnostics through `sol check`.
 
 ```text
 cmake -S . -B build -G Ninja -DSOL_ENABLE_SANITIZERS=ON
@@ -350,7 +350,7 @@ cmake --build build --target test
 ./build/sol check tests/valid.sol
 ```
 
-This implementation is an experimental edition-2027 front end. Function bodies are parsed, names are resolved into an initial HIR, and expressions, calls, returns, built-in generic types, records, enum constructors, and matches over user enums and `Bool` are checked. Function and capability-operation effect rows are checked across direct calls, including `Self` substitution for direct capability parameters. Bound operation values and local effect inference are not implemented yet. Contract blocks remain delimiter-checked. User-defined generics, ownership, and execution are also not implemented yet.
+This implementation is an experimental edition-2027 front end. Function bodies are parsed, names are resolved into an initial HIR, and expressions, calls, returns, built-in generic types, records, enum constructors, and matches over user enums and `Bool` are checked. Function and capability-operation effect rows are checked across statically known calls, including formal-argument and `Self` substitution for direct capability parameters. Bound operation values and local effect inference are not implemented yet. Contract blocks remain delimiter-checked. User-defined generics, ownership, and execution are also not implemented yet.
 
 ## Compiler Architecture
 

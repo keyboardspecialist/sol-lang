@@ -10,6 +10,7 @@ typedef struct {
     const SolTypeTable *types;
     SolDiagnostics *diagnostics;
     unsigned char *visited;
+    unsigned char *reported_substitutions;
     SolDefId current_function;
     size_t depth;
     bool depth_reported;
@@ -115,7 +116,7 @@ static bool sol_effect_row_contains(
     SolEffectChecker *checker,
     SolEffectId effect_id,
     const SolEffect *required,
-    const SolSpan *receiver
+    const SolSpan *substituted_argument
 ) {
     size_t traversed = 0;
     while (effect_id != SOL_AST_NONE) {
@@ -125,13 +126,14 @@ static bool sol_effect_row_contains(
             return false;
         }
         const SolEffect *effect = &checker->syntax->effects[effect_id];
-        bool self_argument = receiver != NULL
-            && required->has_argument
-            && sol_effect_span_text_equal(checker->source, required->argument, "Self");
         bool argument_matches = effect->has_argument == required->has_argument
             && (!effect->has_argument
-                || (self_argument
-                    ? sol_effect_span_equal(checker->source, effect->argument, *receiver)
+                || (substituted_argument != NULL
+                    ? sol_effect_span_equal(
+                        checker->source,
+                        effect->argument,
+                        *substituted_argument
+                    )
                     : sol_effect_span_equal(
                         checker->source,
                         effect->argument,
@@ -148,40 +150,198 @@ static bool sol_effect_row_contains(
     return false;
 }
 
+static bool sol_effect_direct_parameter(
+    SolEffectChecker *checker,
+    SolExprId expression_id,
+    SolSpan *name
+) {
+    if (expression_id >= checker->syntax->expression_count) {
+        checker->malformed = true;
+        return false;
+    }
+    const SolExpr *expression = &checker->syntax->expressions[expression_id];
+    SolResolution resolution = checker->hir->resolutions[expression_id];
+    if (expression->kind != SOL_EXPR_PATH
+        || resolution.kind != SOL_RESOLUTION_LOCAL
+        || resolution.target >= checker->hir->local_count) {
+        return false;
+    }
+    const SolHirLocal *local = &checker->hir->locals[resolution.target];
+    if (local->kind != SOL_LOCAL_PARAMETER || local->owner != checker->current_function
+        || resolution.target >= checker->types->local_count) {
+        return false;
+    }
+    SolType type = checker->types->locals[resolution.target];
+    if (type.kind != SOL_TYPE_NOMINAL
+        || type.definition >= checker->syntax->item_count
+        || checker->syntax->items[type.definition].kind != SOL_ITEM_CAPABILITY) {
+        return false;
+    }
+    *name = local->name;
+    return true;
+}
+
+static bool sol_effect_parameter_is_capability(
+    SolEffectChecker *checker,
+    SolParameterId parameter_id
+) {
+    const SolParameter *parameter = &checker->syntax->parameters[parameter_id];
+    if (parameter->type_id >= checker->types->declared_type_count) {
+        checker->malformed = true;
+        return false;
+    }
+    SolType type = checker->types->declared_types[parameter->type_id];
+    return type.kind == SOL_TYPE_NOMINAL
+        && type.definition < checker->syntax->item_count
+        && checker->syntax->items[type.definition].kind == SOL_ITEM_CAPABILITY;
+}
+
+static SolParameterId sol_effect_find_parameter(
+    SolEffectChecker *checker,
+    SolParameterId parameter_id,
+    SolSpan name
+) {
+    size_t traversed = 0;
+    while (parameter_id != SOL_AST_NONE) {
+        if (parameter_id >= checker->syntax->parameter_count
+            || traversed++ >= checker->syntax->parameter_count) {
+            checker->malformed = true;
+            return SOL_AST_NONE;
+        }
+        const SolParameter *parameter = &checker->syntax->parameters[parameter_id];
+        if (sol_effect_span_equal(checker->source, parameter->name, name)
+            && sol_effect_parameter_is_capability(checker, parameter_id)) {
+            return parameter_id;
+        }
+        parameter_id = parameter->next;
+    }
+    return SOL_AST_NONE;
+}
+
+static SolExprId sol_effect_find_actual_argument(
+    SolEffectChecker *checker,
+    SolParameterId first_parameter,
+    SolParameterId required_parameter,
+    SolArgumentId argument_id
+) {
+    SolParameterId positional_parameter = first_parameter;
+    size_t traversed = 0;
+    while (argument_id != SOL_AST_NONE) {
+        if (argument_id >= checker->syntax->argument_count
+            || traversed++ >= checker->syntax->argument_count) {
+            checker->malformed = true;
+            return SOL_AST_NONE;
+        }
+        const SolArgument *argument = &checker->syntax->arguments[argument_id];
+        SolParameterId matched = SOL_AST_NONE;
+        if (argument->is_named) {
+            matched = sol_effect_find_parameter(checker, first_parameter, argument->name);
+        } else {
+            matched = positional_parameter;
+            if (positional_parameter != SOL_AST_NONE) {
+                positional_parameter = checker->syntax->parameters[positional_parameter].next;
+            }
+        }
+        if (matched == required_parameter) return argument->value;
+        argument_id = argument->next;
+    }
+    return SOL_AST_NONE;
+}
+
+static bool sol_effect_substitute_argument(
+    SolEffectChecker *checker,
+    const SolExpr *call,
+    const SolEffect *required,
+    SolParameterId first_parameter,
+    const SolSpan *self_argument,
+    SolSpan *substituted_argument,
+    bool *has_substitution
+) {
+    *has_substitution = false;
+    if (!required->has_argument) return true;
+    if (self_argument != NULL
+        && sol_effect_span_text_equal(checker->source, required->argument, "Self")) {
+        *substituted_argument = *self_argument;
+        *has_substitution = true;
+        return true;
+    }
+    SolParameterId parameter = sol_effect_find_parameter(
+        checker,
+        first_parameter,
+        required->argument
+    );
+    if (parameter == SOL_AST_NONE) return !checker->malformed;
+    SolExprId actual = sol_effect_find_actual_argument(
+        checker,
+        first_parameter,
+        parameter,
+        call->as.call.first_argument
+    );
+    if (actual == SOL_AST_NONE) {
+        if (!checker->malformed) checker->malformed = true;
+        return false;
+    }
+    if (!sol_effect_direct_parameter(checker, actual, substituted_argument)) {
+        if (checker->malformed) return false;
+        if (!checker->reported_substitutions[actual]) {
+            sol_effect_error(
+                checker,
+                "SOL-EFFECT-003",
+                checker->syntax->expressions[actual].span,
+                "effect-bearing arguments must be direct capability parameters"
+            );
+            checker->reported_substitutions[actual] = 1;
+        }
+        return false;
+    }
+    *has_substitution = true;
+    return true;
+}
+
 static void sol_effect_check_call(SolEffectChecker *checker, const SolExpr *call) {
     SolExprId callee_id = call->as.call.callee;
     const SolExpr *callee = &checker->syntax->expressions[callee_id];
-    if (callee->kind != SOL_EXPR_PATH && callee->kind != SOL_EXPR_FIELD) return;
     SolResolution resolution = checker->hir->resolutions[callee_id];
     SolEffectId effect_id = SOL_AST_NONE;
+    SolParameterId first_parameter = SOL_AST_NONE;
     SolSpan receiver = {0};
     const SolSpan *receiver_pointer = NULL;
-    if (resolution.kind == SOL_RESOLUTION_DEFINITION
+    SolType callee_type = checker->types->expressions[callee_id];
+    if (callee_type.kind == SOL_TYPE_FUNCTION
+        && callee_type.definition < checker->syntax->item_count
+        && checker->syntax->items[callee_type.definition].kind == SOL_ITEM_FUNCTION) {
+        const SolSyntaxItem *function = &checker->syntax->items[callee_type.definition];
+        effect_id = function->first_effect;
+        first_parameter = function->first_parameter;
+    } else if (resolution.kind == SOL_RESOLUTION_DEFINITION
         && resolution.target < checker->syntax->item_count
         && checker->syntax->items[resolution.target].kind == SOL_ITEM_FUNCTION) {
-        effect_id = checker->syntax->items[resolution.target].first_effect;
-    } else if (checker->types->expressions[callee_id].kind
-            == SOL_TYPE_CAPABILITY_OPERATION
-        && checker->types->expressions[callee_id].definition
-            < checker->syntax->capability_member_count
+        const SolSyntaxItem *function = &checker->syntax->items[resolution.target];
+        effect_id = function->first_effect;
+        first_parameter = function->first_parameter;
+    } else if (callee_type.kind == SOL_TYPE_CAPABILITY_OPERATION
+        && callee_type.definition < checker->syntax->capability_member_count
         && callee->kind == SOL_EXPR_FIELD) {
-        SolCapabilityMemberId member_id = checker->types->expressions[callee_id].definition;
+        SolCapabilityMemberId member_id = callee_type.definition;
         SolExprId receiver_id = callee->as.field.base;
-        SolResolution receiver_resolution = checker->hir->resolutions[receiver_id];
-        if (receiver_resolution.kind != SOL_RESOLUTION_LOCAL
-            || receiver_resolution.target >= checker->hir->local_count
-            || checker->hir->locals[receiver_resolution.target].kind != SOL_LOCAL_PARAMETER) {
+        if (!sol_effect_direct_parameter(checker, receiver_id, &receiver)) {
             checker->malformed = true;
             return;
         }
-        effect_id = checker->syntax->capability_members[member_id].first_effect;
-        receiver = checker->hir->locals[receiver_resolution.target].name;
+        const SolCapabilityMember *member = &checker->syntax->capability_members[member_id];
+        effect_id = member->first_effect;
+        first_parameter = member->first_parameter;
         receiver_pointer = &receiver;
     } else {
         return;
     }
 
     size_t traversed = 0;
+    memset(
+        checker->reported_substitutions,
+        0,
+        checker->syntax->expression_count * sizeof(*checker->reported_substitutions)
+    );
     while (effect_id != SOL_AST_NONE) {
         if (effect_id >= checker->syntax->effect_count
             || traversed++ >= checker->syntax->effect_count) {
@@ -189,12 +349,27 @@ static void sol_effect_check_call(SolEffectChecker *checker, const SolExpr *call
             return;
         }
         const SolEffect *required = &checker->syntax->effects[effect_id];
-        if (!required->is_pure
+        if (required->is_pure) {
+            effect_id = required->next;
+            continue;
+        }
+        SolSpan substituted_argument = {0};
+        bool has_substitution = false;
+        bool substitution_valid = sol_effect_substitute_argument(
+            checker,
+            call,
+            required,
+            first_parameter,
+            receiver_pointer,
+            &substituted_argument,
+            &has_substitution
+        );
+        if (substitution_valid
             && !sol_effect_row_contains(
                 checker,
                 checker->syntax->items[checker->current_function].first_effect,
                 required,
-                receiver_pointer
+                has_substitution ? &substituted_argument : NULL
             )) {
             sol_effect_error(
                 checker,
@@ -212,7 +387,8 @@ static void sol_effect_expression(SolEffectChecker *checker, SolExprId expressio
 static void sol_effect_arguments(SolEffectChecker *checker, SolArgumentId argument_id) {
     size_t traversed = 0;
     while (argument_id != SOL_AST_NONE) {
-        if (traversed++ >= checker->syntax->argument_count) {
+        if (argument_id >= checker->syntax->argument_count
+            || traversed++ >= checker->syntax->argument_count) {
             checker->malformed = true;
             return;
         }
@@ -384,6 +560,7 @@ bool sol_effect_check(
         || diagnostics == NULL
         || syntax->item_count > syntax->item_capacity
         || syntax->expression_count > syntax->expression_capacity
+        || syntax->parameter_count > syntax->parameter_capacity
         || syntax->argument_count > syntax->argument_capacity
         || syntax->statement_count > syntax->statement_capacity
         || syntax->match_arm_count > syntax->match_arm_capacity
@@ -391,6 +568,7 @@ bool sol_effect_check(
         || syntax->capability_member_count > syntax->capability_member_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
         || (syntax->expression_count != 0 && syntax->expressions == NULL)
+        || (syntax->parameter_count != 0 && syntax->parameters == NULL)
         || (syntax->argument_count != 0 && syntax->arguments == NULL)
         || (syntax->statement_count != 0 && syntax->statements == NULL)
         || (syntax->match_arm_count != 0 && syntax->match_arms == NULL)
@@ -402,7 +580,11 @@ bool sol_effect_check(
         || (hir->resolution_count != 0 && hir->resolutions == NULL)
         || (hir->local_count != 0 && hir->locals == NULL)
         || types->expression_count != syntax->expression_count
-        || (types->expression_count != 0 && types->expressions == NULL)) {
+        || types->local_count != hir->local_count
+        || types->declared_type_count != syntax->type_count
+        || (types->expression_count != 0 && types->expressions == NULL)
+        || (types->local_count != 0 && types->locals == NULL)
+        || (types->declared_type_count != 0 && types->declared_types == NULL)) {
         if (diagnostics != NULL) {
             sol_diagnostics_add(
                 diagnostics,
@@ -419,8 +601,60 @@ bool sol_effect_check(
         if ((item->body != SOL_AST_NONE && item->body >= syntax->expression_count)
             || (item->first_effect != SOL_AST_NONE
                 && item->first_effect >= syntax->effect_count)
+            || (item->first_parameter != SOL_AST_NONE
+                && item->first_parameter >= syntax->parameter_count)
             || (item->first_member != SOL_AST_NONE
                 && item->first_member >= syntax->capability_member_count)) {
+            sol_diagnostics_add(
+                diagnostics,
+                "SOL-INTERNAL-004",
+                SOL_SEVERITY_ERROR,
+                (SolSpan){0},
+                "invalid syntax or HIR passed to effect checking"
+            );
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->parameter_count; ++index) {
+        const SolParameter *parameter = &syntax->parameters[index];
+        if (!sol_effect_span_valid(source, parameter->name)
+            || parameter->type_id >= syntax->type_count
+            || (parameter->next != SOL_AST_NONE
+                && parameter->next >= syntax->parameter_count)) {
+            sol_diagnostics_add(
+                diagnostics,
+                "SOL-INTERNAL-004",
+                SOL_SEVERITY_ERROR,
+                (SolSpan){0},
+                "invalid syntax or HIR passed to effect checking"
+            );
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->argument_count; ++index) {
+        const SolArgument *argument = &syntax->arguments[index];
+        if (argument->value >= syntax->expression_count
+            || (argument->is_named && !sol_effect_span_valid(source, argument->name))
+            || (argument->next != SOL_AST_NONE
+                && argument->next >= syntax->argument_count)) {
+            sol_diagnostics_add(
+                diagnostics,
+                "SOL-INTERNAL-004",
+                SOL_SEVERITY_ERROR,
+                (SolSpan){0},
+                "invalid syntax or HIR passed to effect checking"
+            );
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->expression_count; ++index) {
+        const SolExpr *expression = &syntax->expressions[index];
+        if ((expression->kind == SOL_EXPR_CALL
+                && expression->as.call.first_argument != SOL_AST_NONE
+                && expression->as.call.first_argument >= syntax->argument_count)
+            || (expression->kind == SOL_EXPR_RECORD
+                && expression->as.record.first_field != SOL_AST_NONE
+                && expression->as.record.first_field >= syntax->argument_count)) {
             sol_diagnostics_add(
                 diagnostics,
                 "SOL-INTERNAL-004",
@@ -453,6 +687,8 @@ bool sol_effect_check(
         if (!sol_effect_span_valid(source, member->span)
             || (member->first_effect != SOL_AST_NONE
                 && member->first_effect >= syntax->effect_count)
+            || (member->first_parameter != SOL_AST_NONE
+                && member->first_parameter >= syntax->parameter_count)
             || (member->next != SOL_AST_NONE
                 && member->next >= syntax->capability_member_count)
             || member->owner_item >= syntax->item_count) {
@@ -467,7 +703,16 @@ bool sol_effect_check(
         }
     }
     unsigned char *visited = calloc(syntax->expression_count, sizeof(*visited));
-    if (syntax->expression_count != 0 && visited == NULL) return false;
+    unsigned char *reported_substitutions = calloc(
+        syntax->expression_count,
+        sizeof(*reported_substitutions)
+    );
+    if (syntax->expression_count != 0
+        && (visited == NULL || reported_substitutions == NULL)) {
+        free(visited);
+        free(reported_substitutions);
+        return false;
+    }
     SolEffectChecker checker = {
         .source = source,
         .syntax = syntax,
@@ -475,6 +720,7 @@ bool sol_effect_check(
         .types = types,
         .diagnostics = diagnostics,
         .visited = visited,
+        .reported_substitutions = reported_substitutions,
     };
     for (size_t index = 0; index < syntax->item_count; ++index) {
         const SolSyntaxItem *item = &syntax->items[index];
@@ -497,6 +743,7 @@ bool sol_effect_check(
         );
     }
     free(visited);
+    free(reported_substitutions);
     if (checker.malformed) {
         sol_diagnostics_add(
             diagnostics,
