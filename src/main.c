@@ -31,11 +31,13 @@ static int sol_check_file(const char *path, bool json) {
     SolSyntaxTree tree;
     SolHirModule hir;
     SolTypeTable types;
+    SolEffectTable effects;
     sol_diagnostics_init(&diagnostics);
     sol_tokens_init(&tokens);
     sol_syntax_tree_init(&tree);
     sol_hir_module_init(&hir);
     sol_type_table_init(&types);
+    sol_effect_table_init(&effects);
 
     bool completed = sol_lex(&source, &tokens, &diagnostics);
     if (completed) {
@@ -48,7 +50,7 @@ static int sol_check_file(const char *path, bool json) {
         completed = sol_type_check(&source, &tree, &hir, &types, &diagnostics);
     }
     if (completed && !sol_diagnostics_has_errors(&diagnostics)) {
-        completed = sol_effect_check(&source, &tree, &hir, &types, &diagnostics);
+        completed = sol_effect_check(&source, &tree, &hir, &types, &effects, &diagnostics);
     }
     bool failed = !completed || sol_diagnostics_has_errors(&diagnostics);
 
@@ -62,6 +64,7 @@ static int sol_check_file(const char *path, bool json) {
         printf("checked %s: %zu declaration%s\n", path, tree.item_count, tree.item_count == 1 ? "" : "s");
     }
 
+    sol_effect_table_free(&effects);
     sol_type_table_free(&types);
     sol_hir_module_free(&hir);
     sol_syntax_tree_free(&tree);
