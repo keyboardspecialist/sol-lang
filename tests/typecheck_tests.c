@@ -410,6 +410,63 @@ static void test_invalid_enum_constructor(void) {
     free_compilation(&compilation);
 }
 
+static void test_capability_operation_calls(void) {
+    static const char text[] =
+        "module capability_calls\n"
+        "capability Clock {\n"
+        "    function offset(delta: Int64) -> Int64\n"
+        "    effects { clock.read<Self> }\n"
+        "}\n"
+        "function read(clock: capability Clock) -> Int64 {\n"
+        "    return clock.offset(delta = 1)\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    bool found_operation = false;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        if (compilation.types.expressions[index].kind == SOL_TYPE_CAPABILITY_OPERATION) {
+            found_operation = true;
+        }
+    }
+    CHECK(found_operation);
+    free_compilation(&compilation);
+}
+
+static void test_invalid_capability_operations(void) {
+    static const char text[] =
+        "module invalid_capability_calls\n"
+        "capability Clock { function offset(delta: Int64) -> Int64 effects { pure } }\n"
+        "function wrong_type(clock: capability Clock) -> Int64 { return clock.offset(true) }\n"
+        "function missing(clock: capability Clock) -> Int64 { return clock.missing() }\n"
+        "function no_authority(clock: Clock) -> Int64 { return clock.offset(1) }\n"
+        "function indirect(clock: capability Clock) -> Int64 {\n"
+        "    let operation = clock.offset\n"
+        "    return operation(1)\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-005"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-009"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-015"));
+    free_compilation(&compilation);
+}
+
+static void test_invalid_capability_declarations(void) {
+    static const char text[] =
+        "module invalid_capability_declarations\n"
+        "capability Broken {\n"
+        "    function duplicate(value: Int64) -> Int64 effects { pure }\n"
+        "    function duplicate(value: Int64) -> Int64 effects { pure }\n"
+        "    function unresolved(value: Missing) -> Missing effects { pure }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-009"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-015"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -431,6 +488,9 @@ int main(void) {
     test_enum_constructors_and_match();
     test_invalid_match();
     test_invalid_enum_constructor();
+    test_capability_operation_calls();
+    test_invalid_capability_operations();
+    test_invalid_capability_declarations();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;

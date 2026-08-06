@@ -29,6 +29,8 @@ static void check_ast_links(const SolSyntaxTree *tree) {
             || tree->items[index].first_field < tree->field_count);
         CHECK(tree->items[index].first_variant == SOL_AST_NONE
             || tree->items[index].first_variant < tree->variant_count);
+        CHECK(tree->items[index].first_member == SOL_AST_NONE
+            || tree->items[index].first_member < tree->capability_member_count);
     }
     for (size_t index = 0; index < tree->expression_count; ++index) {
         const SolExpr *expression = &tree->expressions[index];
@@ -127,6 +129,15 @@ static void check_ast_links(const SolSyntaxTree *tree) {
         CHECK(tree->match_arms[index].next == SOL_AST_NONE
             || tree->match_arms[index].next < tree->match_arm_count);
     }
+    for (size_t index = 0; index < tree->capability_member_count; ++index) {
+        CHECK(tree->capability_members[index].first_parameter == SOL_AST_NONE
+            || tree->capability_members[index].first_parameter < tree->parameter_count);
+        CHECK(tree->capability_members[index].return_type_id < tree->type_count);
+        CHECK(tree->capability_members[index].first_effect == SOL_AST_NONE
+            || tree->capability_members[index].first_effect < tree->effect_count);
+        CHECK(tree->capability_members[index].next == SOL_AST_NONE
+            || tree->capability_members[index].next < tree->capability_member_count);
+    }
 }
 
 static void test_valid_declarations(void) {
@@ -161,6 +172,15 @@ static void test_valid_declarations(void) {
     CHECK(!sol_diagnostics_has_errors(&diagnostics));
     CHECK(tree.edition == 2027);
     CHECK(tree.item_count == 4);
+    CHECK(tree.capability_member_count == 1);
+    CHECK(tree.items[2].first_member == 0);
+    if (tree.capability_member_count == 1) {
+        const SolCapabilityMember *member = &tree.capability_members[0];
+        CHECK(member->owner_item == 2);
+        CHECK(member->first_effect < tree.effect_count);
+        CHECK(member->return_type_id < tree.type_count);
+        CHECK(member->next == SOL_AST_NONE);
+    }
 
     size_t covered = 0;
     for (size_t index = 0; index + 1 < tokens.count; ++index) {

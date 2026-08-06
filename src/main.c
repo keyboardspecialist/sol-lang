@@ -48,7 +48,7 @@ static int sol_check_file(const char *path, bool json) {
         completed = sol_type_check(&source, &tree, &hir, &types, &diagnostics);
     }
     if (completed && !sol_diagnostics_has_errors(&diagnostics)) {
-        completed = sol_effect_check(&source, &tree, &hir, &diagnostics);
+        completed = sol_effect_check(&source, &tree, &hir, &types, &diagnostics);
     }
     bool failed = !completed || sol_diagnostics_has_errors(&diagnostics);
 

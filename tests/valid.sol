@@ -34,3 +34,10 @@ ensures {
 } {
     return ok(user.name)
 }
+
+function timestamp(clock: capability Clock) -> Int64
+effects {
+    clock.read<clock>
+} {
+    return clock.now()
+}

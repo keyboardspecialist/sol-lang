@@ -350,7 +350,7 @@ cmake --build build --target test
 ./build/sol check tests/valid.sol
 ```
 
-This implementation is an experimental edition-2027 front end. Function bodies are parsed, names are resolved into an initial HIR, and expressions, calls, returns, built-in generic types, records, enum constructors, and matches over user enums and `Bool` are checked. Function effect rows are retained and checked across direct calls; capability-operation effects and local inference are not implemented yet. Contract blocks remain delimiter-checked. User-defined generics, ownership, and execution are also not implemented yet.
+This implementation is an experimental edition-2027 front end. Function bodies are parsed, names are resolved into an initial HIR, and expressions, calls, returns, built-in generic types, records, enum constructors, and matches over user enums and `Bool` are checked. Function and capability-operation effect rows are checked across direct calls, including `Self` substitution for direct capability parameters. Bound operation values and local effect inference are not implemented yet. Contract blocks remain delimiter-checked. User-defined generics, ownership, and execution are also not implemented yet.
 
 ## Compiler Architecture
 

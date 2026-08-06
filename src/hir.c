@@ -140,6 +140,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         || syntax->pattern_binding_count > syntax->pattern_binding_capacity
         || syntax->match_arm_count > syntax->match_arm_capacity
         || syntax->effect_count > syntax->effect_capacity
+        || syntax->capability_member_count > syntax->capability_member_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
         || (syntax->parameter_count != 0 && syntax->parameters == NULL)
         || (syntax->argument_count != 0 && syntax->arguments == NULL)
@@ -152,7 +153,9 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         || (syntax->pattern_count != 0 && syntax->patterns == NULL)
         || (syntax->pattern_binding_count != 0 && syntax->pattern_bindings == NULL)
         || (syntax->match_arm_count != 0 && syntax->match_arms == NULL)
-        || (syntax->effect_count != 0 && syntax->effects == NULL)) {
+        || (syntax->effect_count != 0 && syntax->effects == NULL)
+        || (syntax->capability_member_count != 0
+            && syntax->capability_members == NULL)) {
         sol_resolver_malformed(resolver);
         return false;
     }
@@ -171,9 +174,26 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || (item->first_variant != SOL_AST_NONE
                 && item->first_variant >= syntax->variant_count)
             || (item->first_effect != SOL_AST_NONE
-                && item->first_effect >= syntax->effect_count)) {
+                && item->first_effect >= syntax->effect_count)
+            || (item->first_member != SOL_AST_NONE
+                && item->first_member >= syntax->capability_member_count)) {
             sol_resolver_malformed(resolver);
             return false;
+        }
+        if (item->kind != SOL_ITEM_CAPABILITY && item->first_member != SOL_AST_NONE) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+        SolCapabilityMemberId member_id = item->first_member;
+        size_t member_count = 0;
+        while (member_id != SOL_AST_NONE) {
+            if (member_id >= syntax->capability_member_count
+                || member_count++ >= syntax->capability_member_count
+                || syntax->capability_members[member_id].owner_item != index) {
+                sol_resolver_malformed(resolver);
+                return false;
+            }
+            member_id = syntax->capability_members[member_id].next;
         }
     }
     for (size_t index = 0; index < syntax->parameter_count; ++index) {
@@ -266,7 +286,26 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || !sol_span_valid(resolver->source, effect->span)
             || (effect->next != SOL_AST_NONE && effect->next >= syntax->effect_count)
             || effect->owner_item >= syntax->item_count
-            || syntax->items[effect->owner_item].kind != SOL_ITEM_FUNCTION) {
+            || (syntax->items[effect->owner_item].kind != SOL_ITEM_FUNCTION
+                && syntax->items[effect->owner_item].kind != SOL_ITEM_CAPABILITY)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->capability_member_count; ++index) {
+        const SolCapabilityMember *member = &syntax->capability_members[index];
+        if (!sol_span_valid(resolver->source, member->name)
+            || !sol_span_valid(resolver->source, member->span)
+            || !sol_span_valid(resolver->source, member->return_type)
+            || (member->first_parameter != SOL_AST_NONE
+                && member->first_parameter >= syntax->parameter_count)
+            || member->return_type_id >= syntax->type_count
+            || (member->first_effect != SOL_AST_NONE
+                && member->first_effect >= syntax->effect_count)
+            || (member->next != SOL_AST_NONE
+                && member->next >= syntax->capability_member_count)
+            || member->owner_item >= syntax->item_count
+            || syntax->items[member->owner_item].kind != SOL_ITEM_CAPABILITY) {
             sol_resolver_malformed(resolver);
             return false;
         }

@@ -61,6 +61,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || syntax->pattern_binding_count > syntax->pattern_binding_capacity
         || syntax->match_arm_count > syntax->match_arm_capacity
         || syntax->effect_count > syntax->effect_capacity
+        || syntax->capability_member_count > syntax->capability_member_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
         || (syntax->parameter_count != 0 && syntax->parameters == NULL)
         || (syntax->argument_count != 0 && syntax->arguments == NULL)
@@ -74,6 +75,8 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || (syntax->pattern_binding_count != 0 && syntax->pattern_bindings == NULL)
         || (syntax->match_arm_count != 0 && syntax->match_arms == NULL)
         || (syntax->effect_count != 0 && syntax->effects == NULL)
+        || (syntax->capability_member_count != 0
+            && syntax->capability_members == NULL)
         || hir->definition_count != syntax->item_count
         || hir->resolution_count != syntax->expression_count
         || hir->local_count > hir->local_capacity
@@ -100,11 +103,24 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                 && item->first_variant >= syntax->variant_count)
             || (item->first_effect != SOL_AST_NONE
                 && item->first_effect >= syntax->effect_count)
+            || (item->first_member != SOL_AST_NONE
+                && item->first_member >= syntax->capability_member_count)
             || definition->syntax_item != index
             || definition->kind != item->kind
             || !sol_type_span_valid(checker->source, definition->name)) {
             sol_type_malformed(checker);
             return false;
+        }
+        SolCapabilityMemberId member_id = item->first_member;
+        size_t member_count = 0;
+        while (member_id != SOL_AST_NONE) {
+            if (member_id >= syntax->capability_member_count
+                || member_count++ >= syntax->capability_member_count
+                || syntax->capability_members[member_id].owner_item != index) {
+                sol_type_malformed(checker);
+                return false;
+            }
+            member_id = syntax->capability_members[member_id].next;
         }
     }
     for (size_t index = 0; index < syntax->parameter_count; ++index) {
@@ -197,6 +213,24 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || !sol_type_span_valid(checker->source, effect->span)
             || (effect->next != SOL_AST_NONE && effect->next >= syntax->effect_count)
             || effect->owner_item >= syntax->item_count) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->capability_member_count; ++index) {
+        const SolCapabilityMember *member = &syntax->capability_members[index];
+        if (!sol_type_span_valid(checker->source, member->name)
+            || !sol_type_span_valid(checker->source, member->span)
+            || !sol_type_span_valid(checker->source, member->return_type)
+            || (member->first_parameter != SOL_AST_NONE
+                && member->first_parameter >= syntax->parameter_count)
+            || member->return_type_id >= syntax->type_count
+            || (member->first_effect != SOL_AST_NONE
+                && member->first_effect >= syntax->effect_count)
+            || (member->next != SOL_AST_NONE
+                && member->next >= syntax->capability_member_count)
+            || member->owner_item >= syntax->item_count
+            || syntax->items[member->owner_item].kind != SOL_ITEM_CAPABILITY) {
             sol_type_malformed(checker);
             return false;
         }
@@ -341,6 +375,7 @@ static bool sol_type_equal(SolType left, SolType right) {
         && ((left.kind != SOL_TYPE_NOMINAL
                 && left.kind != SOL_TYPE_OPAQUE
                 && left.kind != SOL_TYPE_FUNCTION
+                && left.kind != SOL_TYPE_CAPABILITY_OPERATION
                 && left.kind != SOL_TYPE_VARIANT)
             || left.definition == right.definition);
 }
@@ -354,6 +389,7 @@ static const char *sol_type_name(SolType type) {
         case SOL_TYPE_NOMINAL: return "nominal type";
         case SOL_TYPE_OPAQUE: return "generic type";
         case SOL_TYPE_FUNCTION: return "function";
+        case SOL_TYPE_CAPABILITY_OPERATION: return "capability operation";
         case SOL_TYPE_VARIANT: return "enum constructor";
         case SOL_TYPE_NEVER: return "Never";
         case SOL_TYPE_ERROR: return "error";
@@ -421,8 +457,8 @@ static SolType sol_type_from_id(SolTypeChecker *checker, SolTypeId type_id) {
     } else {
         for (size_t index = 0; index < checker->hir->definition_count; ++index) {
             const SolHirDefinition *definition = &checker->hir->definitions[index];
-            bool capability_matches = !syntax_type->is_capability
-                || definition->kind == SOL_ITEM_CAPABILITY;
+            bool capability_matches = syntax_type->is_capability
+                == (definition->kind == SOL_ITEM_CAPABILITY);
             if (definition->kind != SOL_ITEM_FUNCTION
                 && capability_matches
                 && sol_type_name_equal(
@@ -612,6 +648,7 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
     SolType callee_type = sol_type_expression(checker, call->as.call.callee);
     SolResolution resolution = sol_type_callee_resolution(checker, call->as.call.callee);
     SolDefId target = SOL_AST_NONE;
+    SolCapabilityMemberId operation = SOL_AST_NONE;
     if (resolution.kind == SOL_RESOLUTION_DEFINITION
         && resolution.target < checker->syntax->item_count
         && checker->syntax->items[resolution.target].kind == SOL_ITEM_FUNCTION) {
@@ -619,11 +656,37 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
     } else if (callee_type.kind == SOL_TYPE_FUNCTION
         && callee_type.definition < checker->syntax->item_count) {
         target = callee_type.definition;
+    } else if (callee_type.kind == SOL_TYPE_CAPABILITY_OPERATION
+        && callee_type.definition < checker->syntax->capability_member_count) {
+        operation = callee_type.definition;
     }
     if (callee_type.kind == SOL_TYPE_VARIANT) {
         return sol_type_variant_call(checker, callee_type.definition, call);
     }
-    if (target == SOL_AST_NONE) {
+    if (operation != SOL_AST_NONE) {
+        const SolExpr *callee = &checker->syntax->expressions[call->as.call.callee];
+        bool direct_parameter = false;
+        if (callee->kind == SOL_EXPR_FIELD) {
+            SolExprId receiver_id = callee->as.field.base;
+            const SolExpr *receiver = &checker->syntax->expressions[receiver_id];
+            SolResolution receiver_resolution = checker->hir->resolutions[receiver_id];
+            direct_parameter = receiver->kind == SOL_EXPR_PATH
+                && receiver_resolution.kind == SOL_RESOLUTION_LOCAL
+                && receiver_resolution.target < checker->hir->local_count
+                && checker->hir->locals[receiver_resolution.target].kind == SOL_LOCAL_PARAMETER;
+        }
+        if (!direct_parameter) {
+            sol_type_arguments(checker, call->as.call.first_argument);
+            sol_type_error(
+                checker,
+                "SOL-TYPE-015",
+                callee->span,
+                "capability operations currently require a direct capability parameter"
+            );
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+    }
+    if (target == SOL_AST_NONE && operation == SOL_AST_NONE) {
         sol_type_arguments(checker, call->as.call.first_argument);
         if (resolution.kind != SOL_RESOLUTION_BUILTIN
             && callee_type.kind != SOL_TYPE_UNKNOWN
@@ -638,9 +701,18 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
         return (SolType){.kind = SOL_TYPE_UNKNOWN};
     }
 
-    const SolSyntaxItem *function = &checker->syntax->items[target];
+    SolParameterId first_parameter;
+    SolType result;
+    if (operation != SOL_AST_NONE) {
+        const SolCapabilityMember *member = &checker->syntax->capability_members[operation];
+        first_parameter = member->first_parameter;
+        result = sol_type_from_id(checker, member->return_type_id);
+    } else {
+        first_parameter = checker->syntax->items[target].first_parameter;
+        result = checker->types->definitions[target];
+    }
     size_t parameter_count = 0;
-    SolParameterId parameter_id = function->first_parameter;
+    SolParameterId parameter_id = first_parameter;
     while (parameter_id != SOL_AST_NONE) {
         if (parameter_count++ >= checker->syntax->parameter_count) {
             sol_type_malformed(checker);
@@ -664,7 +736,7 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
             return (SolType){.kind = SOL_TYPE_ERROR};
         }
     }
-    parameter_id = function->first_parameter;
+    parameter_id = first_parameter;
     for (size_t index = 0; index < parameter_count; ++index) {
         parameter_ids[index] = parameter_id;
         parameter_id = checker->syntax->parameters[parameter_id].next;
@@ -752,7 +824,7 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
     }
     free(parameter_ids);
     free(used);
-    return checker->types->definitions[target];
+    return result;
 }
 
 static SolFieldId sol_type_find_field(
@@ -799,6 +871,33 @@ static SolVariantId sol_type_find_variant(
         const SolVariant *variant = &checker->syntax->variants[variant_id];
         if (sol_type_name_equal(checker->source, variant->name, name)) return variant_id;
         variant_id = variant->next;
+    }
+    return SOL_AST_NONE;
+}
+
+static SolCapabilityMemberId sol_type_find_capability_member(
+    SolTypeChecker *checker,
+    SolDefId definition,
+    SolSpan name
+) {
+    if (definition >= checker->syntax->item_count
+        || checker->syntax->items[definition].kind != SOL_ITEM_CAPABILITY) {
+        return SOL_AST_NONE;
+    }
+    SolCapabilityMemberId member_id = checker->syntax->items[definition].first_member;
+    size_t traversed = 0;
+    while (member_id != SOL_AST_NONE) {
+        if (traversed++ >= checker->syntax->capability_member_count) {
+            sol_type_malformed(checker);
+            return SOL_AST_NONE;
+        }
+        const SolCapabilityMember *member = &checker->syntax->capability_members[member_id];
+        if (member->owner_item != definition) {
+            sol_type_malformed(checker);
+            return SOL_AST_NONE;
+        }
+        if (sol_type_name_equal(checker->source, member->name, name)) return member_id;
+        member_id = member->next;
     }
     return SOL_AST_NONE;
 }
@@ -1414,6 +1513,28 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
                             type = (SolType){.kind = SOL_TYPE_VARIANT, .definition = variant};
                         }
                     }
+                } else if (base.kind == SOL_TYPE_NOMINAL
+                    && base.definition < checker->syntax->item_count
+                    && checker->syntax->items[base.definition].kind == SOL_ITEM_CAPABILITY) {
+                    SolCapabilityMemberId member = sol_type_find_capability_member(
+                        checker,
+                        base.definition,
+                        expression->as.field.name
+                    );
+                    if (member == SOL_AST_NONE) {
+                        sol_type_error(
+                            checker,
+                            "SOL-TYPE-015",
+                            expression->as.field.name,
+                            "capability has no operation with this name"
+                        );
+                        type = (SolType){.kind = SOL_TYPE_ERROR};
+                    } else {
+                        type = (SolType){
+                            .kind = SOL_TYPE_CAPABILITY_OPERATION,
+                            .definition = member,
+                        };
+                    }
                 } else if (base.kind != SOL_TYPE_UNKNOWN && base.kind != SOL_TYPE_ERROR) {
                     sol_type_error(
                         checker,
@@ -1619,6 +1740,75 @@ bool sol_type_check(
                 }
                 variant_id = variant->next;
             }
+        } else if (item->kind == SOL_ITEM_CAPABILITY) {
+            SolCapabilityMemberId member_id = item->first_member;
+            size_t member_count = 0;
+            while (member_id != SOL_AST_NONE) {
+                if (member_count++ >= syntax->capability_member_count) {
+                    sol_type_malformed(&checker);
+                    break;
+                }
+                const SolCapabilityMember *member = &syntax->capability_members[member_id];
+                sol_type_from_id(&checker, member->return_type_id);
+                SolCapabilityMemberId previous_member = item->first_member;
+                size_t previous_member_count = 0;
+                while (previous_member != member_id) {
+                    if (previous_member == SOL_AST_NONE
+                        || previous_member_count++ >= syntax->capability_member_count) {
+                        sol_type_malformed(&checker);
+                        break;
+                    }
+                    if (sol_type_name_equal(
+                        source,
+                        syntax->capability_members[previous_member].name,
+                        member->name
+                    )) {
+                        sol_type_error(
+                            &checker,
+                            "SOL-TYPE-015",
+                            member->name,
+                            "capability declares the same operation more than once"
+                        );
+                        break;
+                    }
+                    previous_member = syntax->capability_members[previous_member].next;
+                }
+                SolParameterId parameter_id = member->first_parameter;
+                size_t parameter_count = 0;
+                while (parameter_id != SOL_AST_NONE) {
+                    if (parameter_count++ >= syntax->parameter_count) {
+                        sol_type_malformed(&checker);
+                        break;
+                    }
+                    const SolParameter *parameter = &syntax->parameters[parameter_id];
+                    sol_type_from_id(&checker, parameter->type_id);
+                    SolParameterId previous_parameter = member->first_parameter;
+                    size_t previous_parameter_count = 0;
+                    while (previous_parameter != parameter_id) {
+                        if (previous_parameter == SOL_AST_NONE
+                            || previous_parameter_count++ >= syntax->parameter_count) {
+                            sol_type_malformed(&checker);
+                            break;
+                        }
+                        if (sol_type_name_equal(
+                            source,
+                            syntax->parameters[previous_parameter].name,
+                            parameter->name
+                        )) {
+                            sol_type_error(
+                                &checker,
+                                "SOL-TYPE-015",
+                                parameter->name,
+                                "capability operation declares the same parameter more than once"
+                            );
+                            break;
+                        }
+                        previous_parameter = syntax->parameters[previous_parameter].next;
+                    }
+                    parameter_id = parameter->next;
+                }
+                member_id = member->next;
+            }
         }
     }
     for (size_t index = 0; index < hir->local_count; ++index) {
@@ -1650,6 +1840,25 @@ bool sol_type_check(
                 sol_type_name(body_type)
             );
             sol_type_error(&checker, "SOL-TYPE-004", item->span, message);
+        }
+    }
+    for (size_t index = 0; index < syntax->expression_count; ++index) {
+        if (checker.types->expressions[index].kind != SOL_TYPE_CAPABILITY_OPERATION) continue;
+        bool direct_callee = false;
+        for (size_t candidate = 0; candidate < syntax->expression_count; ++candidate) {
+            const SolExpr *expression = &syntax->expressions[candidate];
+            if (expression->kind == SOL_EXPR_CALL && expression->as.call.callee == index) {
+                direct_callee = true;
+                break;
+            }
+        }
+        if (!direct_callee) {
+            sol_type_error(
+                &checker,
+                "SOL-TYPE-015",
+                syntax->expressions[index].span,
+                "capability operations must be called directly"
+            );
         }
     }
 

@@ -29,6 +29,7 @@ typedef struct {
     bool is_open;
     SolEffectId first_effect;
     bool has_effect_clause;
+    SolCapabilityMemberId first_member;
 } SolSyntaxItem;
 
 typedef struct {
@@ -73,6 +74,9 @@ typedef struct {
     SolEffect *effects;
     size_t effect_count;
     size_t effect_capacity;
+    SolCapabilityMember *capability_members;
+    size_t capability_member_count;
+    size_t capability_member_capacity;
 } SolSyntaxTree;
 
 void sol_syntax_tree_init(SolSyntaxTree *tree);

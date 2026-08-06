@@ -68,6 +68,7 @@ static bool compile_source(TestCompilation *compilation, const char *text) {
         &compilation->source,
         &compilation->syntax,
         &compilation->hir,
+        &compilation->types,
         &compilation->diagnostics
     );
 }
@@ -136,11 +137,80 @@ static void test_parameterized_effects(void) {
     free_compilation(&compilation);
 }
 
+static void test_capability_operation_effects(void) {
+    static const char text[] =
+        "module capability_effects\n"
+        "capability Clock {\n"
+        "    function now() -> Int64 effects { clock.read<Self> }\n"
+        "}\n"
+        "function valid(clock: capability Clock) -> Int64 effects { clock.read<clock> } {\n"
+        "    return clock.now()\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+}
+
+static void test_missing_capability_operation_effects(void) {
+    static const char text[] =
+        "module missing_capability_effects\n"
+        "capability Clock {\n"
+        "    function now() -> Int64 effects { clock.read<Self> }\n"
+        "}\n"
+        "function missing(clock: capability Clock) -> Int64 effects { pure } {\n"
+        "    return clock.now()\n"
+        "}\n"
+        "function wrong(clock: capability Clock, other: capability Clock) -> Int64\n"
+        "effects { clock.read<other> } { return clock.now() }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-002"));
+    free_compilation(&compilation);
+}
+
+static void test_invalid_capability_effect_row(void) {
+    static const char text[] =
+        "module invalid_capability_effects\n"
+        "capability Clock {\n"
+        "    function now() -> Int64 effects { clock.read<Self> clock.read<Self> }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-001"));
+    free_compilation(&compilation);
+}
+
+static void test_malformed_capability_arena_rejected(void) {
+    static const char text[] =
+        "module malformed_capability_arena\n"
+        "capability Clock { function now() -> Int64 effects { pure } }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolCapabilityMember *members = compilation.syntax.capability_members;
+    compilation.syntax.capability_members = NULL;
+    CHECK(!sol_effect_check(
+        &compilation.source,
+        &compilation.syntax,
+        &compilation.hir,
+        &compilation.types,
+        &compilation.diagnostics
+    ));
+    compilation.syntax.capability_members = members;
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_effect_propagation();
     test_undeclared_effect();
     test_invalid_effect_rows();
     test_parameterized_effects();
+    test_capability_operation_effects();
+    test_missing_capability_operation_effects();
+    test_invalid_capability_effect_row();
+    test_malformed_capability_arena_rejected();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;
