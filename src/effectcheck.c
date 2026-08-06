@@ -345,7 +345,7 @@ static void sol_effect_validate_and_normalize_row(
     }
 }
 
-static bool sol_effect_direct_parameter(
+static bool sol_effect_capability_origin(
     SolEffectChecker *checker,
     SolExprId expression_id,
     SolParameterId *parameter_id
@@ -362,9 +362,9 @@ static bool sol_effect_direct_parameter(
         return false;
     }
     const SolHirLocal *local = &checker->hir->locals[resolution.target];
-    if (local->kind != SOL_LOCAL_PARAMETER || local->owner != checker->current_function
-        || local->syntax_id >= checker->syntax->parameter_count
-        || resolution.target >= checker->types->local_count) {
+    if (local->owner != checker->current_function
+        || resolution.target >= checker->types->local_count
+        || checker->types->local_capability_origins[resolution.target] == SOL_AST_NONE) {
         return false;
     }
     SolType type = checker->types->locals[resolution.target];
@@ -373,7 +373,7 @@ static bool sol_effect_direct_parameter(
         || checker->syntax->items[type.definition].kind != SOL_ITEM_CAPABILITY) {
         return false;
     }
-    *parameter_id = local->syntax_id;
+    *parameter_id = checker->types->local_capability_origins[resolution.target];
     return true;
 }
 
@@ -447,14 +447,14 @@ static bool sol_effect_instantiate_atom(
         return false;
     }
     SolParameterId caller_parameter = SOL_AST_NONE;
-    if (!sol_effect_direct_parameter(checker, actual, &caller_parameter)) {
+    if (!sol_effect_capability_origin(checker, actual, &caller_parameter)) {
         if (checker->malformed) return false;
         if (!checker->reported_substitutions[actual]) {
             sol_effect_error(
                 checker,
                 "SOL-EFFECT-003",
                 checker->syntax->expressions[actual].span,
-                "effect-bearing arguments must be direct capability parameters"
+                "effect-bearing arguments must have known capability parameter authority"
             );
             checker->reported_substitutions[actual] = 1;
         }
@@ -757,6 +757,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || types->declared_type_count != syntax->type_count
         || (types->expression_count != 0 && types->expressions == NULL)
         || (types->local_count != 0 && types->locals == NULL)
+        || (types->local_count != 0 && types->local_capability_origins == NULL)
         || (types->declared_type_count != 0 && types->declared_types == NULL)) {
         return false;
     }
@@ -823,6 +824,38 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || member->owner_item >= syntax->item_count) {
             return false;
         }
+    }
+    for (size_t index = 0; index < hir->local_count; ++index) {
+        const SolHirLocal *local = &hir->locals[index];
+        SolParameterId origin = types->local_capability_origins[index];
+        SolType type = types->locals[index];
+        bool capability_type = type.kind == SOL_TYPE_NOMINAL
+            && type.definition < syntax->item_count
+            && syntax->items[type.definition].kind == SOL_ITEM_CAPABILITY;
+        SolParameterId expected = SOL_AST_NONE;
+        if (local->kind == SOL_LOCAL_PARAMETER) {
+            if (local->syntax_id >= syntax->parameter_count) return false;
+            if (capability_type) expected = local->syntax_id;
+        } else if (local->kind == SOL_LOCAL_BINDING) {
+            if (local->syntax_id >= syntax->statement_count) return false;
+            const SolStatement *statement = &syntax->statements[local->syntax_id];
+            if (statement->kind != SOL_STATEMENT_LET
+                || statement->as.let_statement.value >= syntax->expression_count) {
+                return false;
+            }
+            SolExprId initializer_id = statement->as.let_statement.value;
+            const SolExpr *initializer = &syntax->expressions[initializer_id];
+            SolResolution resolution = hir->resolutions[initializer_id];
+            if (initializer->kind == SOL_EXPR_PATH
+                && resolution.kind == SOL_RESOLUTION_LOCAL
+                && resolution.target < index
+                && hir->locals[resolution.target].owner == local->owner) {
+                expected = types->local_capability_origins[resolution.target];
+            }
+        }
+        if (origin != expected) return false;
+        if (origin != SOL_AST_NONE
+            && (!capability_type || origin >= syntax->parameter_count)) return false;
     }
     return true;
 }

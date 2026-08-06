@@ -33,6 +33,8 @@ typedef struct {
     size_t expression_count;
     SolType *locals;
     size_t local_count;
+    /* Indexed by SolLocalId; SOL_AST_NONE means no capability parameter origin. */
+    SolParameterId *local_capability_origins;
     SolType *definitions;
     size_t definition_count;
     SolType *declared_types;

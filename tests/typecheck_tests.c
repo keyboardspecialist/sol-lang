@@ -418,7 +418,9 @@ static void test_capability_operation_calls(void) {
         "    effects { clock.read<Self> }\n"
         "}\n"
         "function read(clock: capability Clock) -> Int64 {\n"
-        "    return clock.offset(delta = 1)\n"
+        "    let first = clock\n"
+        "    let second = first\n"
+        "    return second.offset(delta = 1)\n"
         "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
@@ -430,6 +432,15 @@ static void test_capability_operation_calls(void) {
         }
     }
     CHECK(found_operation);
+    SolParameterId origin = compilation.syntax.items[1].first_parameter;
+    size_t capability_locals = 0;
+    for (size_t index = 0; index < compilation.hir.local_count; ++index) {
+        if (compilation.hir.locals[index].owner == 1) {
+            CHECK(compilation.types.local_capability_origins[index] == origin);
+            ++capability_locals;
+        }
+    }
+    CHECK(capability_locals == 3);
     free_compilation(&compilation);
 }
 
@@ -443,11 +454,29 @@ static void test_invalid_capability_operations(void) {
         "function indirect(clock: capability Clock) -> Int64 {\n"
         "    let operation = clock.offset\n"
         "    return operation(1)\n"
+        "}\n"
+        "function computed(flag: Bool, clock: capability Clock) -> Int64 {\n"
+        "    let selected = if flag { clock } else { clock }\n"
+        "    return selected.offset(1)\n"
         "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
     CHECK(has_diagnostic(&compilation, "SOL-TYPE-005"));
     CHECK(has_diagnostic(&compilation, "SOL-TYPE-009"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-015"));
+    free_compilation(&compilation);
+}
+
+static void test_computed_capability_provenance_rejected(void) {
+    static const char text[] =
+        "module computed_capability\n"
+        "capability Clock { function offset(delta: Int64) -> Int64 effects { pure } }\n"
+        "function computed(flag: Bool, clock: capability Clock) -> Int64 {\n"
+        "    let selected = if flag { clock } else { clock }\n"
+        "    return selected.offset(1)\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
     CHECK(has_diagnostic(&compilation, "SOL-TYPE-015"));
     free_compilation(&compilation);
 }
@@ -490,6 +519,7 @@ int main(void) {
     test_invalid_enum_constructor();
     test_capability_operation_calls();
     test_invalid_capability_operations();
+    test_computed_capability_provenance_rejected();
     test_invalid_capability_declarations();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);

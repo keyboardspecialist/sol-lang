@@ -337,9 +337,17 @@ static void test_capability_operation_effects(void) {
         "}\n"
         "function inferred(actual: capability Clock) -> Int64 {\n"
         "    return helper(count = 1, clock = actual)\n"
+        "}\n"
+        "function inferred_alias(actual: capability Clock) -> Int64 {\n"
+        "    let first = actual\n"
+        "    let second = first\n"
+        "    return second.now() + helper(count = 1, clock = second)\n"
         "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
     CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
     CHECK(compilation.effects.functions[5].inferred);
     CHECK(compilation.effects.functions[5].count == 1);
@@ -347,6 +355,12 @@ static void test_capability_operation_effects(void) {
         == SOL_EFFECT_ATOM_PARAMETER);
     CHECK(compilation.effects.functions[5].atoms[0].parameter
         == compilation.syntax.items[5].first_parameter);
+    CHECK(compilation.effects.functions[6].inferred);
+    CHECK(compilation.effects.functions[6].count == 1);
+    if (compilation.effects.functions[6].count == 1) {
+        CHECK(compilation.effects.functions[6].atoms[0].parameter
+            == compilation.syntax.items[6].first_parameter);
+    }
     free_compilation(&compilation);
 }
 
@@ -357,7 +371,7 @@ static void test_function_effect_parameter_substitution(void) {
         "function helper(clock: capability Clock) -> Int64\n"
         "effects { clock.read<clock> } { return clock.now() }\n"
         "function wrong(actual: capability Clock, other: capability Clock) -> Int64\n"
-        "effects { clock.read<other> } { return helper(actual) }\n";
+        "effects { clock.read<other> } { let alias = actual return helper(alias) }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
     CHECK(diagnostic_count(&compilation, "SOL-EFFECT-002") == 1);
@@ -390,15 +404,15 @@ static void test_exact_function_alias_effects(void) {
     free_compilation(&compilation);
 }
 
-static void test_unrepresentable_effect_argument(void) {
+static void test_computed_effect_argument(void) {
     static const char text[] =
         "module unrepresentable_effect_argument\n"
         "capability Clock { function now() -> Int64 effects { clock.read<Self> } }\n"
         "function helper(clock: capability Clock) -> Int64\n"
         "effects { clock.read<clock> clock.observe<clock> } { return clock.now() }\n"
-        "function alias(clock: capability Clock) -> Int64\n"
+        "function alias(flag: Bool, clock: capability Clock) -> Int64\n"
         "effects { clock.read<clock> clock.observe<clock> } {\n"
-        "    let authority = clock\n"
+        "    let authority = if flag { clock } else { clock }\n"
         "    return helper(authority)\n"
         "}\n";
     TestCompilation compilation;
@@ -439,9 +453,20 @@ static void test_invalid_capability_effect_row(void) {
 static void test_malformed_capability_arena_rejected(void) {
     static const char text[] =
         "module malformed_capability_arena\n"
-        "capability Clock { function now(value: Int64) -> Int64 effects { pure } }\n";
+        "capability Clock { function now(value: Int64) -> Int64 effects { pure } }\n"
+        "function consume(\n"
+        "    flag: Bool,\n"
+        "    first: capability Clock,\n"
+        "    second: capability Clock,\n"
+        ") -> Int64 effects { pure } {\n"
+        "    let selected = if flag { first } else { first }\n"
+        "    return 1\n"
+        "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
     CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
     SolCapabilityMember *members = compilation.syntax.capability_members;
     compilation.syntax.capability_members = NULL;
@@ -467,6 +492,50 @@ static void test_malformed_capability_arena_rejected(void) {
         &compilation.diagnostics
     ));
     compilation.syntax.parameters = parameters;
+    SolParameterId *origins = compilation.types.local_capability_origins;
+    compilation.types.local_capability_origins = NULL;
+    CHECK(!sol_effect_check(
+        &compilation.source,
+        &compilation.syntax,
+        &compilation.hir,
+        &compilation.types,
+        &compilation.effects,
+        &compilation.diagnostics
+    ));
+    compilation.types.local_capability_origins = origins;
+    CHECK(origins != NULL);
+    if (origins != NULL) {
+        SolLocalId binding = SOL_AST_NONE;
+        for (size_t index = 0; index < compilation.hir.local_count; ++index) {
+            if (compilation.hir.locals[index].kind == SOL_LOCAL_BINDING) binding = index;
+        }
+        CHECK(binding != SOL_AST_NONE);
+        if (binding != SOL_AST_NONE) {
+            SolParameterId origin = origins[binding];
+            origins[binding] = compilation.syntax.parameter_count;
+            CHECK(!sol_effect_check(
+                &compilation.source,
+                &compilation.syntax,
+                &compilation.hir,
+                &compilation.types,
+                &compilation.effects,
+                &compilation.diagnostics
+            ));
+            SolParameterId first = compilation.syntax.items[1].first_parameter;
+            SolParameterId second = compilation.syntax.parameters[first].next;
+            second = compilation.syntax.parameters[second].next;
+            origins[binding] = second;
+            CHECK(!sol_effect_check(
+                &compilation.source,
+                &compilation.syntax,
+                &compilation.hir,
+                &compilation.types,
+                &compilation.effects,
+                &compilation.diagnostics
+            ));
+            origins[binding] = origin;
+        }
+    }
     free_compilation(&compilation);
 }
 
@@ -505,7 +574,7 @@ int main(void) {
     test_capability_operation_effects();
     test_function_effect_parameter_substitution();
     test_exact_function_alias_effects();
-    test_unrepresentable_effect_argument();
+    test_computed_effect_argument();
     test_missing_capability_operation_effects();
     test_invalid_capability_effect_row();
     test_malformed_capability_arena_rejected();

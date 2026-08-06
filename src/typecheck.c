@@ -347,6 +347,7 @@ void sol_type_table_init(SolTypeTable *table) {
 void sol_type_table_free(SolTypeTable *table) {
     free(table->expressions);
     free(table->locals);
+    free(table->local_capability_origins);
     free(table->definitions);
     free(table->declared_types);
     memset(table, 0, sizeof(*table));
@@ -496,6 +497,9 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     }
     checker->types->expressions = calloc(expression_count, sizeof(*checker->types->expressions));
     checker->types->locals = calloc(local_count, sizeof(*checker->types->locals));
+    checker->types->local_capability_origins = malloc(
+        local_count * sizeof(*checker->types->local_capability_origins)
+    );
     checker->types->definitions = calloc(
         definition_count,
         sizeof(*checker->types->definitions)
@@ -511,7 +515,9 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     );
     if ((expression_count != 0
             && (checker->types->expressions == NULL || checker->states == NULL))
-        || (local_count != 0 && checker->types->locals == NULL)
+        || (local_count != 0
+            && (checker->types->locals == NULL
+                || checker->types->local_capability_origins == NULL))
         || (definition_count != 0 && checker->types->definitions == NULL)) {
         return false;
     }
@@ -523,6 +529,9 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     checker->types->local_count = local_count;
     checker->types->definition_count = definition_count;
     checker->types->declared_type_count = checker->syntax->type_count;
+    for (size_t index = 0; index < local_count; ++index) {
+        checker->types->local_capability_origins[index] = SOL_AST_NONE;
+    }
     return true;
 }
 
@@ -565,6 +574,29 @@ static SolLocalId sol_type_find_local(
     return SOL_AST_NONE;
 }
 
+static SolParameterId sol_type_capability_origin(
+    SolTypeChecker *checker,
+    SolExprId expression_id
+) {
+    if (expression_id >= checker->syntax->expression_count) {
+        sol_type_malformed(checker);
+        return SOL_AST_NONE;
+    }
+    const SolExpr *expression = &checker->syntax->expressions[expression_id];
+    SolResolution resolution = checker->hir->resolutions[expression_id];
+    if (expression->kind != SOL_EXPR_PATH
+        || resolution.kind != SOL_RESOLUTION_LOCAL
+        || resolution.target >= checker->hir->local_count) {
+        return SOL_AST_NONE;
+    }
+    const SolHirLocal *local = &checker->hir->locals[resolution.target];
+    if (local->owner != checker->current_definition
+        || resolution.target >= checker->types->local_count) {
+        return SOL_AST_NONE;
+    }
+    return checker->types->local_capability_origins[resolution.target];
+}
+
 static SolType sol_type_arguments(SolTypeChecker *checker, SolArgumentId argument_id) {
     SolType last = {.kind = SOL_TYPE_UNIT};
     size_t traversed = 0;
@@ -595,6 +627,11 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
             );
             if (local != SOL_AST_NONE) {
                 checker->types->locals[local] = value;
+                checker->types->local_capability_origins[local]
+                    = sol_type_capability_origin(
+                        checker,
+                        statement->as.let_statement.value
+                    );
             }
             if (!terminated) {
                 result = value.kind == SOL_TYPE_NEVER
@@ -665,23 +702,18 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
     }
     if (operation != SOL_AST_NONE) {
         const SolExpr *callee = &checker->syntax->expressions[call->as.call.callee];
-        bool direct_parameter = false;
+        bool known_authority = false;
         if (callee->kind == SOL_EXPR_FIELD) {
             SolExprId receiver_id = callee->as.field.base;
-            const SolExpr *receiver = &checker->syntax->expressions[receiver_id];
-            SolResolution receiver_resolution = checker->hir->resolutions[receiver_id];
-            direct_parameter = receiver->kind == SOL_EXPR_PATH
-                && receiver_resolution.kind == SOL_RESOLUTION_LOCAL
-                && receiver_resolution.target < checker->hir->local_count
-                && checker->hir->locals[receiver_resolution.target].kind == SOL_LOCAL_PARAMETER;
+            known_authority = sol_type_capability_origin(checker, receiver_id) != SOL_AST_NONE;
         }
-        if (!direct_parameter) {
+        if (!known_authority) {
             sol_type_arguments(checker, call->as.call.first_argument);
             sol_type_error(
                 checker,
                 "SOL-TYPE-015",
                 callee->span,
-                "capability operations currently require a direct capability parameter"
+                "capability operation receiver has no known parameter authority"
             );
             return (SolType){.kind = SOL_TYPE_ERROR};
         }
@@ -1622,7 +1654,8 @@ bool sol_type_check(
         .types = types,
         .diagnostics = diagnostics,
     };
-    if (types->expressions != NULL || types->locals != NULL || types->definitions != NULL
+    if (types->expressions != NULL || types->locals != NULL
+        || types->local_capability_origins != NULL || types->definitions != NULL
         || types->declared_types != NULL
         || types->expression_count != 0 || types->local_count != 0
         || types->definition_count != 0 || types->declared_type_count != 0) {
@@ -1818,6 +1851,12 @@ bool sol_type_check(
                 &checker,
                 syntax->parameters[local->syntax_id].type_id
             );
+            SolType type = checker.types->locals[index];
+            if (type.kind == SOL_TYPE_NOMINAL
+                && type.definition < syntax->item_count
+                && syntax->items[type.definition].kind == SOL_ITEM_CAPABILITY) {
+                checker.types->local_capability_origins[index] = local->syntax_id;
+            }
         }
     }
     for (size_t index = 0; index < syntax->item_count; ++index) {
