@@ -143,6 +143,28 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             }
             member_id = syntax->capability_members[member_id].next;
         }
+        if (item->result_authority_parameter != SOL_AST_NONE) {
+            SolParameterId parameter = item->first_parameter;
+            size_t traversed = 0;
+            while (parameter != SOL_AST_NONE
+                && parameter != item->result_authority_parameter) {
+                if (parameter >= syntax->parameter_count
+                    || traversed++ >= syntax->parameter_count) {
+                    sol_type_malformed(checker);
+                    return false;
+                }
+                parameter = syntax->parameters[parameter].next;
+            }
+            if (item->kind != SOL_ITEM_FUNCTION || parameter == SOL_AST_NONE
+                || parameter >= syntax->parameter_count
+                || item->return_type_id >= syntax->type_count
+                || !syntax->types[item->return_type_id].is_capability
+                || syntax->parameters[parameter].type_id >= syntax->type_count
+                || !syntax->types[syntax->parameters[parameter].type_id].is_capability) {
+                sol_type_malformed(checker);
+                return false;
+            }
+        }
     }
     for (size_t index = 0; index < syntax->parameter_count; ++index) {
         const SolParameter *parameter = &syntax->parameters[index];
@@ -1239,6 +1261,47 @@ static SolParameterId sol_type_join_expression_origin(
     return have_value ? origin : SOL_AST_NONE;
 }
 
+static SolExprId sol_type_find_authority_actual(
+    SolTypeChecker *checker,
+    const SolExpr *call,
+    SolParameterId first_parameter,
+    SolParameterId required
+) {
+    SolParameterId positional = first_parameter;
+    SolArgumentId argument = call->as.call.first_argument;
+    size_t traversed = 0;
+    while (argument != SOL_AST_NONE) {
+        if (argument >= checker->syntax->argument_count
+            || traversed++ >= checker->syntax->argument_count) {
+            return SOL_AST_NONE;
+        }
+        const SolArgument *actual = &checker->syntax->arguments[argument];
+        SolParameterId matched = SOL_AST_NONE;
+        if (actual->is_named) {
+            SolParameterId parameter = first_parameter;
+            while (parameter != SOL_AST_NONE) {
+                if (sol_type_name_equal(
+                    checker->source,
+                    checker->syntax->parameters[parameter].name,
+                    actual->name
+                )) {
+                    matched = parameter;
+                    break;
+                }
+                parameter = checker->syntax->parameters[parameter].next;
+            }
+        } else {
+            matched = positional;
+            if (positional != SOL_AST_NONE) {
+                positional = checker->syntax->parameters[positional].next;
+            }
+        }
+        if (matched == required) return actual->value;
+        argument = actual->next;
+    }
+    return SOL_AST_NONE;
+}
+
 static SolParameterId sol_type_expression_origin(
     SolTypeChecker *checker,
     SolExprId expression_id,
@@ -1263,6 +1326,22 @@ static SolParameterId sol_type_expression_origin(
         SolExprId callee = expression->as.call.callee;
         if (callee < checker->types->expression_count) {
             SolType callee_type = checker->types->expressions[callee];
+            if (callee_type.kind == SOL_TYPE_FUNCTION
+                && callee_type.definition < checker->syntax->item_count) {
+                const SolSyntaxItem *function
+                    = &checker->syntax->items[callee_type.definition];
+                if (function->result_authority_parameter != SOL_AST_NONE) {
+                    SolExprId actual = sol_type_find_authority_actual(
+                        checker,
+                        expression,
+                        function->first_parameter,
+                        function->result_authority_parameter
+                    );
+                    if (actual < checker->types->expression_count) {
+                        return checker->types->expression_capability_origins[actual];
+                    }
+                }
+            }
             if (callee_type.kind == SOL_TYPE_CAPABILITY_OPERATION
                 && callee_type.definition < checker->syntax->capability_member_count
                 && checker->syntax->capability_members[
@@ -1332,6 +1411,19 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
         } else {
             SolType value = sol_type_expression(checker, statement->as.expression);
             if (statement->kind == SOL_STATEMENT_RETURN) {
+                const SolSyntaxItem *function
+                    = &checker->syntax->items[checker->current_definition];
+                if (function->result_authority_parameter != SOL_AST_NONE
+                    && checker->types->expression_capability_origins[
+                        statement->as.expression
+                    ] != function->result_authority_parameter) {
+                    sol_type_error(
+                        checker,
+                        "SOL-AUTHORITY-001",
+                        statement->span,
+                        "returned capability does not derive from the declared authority parameter"
+                    );
+                }
                 if (!sol_type_assignable(
                     checker,
                     checker->expected_return,
@@ -2623,6 +2715,17 @@ bool sol_type_check(
         checker.expected_return = checker.types->definitions[index];
         memset(checker.states, 0, syntax->expression_count * sizeof(*checker.states));
         SolType body_type = sol_type_expression(&checker, item->body);
+        if (item->result_authority_parameter != SOL_AST_NONE
+            && body_type.kind != SOL_TYPE_NEVER
+            && checker.types->expression_capability_origins[item->body]
+                != item->result_authority_parameter) {
+            sol_type_error(
+                &checker,
+                "SOL-AUTHORITY-001",
+                item->span,
+                "function result does not derive from the declared authority parameter"
+            );
+        }
         if (body_type.kind != SOL_TYPE_NEVER
             && !sol_type_assignable(
                 &checker,

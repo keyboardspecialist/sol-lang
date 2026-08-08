@@ -642,6 +642,27 @@ static void test_invalid_general_function_types(void) {
     free_compilation(&compilation);
 }
 
+static void test_invalid_return_authority_contract(void) {
+    static const char text[] =
+        "module invalid_return_authority\n"
+        "capability Restricted {}\n"
+        "capability Root {\n"
+        "    function restrict() -> capability Restricted\n"
+        "    authority { result derives_from Self }\n"
+        "    effects { pure }\n"
+        "}\n"
+        "function lie(\n"
+        "    claimed: capability Root,\n"
+        "    actual: capability Root,\n"
+        ") -> capability Restricted\n"
+        "authority { result derives_from claimed }\n"
+        "effects { pure } { return actual.restrict() }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -670,6 +691,7 @@ int main(void) {
     test_invalid_capability_declarations();
     test_general_function_types();
     test_invalid_general_function_types();
+    test_invalid_return_authority_contract();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;

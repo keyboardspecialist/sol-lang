@@ -30,6 +30,7 @@ typedef struct {
     SolEffectId first_effect;
     bool has_effect_clause;
     SolCapabilityMemberId first_member;
+    SolParameterId result_authority_parameter;
 } SolSyntaxItem;
 
 typedef struct {

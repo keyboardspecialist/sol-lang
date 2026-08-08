@@ -211,6 +211,28 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             sol_resolver_malformed(resolver);
             return false;
         }
+        if (item->result_authority_parameter != SOL_AST_NONE) {
+            SolParameterId parameter = item->first_parameter;
+            size_t traversed = 0;
+            while (parameter != SOL_AST_NONE
+                && parameter != item->result_authority_parameter) {
+                if (parameter >= syntax->parameter_count
+                    || traversed++ >= syntax->parameter_count) {
+                    sol_resolver_malformed(resolver);
+                    return false;
+                }
+                parameter = syntax->parameters[parameter].next;
+            }
+            if (item->kind != SOL_ITEM_FUNCTION || parameter == SOL_AST_NONE
+                || parameter >= syntax->parameter_count
+                || item->return_type_id >= syntax->type_count
+                || !syntax->types[item->return_type_id].is_capability
+                || syntax->parameters[parameter].type_id >= syntax->type_count
+                || !syntax->types[syntax->parameters[parameter].type_id].is_capability) {
+                sol_resolver_malformed(resolver);
+                return false;
+            }
+        }
         SolCapabilityMemberId member_id = item->first_member;
         size_t member_count = 0;
         while (member_id != SOL_AST_NONE) {

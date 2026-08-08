@@ -10,7 +10,9 @@ toolchain phases remain documented in the [README](README.md#roadmap).
 - [x] Check higher-order calls, callbacks, and function values with closed declared effects.
 - [x] Preserve receiver authority through explicitly declared, type-changing
       capability-member restrictions.
-- [ ] Add free-function return-authority contracts and user-defined capability wrappers.
+- [x] Preserve declared parameter authority through exact capability-returning
+      functions and aliases.
+- [ ] Add user-defined capability restriction and wrapper implementations.
 - [ ] Define and implement effect handlers and handled-row subtraction.
 - [ ] Decide how dynamic or mixed authority provenance is represented beyond the
       current same-origin `if` and `match` joins.

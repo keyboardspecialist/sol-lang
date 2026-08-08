@@ -1218,9 +1218,13 @@ static void test_restricted_capability_return_authority(void) {
         "    authority { result derives_from Self }\n"
         "    effects { pure }\n"
         "}\n"
+        "function restrict(filesystem: capability FileSystem) -> capability ReadFileSystem\n"
+        "authority { result derives_from filesystem }\n"
+        "effects { pure } { return filesystem.read_only() }\n"
         "function valid(filesystem: capability FileSystem) -> Int64\n"
         "effects { filesystem.read<filesystem> } {\n"
-        "    let restricted = filesystem.read_only()\n"
+        "    let wrapper = restrict\n"
+        "    let restricted = wrapper(filesystem = filesystem)\n"
         "    return restricted.read()\n"
         "}\n";
     TestCompilation compilation;
@@ -1229,14 +1233,15 @@ static void test_restricted_capability_return_authority(void) {
         sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
     }
     CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
-    SolParameterId root = compilation.syntax.items[2].first_parameter;
+    SolParameterId root = compilation.syntax.items[3].first_parameter;
     bool found_restricted_call = false;
     for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
         if (compilation.syntax.expressions[index].kind == SOL_EXPR_CALL
             && compilation.types.expressions[index].kind == SOL_TYPE_NOMINAL
             && compilation.types.expressions[index].definition == 0) {
-            CHECK(compilation.types.expression_capability_origins[index] == root);
-            found_restricted_call = true;
+            if (compilation.types.expression_capability_origins[index] == root) {
+                found_restricted_call = true;
+            }
         }
     }
     CHECK(found_restricted_call);

@@ -1335,7 +1335,7 @@ static SolParameterId sol_effect_join_expression_origin(
 }
 
 static SolParameterId sol_effect_expected_expression_origin(
-    const SolEffectChecker *checker,
+    SolEffectChecker *checker,
     SolExprId expression_id,
     bool capability
 ) {
@@ -1358,6 +1358,26 @@ static SolParameterId sol_effect_expected_expression_origin(
         SolExprId callee = expression->as.call.callee;
         if (callee < checker->types->expression_count) {
             SolType callee_type = checker->types->expressions[callee];
+            if (callee_type.kind == SOL_TYPE_FUNCTION
+                && callee_type.definition < checker->syntax->item_count) {
+                const SolSyntaxItem *function
+                    = &checker->syntax->items[callee_type.definition];
+                if (function->result_authority_parameter != SOL_AST_NONE) {
+                    SolExprId actual = sol_effect_find_actual_argument(
+                        checker,
+                        function->first_parameter,
+                        function->result_authority_parameter,
+                        expression->as.call.first_argument
+                    );
+                    if (actual < checker->types->expression_count) {
+                        return sol_effect_expected_expression_origin(
+                            checker,
+                            actual,
+                            true
+                        );
+                    }
+                }
+            }
             if (callee_type.kind == SOL_TYPE_CAPABILITY_OPERATION
                 && callee_type.definition < checker->syntax->capability_member_count
                 && checker->syntax->capability_members[
@@ -1527,7 +1547,7 @@ static void sol_effect_push_expression_provenance_dependencies(
 }
 
 static bool sol_effect_validate_provenance_node(
-    const SolEffectChecker *checker,
+    SolEffectChecker *checker,
     size_t node,
     bool capability
 ) {
@@ -1882,7 +1902,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || (item->first_parameter != SOL_AST_NONE
                 && item->first_parameter >= syntax->parameter_count)
             || (item->first_member != SOL_AST_NONE
-                && item->first_member >= syntax->capability_member_count)) {
+                && item->first_member >= syntax->capability_member_count)
+            || (item->result_authority_parameter != SOL_AST_NONE
+                && item->result_authority_parameter >= syntax->parameter_count)) {
             return false;
         }
     }

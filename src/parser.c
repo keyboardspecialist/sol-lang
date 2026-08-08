@@ -273,6 +273,7 @@ static bool sol_parser_effect_clause(
     size_t owner,
     SolEffectId *first_effect
 );
+static bool sol_parser_is_declaration_start(SolTokenKind kind);
 
 static SolTypeArgumentId sol_parser_add_type_argument(
     SolParser *parser,
@@ -1452,7 +1453,8 @@ static bool sol_parser_function(
     SolTypeId *return_type_id,
     SolEffectId *first_effect,
     bool *has_effect_clause,
-    bool *result_authority_from_self
+    bool *result_authority_from_self,
+    SolParameterId *result_authority_parameter
 ) {
     *body = SOL_AST_NONE;
     *first_parameter = SOL_AST_NONE;
@@ -1461,6 +1463,7 @@ static bool sol_parser_function(
     *first_effect = SOL_AST_NONE;
     *has_effect_clause = false;
     *result_authority_from_self = false;
+    *result_authority_parameter = SOL_AST_NONE;
     SolToken function_token = sol_parser_current(parser);
     if (!sol_parser_expect(parser, SOL_TOKEN_FUNCTION, "expected 'function'")) {
         return false;
@@ -1489,20 +1492,13 @@ static bool sol_parser_function(
         if (kind == SOL_TOKEN_IDENTIFIER
             && sol_token_text_equal(parser->source, current, "authority")) {
             sol_parser_advance(parser);
-            if (*result_authority_from_self) {
+            if (*result_authority_from_self
+                || *result_authority_parameter != SOL_AST_NONE) {
                 sol_parser_error(
                     parser,
                     "SOL-PARSE-016",
                     current,
                     "duplicate return authority clause"
-                );
-            }
-            if (!member) {
-                sol_parser_error(
-                    parser,
-                    "SOL-PARSE-016",
-                    current,
-                    "return authority clauses are currently limited to capability members"
                 );
             }
             bool valid_authority = sol_parser_expect(
@@ -1520,10 +1516,11 @@ static bool sol_parser_function(
                 "derives_from",
                 "expected 'derives_from' in return authority clause"
             );
-            valid_authority = valid_authority && sol_parser_expect_identifier_text(
+            SolToken authority_source = sol_parser_current(parser);
+            valid_authority = valid_authority && sol_parser_expect(
                 parser,
-                "Self",
-                "expected 'Self' in return authority clause"
+                SOL_TOKEN_IDENTIFIER,
+                "expected an authority source"
             );
             valid_authority = valid_authority && sol_parser_expect(
                 parser,
@@ -1532,7 +1529,8 @@ static bool sol_parser_function(
             );
             if (!valid_authority) {
                 while (sol_parser_kind(parser) != SOL_TOKEN_RIGHT_BRACE
-                    && sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+                    && sol_parser_kind(parser) != SOL_TOKEN_EOF
+                    && !sol_parser_is_declaration_start(sol_parser_kind(parser))) {
                     sol_parser_advance(parser);
                 }
                 sol_parser_match(parser, SOL_TOKEN_RIGHT_BRACE);
@@ -1551,7 +1549,68 @@ static bool sol_parser_function(
                     "return authority requires a direct capability result type"
                 );
             }
-            *result_authority_from_self = member && direct_capability;
+            if (member) {
+                if (!sol_token_text_equal(parser->source, authority_source, "Self")) {
+                    sol_parser_error(
+                        parser,
+                        "SOL-PARSE-016",
+                        authority_source,
+                        "capability-member result authority must derive from Self"
+                    );
+                } else {
+                    *result_authority_from_self = direct_capability;
+                }
+            } else {
+                SolParameterId parameter = *first_parameter;
+                size_t traversed = 0;
+                while (parameter != SOL_AST_NONE) {
+                    if (parameter >= parser->tree->parameter_count
+                        || traversed++ >= parser->tree->parameter_count) {
+                        parameter = SOL_AST_NONE;
+                        break;
+                    }
+                    size_t parameter_length = parser->tree->parameters[parameter].name.end
+                        - parser->tree->parameters[parameter].name.start;
+                    size_t source_length = authority_source.span.end
+                        - authority_source.span.start;
+                    if (parameter_length == source_length
+                        && memcmp(
+                            parser->source->text
+                                + parser->tree->parameters[parameter].name.start,
+                            parser->source->text + authority_source.span.start,
+                            source_length
+                        ) == 0) break;
+                    parameter = parser->tree->parameters[parameter].next;
+                }
+                if (parameter == SOL_AST_NONE) {
+                    sol_parser_error(
+                        parser,
+                        "SOL-PARSE-016",
+                        authority_source,
+                        "return authority source must name a function parameter"
+                    );
+                } else {
+                    const SolSyntaxType *parameter_type = &parser->tree->types[
+                        parser->tree->parameters[parameter].type_id
+                    ];
+                    bool capability_parameter
+                        = parameter_type->kind == SOL_SYNTAX_TYPE_PATH
+                        && parameter_type->is_capability
+                        && parameter_type->first_argument == SOL_AST_NONE;
+                    if (!capability_parameter) {
+                        sol_parser_error(
+                            parser,
+                            "SOL-PARSE-016",
+                            authority_source,
+                            "return authority source must be a capability parameter"
+                        );
+                    }
+                    *result_authority_parameter = direct_capability
+                            && capability_parameter
+                        ? parameter
+                        : SOL_AST_NONE;
+                }
+            }
             continue;
         }
         unsigned int clause = 0;
@@ -1754,6 +1813,7 @@ static bool sol_parser_capability(
         SolEffectId member_effects;
         bool member_has_effects;
         bool member_result_authority_from_self;
+        SolParameterId member_result_authority_parameter;
         if (!sol_parser_function(
             parser,
             true,
@@ -1766,7 +1826,8 @@ static bool sol_parser_capability(
             &member_return_type_id,
             &member_effects,
             &member_has_effects,
-            &member_result_authority_from_self
+            &member_result_authority_from_self,
+            &member_result_authority_parameter
         )) {
             parser->tree->parameter_count = parameter_mark;
             parser->tree->type_count = type_mark;
@@ -1874,6 +1935,7 @@ static void sol_parser_declaration(SolParser *parser) {
     SolEffectId first_effect = SOL_AST_NONE;
     bool has_effect_clause = false;
     bool result_authority_from_self = false;
+    SolParameterId result_authority_parameter = SOL_AST_NONE;
     SolCapabilityMemberId first_member = SOL_AST_NONE;
     bool parsed = false;
     SolTokenKind kind = sol_parser_kind(parser);
@@ -1913,7 +1975,8 @@ static void sol_parser_declaration(SolParser *parser) {
             &return_type_id,
             &first_effect,
             &has_effect_clause,
-            &result_authority_from_self
+            &result_authority_from_self,
+            &result_authority_parameter
         );
     } else {
         sol_parser_error(
@@ -1941,6 +2004,7 @@ static void sol_parser_declaration(SolParser *parser) {
             .first_effect = first_effect,
             .has_effect_clause = has_effect_clause,
             .first_member = first_member,
+            .result_authority_parameter = result_authority_parameter,
         });
     } else {
         parser->tree->parameter_count = parameter_mark;
