@@ -280,6 +280,45 @@ static void test_malformed_arena_metadata_rejected(void) {
     sol_source_free(&source);
 }
 
+static void test_derived_capability_resolution_and_malformed_body(void) {
+    static const char text[] =
+        "module derived_resolution\n"
+        "capability Root {}\n"
+        "capability Wrapper derives_from source: capability Root {\n"
+        "    function invalid() -> capability Root effects { pure } { return Self }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-RESOLVE-002"));
+    free_compilation(&compilation);
+
+    static const char valid_text[] =
+        "module malformed_derived_body\n"
+        "capability Root {}\n"
+        "capability Wrapper derives_from source: capability Root {\n"
+        "    function root() -> capability Root\n"
+        "    authority { result derives_from Self }\n"
+        "    effects { pure } { return source }\n"
+        "}\n";
+    CHECK(compile_source(&compilation, valid_text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolExprId body = compilation.syntax.capability_members[0].body;
+    compilation.syntax.capability_members[0].body = compilation.syntax.expression_count;
+    sol_hir_module_free(&compilation.hir);
+    sol_hir_module_init(&compilation.hir);
+    sol_diagnostics_free(&compilation.diagnostics);
+    sol_diagnostics_init(&compilation.diagnostics);
+    CHECK(!sol_hir_lower(
+        &compilation.source,
+        &compilation.syntax,
+        &compilation.hir,
+        &compilation.diagnostics
+    ));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    compilation.syntax.capability_members[0].body = body;
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_successful_resolution();
     test_unresolved_name();
@@ -290,6 +329,7 @@ int main(void) {
     test_semantic_depth_limit();
     test_malformed_ast_rejected();
     test_malformed_arena_metadata_rejected();
+    test_derived_capability_resolution_and_malformed_body();
     if (failures != 0) {
         fprintf(stderr, "%d semantic test failure(s)\n", failures);
         return 1;

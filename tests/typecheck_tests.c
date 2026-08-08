@@ -663,6 +663,50 @@ static void test_invalid_return_authority_contract(void) {
     free_compilation(&compilation);
 }
 
+static void test_invalid_derived_capabilities(void) {
+    static const char text[] =
+        "module invalid_derived_capabilities\n"
+        "capability FileSystem {\n"
+        "    function read(path: Text) -> Text effects { filesystem.read<Self> }\n"
+        "}\n"
+        "capability Other {}\n"
+        "capability ReadFileSystem derives_from source: capability FileSystem {\n"
+        "    function read(path: Text) -> Text effects { filesystem.read<Self> } {\n"
+        "        return source.read(path)\n"
+        "    }\n"
+        "}\n"
+        "function wrong_source(fs: capability Other) -> capability ReadFileSystem {\n"
+        "    return ReadFileSystem { source = fs }\n"
+        "}\n"
+        "function extra(fs: capability FileSystem) -> capability ReadFileSystem {\n"
+        "    return ReadFileSystem { source = fs, extra = fs }\n"
+        "}\n"
+        "function missing() -> capability ReadFileSystem { return ReadFileSystem {} }\n"
+        "function expose(fs: capability FileSystem) -> capability FileSystem {\n"
+        "    let restricted = ReadFileSystem { source = fs }\n"
+        "    return restricted.source\n"
+        "}\n"
+        "function nominal(fs: capability FileSystem) -> capability ReadFileSystem {\n"
+        "    return fs\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(diagnostic_count(&compilation, "SOL-TYPE-015") >= 5);
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-004"));
+    free_compilation(&compilation);
+}
+
+static void test_derived_capability_cycles(void) {
+    static const char text[] =
+        "module derived_capability_cycles\n"
+        "capability First derives_from second: capability Second {}\n"
+        "capability Second derives_from first: capability First {}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-015"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -692,6 +736,8 @@ int main(void) {
     test_general_function_types();
     test_invalid_general_function_types();
     test_invalid_return_authority_contract();
+    test_invalid_derived_capabilities();
+    test_derived_capability_cycles();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;

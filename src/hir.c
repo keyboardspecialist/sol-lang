@@ -197,7 +197,9 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || (item->first_effect != SOL_AST_NONE
                 && item->first_effect >= syntax->effect_count)
             || (item->first_member != SOL_AST_NONE
-                && item->first_member >= syntax->capability_member_count)) {
+                && item->first_member >= syntax->capability_member_count)
+            || (item->capability_source != SOL_AST_NONE
+                && item->capability_source >= syntax->parameter_count)) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -208,6 +210,24 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             return false;
         }
         if (item->kind != SOL_ITEM_CAPABILITY && item->first_member != SOL_AST_NONE) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+        if ((item->capability_source != SOL_AST_NONE
+                && item->kind != SOL_ITEM_CAPABILITY)
+            || (item->capability_source != SOL_AST_NONE
+                && (syntax->parameters[item->capability_source].next != SOL_AST_NONE
+                    || syntax->parameters[item->capability_source].type_id
+                        >= syntax->type_count
+                    || syntax->types[
+                        syntax->parameters[item->capability_source].type_id
+                    ].kind != SOL_SYNTAX_TYPE_PATH
+                    || !syntax->types[
+                        syntax->parameters[item->capability_source].type_id
+                    ].is_capability
+                    || syntax->types[
+                        syntax->parameters[item->capability_source].type_id
+                    ].first_argument != SOL_AST_NONE))) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -386,10 +406,17 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || member->return_type_id >= syntax->type_count
             || (member->first_effect != SOL_AST_NONE
                 && member->first_effect >= syntax->effect_count)
+            || (member->body != SOL_AST_NONE
+                && member->body >= syntax->expression_count)
             || (member->next != SOL_AST_NONE
                 && member->next >= syntax->capability_member_count)
             || member->owner_item >= syntax->item_count
             || syntax->items[member->owner_item].kind != SOL_ITEM_CAPABILITY) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+        bool derived = syntax->items[member->owner_item].capability_source != SOL_AST_NONE;
+        if (derived != (member->body != SOL_AST_NONE)) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -897,6 +924,38 @@ static void sol_resolver_function(SolResolver *resolver, SolDefId definition) {
     resolver->binding_count = 0;
 }
 
+static void sol_resolver_capability_members(SolResolver *resolver, SolDefId definition) {
+    const SolSyntaxItem *item = &resolver->syntax->items[definition];
+    if (item->capability_source == SOL_AST_NONE) return;
+    SolCapabilityMemberId member_id = item->first_member;
+    while (member_id != SOL_AST_NONE) {
+        const SolCapabilityMember *member = &resolver->syntax->capability_members[member_id];
+        resolver->current_definition = definition;
+        resolver->binding_count = 0;
+        resolver->scope_depth = 0;
+        sol_resolver_add_binding(
+            resolver,
+            resolver->syntax->parameters[item->capability_source].name,
+            SOL_LOCAL_PARAMETER,
+            item->capability_source
+        );
+        SolParameterId parameter_id = member->first_parameter;
+        while (parameter_id != SOL_AST_NONE) {
+            const SolParameter *parameter = &resolver->syntax->parameters[parameter_id];
+            sol_resolver_add_binding(
+                resolver,
+                parameter->name,
+                SOL_LOCAL_PARAMETER,
+                parameter_id
+            );
+            parameter_id = parameter->next;
+        }
+        sol_resolver_expression(resolver, member->body);
+        resolver->binding_count = 0;
+        member_id = member->next;
+    }
+}
+
 bool sol_hir_lower(
     const SolSource *source,
     const SolSyntaxTree *syntax,
@@ -929,6 +988,8 @@ bool sol_hir_lower(
     for (size_t index = 0; index < syntax->item_count; ++index) {
         if (syntax->items[index].kind == SOL_ITEM_FUNCTION) {
             sol_resolver_function(&resolver, index);
+        } else if (syntax->items[index].kind == SOL_ITEM_CAPABILITY) {
+            sol_resolver_capability_members(&resolver, index);
         }
     }
 

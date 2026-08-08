@@ -204,6 +204,7 @@ typedef struct {
     SolSpan return_type;
     SolTypeId return_type_id;
     SolEffectId first_effect;
+    SolExprId body;
     SolCapabilityMemberId next;
     size_t owner_item;
     bool has_effect_clause;

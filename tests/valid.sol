@@ -19,6 +19,15 @@ capability Clock {
     }
 }
 
+capability TimestampClock derives_from source: capability Clock {
+    function now() -> Int64
+    effects {
+        clock.read<Self>
+    } {
+        return source.now()
+    }
+}
+
 public function greet(
     user: User,
     clock: capability Clock,
@@ -40,4 +49,12 @@ effects {
     clock.read<clock>
 } {
     return clock.now()
+}
+
+function restricted_timestamp(clock: capability Clock) -> Int64
+effects {
+    clock.read<clock>
+} {
+    let restricted = TimestampClock { source = clock }
+    return restricted.now()
 }

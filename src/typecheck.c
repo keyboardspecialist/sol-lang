@@ -15,6 +15,7 @@ typedef struct {
     unsigned char *declared_states;
     size_t depth;
     SolDefId current_definition;
+    SolCapabilityMemberId current_member;
     SolType expected_return;
     bool allocation_failed;
     bool depth_reported;
@@ -126,9 +127,29 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                 && item->first_effect >= syntax->effect_count)
             || (item->first_member != SOL_AST_NONE
                 && item->first_member >= syntax->capability_member_count)
+            || (item->capability_source != SOL_AST_NONE
+                && item->capability_source >= syntax->parameter_count)
             || definition->syntax_item != index
             || definition->kind != item->kind
             || !sol_type_span_valid(checker->source, definition->name)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+        if ((item->capability_source != SOL_AST_NONE
+                && item->kind != SOL_ITEM_CAPABILITY)
+            || (item->capability_source != SOL_AST_NONE
+                && (syntax->parameters[item->capability_source].next != SOL_AST_NONE
+                    || syntax->parameters[item->capability_source].type_id
+                        >= syntax->type_count
+                    || syntax->types[
+                        syntax->parameters[item->capability_source].type_id
+                    ].kind != SOL_SYNTAX_TYPE_PATH
+                    || !syntax->types[
+                        syntax->parameters[item->capability_source].type_id
+                    ].is_capability
+                    || syntax->types[
+                        syntax->parameters[item->capability_source].type_id
+                    ].first_argument != SOL_AST_NONE))) {
             sol_type_malformed(checker);
             return false;
         }
@@ -306,10 +327,17 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || member->return_type_id >= syntax->type_count
             || (member->first_effect != SOL_AST_NONE
                 && member->first_effect >= syntax->effect_count)
+            || (member->body != SOL_AST_NONE
+                && member->body >= syntax->expression_count)
             || (member->next != SOL_AST_NONE
                 && member->next >= syntax->capability_member_count)
             || member->owner_item >= syntax->item_count
             || syntax->items[member->owner_item].kind != SOL_ITEM_CAPABILITY) {
+            sol_type_malformed(checker);
+            return false;
+        }
+        if ((syntax->items[member->owner_item].capability_source != SOL_AST_NONE)
+            != (member->body != SOL_AST_NONE)) {
             sol_type_malformed(checker);
             return false;
         }
@@ -1351,6 +1379,23 @@ static SolParameterId sol_type_expression_origin(
             }
         }
     }
+    if (capability && expression->kind == SOL_EXPR_RECORD) {
+        SolExprId type_expression = expression->as.record.type;
+        SolResolution resolution = checker->hir->resolutions[type_expression];
+        if (resolution.kind == SOL_RESOLUTION_DEFINITION
+            && resolution.target < checker->syntax->item_count) {
+            const SolSyntaxItem *item = &checker->syntax->items[resolution.target];
+            if (item->kind == SOL_ITEM_CAPABILITY
+                && item->capability_source != SOL_AST_NONE) {
+                SolArgumentId field = expression->as.record.first_field;
+                if (field < checker->syntax->argument_count) {
+                    return checker->types->expression_capability_origins[
+                        checker->syntax->arguments[field].value
+                    ];
+                }
+            }
+        }
+    }
     if (expression->kind == SOL_EXPR_PATH) {
         return sol_type_path_origin(checker, expression_id, local_origins);
     }
@@ -1411,17 +1456,29 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
         } else {
             SolType value = sol_type_expression(checker, statement->as.expression);
             if (statement->kind == SOL_STATEMENT_RETURN) {
-                const SolSyntaxItem *function
-                    = &checker->syntax->items[checker->current_definition];
-                if (function->result_authority_parameter != SOL_AST_NONE
+                SolParameterId expected_authority = SOL_AST_NONE;
+                if (checker->current_member != SOL_AST_NONE) {
+                    const SolCapabilityMember *member
+                        = &checker->syntax->capability_members[checker->current_member];
+                    if (member->result_authority_from_self) {
+                        expected_authority = checker->syntax->items[
+                            member->owner_item
+                        ].capability_source;
+                    }
+                } else {
+                    expected_authority = checker->syntax->items[
+                        checker->current_definition
+                    ].result_authority_parameter;
+                }
+                if (expected_authority != SOL_AST_NONE
                     && checker->types->expression_capability_origins[
                         statement->as.expression
-                    ] != function->result_authority_parameter) {
+                    ] != expected_authority) {
                     sol_type_error(
                         checker,
                         "SOL-AUTHORITY-001",
                         statement->span,
-                        "returned capability does not derive from the declared authority parameter"
+                        "returned capability does not derive from the declared authority source"
                     );
                 }
                 if (!sol_type_assignable(
@@ -1905,6 +1962,75 @@ static SolType sol_type_record(SolTypeChecker *checker, const SolExpr *record) {
     SolExprId type_expression = record->as.record.type;
     SolResolution resolution = checker->hir->resolutions[type_expression];
     sol_type_expression(checker, type_expression);
+    if (resolution.kind == SOL_RESOLUTION_DEFINITION
+        && resolution.target < checker->types->definition_count
+        && checker->syntax->items[resolution.target].kind == SOL_ITEM_CAPABILITY) {
+        const SolSyntaxItem *wrapper = &checker->syntax->items[resolution.target];
+        SolArgumentId field_id = record->as.record.first_field;
+        if (wrapper->capability_source == SOL_AST_NONE) {
+            sol_type_arguments(checker, field_id);
+            sol_type_error(
+                checker,
+                "SOL-TYPE-015",
+                record->span,
+                "ordinary capabilities cannot be constructed"
+            );
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        const SolParameter *source
+            = &checker->syntax->parameters[wrapper->capability_source];
+        size_t field_count = 0;
+        bool valid = true;
+        while (field_id != SOL_AST_NONE) {
+            const SolArgument *field = &checker->syntax->arguments[field_id];
+            SolType actual = sol_type_expression(checker, field->value);
+            ++field_count;
+            if (!field->is_named
+                || !sol_type_name_equal(checker->source, field->name, source->name)) {
+                sol_type_error(
+                    checker,
+                    "SOL-TYPE-015",
+                    field->is_named ? field->name : record->span,
+                    "derived capability construction only accepts its private source"
+                );
+                valid = false;
+            } else {
+                SolType expected = sol_type_from_id(checker, source->type_id);
+                if (!sol_type_equal(expected, actual)) {
+                    sol_type_error(
+                        checker,
+                        "SOL-TYPE-015",
+                        checker->syntax->expressions[field->value].span,
+                        "derived capability source has the wrong capability type"
+                    );
+                    valid = false;
+                }
+                if (checker->types->expression_capability_origins[field->value]
+                    == SOL_AST_NONE) {
+                    sol_type_error(
+                        checker,
+                        "SOL-TYPE-015",
+                        checker->syntax->expressions[field->value].span,
+                        "derived capability source has no known root authority"
+                    );
+                    valid = false;
+                }
+            }
+            field_id = field->next;
+        }
+        if (field_count != 1) {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-015",
+                record->span,
+                "derived capability construction requires exactly one source"
+            );
+            valid = false;
+        }
+        return valid
+            ? (SolType){.kind = SOL_TYPE_NOMINAL, .definition = resolution.target}
+            : (SolType){.kind = SOL_TYPE_ERROR};
+    }
     if (resolution.kind != SOL_RESOLUTION_DEFINITION
         || resolution.target >= checker->types->definition_count
         || checker->syntax->items[resolution.target].kind != SOL_ITEM_RECORD) {
@@ -2494,6 +2620,7 @@ bool sol_type_check(
         .hir = hir,
         .types = types,
         .diagnostics = diagnostics,
+        .current_member = SOL_AST_NONE,
     };
     if (types->expressions != NULL || types->expression_capability_origins != NULL
         || types->expression_operation_origins != NULL
@@ -2621,6 +2748,12 @@ bool sol_type_check(
                 variant_id = variant->next;
             }
         } else if (item->kind == SOL_ITEM_CAPABILITY) {
+            if (item->capability_source != SOL_AST_NONE) {
+                sol_type_from_id(
+                    &checker,
+                    syntax->parameters[item->capability_source].type_id
+                );
+            }
             SolCapabilityMemberId member_id = item->first_member;
             size_t member_count = 0;
             while (member_id != SOL_AST_NONE) {
@@ -2691,6 +2824,32 @@ bool sol_type_check(
             }
         }
     }
+    for (size_t start = 0; start < syntax->item_count; ++start) {
+        if (syntax->items[start].kind != SOL_ITEM_CAPABILITY
+            || syntax->items[start].capability_source == SOL_AST_NONE) {
+            continue;
+        }
+        SolDefId current = start;
+        for (size_t steps = 0; steps < syntax->item_count; ++steps) {
+            const SolSyntaxItem *item = &syntax->items[current];
+            if (item->capability_source == SOL_AST_NONE) break;
+            SolType source_type = sol_type_from_id(
+                &checker,
+                syntax->parameters[item->capability_source].type_id
+            );
+            if (!sol_type_is_capability(&checker, source_type)) break;
+            current = source_type.definition;
+            if (current == start) {
+                sol_type_error(
+                    &checker,
+                    "SOL-TYPE-015",
+                    syntax->items[start].name,
+                    "derived capability source cycle"
+                );
+                break;
+            }
+        }
+    }
     for (size_t index = 0; index < hir->local_count; ++index) {
         const SolHirLocal *local = &hir->locals[index];
         if (local->kind == SOL_LOCAL_PARAMETER && local->syntax_id < syntax->parameter_count) {
@@ -2712,6 +2871,7 @@ bool sol_type_check(
             continue;
         }
         checker.current_definition = index;
+        checker.current_member = SOL_AST_NONE;
         checker.expected_return = checker.types->definitions[index];
         memset(checker.states, 0, syntax->expression_count * sizeof(*checker.states));
         SolType body_type = sol_type_expression(&checker, item->body);
@@ -2742,6 +2902,42 @@ bool sol_type_check(
                 sol_type_name(body_type)
             );
             sol_type_error(&checker, "SOL-TYPE-004", item->span, message);
+        }
+    }
+    for (size_t member_id = 0; member_id < syntax->capability_member_count; ++member_id) {
+        const SolCapabilityMember *member = &syntax->capability_members[member_id];
+        if (member->body == SOL_AST_NONE) continue;
+        checker.current_definition = member->owner_item;
+        checker.current_member = member_id;
+        checker.expected_return = sol_type_from_id(&checker, member->return_type_id);
+        memset(checker.states, 0, syntax->expression_count * sizeof(*checker.states));
+        SolType body_type = sol_type_expression(&checker, member->body);
+        SolParameterId expected_authority = member->result_authority_from_self
+            ? syntax->items[member->owner_item].capability_source
+            : SOL_AST_NONE;
+        if (expected_authority != SOL_AST_NONE && body_type.kind != SOL_TYPE_NEVER
+            && checker.types->expression_capability_origins[member->body]
+                != expected_authority) {
+            sol_type_error(
+                &checker,
+                "SOL-AUTHORITY-001",
+                member->span,
+                "capability member result does not derive from its source root"
+            );
+        }
+        if (body_type.kind != SOL_TYPE_NEVER
+            && !sol_type_assignable(
+                &checker,
+                checker.expected_return,
+                body_type,
+                member->body
+            )) {
+            sol_type_error(
+                &checker,
+                "SOL-TYPE-004",
+                member->span,
+                "capability member body type does not match its result type"
+            );
         }
     }
     unsigned char *call_callees = calloc(syntax->expression_count, sizeof(*call_callees));

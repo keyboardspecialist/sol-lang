@@ -12,7 +12,8 @@ toolchain phases remain documented in the [README](README.md#roadmap).
       capability-member restrictions.
 - [x] Preserve declared parameter authority through exact capability-returning
       functions and aliases.
-- [ ] Add user-defined capability restriction and wrapper implementations.
+- [x] Add closed nominal, single-source user-defined capability wrappers with
+      checked member implementations and root-preserving `Self` effects.
 - [ ] Define and implement effect handlers and handled-row subtraction.
 - [ ] Decide how dynamic or mixed authority provenance is represented beyond the
       current same-origin `if` and `match` joins.

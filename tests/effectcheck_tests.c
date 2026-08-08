@@ -1248,6 +1248,67 @@ static void test_restricted_capability_return_authority(void) {
     free_compilation(&compilation);
 }
 
+static void test_derived_capability_wrapper(void) {
+    static const char text[] =
+        "module derived_capability_wrapper\n"
+        "capability FileSystem {\n"
+        "    function read(path: Text) -> Text effects { filesystem.read<Self> }\n"
+        "}\n"
+        "capability ReadFileSystem derives_from source: capability FileSystem {\n"
+        "    function read(path: Text) -> Text effects { filesystem.read<Self> } {\n"
+        "        return source.read(path)\n"
+        "    }\n"
+        "}\n"
+        "function read(filesystem: capability FileSystem, path: Text) -> Text\n"
+        "effects { filesystem.read<filesystem> } {\n"
+        "    let restricted = ReadFileSystem { source = filesystem }\n"
+        "    return restricted.read(path)\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolParameterId root = compilation.syntax.items[2].first_parameter;
+    bool found_wrapper = false;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        if (compilation.syntax.expressions[index].kind == SOL_EXPR_RECORD
+            && compilation.types.expressions[index].kind == SOL_TYPE_NOMINAL
+            && compilation.types.expressions[index].definition == 1) {
+            CHECK(compilation.types.expression_capability_origins[index] == root);
+            found_wrapper = true;
+        }
+    }
+    CHECK(found_wrapper);
+    CHECK(compilation.effects.capability_member_count == 2);
+    if (compilation.effects.capability_member_count == 2) {
+        CHECK(compilation.effects.capability_members[1].count == 1);
+        if (compilation.effects.capability_members[1].count == 1) {
+            CHECK(compilation.effects.capability_members[1].atoms[0].argument_kind
+                == SOL_EFFECT_ATOM_SELF);
+        }
+    }
+    free_compilation(&compilation);
+}
+
+static void test_derived_capability_body_effect_checked(void) {
+    static const char text[] =
+        "module invalid_derived_capability_effect\n"
+        "capability FileSystem {\n"
+        "    function read(path: Text) -> Text effects { filesystem.read<Self> }\n"
+        "}\n"
+        "capability ReadFileSystem derives_from source: capability FileSystem {\n"
+        "    function read(path: Text) -> Text effects { pure } {\n"
+        "        return source.read(path)\n"
+        "    }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-002") == 1);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_private_pure_inference();
     test_forward_transitive_inference();
@@ -1284,6 +1345,8 @@ int main(void) {
     test_malformed_function_coercion_rejected();
     test_static_bound_operation_callback();
     test_restricted_capability_return_authority();
+    test_derived_capability_wrapper();
+    test_derived_capability_body_effect_checked();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;

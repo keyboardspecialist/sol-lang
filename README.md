@@ -145,6 +145,19 @@ effects {
 
 Effects describe behavior; capabilities provide authority. Code cannot access ambient network, filesystem, clock, database, randomness, or process state without receiving the corresponding capability.
 
+Capabilities can be closed into nominal, single-source wrappers. Every wrapper operation has an implementation, the source remains private, and `Self` names the original source root on both sides of the wrapper boundary:
+
+```sol
+capability ReadFileSystem derives_from source: capability FileSystem {
+    function read(path: Text) -> Text
+    effects { filesystem.read<Self> } {
+        return source.read(path)
+    }
+}
+
+let restricted = ReadFileSystem { source = filesystem }
+```
+
 Effect rows may be inferred locally, but public APIs expose a canonical effect signature. Tests can replace capabilities directly without a separate dependency-injection framework.
 
 ### Contracts and progressive verification
@@ -350,7 +363,7 @@ cmake --build build --target test
 ./build/sol check tests/valid.sol
 ```
 
-This implementation is an experimental edition-2027 front end. Function bodies are parsed, names are resolved into an initial HIR, and expressions, calls, returns, built-in generic types, records, enum constructors, and matches over user enums and `Bool` are checked. Closed structural function types carry explicit normalized semantic effect rows, and calls through function values propagate those rows through inference and explicit checks. Exact functions and bound operations coerce contextually to compatible callback shapes; their finalized effects must be a subset of the callback row. Capability-valued members can declare `authority { result derives_from Self }`, while exact capability-returning functions can derive result authority from a named capability parameter. Both forms preserve provenance through aliases and nominal, type-changing restrictions. Explicit declaration rows form modular boundaries, while omitted private functions infer a least union row across direct operations and statically known calls, including self- and mutually recursive call-graph components and formal-argument and `Self` substitution through immutable capability and bound-operation aliases. Safe computed capability and bound-operation provenance joins are supported for `if` and `match` when every reachable value has the same original parameter authority. Public functions and capability members require explicit rows. Generic effect-row variables, user-defined capability wrapper implementations, lambdas, computed joins of distinct function identities, parameter-dependent callback rows, and `Self`-dependent bound-operation coercions are not yet supported. Mixed or unknown computed provenance is also unsupported. Contract blocks remain delimiter-checked. User-defined generics, ownership, and execution are also not implemented yet.
+This implementation is an experimental edition-2027 front end. Function bodies are parsed, names are resolved into an initial HIR, and expressions, calls, returns, built-in generic types, records, enum constructors, and matches over user enums and `Bool` are checked. Closed structural function types carry explicit normalized semantic effect rows, and calls through function values propagate those rows through inference and explicit checks. Exact functions and bound operations coerce contextually to compatible callback shapes; their finalized effects must be a subset of the callback row. Capability-valued members can declare `authority { result derives_from Self }`, while exact capability-returning functions can derive result authority from a named capability parameter. Both forms preserve provenance through aliases and nominal, type-changing restrictions. Closed nominal capability wrappers have exactly one private capability source, checked member bodies, cycle rejection, and root-preserving construction and `Self` substitution without subtyping or coercion. Explicit declaration rows form modular boundaries, while omitted private functions infer a least union row across direct operations and statically known calls, including self- and mutually recursive call-graph components and formal-argument and `Self` substitution through immutable capability and bound-operation aliases. Safe computed capability and bound-operation provenance joins are supported for `if` and `match` when every reachable value has the same original parameter authority. Public functions and capability members require explicit rows. Generic effect-row variables, lambdas, computed joins of distinct function identities, parameter-dependent callback rows, and `Self`-dependent bound-operation coercions are not yet supported. Mixed or unknown computed provenance is also unsupported. Contract blocks remain delimiter-checked. User-defined generics, ownership, and execution are also not implemented yet.
 
 Concrete remaining bootstrap work is tracked in [TODO.md](TODO.md).
 

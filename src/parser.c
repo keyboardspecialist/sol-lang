@@ -1444,6 +1444,7 @@ static bool sol_parser_parameters(
 static bool sol_parser_function(
     SolParser *parser,
     bool member,
+    bool member_has_body,
     size_t effect_owner,
     SolSpan *name,
     SolSpan *whole,
@@ -1653,7 +1654,7 @@ static bool sol_parser_function(
         }
     }
 
-    if (sol_parser_kind(parser) == SOL_TOKEN_LEFT_BRACE && member) {
+    if (sol_parser_kind(parser) == SOL_TOKEN_LEFT_BRACE && member && !member_has_body) {
         SolToken body_token = sol_parser_current(parser);
         sol_diagnostics_add(
             parser->diagnostics,
@@ -1668,12 +1669,13 @@ static bool sol_parser_function(
         if (*body == SOL_AST_NONE) {
             return false;
         }
-    } else if (!member) {
+    } else if (!member || member_has_body) {
         sol_parser_error(
             parser,
             "SOL-PARSE-001",
             sol_parser_current(parser),
-            "expected a function body"
+            member ? "derived capability members must define function bodies"
+                   : "expected a function body"
         );
         return false;
     }
@@ -1785,9 +1787,11 @@ static bool sol_parser_capability(
     SolParser *parser,
     SolSpan *name,
     SolSpan *whole,
-    SolCapabilityMemberId *first_member
+    SolCapabilityMemberId *first_member,
+    SolParameterId *source_parameter
 ) {
     *first_member = SOL_AST_NONE;
+    *source_parameter = SOL_AST_NONE;
     SolCapabilityMemberId last_member = SOL_AST_NONE;
     SolToken opening = sol_parser_advance(parser);
     SolToken name_token = sol_parser_current(parser);
@@ -1795,6 +1799,46 @@ static bool sol_parser_capability(
         return false;
     }
     *name = name_token.span;
+    bool derived = false;
+    SolToken derives = sol_parser_current(parser);
+    if (derives.kind == SOL_TOKEN_IDENTIFIER
+        && sol_token_text_equal(parser->source, derives, "derives_from")) {
+        derived = true;
+        sol_parser_advance(parser);
+        SolToken source_name = sol_parser_current(parser);
+        if (!sol_parser_expect(
+                parser,
+                SOL_TOKEN_IDENTIFIER,
+                "expected a source name after 'derives_from'"
+            )
+            || !sol_parser_expect(
+                parser,
+                SOL_TOKEN_COLON,
+                "expected ':' after the capability source name"
+            )) {
+            return false;
+        }
+        SolSpan source_type;
+        SolTypeId source_type_id;
+        if (!sol_parser_type(parser, &source_type, &source_type_id)) return false;
+        const SolSyntaxType *type = &parser->tree->types[source_type_id];
+        if (type->kind != SOL_SYNTAX_TYPE_PATH || !type->is_capability
+            || type->first_argument != SOL_AST_NONE) {
+            sol_parser_error(
+                parser,
+                "SOL-PARSE-016",
+                derives,
+                "a derived capability source must have a direct capability type"
+            );
+        }
+        *source_parameter = sol_parser_add_parameter(parser, (SolParameter){
+            .name = source_name.span,
+            .type = source_type,
+            .type_id = source_type_id,
+            .next = SOL_AST_NONE,
+        });
+        if (*source_parameter == SOL_AST_NONE) return false;
+    }
     if (!sol_parser_expect(parser, SOL_TOKEN_LEFT_BRACE, "expected '{' after the capability name")) {
         return false;
     }
@@ -1804,6 +1848,12 @@ static bool sol_parser_capability(
         size_t type_mark = parser->tree->type_count;
         size_t type_argument_mark = parser->tree->type_argument_count;
         size_t effect_mark = parser->tree->effect_count;
+        size_t expression_mark = parser->tree->expression_count;
+        size_t statement_mark = parser->tree->statement_count;
+        size_t argument_mark = parser->tree->argument_count;
+        size_t pattern_mark = parser->tree->pattern_count;
+        size_t pattern_binding_mark = parser->tree->pattern_binding_count;
+        size_t match_arm_mark = parser->tree->match_arm_count;
         SolSpan member_name;
         SolSpan member_span;
         SolExprId member_body;
@@ -1817,6 +1867,7 @@ static bool sol_parser_capability(
         if (!sol_parser_function(
             parser,
             true,
+            derived,
             parser->tree->capability_member_count,
             &member_name,
             &member_span,
@@ -1833,6 +1884,12 @@ static bool sol_parser_capability(
             parser->tree->type_count = type_mark;
             parser->tree->type_argument_count = type_argument_mark;
             parser->tree->effect_count = effect_mark;
+            parser->tree->expression_count = expression_mark;
+            parser->tree->statement_count = statement_mark;
+            parser->tree->argument_count = argument_mark;
+            parser->tree->pattern_count = pattern_mark;
+            parser->tree->pattern_binding_count = pattern_binding_mark;
+            parser->tree->match_arm_count = match_arm_mark;
             if (sol_parser_kind(parser) != SOL_TOKEN_EOF
                 && sol_parser_kind(parser) != SOL_TOKEN_FUNCTION
                 && sol_parser_kind(parser) != SOL_TOKEN_RIGHT_BRACE) {
@@ -1848,6 +1905,7 @@ static bool sol_parser_capability(
                     .return_type = member_return_type,
                     .return_type_id = member_return_type_id,
                     .first_effect = member_effects,
+                    .body = member_body,
                     .next = SOL_AST_NONE,
                     .owner_item = parser->tree->item_count,
                     .has_effect_clause = member_has_effects,
@@ -1913,6 +1971,12 @@ static void sol_parser_declaration(SolParser *parser) {
     size_t variant_mark = parser->tree->variant_count;
     size_t effect_mark = parser->tree->effect_count;
     size_t capability_member_mark = parser->tree->capability_member_count;
+    size_t expression_mark = parser->tree->expression_count;
+    size_t statement_mark = parser->tree->statement_count;
+    size_t argument_mark = parser->tree->argument_count;
+    size_t pattern_mark = parser->tree->pattern_count;
+    size_t pattern_binding_mark = parser->tree->pattern_binding_count;
+    size_t match_arm_mark = parser->tree->match_arm_count;
     size_t start = sol_parser_current(parser).span.start;
     while (sol_parser_kind(parser) == SOL_TOKEN_AT) {
         sol_parser_annotation(parser);
@@ -1937,6 +2001,7 @@ static void sol_parser_declaration(SolParser *parser) {
     bool result_authority_from_self = false;
     SolParameterId result_authority_parameter = SOL_AST_NONE;
     SolCapabilityMemberId first_member = SOL_AST_NONE;
+    SolParameterId capability_source = SOL_AST_NONE;
     bool parsed = false;
     SolTokenKind kind = sol_parser_kind(parser);
     if (kind == SOL_TOKEN_RECORD) {
@@ -1960,11 +2025,18 @@ static void sol_parser_declaration(SolParser *parser) {
         parsed = sol_parser_enum(parser, &name, &whole, &first_variant);
     } else if (kind == SOL_TOKEN_CAPABILITY) {
         item_kind = SOL_ITEM_CAPABILITY;
-        parsed = sol_parser_capability(parser, &name, &whole, &first_member);
+        parsed = sol_parser_capability(
+            parser,
+            &name,
+            &whole,
+            &first_member,
+            &capability_source
+        );
     } else if (kind == SOL_TOKEN_FUNCTION) {
         item_kind = SOL_ITEM_FUNCTION;
         parsed = sol_parser_function(
             parser,
+            false,
             false,
             parser->tree->item_count,
             &name,
@@ -2005,6 +2077,7 @@ static void sol_parser_declaration(SolParser *parser) {
             .has_effect_clause = has_effect_clause,
             .first_member = first_member,
             .result_authority_parameter = result_authority_parameter,
+            .capability_source = capability_source,
         });
     } else {
         parser->tree->parameter_count = parameter_mark;
@@ -2014,6 +2087,12 @@ static void sol_parser_declaration(SolParser *parser) {
         parser->tree->variant_count = variant_mark;
         parser->tree->effect_count = effect_mark;
         parser->tree->capability_member_count = capability_member_mark;
+        parser->tree->expression_count = expression_mark;
+        parser->tree->statement_count = statement_mark;
+        parser->tree->argument_count = argument_mark;
+        parser->tree->pattern_count = pattern_mark;
+        parser->tree->pattern_binding_count = pattern_binding_mark;
+        parser->tree->match_arm_count = match_arm_mark;
         sol_parser_recover_declaration(parser, failed_at);
     }
 }
