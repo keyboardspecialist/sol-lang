@@ -86,6 +86,14 @@ static bool has_diagnostic(const TestCompilation *compilation, const char *code)
     return false;
 }
 
+static size_t diagnostic_count(const TestCompilation *compilation, const char *code) {
+    size_t count = 0;
+    for (size_t index = 0; index < compilation->diagnostics.count; ++index) {
+        if (strcmp(compilation->diagnostics.items[index].code, code) == 0) ++count;
+    }
+    return count;
+}
+
 static void test_valid_types(void) {
     static const char text[] =
         "module valid_types\n"
@@ -468,10 +476,6 @@ static void test_invalid_capability_operations(void) {
         "function indirect(clock: capability Clock) -> Int64 {\n"
         "    let operation = clock.offset\n"
         "    return operation(1)\n"
-        "}\n"
-        "function computed(flag: Bool, clock: capability Clock) -> Int64 {\n"
-        "    let selected = if flag { clock } else { clock }\n"
-        "    return selected.offset(1)\n"
         "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
@@ -481,22 +485,71 @@ static void test_invalid_capability_operations(void) {
     free_compilation(&compilation);
 }
 
-static void test_computed_capability_provenance_rejected(void) {
+static void test_computed_capability_provenance(void) {
     static const char text[] =
         "module computed_capability\n"
+        "enum Empty {}\n"
         "capability Clock { function offset(delta: Int64) -> Int64 effects { pure } }\n"
-        "function computed(flag: Bool, clock: capability Clock) -> Int64 {\n"
+        "function direct_if(flag: Bool, clock: capability Clock) -> Int64 {\n"
+        "    return (if flag { clock } else { clock }).offset(1)\n"
+        "}\n"
+        "function aliased_if(flag: Bool, clock: capability Clock) -> Int64 {\n"
         "    let selected = if flag { clock } else { clock }\n"
         "    return selected.offset(1)\n"
         "}\n"
-        "function computed_operation(flag: Bool, clock: capability Clock) -> Int64 {\n"
+        "function direct_match(flag: Bool, clock: capability Clock) -> Int64 {\n"
+        "    return (match flag { true => clock false => clock }).offset(1)\n"
+        "}\n"
+        "function aliased_match(flag: Bool, clock: capability Clock) -> Int64 {\n"
+        "    let selected = match flag { true => clock false => clock }\n"
+        "    return selected.offset(1)\n"
+        "}\n"
+        "function direct_operation_if(flag: Bool, clock: capability Clock) -> Int64 {\n"
+        "    return (if flag { clock.offset } else { clock.offset })(1)\n"
+        "}\n"
+        "function aliased_operation_if(flag: Bool, clock: capability Clock) -> Int64 {\n"
         "    let selected = if flag { clock.offset } else { clock.offset }\n"
-        "    return selected()\n"
+        "    return selected(1)\n"
+        "}\n"
+        "function operation_match(flag: Bool, clock: capability Clock) -> Int64 {\n"
+        "    let selected = match flag { true => clock.offset false => clock.offset }\n"
+        "    return selected(1)\n"
+        "}\n"
+        "function ignore_never(\n"
+        "    flag: Bool, impossible: Empty, clock: capability Clock,\n"
+        ") -> Int64 {\n"
+        "    let selected = if flag { match impossible {} } else { clock }\n"
+        "    return selected.offset(1)\n"
         "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
-    CHECK(has_diagnostic(&compilation, "SOL-TYPE-015"));
-    CHECK(has_diagnostic(&compilation, "SOL-TYPE-006"));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+}
+
+static void test_mixed_computed_capability_provenance(void) {
+    static const char capability_text[] =
+        "module mixed_capability\n"
+        "capability Clock { function offset(delta: Int64) -> Int64 effects { pure } }\n"
+        "function mixed(flag: Bool, first: capability Clock, second: capability Clock)\n"
+        "-> Int64 { return (if flag { first } else { second }).offset(1) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, capability_text));
+    CHECK(diagnostic_count(&compilation, "SOL-TYPE-015") == 1);
+    CHECK(compilation.diagnostics.count == 1);
+    free_compilation(&compilation);
+
+    static const char operation_text[] =
+        "module mixed_operation\n"
+        "capability Clock { function offset(delta: Int64) -> Int64 effects { pure } }\n"
+        "function mixed(flag: Bool, first: capability Clock, second: capability Clock)\n"
+        "-> Int64 { return (if flag { first.offset } else { second.offset })(1) }\n";
+    CHECK(compile_source(&compilation, operation_text));
+    CHECK(diagnostic_count(&compilation, "SOL-TYPE-015") == 1);
+    CHECK(compilation.diagnostics.count == 1);
     free_compilation(&compilation);
 }
 
@@ -538,7 +591,8 @@ int main(void) {
     test_invalid_enum_constructor();
     test_capability_operation_calls();
     test_invalid_capability_operations();
-    test_computed_capability_provenance_rejected();
+    test_computed_capability_provenance();
+    test_mixed_computed_capability_provenance();
     test_invalid_capability_declarations();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);

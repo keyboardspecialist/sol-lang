@@ -18,6 +18,16 @@ typedef struct {
 } SolEffectEdge;
 
 typedef struct {
+    SolExprId expression;
+    bool exiting;
+} SolEffectExpressionEntry;
+
+typedef struct {
+    size_t node;
+    bool exiting;
+} SolEffectProvenanceEntry;
+
+typedef struct {
     const SolSource *source;
     const SolSyntaxTree *syntax;
     const SolHirModule *hir;
@@ -30,6 +40,7 @@ typedef struct {
     size_t *first_outgoing;
     size_t *first_incoming;
     SolDefId *parameter_owners;
+    SolDefId *expression_owners;
     size_t edge_count;
     size_t edge_capacity;
     SolDefId current_function;
@@ -355,26 +366,14 @@ static bool sol_effect_capability_origin(
         checker->malformed = true;
         return false;
     }
-    const SolExpr *expression = &checker->syntax->expressions[expression_id];
-    SolResolution resolution = checker->hir->resolutions[expression_id];
-    if (expression->kind != SOL_EXPR_PATH
-        || resolution.kind != SOL_RESOLUTION_LOCAL
-        || resolution.target >= checker->hir->local_count) {
-        return false;
-    }
-    const SolHirLocal *local = &checker->hir->locals[resolution.target];
-    if (local->owner != checker->current_function
-        || resolution.target >= checker->types->local_count
-        || checker->types->local_capability_origins[resolution.target] == SOL_AST_NONE) {
-        return false;
-    }
-    SolType type = checker->types->locals[resolution.target];
+    SolParameterId origin = checker->types->expression_capability_origins[expression_id];
+    SolType type = checker->types->expressions[expression_id];
     if (type.kind != SOL_TYPE_NOMINAL
         || type.definition >= checker->syntax->item_count
-        || checker->syntax->items[type.definition].kind != SOL_ITEM_CAPABILITY) {
+        || checker->syntax->items[type.definition].kind != SOL_ITEM_CAPABILITY
+        || origin == SOL_AST_NONE) {
         return false;
     }
-    SolParameterId origin = checker->types->local_capability_origins[resolution.target];
     if (origin >= checker->syntax->parameter_count
         || checker->parameter_owners[origin] != checker->current_function) {
         checker->malformed = true;
@@ -749,6 +748,898 @@ static void sol_effect_walk_function(
     sol_effect_expression(checker, item->body);
 }
 
+static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
+    const SolSource *source = checker->source;
+    const SolSyntaxTree *syntax = checker->syntax;
+    const SolHirModule *hir = checker->hir;
+    for (size_t index = 0; index < syntax->argument_count; ++index) {
+        const SolArgument *argument = &syntax->arguments[index];
+        if (argument->value >= syntax->expression_count
+            || (argument->is_named && !sol_effect_span_valid(source, argument->name))
+            || (argument->next != SOL_AST_NONE
+                && argument->next >= syntax->argument_count)) {
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->statement_count; ++index) {
+        const SolStatement *statement = &syntax->statements[index];
+        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_EXPRESSION
+            || !sol_effect_span_valid(source, statement->span)
+            || (statement->kind == SOL_STATEMENT_LET
+                && !sol_effect_span_valid(source, statement->as.let_statement.name))
+            || (statement->next != SOL_AST_NONE
+                && statement->next >= syntax->statement_count)) {
+            return false;
+        }
+        SolExprId value = statement->kind == SOL_STATEMENT_LET
+            ? statement->as.let_statement.value
+            : statement->as.expression;
+        if (value >= syntax->expression_count) return false;
+    }
+    for (size_t index = 0; index < syntax->match_arm_count; ++index) {
+        const SolMatchArm *arm = &syntax->match_arms[index];
+        if (arm->pattern >= syntax->pattern_count
+            || arm->value >= syntax->expression_count
+            || !sol_effect_span_valid(source, arm->span)
+            || (arm->next != SOL_AST_NONE && arm->next >= syntax->match_arm_count)) {
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->expression_count; ++index) {
+        const SolExpr *expression = &syntax->expressions[index];
+        bool valid = (int)expression->kind >= 0
+            && expression->kind <= SOL_EXPR_PROPAGATE
+            && sol_effect_span_valid(source, expression->span);
+        switch (expression->kind) {
+            case SOL_EXPR_PATH:
+                valid = valid && sol_effect_span_valid(source, expression->as.name);
+                break;
+            case SOL_EXPR_UNARY:
+                valid = valid && expression->as.unary.operand < syntax->expression_count;
+                break;
+            case SOL_EXPR_BINARY:
+                valid = valid
+                    && expression->as.binary.left < syntax->expression_count
+                    && expression->as.binary.right < syntax->expression_count;
+                break;
+            case SOL_EXPR_CALL:
+                valid = valid
+                    && expression->as.call.callee < syntax->expression_count
+                    && (expression->as.call.first_argument == SOL_AST_NONE
+                        || expression->as.call.first_argument < syntax->argument_count);
+                break;
+            case SOL_EXPR_FIELD:
+                valid = valid
+                    && expression->as.field.base < syntax->expression_count
+                    && sol_effect_span_valid(source, expression->as.field.name);
+                break;
+            case SOL_EXPR_RECORD:
+                valid = valid
+                    && expression->as.record.type < syntax->expression_count
+                    && (expression->as.record.first_field == SOL_AST_NONE
+                        || expression->as.record.first_field < syntax->argument_count);
+                break;
+            case SOL_EXPR_IF:
+                valid = valid
+                    && expression->as.if_expr.condition < syntax->expression_count
+                    && expression->as.if_expr.then_branch < syntax->expression_count
+                    && expression->as.if_expr.else_branch < syntax->expression_count;
+                break;
+            case SOL_EXPR_MATCH:
+                valid = valid
+                    && expression->as.match_expr.scrutinee < syntax->expression_count
+                    && (expression->as.match_expr.first_arm == SOL_AST_NONE
+                        || expression->as.match_expr.first_arm < syntax->match_arm_count);
+                break;
+            case SOL_EXPR_BLOCK:
+                valid = valid
+                    && (expression->as.block.first_statement == SOL_AST_NONE
+                        || expression->as.block.first_statement < syntax->statement_count);
+                break;
+            case SOL_EXPR_PROPAGATE:
+                valid = valid && expression->as.propagated < syntax->expression_count;
+                break;
+            default:
+                break;
+        }
+        SolResolution resolution = hir->resolutions[index];
+        valid = valid
+            && (int)resolution.kind >= 0
+            && resolution.kind <= SOL_RESOLUTION_BUILTIN;
+        if (resolution.kind == SOL_RESOLUTION_DEFINITION) {
+            valid = valid && resolution.target < hir->definition_count;
+        } else if (resolution.kind == SOL_RESOLUTION_LOCAL) {
+            valid = valid && resolution.target < hir->local_count;
+        } else if (resolution.kind == SOL_RESOLUTION_BUILTIN) {
+            valid = valid && resolution.target <= SOL_BUILTIN_NONE;
+        }
+        if (!valid) return false;
+    }
+    return true;
+}
+
+static bool sol_effect_hir_matches_source(SolEffectChecker *checker) {
+    SolHirModule rebuilt;
+    SolDiagnostics diagnostics;
+    sol_hir_module_init(&rebuilt);
+    sol_diagnostics_init(&diagnostics);
+    bool completed = sol_hir_lower(
+        checker->source,
+        checker->syntax,
+        &rebuilt,
+        &diagnostics
+    );
+    bool matches = completed
+        && !sol_diagnostics_has_errors(&diagnostics)
+        && rebuilt.definition_count == checker->hir->definition_count
+        && rebuilt.local_count == checker->hir->local_count
+        && rebuilt.resolution_count == checker->hir->resolution_count;
+    for (size_t index = 0; matches && index < rebuilt.definition_count; ++index) {
+        const SolHirDefinition *left = &rebuilt.definitions[index];
+        const SolHirDefinition *right = &checker->hir->definitions[index];
+        matches = left->kind == right->kind
+            && left->name.start == right->name.start
+            && left->name.end == right->name.end
+            && left->syntax_item == right->syntax_item;
+    }
+    for (size_t index = 0; matches && index < rebuilt.local_count; ++index) {
+        const SolHirLocal *left = &rebuilt.locals[index];
+        const SolHirLocal *right = &checker->hir->locals[index];
+        matches = left->kind == right->kind
+            && left->name.start == right->name.start
+            && left->name.end == right->name.end
+            && left->owner == right->owner
+            && left->syntax_id == right->syntax_id;
+    }
+    for (size_t index = 0; matches && index < rebuilt.resolution_count; ++index) {
+        matches = rebuilt.resolutions[index].kind == checker->hir->resolutions[index].kind
+            && rebuilt.resolutions[index].target == checker->hir->resolutions[index].target;
+    }
+    if (!completed && !sol_diagnostics_has_errors(&diagnostics)) {
+        checker->allocation_failed = true;
+    }
+    sol_hir_module_free(&rebuilt);
+    sol_diagnostics_free(&diagnostics);
+    return matches;
+}
+
+static bool sol_effect_schedule_owned_expression(
+    SolEffectChecker *checker,
+    SolDefId owner,
+    SolExprId expression,
+    unsigned char *states,
+    SolEffectExpressionEntry *stack,
+    size_t *stack_count
+) {
+    if (expression >= checker->syntax->expression_count) return false;
+    if (states[expression] != 0) return false;
+    states[expression] = 1;
+    checker->expression_owners[expression] = owner;
+    stack[(*stack_count)++] = (SolEffectExpressionEntry){
+        .expression = expression,
+    };
+    return true;
+}
+
+static bool sol_effect_schedule_argument_expressions(
+    SolEffectChecker *checker,
+    SolDefId owner,
+    SolExprId parent,
+    SolArgumentId argument,
+    unsigned char *states,
+    SolExprId *argument_owners,
+    SolEffectExpressionEntry *stack,
+    size_t *stack_count
+) {
+    while (argument != SOL_AST_NONE) {
+        if (argument_owners[argument] != SOL_AST_NONE) return false;
+        argument_owners[argument] = parent;
+        const SolArgument *current = &checker->syntax->arguments[argument];
+        if (!sol_effect_schedule_owned_expression(
+            checker,
+            owner,
+            current->value,
+            states,
+            stack,
+            stack_count
+        )) {
+            return false;
+        }
+        argument = current->next;
+    }
+    return true;
+}
+
+static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
+    size_t count = checker->syntax->expression_count;
+    if (checker->syntax->item_count > SIZE_MAX - count
+        || count > SIZE_MAX / sizeof(*checker->expression_owners)
+        || count > SIZE_MAX / 2
+        || count * 2 > SIZE_MAX / sizeof(SolEffectExpressionEntry)
+        || checker->syntax->argument_count > SIZE_MAX / sizeof(SolExprId)
+        || checker->syntax->statement_count > SIZE_MAX / sizeof(SolExprId)
+        || checker->syntax->match_arm_count > SIZE_MAX / sizeof(SolExprId)) {
+        return false;
+    }
+    checker->expression_owners = malloc(count * sizeof(*checker->expression_owners));
+    unsigned char *states = calloc(count, sizeof(*states));
+    SolEffectExpressionEntry *stack = count == 0
+        ? NULL
+        : malloc(count * 2 * sizeof(*stack));
+    SolExprId *argument_owners = malloc(
+        checker->syntax->argument_count * sizeof(*argument_owners)
+    );
+    SolExprId *statement_owners = malloc(
+        checker->syntax->statement_count * sizeof(*statement_owners)
+    );
+    SolExprId *arm_owners = malloc(
+        checker->syntax->match_arm_count * sizeof(*arm_owners)
+    );
+    if ((count != 0
+            && (checker->expression_owners == NULL || states == NULL || stack == NULL))
+        || (checker->syntax->argument_count != 0 && argument_owners == NULL)
+        || (checker->syntax->statement_count != 0 && statement_owners == NULL)
+        || (checker->syntax->match_arm_count != 0 && arm_owners == NULL)) {
+        free(states);
+        free(stack);
+        free(argument_owners);
+        free(statement_owners);
+        free(arm_owners);
+        checker->allocation_failed = true;
+        return false;
+    }
+    for (size_t index = 0; index < count; ++index) {
+        checker->expression_owners[index] = SOL_AST_NONE;
+    }
+    for (size_t index = 0; index < checker->syntax->argument_count; ++index) {
+        argument_owners[index] = SOL_AST_NONE;
+    }
+    for (size_t index = 0; index < checker->syntax->statement_count; ++index) {
+        statement_owners[index] = SOL_AST_NONE;
+    }
+    for (size_t index = 0; index < checker->syntax->match_arm_count; ++index) {
+        arm_owners[index] = SOL_AST_NONE;
+    }
+    for (size_t root = 0; root < checker->syntax->item_count + count; ++root) {
+        SolDefId owner = SOL_AST_NONE;
+        SolExprId root_expression;
+        if (root < checker->syntax->item_count) {
+            const SolSyntaxItem *item = &checker->syntax->items[root];
+            if (item->kind != SOL_ITEM_FUNCTION || item->body == SOL_AST_NONE) continue;
+            owner = root;
+            root_expression = item->body;
+        } else {
+            root_expression = root - checker->syntax->item_count;
+            if (states[root_expression] != 0) continue;
+        }
+        size_t stack_count = 0;
+        if (!sol_effect_schedule_owned_expression(
+            checker,
+            owner,
+            root_expression,
+            states,
+            stack,
+            &stack_count
+        )) {
+            goto invalid;
+        }
+        while (stack_count != 0) {
+            SolEffectExpressionEntry entry = stack[--stack_count];
+            SolExprId expression_id = entry.expression;
+            if (entry.exiting) {
+                states[expression_id] = 2;
+                continue;
+            }
+            stack[stack_count++] = (SolEffectExpressionEntry){
+                .expression = expression_id,
+                .exiting = true,
+            };
+            const SolExpr *expression = &checker->syntax->expressions[expression_id];
+            bool valid = true;
+            switch (expression->kind) {
+                case SOL_EXPR_UNARY:
+                    valid = sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.unary.operand,
+                        states,
+                        stack,
+                        &stack_count
+                    );
+                    break;
+                case SOL_EXPR_BINARY:
+                    valid = sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.binary.left,
+                        states,
+                        stack,
+                        &stack_count
+                    ) && sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.binary.right,
+                        states,
+                        stack,
+                        &stack_count
+                    );
+                    break;
+                case SOL_EXPR_CALL:
+                    valid = sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.call.callee,
+                        states,
+                        stack,
+                        &stack_count
+                    ) && sol_effect_schedule_argument_expressions(
+                        checker,
+                        owner,
+                        expression_id,
+                        expression->as.call.first_argument,
+                        states,
+                        argument_owners,
+                        stack,
+                        &stack_count
+                    );
+                    break;
+                case SOL_EXPR_FIELD:
+                    valid = sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.field.base,
+                        states,
+                        stack,
+                        &stack_count
+                    );
+                    break;
+                case SOL_EXPR_RECORD:
+                    valid = sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.record.type,
+                        states,
+                        stack,
+                        &stack_count
+                    ) && sol_effect_schedule_argument_expressions(
+                        checker,
+                        owner,
+                        expression_id,
+                        expression->as.record.first_field,
+                        states,
+                        argument_owners,
+                        stack,
+                        &stack_count
+                    );
+                    break;
+                case SOL_EXPR_IF:
+                    valid = sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.if_expr.condition,
+                        states,
+                        stack,
+                        &stack_count
+                    ) && sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.if_expr.then_branch,
+                        states,
+                        stack,
+                        &stack_count
+                    ) && sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.if_expr.else_branch,
+                        states,
+                        stack,
+                        &stack_count
+                    );
+                    break;
+                case SOL_EXPR_MATCH: {
+                    valid = sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.match_expr.scrutinee,
+                        states,
+                        stack,
+                        &stack_count
+                    );
+                    SolMatchArmId arm = expression->as.match_expr.first_arm;
+                    while (valid && arm != SOL_AST_NONE) {
+                        if (arm_owners[arm] != SOL_AST_NONE) {
+                            valid = false;
+                            break;
+                        }
+                        arm_owners[arm] = expression_id;
+                        valid = sol_effect_schedule_owned_expression(
+                            checker,
+                            owner,
+                            checker->syntax->match_arms[arm].value,
+                            states,
+                            stack,
+                            &stack_count
+                        );
+                        arm = checker->syntax->match_arms[arm].next;
+                    }
+                    break;
+                }
+                case SOL_EXPR_BLOCK: {
+                    SolStatementId statement = expression->as.block.first_statement;
+                    while (valid && statement != SOL_AST_NONE) {
+                        if (statement_owners[statement] != SOL_AST_NONE) {
+                            valid = false;
+                            break;
+                        }
+                        statement_owners[statement] = expression_id;
+                        const SolStatement *current = &checker->syntax->statements[statement];
+                        SolExprId value = current->kind == SOL_STATEMENT_LET
+                            ? current->as.let_statement.value
+                            : current->as.expression;
+                        valid = sol_effect_schedule_owned_expression(
+                            checker,
+                            owner,
+                            value,
+                            states,
+                            stack,
+                            &stack_count
+                        );
+                        statement = current->next;
+                    }
+                    break;
+                }
+                case SOL_EXPR_PROPAGATE:
+                    valid = sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.propagated,
+                        states,
+                        stack,
+                        &stack_count
+                    );
+                    break;
+                default:
+                    break;
+            }
+            if (!valid) goto invalid;
+        }
+    }
+    free(states);
+    free(stack);
+    free(argument_owners);
+    free(statement_owners);
+    free(arm_owners);
+    return true;
+
+invalid:
+    free(states);
+    free(stack);
+    free(argument_owners);
+    free(statement_owners);
+    free(arm_owners);
+    return false;
+}
+
+static bool sol_effect_type_is_capability(
+    const SolEffectChecker *checker,
+    SolType type
+) {
+    return type.kind == SOL_TYPE_NOMINAL
+        && type.definition < checker->syntax->item_count
+        && checker->syntax->items[type.definition].kind == SOL_ITEM_CAPABILITY;
+}
+
+static SolParameterId sol_effect_block_origin(
+    const SolEffectChecker *checker,
+    const SolExpr *block,
+    const SolParameterId *expression_origins
+) {
+    SolParameterId result = SOL_AST_NONE;
+    bool terminated = false;
+    SolStatementId statement = block->as.block.first_statement;
+    size_t traversed = 0;
+    while (statement != SOL_AST_NONE && traversed++ < checker->syntax->statement_count) {
+        const SolStatement *current = &checker->syntax->statements[statement];
+        SolExprId value_id = current->kind == SOL_STATEMENT_LET
+            ? current->as.let_statement.value
+            : current->as.expression;
+        SolType value = checker->types->expressions[value_id];
+        if (!terminated) {
+            result = current->kind == SOL_STATEMENT_EXPRESSION
+                    && value.kind != SOL_TYPE_NEVER
+                    && value.kind != SOL_TYPE_UNKNOWN
+                    && value.kind != SOL_TYPE_ERROR
+                ? expression_origins[value_id]
+                : SOL_AST_NONE;
+            terminated = current->kind == SOL_STATEMENT_RETURN
+                || value.kind == SOL_TYPE_NEVER;
+        }
+        statement = current->next;
+    }
+    return result;
+}
+
+static bool sol_effect_join_origin(
+    const SolEffectChecker *checker,
+    SolExprId value_id,
+    const SolParameterId *expression_origins,
+    SolParameterId *origin,
+    bool *have_value
+) {
+    SolType value = checker->types->expressions[value_id];
+    if (value.kind == SOL_TYPE_NEVER) return true;
+    SolParameterId value_origin = expression_origins[value_id];
+    if (value.kind == SOL_TYPE_UNKNOWN || value.kind == SOL_TYPE_ERROR
+        || value_origin == SOL_AST_NONE) {
+        return false;
+    }
+    if (!*have_value) {
+        *origin = value_origin;
+        *have_value = true;
+        return true;
+    }
+    return *origin == value_origin;
+}
+
+static SolParameterId sol_effect_join_expression_origin(
+    const SolEffectChecker *checker,
+    const SolExpr *expression,
+    const SolParameterId *expression_origins
+) {
+    SolParameterId origin = SOL_AST_NONE;
+    bool have_value = false;
+    if (expression->kind == SOL_EXPR_IF) {
+        if (!sol_effect_join_origin(
+                checker,
+                expression->as.if_expr.then_branch,
+                expression_origins,
+                &origin,
+                &have_value
+            )
+            || !sol_effect_join_origin(
+                checker,
+                expression->as.if_expr.else_branch,
+                expression_origins,
+                &origin,
+                &have_value
+            )) {
+            return SOL_AST_NONE;
+        }
+    } else {
+        SolMatchArmId arm = expression->as.match_expr.first_arm;
+        size_t traversed = 0;
+        while (arm != SOL_AST_NONE && traversed++ < checker->syntax->match_arm_count) {
+            if (!sol_effect_join_origin(
+                checker,
+                checker->syntax->match_arms[arm].value,
+                expression_origins,
+                &origin,
+                &have_value
+            )) {
+                return SOL_AST_NONE;
+            }
+            arm = checker->syntax->match_arms[arm].next;
+        }
+    }
+    return have_value ? origin : SOL_AST_NONE;
+}
+
+static SolParameterId sol_effect_expected_expression_origin(
+    const SolEffectChecker *checker,
+    SolExprId expression_id,
+    bool capability
+) {
+    SolType type = checker->types->expressions[expression_id];
+    if (capability ? !sol_effect_type_is_capability(checker, type)
+                   : type.kind != SOL_TYPE_CAPABILITY_OPERATION) {
+        return SOL_AST_NONE;
+    }
+    const SolExpr *expression = &checker->syntax->expressions[expression_id];
+    const SolParameterId *expression_origins = capability
+        ? checker->types->expression_capability_origins
+        : checker->types->expression_operation_origins;
+    const SolParameterId *local_origins = capability
+        ? checker->types->local_capability_origins
+        : checker->types->local_operation_origins;
+    if (!capability && expression->kind == SOL_EXPR_FIELD) {
+        return checker->types->expression_capability_origins[expression->as.field.base];
+    }
+    if (expression->kind == SOL_EXPR_PATH) {
+        SolResolution resolution = checker->hir->resolutions[expression_id];
+        if (resolution.kind == SOL_RESOLUTION_LOCAL
+            && resolution.target < checker->hir->local_count
+            && checker->hir->locals[resolution.target].owner
+                == checker->expression_owners[expression_id]) {
+            return local_origins[resolution.target];
+        }
+        return SOL_AST_NONE;
+    }
+    if (expression->kind == SOL_EXPR_BLOCK) {
+        return sol_effect_block_origin(checker, expression, expression_origins);
+    }
+    if (expression->kind == SOL_EXPR_IF || expression->kind == SOL_EXPR_MATCH) {
+        return sol_effect_join_expression_origin(checker, expression, expression_origins);
+    }
+    return SOL_AST_NONE;
+}
+
+static bool sol_effect_origin_matches_type(
+    const SolEffectChecker *checker,
+    SolParameterId origin,
+    SolType value_type,
+    SolDefId owner,
+    bool operation
+) {
+    if (origin == SOL_AST_NONE) return true;
+    if (origin >= checker->syntax->parameter_count
+        || owner == SOL_AST_NONE
+        || checker->parameter_owners[origin] != owner) {
+        return false;
+    }
+    const SolParameter *parameter = &checker->syntax->parameters[origin];
+    if (parameter->type_id >= checker->types->declared_type_count) return false;
+    SolType parameter_type = checker->types->declared_types[parameter->type_id];
+    if (!sol_effect_type_is_capability(checker, parameter_type)) return false;
+    if (!operation) {
+        return sol_effect_type_is_capability(checker, value_type)
+            && value_type.definition == parameter_type.definition;
+    }
+    return value_type.kind == SOL_TYPE_CAPABILITY_OPERATION
+        && value_type.definition < checker->syntax->capability_member_count
+        && checker->syntax->capability_members[value_type.definition].owner_item
+            == parameter_type.definition;
+}
+
+static bool sol_effect_validate_local_resolutions(const SolEffectChecker *checker) {
+    for (size_t index = 0; index < checker->syntax->expression_count; ++index) {
+        SolResolution resolution = checker->hir->resolutions[index];
+        if (resolution.kind != SOL_RESOLUTION_LOCAL) continue;
+        const SolExpr *expression = &checker->syntax->expressions[index];
+        const SolHirLocal *local = &checker->hir->locals[resolution.target];
+        SolDefId owner = checker->expression_owners[index];
+        if (expression->kind != SOL_EXPR_PATH
+            || owner == SOL_AST_NONE
+            || local->owner != owner
+            || !sol_effect_span_equal(checker->source, expression->as.name, local->name)) {
+            return false;
+        }
+        if (local->kind == SOL_LOCAL_PARAMETER) {
+            if (local->syntax_id >= checker->syntax->parameter_count
+                || checker->parameter_owners[local->syntax_id] != owner
+                || !sol_effect_span_equal(
+                    checker->source,
+                    local->name,
+                    checker->syntax->parameters[local->syntax_id].name
+                )) {
+                return false;
+            }
+        } else if (local->kind == SOL_LOCAL_BINDING) {
+            if (local->syntax_id >= checker->syntax->statement_count) return false;
+            const SolStatement *statement = &checker->syntax->statements[local->syntax_id];
+            if (statement->kind != SOL_STATEMENT_LET
+                || statement->span.end > expression->span.start
+                || !sol_effect_span_equal(
+                    checker->source,
+                    local->name,
+                    statement->as.let_statement.name
+                )) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+static bool sol_effect_provenance_node_relevant(
+    const SolEffectChecker *checker,
+    size_t node,
+    bool capability
+) {
+    size_t expression_count = checker->syntax->expression_count;
+    SolType type = node < expression_count
+        ? checker->types->expressions[node]
+        : checker->types->locals[node - expression_count];
+    return capability
+        ? sol_effect_type_is_capability(checker, type)
+        : type.kind == SOL_TYPE_CAPABILITY_OPERATION;
+}
+
+static void sol_effect_push_provenance_dependency(
+    SolEffectProvenanceEntry *stack,
+    size_t *stack_count,
+    size_t node
+) {
+    stack[(*stack_count)++] = (SolEffectProvenanceEntry){.node = node};
+}
+
+static void sol_effect_push_expression_provenance_dependencies(
+    const SolEffectChecker *checker,
+    SolExprId expression_id,
+    bool capability,
+    SolEffectProvenanceEntry *stack,
+    size_t *stack_count
+) {
+    const SolExpr *expression = &checker->syntax->expressions[expression_id];
+    size_t expression_count = checker->syntax->expression_count;
+    if (expression->kind == SOL_EXPR_PATH) {
+        SolResolution resolution = checker->hir->resolutions[expression_id];
+        if (resolution.kind == SOL_RESOLUTION_LOCAL) {
+            sol_effect_push_provenance_dependency(
+                stack,
+                stack_count,
+                expression_count + resolution.target
+            );
+        }
+    } else if (expression->kind == SOL_EXPR_BLOCK) {
+        SolStatementId statement = expression->as.block.first_statement;
+        while (statement != SOL_AST_NONE) {
+            const SolStatement *current = &checker->syntax->statements[statement];
+            SolExprId value = current->kind == SOL_STATEMENT_LET
+                ? current->as.let_statement.value
+                : current->as.expression;
+            sol_effect_push_provenance_dependency(stack, stack_count, value);
+            statement = current->next;
+        }
+    } else if (expression->kind == SOL_EXPR_IF) {
+        sol_effect_push_provenance_dependency(
+            stack,
+            stack_count,
+            expression->as.if_expr.then_branch
+        );
+        sol_effect_push_provenance_dependency(
+            stack,
+            stack_count,
+            expression->as.if_expr.else_branch
+        );
+    } else if (expression->kind == SOL_EXPR_MATCH) {
+        SolMatchArmId arm = expression->as.match_expr.first_arm;
+        while (arm != SOL_AST_NONE) {
+            sol_effect_push_provenance_dependency(
+                stack,
+                stack_count,
+                checker->syntax->match_arms[arm].value
+            );
+            arm = checker->syntax->match_arms[arm].next;
+        }
+    } else if (!capability && expression->kind == SOL_EXPR_FIELD) {
+        /* Capability expression provenance is validated before operation provenance. */
+    }
+}
+
+static bool sol_effect_validate_provenance_node(
+    const SolEffectChecker *checker,
+    size_t node,
+    bool capability
+) {
+    size_t expression_count = checker->syntax->expression_count;
+    if (node < expression_count) {
+        SolParameterId actual = capability
+            ? checker->types->expression_capability_origins[node]
+            : checker->types->expression_operation_origins[node];
+        SolParameterId expected = sol_effect_expected_expression_origin(
+            checker,
+            node,
+            capability
+        );
+        return actual == expected
+            && sol_effect_origin_matches_type(
+                checker,
+                actual,
+                checker->types->expressions[node],
+                checker->expression_owners[node],
+                !capability
+            );
+    }
+    SolLocalId local_id = node - expression_count;
+    const SolHirLocal *local = &checker->hir->locals[local_id];
+    SolType type = checker->types->locals[local_id];
+    SolParameterId actual = capability
+        ? checker->types->local_capability_origins[local_id]
+        : checker->types->local_operation_origins[local_id];
+    SolParameterId expected = SOL_AST_NONE;
+    if (sol_effect_provenance_node_relevant(checker, node, capability)) {
+        if (capability && local->kind == SOL_LOCAL_PARAMETER) {
+            expected = local->syntax_id;
+        } else if (local->kind == SOL_LOCAL_BINDING) {
+            const SolStatement *statement = &checker->syntax->statements[local->syntax_id];
+            expected = capability
+                ? checker->types->expression_capability_origins[
+                    statement->as.let_statement.value
+                ]
+                : checker->types->expression_operation_origins[
+                    statement->as.let_statement.value
+                ];
+        }
+    }
+    return actual == expected
+        && sol_effect_origin_matches_type(
+            checker,
+            actual,
+            type,
+            local->owner,
+            !capability
+        );
+}
+
+static bool sol_effect_validate_provenance(
+    SolEffectChecker *checker,
+    bool capability
+) {
+    size_t expression_count = checker->syntax->expression_count;
+    if (expression_count > SIZE_MAX - checker->hir->local_count) return false;
+    size_t count = expression_count + checker->hir->local_count;
+    if (count > SIZE_MAX / 2
+        || count * 2 > SIZE_MAX / sizeof(SolEffectProvenanceEntry)) {
+        return false;
+    }
+    unsigned char *states = calloc(count, sizeof(*states));
+    SolEffectProvenanceEntry *stack = count == 0
+        ? NULL
+        : malloc(count * 2 * sizeof(*stack));
+    if (count != 0 && (states == NULL || stack == NULL)) {
+        free(states);
+        free(stack);
+        checker->allocation_failed = true;
+        return false;
+    }
+    for (size_t root = 0; root < count; ++root) {
+        if (states[root] == 2) continue;
+        size_t stack_count = 0;
+        sol_effect_push_provenance_dependency(stack, &stack_count, root);
+        while (stack_count != 0) {
+            SolEffectProvenanceEntry entry = stack[--stack_count];
+            if (entry.exiting) {
+                if (!sol_effect_validate_provenance_node(checker, entry.node, capability)) {
+                    free(states);
+                    free(stack);
+                    return false;
+                }
+                states[entry.node] = 2;
+                continue;
+            }
+            if (states[entry.node] == 2) continue;
+            if (states[entry.node] == 1) {
+                free(states);
+                free(stack);
+                return false;
+            }
+            states[entry.node] = 1;
+            stack[stack_count++] = (SolEffectProvenanceEntry){
+                .node = entry.node,
+                .exiting = true,
+            };
+            if (!sol_effect_provenance_node_relevant(checker, entry.node, capability)) {
+                continue;
+            }
+            if (entry.node < expression_count) {
+                sol_effect_push_expression_provenance_dependencies(
+                    checker,
+                    entry.node,
+                    capability,
+                    stack,
+                    &stack_count
+                );
+            } else {
+                SolLocalId local_id = entry.node - expression_count;
+                const SolHirLocal *local = &checker->hir->locals[local_id];
+                if (local->kind == SOL_LOCAL_BINDING) {
+                    SolExprId initializer = checker->syntax->statements[
+                        local->syntax_id
+                    ].as.let_statement.value;
+                    sol_effect_push_provenance_dependency(
+                        stack,
+                        &stack_count,
+                        initializer
+                    );
+                }
+            }
+        }
+    }
+    free(states);
+    free(stack);
+    return true;
+}
+
 static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
     const SolSource *source = checker->source;
     const SolSyntaxTree *syntax = checker->syntax;
@@ -773,12 +1664,14 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || hir->definition_count != syntax->item_count
         || hir->resolution_count != syntax->expression_count
         || hir->local_count > hir->local_capacity
+        || (hir->definition_count != 0 && hir->definitions == NULL)
         || (hir->resolution_count != 0 && hir->resolutions == NULL)
         || (hir->local_count != 0 && hir->locals == NULL)
         || types->expression_count != syntax->expression_count
         || types->local_count != hir->local_count
         || types->declared_type_count != syntax->type_count
         || (types->expression_count != 0 && types->expressions == NULL)
+        || (types->expression_count != 0 && types->expression_capability_origins == NULL)
         || (types->expression_count != 0 && types->expression_operation_origins == NULL)
         || (types->local_count != 0 && types->locals == NULL)
         || (types->local_count != 0 && types->local_capability_origins == NULL)
@@ -788,7 +1681,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
     }
     for (size_t index = 0; index < syntax->item_count; ++index) {
         const SolSyntaxItem *item = &syntax->items[index];
-        if ((item->body != SOL_AST_NONE && item->body >= syntax->expression_count)
+        if ((int)item->kind < 0 || item->kind > SOL_ITEM_FUNCTION
+            || (item->body != SOL_AST_NONE && item->body >= syntax->expression_count)
             || (item->first_effect != SOL_AST_NONE
                 && item->first_effect >= syntax->effect_count)
             || (item->first_parameter != SOL_AST_NONE
@@ -833,24 +1727,43 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             parameter = syntax->parameters[parameter].next;
         }
     }
-    for (size_t index = 0; index < syntax->argument_count; ++index) {
-        const SolArgument *argument = &syntax->arguments[index];
-        if (argument->value >= syntax->expression_count
-            || (argument->is_named && !sol_effect_span_valid(source, argument->name))
-            || (argument->next != SOL_AST_NONE
-                && argument->next >= syntax->argument_count)) {
+    if (!sol_effect_validate_expression_arena(checker)) return false;
+    for (size_t index = 0; index < hir->local_count; ++index) {
+        const SolHirLocal *local = &hir->locals[index];
+        if ((int)local->kind < 0 || local->kind > SOL_LOCAL_PATTERN
+            || !sol_effect_span_valid(source, local->name)
+            || local->owner >= syntax->item_count
+            || syntax->items[local->owner].kind != SOL_ITEM_FUNCTION
+            || (local->kind == SOL_LOCAL_PARAMETER
+                && (local->syntax_id >= syntax->parameter_count
+                    || local->name.start != syntax->parameters[local->syntax_id].name.start
+                    || local->name.end != syntax->parameters[local->syntax_id].name.end))
+            || (local->kind == SOL_LOCAL_BINDING
+                && (local->syntax_id >= syntax->statement_count
+                    || syntax->statements[local->syntax_id].kind != SOL_STATEMENT_LET
+                    || local->name.start
+                        != syntax->statements[
+                            local->syntax_id
+                        ].as.let_statement.name.start
+                    || local->name.end
+                        != syntax->statements[
+                            local->syntax_id
+                        ].as.let_statement.name.end))
+            || (local->kind == SOL_LOCAL_PATTERN
+                && local->syntax_id >= syntax->pattern_binding_count)) {
             return false;
         }
     }
-    for (size_t index = 0; index < syntax->expression_count; ++index) {
-        const SolExpr *expression = &syntax->expressions[index];
-        if ((expression->kind == SOL_EXPR_CALL
-                && expression->as.call.first_argument != SOL_AST_NONE
-                && expression->as.call.first_argument >= syntax->argument_count)
-            || (expression->kind == SOL_EXPR_RECORD
-                && expression->as.record.first_field != SOL_AST_NONE
-                && expression->as.record.first_field >= syntax->argument_count)) {
-            return false;
+    if (!sol_effect_build_expression_owners(checker)
+        || !sol_effect_validate_local_resolutions(checker)) return false;
+    if (!sol_effect_hir_matches_source(checker)) return false;
+    for (size_t index = 0; index < hir->local_count; ++index) {
+        const SolHirLocal *local = &hir->locals[index];
+        if (local->kind == SOL_LOCAL_BINDING) {
+            SolExprId initializer = syntax->statements[
+                local->syntax_id
+            ].as.let_statement.value;
+            if (checker->expression_owners[initializer] != local->owner) return false;
         }
     }
     for (size_t index = 0; index < syntax->effect_count; ++index) {
@@ -876,93 +1789,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             return false;
         }
     }
-    for (size_t index = 0; index < hir->local_count; ++index) {
-        const SolHirLocal *local = &hir->locals[index];
-        SolParameterId origin = types->local_capability_origins[index];
-        SolType type = types->locals[index];
-        bool capability_type = type.kind == SOL_TYPE_NOMINAL
-            && type.definition < syntax->item_count
-            && syntax->items[type.definition].kind == SOL_ITEM_CAPABILITY;
-        SolParameterId expected = SOL_AST_NONE;
-        if (local->kind == SOL_LOCAL_PARAMETER) {
-            if (local->syntax_id >= syntax->parameter_count) return false;
-            if (capability_type) expected = local->syntax_id;
-        } else if (local->kind == SOL_LOCAL_BINDING) {
-            if (local->syntax_id >= syntax->statement_count) return false;
-            const SolStatement *statement = &syntax->statements[local->syntax_id];
-            if (statement->kind != SOL_STATEMENT_LET
-                || statement->as.let_statement.value >= syntax->expression_count) {
-                return false;
-            }
-            SolExprId initializer_id = statement->as.let_statement.value;
-            const SolExpr *initializer = &syntax->expressions[initializer_id];
-            SolResolution resolution = hir->resolutions[initializer_id];
-            if (initializer->kind == SOL_EXPR_PATH
-                && resolution.kind == SOL_RESOLUTION_LOCAL
-                && resolution.target < index
-                && hir->locals[resolution.target].owner == local->owner) {
-                expected = types->local_capability_origins[resolution.target];
-            }
-        }
-        if (origin != expected) return false;
-        if (origin != SOL_AST_NONE
-            && (!capability_type || origin >= syntax->parameter_count
-                || checker->parameter_owners[origin] != local->owner)) return false;
-    }
-    for (size_t index = 0; index < syntax->expression_count; ++index) {
-        SolType type = types->expressions[index];
-        SolParameterId origin = types->expression_operation_origins[index];
-        SolParameterId expected = SOL_AST_NONE;
-        const SolExpr *expression = &syntax->expressions[index];
-        if (type.kind == SOL_TYPE_CAPABILITY_OPERATION) {
-            if (type.definition >= syntax->capability_member_count) return false;
-            if (expression->kind == SOL_EXPR_FIELD) {
-                SolExprId base = expression->as.field.base;
-                if (base >= syntax->expression_count) return false;
-                SolResolution resolution = hir->resolutions[base];
-                if (syntax->expressions[base].kind == SOL_EXPR_PATH
-                    && resolution.kind == SOL_RESOLUTION_LOCAL
-                    && resolution.target < hir->local_count) {
-                    expected = types->local_capability_origins[resolution.target];
-                }
-            } else if (expression->kind == SOL_EXPR_PATH) {
-                SolResolution resolution = hir->resolutions[index];
-                if (resolution.kind == SOL_RESOLUTION_LOCAL
-                    && resolution.target < hir->local_count) {
-                    expected = types->local_operation_origins[resolution.target];
-                }
-            }
-        }
-        if (origin != expected) return false;
-        if (origin != SOL_AST_NONE) {
-            SolDefId capability = syntax->capability_members[type.definition].owner_item;
-            if (origin >= syntax->parameter_count
-                || syntax->parameters[origin].type_id >= types->declared_type_count) {
-                return false;
-            }
-            SolType parameter_type = types->declared_types[syntax->parameters[origin].type_id];
-            if (parameter_type.kind != SOL_TYPE_NOMINAL
-                || parameter_type.definition != capability) return false;
-        }
-    }
-    for (size_t index = 0; index < hir->local_count; ++index) {
-        const SolHirLocal *local = &hir->locals[index];
-        SolParameterId origin = types->local_operation_origins[index];
-        SolParameterId expected = SOL_AST_NONE;
-        if (local->kind == SOL_LOCAL_BINDING) {
-            if (local->syntax_id >= syntax->statement_count) return false;
-            const SolStatement *statement = &syntax->statements[local->syntax_id];
-            if (statement->kind != SOL_STATEMENT_LET
-                || statement->as.let_statement.value >= syntax->expression_count) {
-                return false;
-            }
-            expected = types->expression_operation_origins[statement->as.let_statement.value];
-        }
-        if (origin != expected) return false;
-        if (origin != SOL_AST_NONE
-            && types->locals[index].kind != SOL_TYPE_CAPABILITY_OPERATION) return false;
-    }
-    return true;
+    return sol_effect_validate_provenance(checker, true)
+        && sol_effect_validate_provenance(checker, false);
 }
 
 static bool sol_effect_allocate_table(SolEffectChecker *checker) {
@@ -1198,10 +2026,12 @@ bool sol_effect_check(
             "invalid syntax, semantic input, or output table passed to effect checking"
         );
         free(checker.parameter_owners);
+        free(checker.expression_owners);
         return false;
     }
     if (!sol_effect_allocate_table(&checker)) {
         free(checker.parameter_owners);
+        free(checker.expression_owners);
         return false;
     }
     checker.visited = calloc(syntax->expression_count, sizeof(*checker.visited));
@@ -1302,6 +2132,7 @@ bool sol_effect_check(
     free(checker.visited);
     free(checker.reported_substitutions);
     free(checker.parameter_owners);
+    free(checker.expression_owners);
     if (checker.malformed) {
         sol_effect_error(
             &checker,

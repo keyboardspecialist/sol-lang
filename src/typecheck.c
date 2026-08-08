@@ -346,6 +346,7 @@ void sol_type_table_init(SolTypeTable *table) {
 
 void sol_type_table_free(SolTypeTable *table) {
     free(table->expressions);
+    free(table->expression_capability_origins);
     free(table->expression_operation_origins);
     free(table->locals);
     free(table->local_capability_origins);
@@ -492,12 +493,21 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     size_t local_count = checker->hir->local_count;
     size_t definition_count = checker->hir->definition_count;
     if (expression_count > SIZE_MAX / sizeof(*checker->types->expressions)
+        || expression_count > SIZE_MAX
+            / sizeof(*checker->types->expression_capability_origins)
+        || expression_count > SIZE_MAX
+            / sizeof(*checker->types->expression_operation_origins)
         || local_count > SIZE_MAX / sizeof(*checker->types->locals)
+        || local_count > SIZE_MAX / sizeof(*checker->types->local_capability_origins)
+        || local_count > SIZE_MAX / sizeof(*checker->types->local_operation_origins)
         || definition_count > SIZE_MAX / sizeof(*checker->types->definitions)
         || checker->syntax->type_count > SIZE_MAX / sizeof(*checker->types->declared_types)) {
         return false;
     }
     checker->types->expressions = calloc(expression_count, sizeof(*checker->types->expressions));
+    checker->types->expression_capability_origins = malloc(
+        expression_count * sizeof(*checker->types->expression_capability_origins)
+    );
     checker->types->expression_operation_origins = malloc(
         expression_count * sizeof(*checker->types->expression_operation_origins)
     );
@@ -523,6 +533,7 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     );
     if ((expression_count != 0
             && (checker->types->expressions == NULL
+                || checker->types->expression_capability_origins == NULL
                 || checker->types->expression_operation_origins == NULL
                 || checker->states == NULL))
         || (local_count != 0
@@ -541,6 +552,7 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     checker->types->definition_count = definition_count;
     checker->types->declared_type_count = checker->syntax->type_count;
     for (size_t index = 0; index < expression_count; ++index) {
+        checker->types->expression_capability_origins[index] = SOL_AST_NONE;
         checker->types->expression_operation_origins[index] = SOL_AST_NONE;
     }
     for (size_t index = 0; index < local_count; ++index) {
@@ -589,9 +601,16 @@ static SolLocalId sol_type_find_local(
     return SOL_AST_NONE;
 }
 
-static SolParameterId sol_type_capability_origin(
+static bool sol_type_is_capability(SolTypeChecker *checker, SolType type) {
+    return type.kind == SOL_TYPE_NOMINAL
+        && type.definition < checker->syntax->item_count
+        && checker->syntax->items[type.definition].kind == SOL_ITEM_CAPABILITY;
+}
+
+static SolParameterId sol_type_path_origin(
     SolTypeChecker *checker,
-    SolExprId expression_id
+    SolExprId expression_id,
+    const SolParameterId *local_origins
 ) {
     if (expression_id >= checker->syntax->expression_count) {
         sol_type_malformed(checker);
@@ -609,26 +628,135 @@ static SolParameterId sol_type_capability_origin(
         || resolution.target >= checker->types->local_count) {
         return SOL_AST_NONE;
     }
-    return checker->types->local_capability_origins[resolution.target];
+    return local_origins[resolution.target];
 }
 
-static SolParameterId sol_type_operation_origin(
+static SolParameterId sol_type_block_origin(
+    SolTypeChecker *checker,
+    const SolExpr *block,
+    const SolParameterId *expression_origins
+) {
+    SolParameterId result = SOL_AST_NONE;
+    bool terminated = false;
+    SolStatementId statement_id = block->as.block.first_statement;
+    size_t traversed = 0;
+    while (statement_id != SOL_AST_NONE && traversed++ < checker->syntax->statement_count) {
+        const SolStatement *statement = &checker->syntax->statements[statement_id];
+        SolExprId value_id = statement->kind == SOL_STATEMENT_LET
+            ? statement->as.let_statement.value
+            : statement->as.expression;
+        SolType value = checker->types->expressions[value_id];
+        if (!terminated) {
+            if (statement->kind == SOL_STATEMENT_EXPRESSION
+                && value.kind != SOL_TYPE_NEVER
+                && value.kind != SOL_TYPE_UNKNOWN
+                && value.kind != SOL_TYPE_ERROR) {
+                result = expression_origins[value_id];
+            } else {
+                result = SOL_AST_NONE;
+            }
+            terminated = statement->kind == SOL_STATEMENT_RETURN
+                || value.kind == SOL_TYPE_NEVER;
+        }
+        statement_id = statement->next;
+    }
+    return result;
+}
+
+static bool sol_type_join_origin(
+    SolTypeChecker *checker,
+    SolExprId value_id,
+    const SolParameterId *expression_origins,
+    SolParameterId *origin,
+    bool *have_value
+) {
+    SolType value = checker->types->expressions[value_id];
+    if (value.kind == SOL_TYPE_NEVER) return true;
+    SolParameterId value_origin = expression_origins[value_id];
+    if (value.kind == SOL_TYPE_UNKNOWN || value.kind == SOL_TYPE_ERROR
+        || value_origin == SOL_AST_NONE) {
+        return false;
+    }
+    if (!*have_value) {
+        *origin = value_origin;
+        *have_value = true;
+        return true;
+    }
+    return *origin == value_origin;
+}
+
+static SolParameterId sol_type_join_expression_origin(
+    SolTypeChecker *checker,
+    const SolExpr *expression,
+    const SolParameterId *expression_origins
+) {
+    SolParameterId origin = SOL_AST_NONE;
+    bool have_value = false;
+    if (expression->kind == SOL_EXPR_IF) {
+        if (!sol_type_join_origin(
+                checker,
+                expression->as.if_expr.then_branch,
+                expression_origins,
+                &origin,
+                &have_value
+            )
+            || !sol_type_join_origin(
+                checker,
+                expression->as.if_expr.else_branch,
+                expression_origins,
+                &origin,
+                &have_value
+            )) {
+            return SOL_AST_NONE;
+        }
+    } else {
+        SolMatchArmId arm_id = expression->as.match_expr.first_arm;
+        size_t traversed = 0;
+        while (arm_id != SOL_AST_NONE && traversed++ < checker->syntax->match_arm_count) {
+            const SolMatchArm *arm = &checker->syntax->match_arms[arm_id];
+            if (!sol_type_join_origin(
+                checker,
+                arm->value,
+                expression_origins,
+                &origin,
+                &have_value
+            )) {
+                return SOL_AST_NONE;
+            }
+            arm_id = arm->next;
+        }
+    }
+    return have_value ? origin : SOL_AST_NONE;
+}
+
+static SolParameterId sol_type_expression_origin(
     SolTypeChecker *checker,
     SolExprId expression_id,
-    SolType type
+    SolType type,
+    bool capability
 ) {
-    if (type.kind != SOL_TYPE_CAPABILITY_OPERATION) return SOL_AST_NONE;
+    if (capability ? !sol_type_is_capability(checker, type)
+                   : type.kind != SOL_TYPE_CAPABILITY_OPERATION) {
+        return SOL_AST_NONE;
+    }
     const SolExpr *expression = &checker->syntax->expressions[expression_id];
-    if (expression->kind == SOL_EXPR_FIELD) {
-        return sol_type_capability_origin(checker, expression->as.field.base);
+    const SolParameterId *expression_origins = capability
+        ? checker->types->expression_capability_origins
+        : checker->types->expression_operation_origins;
+    const SolParameterId *local_origins = capability
+        ? checker->types->local_capability_origins
+        : checker->types->local_operation_origins;
+    if (!capability && expression->kind == SOL_EXPR_FIELD) {
+        return checker->types->expression_capability_origins[expression->as.field.base];
     }
     if (expression->kind == SOL_EXPR_PATH) {
-        SolResolution resolution = checker->hir->resolutions[expression_id];
-        if (resolution.kind == SOL_RESOLUTION_LOCAL
-            && resolution.target < checker->types->local_count
-            && checker->hir->locals[resolution.target].owner == checker->current_definition) {
-            return checker->types->local_operation_origins[resolution.target];
-        }
+        return sol_type_path_origin(checker, expression_id, local_origins);
+    }
+    if (expression->kind == SOL_EXPR_BLOCK) {
+        return sol_type_block_origin(checker, expression, expression_origins);
+    }
+    if (expression->kind == SOL_EXPR_IF || expression->kind == SOL_EXPR_MATCH) {
+        return sol_type_join_expression_origin(checker, expression, expression_origins);
     }
     return SOL_AST_NONE;
 }
@@ -664,10 +792,9 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
             if (local != SOL_AST_NONE) {
                 checker->types->locals[local] = value;
                 checker->types->local_capability_origins[local]
-                    = sol_type_capability_origin(
-                        checker,
+                    = checker->types->expression_capability_origins[
                         statement->as.let_statement.value
-                    );
+                    ];
                 checker->types->local_operation_origins[local]
                     = checker->types->expression_operation_origins[
                         statement->as.let_statement.value
@@ -1662,8 +1789,10 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
     --checker->depth;
     checker->states[expression_id] = 2;
     checker->types->expressions[expression_id] = type;
+    checker->types->expression_capability_origins[expression_id]
+        = sol_type_expression_origin(checker, expression_id, type, true);
     checker->types->expression_operation_origins[expression_id]
-        = sol_type_operation_origin(checker, expression_id, type);
+        = sol_type_expression_origin(checker, expression_id, type, false);
     return type;
 }
 
@@ -1694,7 +1823,8 @@ bool sol_type_check(
         .types = types,
         .diagnostics = diagnostics,
     };
-    if (types->expressions != NULL || types->expression_operation_origins != NULL
+    if (types->expressions != NULL || types->expression_capability_origins != NULL
+        || types->expression_operation_origins != NULL
         || types->locals != NULL || types->local_capability_origins != NULL
         || types->local_operation_origins != NULL || types->definitions != NULL
         || types->declared_types != NULL
