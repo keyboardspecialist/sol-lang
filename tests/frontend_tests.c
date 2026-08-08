@@ -74,6 +74,12 @@ static void check_ast_links(const SolSyntaxTree *tree) {
             case SOL_EXPR_PROPAGATE:
                 CHECK(expression->as.propagated < tree->expression_count);
                 break;
+            case SOL_EXPR_HANDLE:
+                CHECK(expression->as.handle.authority < tree->expression_count);
+                CHECK(expression->as.handle.provider < tree->expression_count);
+                CHECK(expression->as.handle.body < tree->expression_count);
+                CHECK(tree->expressions[expression->as.handle.body].kind == SOL_EXPR_BLOCK);
+                break;
             default:
                 break;
         }
@@ -823,6 +829,79 @@ static void test_function_type_recovery_skips_nested_function(void) {
     sol_source_free(&source);
 }
 
+static void test_handle_expression_syntax(void) {
+    static const char source_text[] =
+        "module handle_syntax\n"
+        "capability Clock { function read() -> Int64 effects { clock.read<Self> } }\n"
+        "capability TestClock { function read() -> Int64 effects { pure } }\n"
+        "function sample(clock: capability Clock, provider: capability TestClock) -> Int64 {\n"
+        "    return handle clock.read<clock> with provider { clock.read() }\n"
+        "}\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "handle.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    check_ast_links(&tree);
+    size_t handlers = 0;
+    for (size_t index = 0; index < tree.expression_count; ++index) {
+        if (tree.expressions[index].kind != SOL_EXPR_HANDLE) continue;
+        const SolExpr *handler = &tree.expressions[index];
+        CHECK(sol_token_text_equal(
+            &source,
+            (SolToken){.span = handler->as.handle.effect_name},
+            "clock.read"
+        ));
+        CHECK(tree.expressions[handler->as.handle.body].kind == SOL_EXPR_BLOCK);
+        ++handlers;
+    }
+    CHECK(handlers == 1);
+    bool saw_handle = false;
+    bool saw_with = false;
+    for (size_t index = 0; index < tokens.count; ++index) {
+        saw_handle = saw_handle || tokens.items[index].kind == SOL_TOKEN_HANDLE;
+        saw_with = saw_with || tokens.items[index].kind == SOL_TOKEN_WITH;
+    }
+    CHECK(saw_handle);
+    CHECK(saw_with);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_malformed_handle_expressions(void) {
+    static const char *cases[] = {
+        "module malformed_handle\nfunction bad(a: Int64) -> Int64 { return handle clock.read with a { 1 } }\n",
+        "module malformed_handle\nfunction bad(a: Int64) -> Int64 { return handle clock.read<a> a { 1 } }\n",
+        "module malformed_handle\nfunction bad(a: Int64) -> Int64 { return handle clock.read<a> with a 1 }\n",
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+        SolSource source;
+        SolTokens tokens;
+        SolDiagnostics diagnostics;
+        SolSyntaxTree tree;
+        CHECK(sol_source_from_text(&source, "malformed_handle.sol", cases[index]));
+        sol_tokens_init(&tokens);
+        sol_diagnostics_init(&diagnostics);
+        sol_syntax_tree_init(&tree);
+        CHECK(sol_lex(&source, &tokens, &diagnostics));
+        CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+        CHECK(sol_diagnostics_has_errors(&diagnostics));
+        check_ast_links(&tree);
+        sol_syntax_tree_free(&tree);
+        sol_diagnostics_free(&diagnostics);
+        sol_tokens_free(&tokens);
+        sol_source_free(&source);
+    }
+}
+
 int main(void) {
     test_valid_declarations();
     test_missing_module();
@@ -844,6 +923,8 @@ int main(void) {
     test_function_types();
     test_function_type_requires_effects();
     test_function_type_recovery_skips_nested_function();
+    test_handle_expression_syntax();
+    test_malformed_handle_expressions();
     if (failures != 0) {
         fprintf(stderr, "%d frontend test failure(s)\n", failures);
         return 1;

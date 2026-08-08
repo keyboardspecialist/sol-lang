@@ -707,6 +707,74 @@ static void test_derived_capability_cycles(void) {
     free_compilation(&compilation);
 }
 
+static void test_handler_types_and_metadata(void) {
+    static const char text[] =
+        "module handler_types\n"
+        "capability Clock { function read(delta: Int64) -> Int64 effects { clock.read<Self> } }\n"
+        "capability TestClock { function read(delta: Int64) -> Int64 effects { pure } }\n"
+        "function handled(\n"
+        "    choose: Bool, clock: capability Clock, provider: capability TestClock,\n"
+        ") -> Text {\n"
+        "    let selected = if choose { provider } else { provider }\n"
+        "    return handle clock.read<clock> with selected { clock.read(1) \"handled\" }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    if (compilation.types.expressions == NULL || compilation.types.handlers == NULL) {
+        free_compilation(&compilation);
+        return;
+    }
+    CHECK(compilation.types.handler_count == compilation.syntax.expression_count);
+    size_t handlers = 0;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        if (compilation.syntax.expressions[index].kind != SOL_EXPR_HANDLE) continue;
+        CHECK(compilation.types.expressions[index].kind == SOL_TYPE_TEXT);
+        CHECK(compilation.types.handlers[index].source_member == 0);
+        CHECK(compilation.types.handlers[index].provider_member == 1);
+        CHECK(compilation.types.handlers[index].root
+            == compilation.syntax.parameters[
+                compilation.syntax.items[2].first_parameter
+            ].next);
+        ++handlers;
+    }
+    CHECK(handlers == 1);
+    free_compilation(&compilation);
+}
+
+static void test_invalid_handlers(void) {
+    static const char text[] =
+        "module invalid_handlers\n"
+        "capability Clock { function read(value: Int64) -> Int64 effects { clock.read<Self> } }\n"
+        "capability OtherClock { function read(value: Int64) -> Int64 effects { clock.read<Self> } }\n"
+        "capability Impure { function read(value: Int64) -> Int64 effects { service.read<Self> } }\n"
+        "capability Wrong { function read(value: Bool) -> Int64 effects { pure } }\n"
+        "capability Missing { function value(value: Int64) -> Int64 effects { pure } }\n"
+        "function ambiguous(clock: capability Clock, provider: capability Wrong) -> Int64 {\n"
+        "    return handle clock.read<clock> with provider { 1 }\n"
+        "}\n"
+        "function no_root(provider: capability Wrong) -> Int64 {\n"
+        "    return handle service.read<Impure> with provider { 1 }\n"
+        "}\n"
+        "function incompatible(authority: capability Impure, provider: capability Wrong) -> Int64 {\n"
+        "    return handle service.read<authority> with provider { 1 }\n"
+        "}\n"
+        "function missing(authority: capability Impure, provider: capability Missing) -> Int64 {\n"
+        "    return handle service.read<authority> with provider { 1 }\n"
+        "}\n"
+        "function impure(authority: capability Impure, provider: capability Impure) -> Int64 {\n"
+        "    return handle service.read<authority> with provider { 1 }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-HANDLER-001"));
+    CHECK(diagnostic_count(&compilation, "SOL-HANDLER-001") >= 5);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -738,6 +806,8 @@ int main(void) {
     test_invalid_return_authority_contract();
     test_invalid_derived_capabilities();
     test_derived_capability_cycles();
+    test_handler_types_and_metadata();
+    test_invalid_handlers();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;

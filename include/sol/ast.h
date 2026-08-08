@@ -40,6 +40,7 @@ typedef enum {
     SOL_EXPR_MATCH,
     SOL_EXPR_BLOCK,
     SOL_EXPR_PROPAGATE,
+    SOL_EXPR_HANDLE,
 } SolExprKind;
 
 typedef struct {
@@ -82,6 +83,12 @@ typedef struct {
             SolStatementId first_statement;
         } block;
         SolExprId propagated;
+        struct {
+            SolSpan effect_name;
+            SolExprId authority;
+            SolExprId provider;
+            SolExprId body;
+        } handle;
     } as;
 } SolExpr;
 

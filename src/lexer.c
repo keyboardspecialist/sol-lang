@@ -30,6 +30,8 @@ static const SolKeyword SOL_KEYWORDS[] = {
     {"if", SOL_TOKEN_IF},
     {"else", SOL_TOKEN_ELSE},
     {"match", SOL_TOKEN_MATCH},
+    {"handle", SOL_TOKEN_HANDLE},
+    {"with", SOL_TOKEN_WITH},
     {"true", SOL_TOKEN_TRUE},
     {"false", SOL_TOKEN_FALSE},
 };
@@ -348,7 +350,7 @@ const char *sol_token_kind_name(SolTokenKind kind) {
         "block comment", "identifier", "integer", "string", "module", "edition",
         "use", "public", "private", "record", "enum", "open", "capability",
         "function", "effects", "requires", "ensures", "pure", "let", "return",
-        "if", "else", "match", "true", "false", "(", ")", "{", "}", "[",
+        "if", "else", "match", "handle", "with", "true", "false", "(", ")", "{", "}", "[",
         "]", "<", ">", "<=", ">=", "=", "==", "!", "!=", "+", "-", "*",
         "/", "%", "&&", "||", ".", ",", ":", "@", "?", "->", "=>",
     };

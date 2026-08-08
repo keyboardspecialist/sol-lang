@@ -616,6 +616,52 @@ static bool sol_parser_type(SolParser *parser, SolSpan *span, SolTypeId *type_id
 static SolExprId sol_parser_expression(SolParser *parser, unsigned int minimum_precedence);
 static SolExprId sol_parser_block_expression(SolParser *parser);
 
+static SolExprId sol_parser_handle_expression(SolParser *parser) {
+    SolToken handle = sol_parser_advance(parser);
+    SolSpan effect_name = {0};
+    bool valid = sol_parser_path(parser, &effect_name, "expected an effect name after 'handle'");
+    valid = sol_parser_expect(
+        parser,
+        SOL_TOKEN_LESS,
+        "handled effects require an exact capability argument"
+    ) && valid;
+    SolExprId authority = sol_parser_expression(parser, 5);
+    valid = sol_parser_expect(
+        parser,
+        SOL_TOKEN_GREATER,
+        "expected '>' after handled effect authority"
+    ) && valid;
+    valid = sol_parser_expect(parser, SOL_TOKEN_WITH, "expected 'with' after handled effect")
+        && valid;
+    bool previous_suppression = parser->suppress_record_literal;
+    parser->suppress_record_literal = true;
+    SolExprId provider = sol_parser_expression(parser, 1);
+    parser->suppress_record_literal = previous_suppression;
+    valid = sol_parser_kind(parser) == SOL_TOKEN_LEFT_BRACE && valid;
+    if (sol_parser_kind(parser) != SOL_TOKEN_LEFT_BRACE) {
+        sol_parser_error(
+            parser,
+            "SOL-PARSE-001",
+            sol_parser_current(parser),
+            "expected a handler body"
+        );
+    }
+    SolExprId body = sol_parser_block_expression(parser);
+    size_t end = body < parser->tree->expression_count
+        ? parser->tree->expressions[body].span.end
+        : handle.span.end;
+    return sol_parser_add_expression(parser, (SolExpr){
+        .kind = valid ? SOL_EXPR_HANDLE : SOL_EXPR_ERROR,
+        .span = {.start = handle.span.start, .end = end},
+        .as.handle = {
+            .effect_name = effect_name,
+            .authority = authority,
+            .provider = provider,
+            .body = body,
+        },
+    });
+}
+
 typedef struct {
     SolArgumentId first;
     SolToken closing;
@@ -991,6 +1037,9 @@ static SolExprId sol_parser_primary_expression(SolParser *parser) {
     }
     if (token.kind == SOL_TOKEN_MATCH) {
         return sol_parser_match_expression(parser);
+    }
+    if (token.kind == SOL_TOKEN_HANDLE) {
+        return sol_parser_handle_expression(parser);
     }
 
     sol_parser_error(parser, "SOL-PARSE-011", token, "expected an expression");

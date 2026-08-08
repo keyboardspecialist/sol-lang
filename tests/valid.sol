@@ -28,6 +28,20 @@ capability TimestampClock derives_from source: capability Clock {
     }
 }
 
+capability Random {
+    function next() -> Int64
+    effects {
+        random.read<Self>
+    }
+}
+
+capability FixedRandom {
+    function next() -> Int64
+    effects {
+        pure
+    }
+}
+
 public function greet(
     user: User,
     clock: capability Clock,
@@ -57,4 +71,16 @@ effects {
 } {
     let restricted = TimestampClock { source = clock }
     return restricted.now()
+}
+
+function fixed_random(
+    random: capability Random,
+    provider: capability FixedRandom,
+) -> Int64
+effects {
+    pure
+} {
+    return handle random.read<random> with provider {
+        random.next()
+    }
 }

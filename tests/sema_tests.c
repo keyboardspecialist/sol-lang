@@ -319,6 +319,40 @@ static void test_derived_capability_resolution_and_malformed_body(void) {
     free_compilation(&compilation);
 }
 
+static void test_malformed_handler_ast_rejected(void) {
+    static const char text[] =
+        "module malformed_handler_ast\n"
+        "capability Clock { function read() -> Int64 effects { clock.read<Self> } }\n"
+        "capability TestClock { function read() -> Int64 effects { pure } }\n"
+        "function sample(clock: capability Clock, provider: capability TestClock) -> Int64 {\n"
+        "    return handle clock.read<clock> with provider { clock.read() }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolExprId handler = SOL_AST_NONE;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        if (compilation.syntax.expressions[index].kind == SOL_EXPR_HANDLE) handler = index;
+    }
+    CHECK(handler != SOL_AST_NONE);
+    if (handler != SOL_AST_NONE) {
+        compilation.syntax.expressions[handler].as.handle.body
+            = compilation.syntax.expression_count;
+        sol_hir_module_free(&compilation.hir);
+        sol_hir_module_init(&compilation.hir);
+        sol_diagnostics_free(&compilation.diagnostics);
+        sol_diagnostics_init(&compilation.diagnostics);
+        CHECK(!sol_hir_lower(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    }
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_successful_resolution();
     test_unresolved_name();
@@ -330,6 +364,7 @@ int main(void) {
     test_malformed_ast_rejected();
     test_malformed_arena_metadata_rejected();
     test_derived_capability_resolution_and_malformed_body();
+    test_malformed_handler_ast_rejected();
     if (failures != 0) {
         fprintf(stderr, "%d semantic test failure(s)\n", failures);
         return 1;

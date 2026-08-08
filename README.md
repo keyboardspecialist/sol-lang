@@ -160,6 +160,25 @@ let restricted = ReadFileSystem { source = filesystem }
 
 Effect rows may be inferred locally, but public APIs expose a canonical effect signature. Tests can replace capabilities directly without a separate dependency-injection framework.
 
+Exact capability-backed handlers replace one operation lexically while preserving the body's value and type:
+
+```sol
+capability TestClock {
+    function now() -> Int64 effects { pure }
+}
+
+function deterministic(
+    clock: capability Clock,
+    provider: capability TestClock,
+) -> Int64 effects { pure } {
+    return handle clock.read<clock> with provider {
+        timestamp(clock)
+    }
+}
+```
+
+The handled target must be one parameterized atom and must identify exactly one module-local capability member whose complete row is `{ clock.read<Self> }`. The authority and provider are capability values with known roots. The provider exposes the same operation name and signature with a pure row. Its expression is evaluated outside the handler; calls in the body are handled deeply and lexically only when the instantiated effect has the exact target name and authority root. Other roots and effects remain in the row. This bootstrap form has no resumptions, row transformation, static or unparameterized targets, or dynamic authority matching.
+
 ### Contracts and progressive verification
 
 Preconditions, postconditions, invariants, refinements, ghost state, examples, and properties are native language constructs.
@@ -354,7 +373,7 @@ The language server is expected to expose typed syntax, inferred effects, owners
 
 ## Bootstrap Compiler
 
-The bootstrap compiler is written in C17 and currently provides a lossless lexer, a recovering parser for core declarations and function-body expressions, an arena-backed syntax AST, deterministic definition IDs, lexical name resolution, structural `Option`/`Result` types, checked records and enums, exhaustive matching, semantic effect rows with local inference across statically known calls, and structured human or JSON diagnostics through `sol check`.
+The bootstrap compiler is written in C17 and currently provides a lossless lexer, a recovering parser for core declarations and function-body expressions, an arena-backed syntax AST, deterministic definition IDs, lexical name resolution, structural `Option`/`Result` types, checked records and enums, exhaustive matching, semantic effect rows with local inference across statically known calls, capability-backed exact handlers, and structured human or JSON diagnostics through `sol check`.
 
 ```text
 cmake -S . -B build -G Ninja -DSOL_ENABLE_SANITIZERS=ON
@@ -363,7 +382,7 @@ cmake --build build --target test
 ./build/sol check tests/valid.sol
 ```
 
-This implementation is an experimental edition-2027 front end. Function bodies are parsed, names are resolved into an initial HIR, and expressions, calls, returns, built-in generic types, records, enum constructors, and matches over user enums and `Bool` are checked. Closed structural function types carry explicit normalized semantic effect rows, and calls through function values propagate those rows through inference and explicit checks. Exact functions and bound operations coerce contextually to compatible callback shapes; their finalized effects must be a subset of the callback row. Capability-valued members can declare `authority { result derives_from Self }`, while exact capability-returning functions can derive result authority from a named capability parameter. Both forms preserve provenance through aliases and nominal, type-changing restrictions. Closed nominal capability wrappers have exactly one private capability source, checked member bodies, cycle rejection, and root-preserving construction and `Self` substitution without subtyping or coercion. Explicit declaration rows form modular boundaries, while omitted private functions infer a least union row across direct operations and statically known calls, including self- and mutually recursive call-graph components and formal-argument and `Self` substitution through immutable capability and bound-operation aliases. Safe computed capability and bound-operation provenance joins are supported for `if` and `match` when every reachable value has the same original parameter authority. Public functions and capability members require explicit rows. Generic effect-row variables, lambdas, computed joins of distinct function identities, parameter-dependent callback rows, and `Self`-dependent bound-operation coercions are not yet supported. Mixed or unknown computed provenance is also unsupported. Contract blocks remain delimiter-checked. User-defined generics, ownership, and execution are also not implemented yet.
+This implementation is an experimental edition-2027 front end. Function bodies are parsed, names are resolved into an initial HIR, and expressions, calls, returns, built-in generic types, records, enum constructors, matches over user enums and `Bool`, and exact `handle effect<authority> with provider { body }` expressions are checked. Closed structural function types carry explicit normalized semantic effect rows, and calls through function values propagate those rows through inference and explicit checks. Exact functions and bound operations coerce contextually to compatible callback shapes; their finalized effects must be a subset of the callback row. Capability-valued members can declare `authority { result derives_from Self }`, while exact capability-returning functions can derive result authority from a named capability parameter. Both forms preserve provenance through aliases and nominal, type-changing restrictions. Closed nominal capability wrappers have exactly one private capability source, checked member bodies, cycle rejection, and root-preserving construction and `Self` substitution without subtyping or coercion. Explicit declaration rows form modular boundaries, while omitted private functions infer a least union row across direct operations and statically known calls, including self- and mutually recursive call-graph components and formal-argument and `Self` substitution through immutable capability and bound-operation aliases. Exact handlers retain source and provider operation metadata for runtime interception and subtract matching instantiated name-and-root atoms inside the body without removing call-graph edges; provider evaluation and residual effects remain outward. Safe computed capability and bound-operation provenance joins are supported for `if` and `match` when every reachable value has the same original parameter authority. Public functions and capability members require explicit rows. Generic effect-row variables, lambdas, resumptions, transformed handler rows, dynamic handler targets, computed joins of distinct function identities, parameter-dependent callback rows, and `Self`-dependent bound-operation coercions are not yet supported. Mixed or unknown computed provenance is also unsupported. Contract blocks remain delimiter-checked. User-defined generics, ownership, and execution are also not implemented yet.
 
 Concrete remaining bootstrap work is tracked in [TODO.md](TODO.md).
 

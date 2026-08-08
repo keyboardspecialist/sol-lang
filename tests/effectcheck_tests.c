@@ -1309,6 +1309,137 @@ static void test_derived_capability_body_effect_checked(void) {
     free_compilation(&compilation);
 }
 
+static void test_exact_effect_handlers(void) {
+    static const char text[] =
+        "module exact_effect_handlers\n"
+        "capability Clock {\n"
+        "    function read(value: Int64) -> Int64 effects { clock.read<Self> }\n"
+        "}\n"
+        "capability TestClock {\n"
+        "    function read(value: Int64) -> Int64 effects { pure }\n"
+        "}\n"
+        "function evaluate(provider: capability TestClock) -> capability TestClock\n"
+        "authority { result derives_from provider }\n"
+        "effects { provider.evaluate } { return provider }\n"
+        "function read(clock: capability Clock) -> Int64\n"
+        "effects { clock.read<clock> } { return clock.read(1) }\n"
+        "function mixed(clock: capability Clock) -> Int64\n"
+        "effects { clock.read<clock> service.log } { return clock.read(1) }\n"
+        "function handled(\n"
+        "    clock: capability Clock, other: capability Clock, provider: capability TestClock,\n"
+        ") -> Int64 {\n"
+        "    return handle clock.read<clock> with evaluate(provider) {\n"
+        "        mixed(clock) + other.read(1)\n"
+        "    }\n"
+        "}\n"
+        "function transitive(clock: capability Clock, provider: capability TestClock) -> Int64 {\n"
+        "    return handle clock.read<clock> with provider { read(clock) }\n"
+        "}\n"
+        "function recursive(\n"
+        "    clock: capability Clock, provider: capability TestClock, depth: Int64,\n"
+        ") -> Int64 {\n"
+        "    return handle clock.read<clock> with provider {\n"
+        "        if depth == 0 { clock.read(1) } else { recursive(clock, provider, depth - 1) }\n"
+        "    }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    if (compilation.effects.functions == NULL) {
+        free_compilation(&compilation);
+        return;
+    }
+    const SolSyntaxItem *handled_item = &compilation.syntax.items[5];
+    SolParameterId handled_clock = handled_item->first_parameter;
+    SolParameterId handled_other = compilation.syntax.parameters[handled_clock].next;
+    const SolEffectRow *handled = &compilation.effects.functions[5];
+    CHECK(handled->inferred);
+    CHECK(handled->count == 3);
+    CHECK(row_has_effect(&compilation, handled, "provider.evaluate"));
+    CHECK(row_has_effect(&compilation, handled, "service.log"));
+    CHECK(row_has_parameter_effect(
+        &compilation,
+        handled,
+        "clock.read",
+        handled_other
+    ));
+    CHECK(!row_has_parameter_effect(
+        &compilation,
+        handled,
+        "clock.read",
+        handled_clock
+    ));
+    CHECK(compilation.effects.functions[6].inferred);
+    CHECK(compilation.effects.functions[6].count == 0);
+    CHECK(compilation.effects.functions[7].inferred);
+    CHECK(compilation.effects.functions[7].count == 0);
+
+    size_t handler_count = 0;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        if (compilation.syntax.expressions[index].kind != SOL_EXPR_HANDLE) continue;
+        const SolHandler *handler = &compilation.types.handlers[index];
+        CHECK(handler->source_member == 0);
+        CHECK(handler->provider_member == 1);
+        CHECK(handler->root != SOL_AST_NONE);
+        ++handler_count;
+    }
+    CHECK(handler_count == 3);
+    free_compilation(&compilation);
+}
+
+static void test_handler_provider_constraints(void) {
+    static const char text[] =
+        "module handler_provider_constraints\n"
+        "capability Clock { function read(value: Int64) -> Int64 effects { clock.read<Self> } }\n"
+        "capability ImpureClock {\n"
+        "    function read(value: Int64) -> Int64 effects { service.fake<Self> }\n"
+        "}\n"
+        "function invalid(clock: capability Clock, provider: capability ImpureClock) -> Int64 {\n"
+        "    return handle clock.read<clock> with provider { clock.read(1) }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(!compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-HANDLER-001"));
+    free_compilation(&compilation);
+}
+
+static void test_forged_handler_metadata_rejected(void) {
+    static const char text[] =
+        "module forged_handler_metadata\n"
+        "capability Clock { function read() -> Int64 effects { clock.read<Self> } }\n"
+        "capability TestClock { function read() -> Int64 effects { pure } }\n"
+        "function sample(clock: capability Clock, provider: capability TestClock) -> Int64 {\n"
+        "    return handle clock.read<clock> with provider { clock.read() }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolExprId handler = SOL_AST_NONE;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        if (compilation.syntax.expressions[index].kind == SOL_EXPR_HANDLE) handler = index;
+    }
+    CHECK(handler != SOL_AST_NONE);
+    if (handler != SOL_AST_NONE) {
+        sol_effect_table_free(&compilation.effects);
+        SolParameterId root = compilation.types.handlers[handler].root;
+        compilation.types.handlers[handler].root = compilation.syntax.parameters[root].next;
+        CHECK(!sol_effect_check(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+        compilation.types.handlers[handler].root = root;
+    }
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_private_pure_inference();
     test_forward_transitive_inference();
@@ -1347,6 +1478,9 @@ int main(void) {
     test_restricted_capability_return_authority();
     test_derived_capability_wrapper();
     test_derived_capability_body_effect_checked();
+    test_exact_effect_handlers();
+    test_handler_provider_constraints();
+    test_forged_handler_metadata_rejected();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;

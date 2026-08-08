@@ -43,6 +43,12 @@ typedef struct {
 } SolFunctionCoercion;
 
 typedef struct {
+    SolCapabilityMemberId source_member;
+    SolCapabilityMemberId provider_member;
+    SolParameterId root;
+} SolHandler;
+
+typedef struct {
     SolType *expressions;
     size_t expression_count;
     /* Indexed by SolExprId; SOL_AST_NONE means no capability parameter origin. */
@@ -63,6 +69,9 @@ typedef struct {
     SolFunctionCoercion *function_coercions;
     size_t function_coercion_count;
     size_t function_coercion_capacity;
+    /* Indexed by SolExprId; non-handler entries contain SOL_AST_NONE fields. */
+    SolHandler *handlers;
+    size_t handler_count;
 } SolTypeTable;
 
 void sol_type_table_init(SolTypeTable *table);

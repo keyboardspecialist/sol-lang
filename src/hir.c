@@ -463,7 +463,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         const SolExpr *expression = &syntax->expressions[index];
         bool valid = (int)expression->kind >= 0
-            && expression->kind <= SOL_EXPR_PROPAGATE
+            && expression->kind <= SOL_EXPR_HANDLE
             && sol_span_valid(resolver->source, expression->span);
         switch (expression->kind) {
             case SOL_EXPR_PATH:
@@ -513,6 +513,16 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                 break;
             case SOL_EXPR_PROPAGATE:
                 valid = valid && expression->as.propagated < syntax->expression_count;
+                break;
+            case SOL_EXPR_HANDLE:
+                valid = valid
+                    && sol_span_valid(resolver->source, expression->as.handle.effect_name)
+                    && expression->as.handle.effect_name.start
+                        < expression->as.handle.effect_name.end
+                    && expression->as.handle.authority < syntax->expression_count
+                    && expression->as.handle.provider < syntax->expression_count
+                    && expression->as.handle.body < syntax->expression_count
+                    && syntax->expressions[expression->as.handle.body].kind == SOL_EXPR_BLOCK;
                 break;
             default:
                 break;
@@ -860,6 +870,11 @@ static void sol_resolver_expression(SolResolver *resolver, SolExprId expression_
             break;
         case SOL_EXPR_PROPAGATE:
             sol_resolver_expression(resolver, expression->as.propagated);
+            break;
+        case SOL_EXPR_HANDLE:
+            sol_resolver_expression(resolver, expression->as.handle.authority);
+            sol_resolver_expression(resolver, expression->as.handle.provider);
+            sol_resolver_expression(resolver, expression->as.handle.body);
             break;
         default:
             break;

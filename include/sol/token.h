@@ -36,6 +36,8 @@ typedef enum {
     SOL_TOKEN_IF,
     SOL_TOKEN_ELSE,
     SOL_TOKEN_MATCH,
+    SOL_TOKEN_HANDLE,
+    SOL_TOKEN_WITH,
     SOL_TOKEN_TRUE,
     SOL_TOKEN_FALSE,
 

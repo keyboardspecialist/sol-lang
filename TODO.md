@@ -14,7 +14,8 @@ toolchain phases remain documented in the [README](README.md#roadmap).
       functions and aliases.
 - [x] Add closed nominal, single-source user-defined capability wrappers with
       checked member implementations and root-preserving `Self` effects.
-- [ ] Define and implement effect handlers and handled-row subtraction.
+- [x] Add capability-backed exact effect handlers with scoped, root-sensitive
+      handled-row subtraction and preserved runtime interception metadata.
 - [ ] Decide how dynamic or mixed authority provenance is represented beyond the
       current same-origin `if` and `match` joins.
 

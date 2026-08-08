@@ -28,6 +28,11 @@ typedef struct {
 } SolEffectProvenanceEntry;
 
 typedef struct {
+    SolSpan name;
+    SolParameterId root;
+} SolHandledEffect;
+
+typedef struct {
     const SolSource *source;
     const SolSyntaxTree *syntax;
     const SolHirModule *hir;
@@ -43,6 +48,8 @@ typedef struct {
     SolDefId *expression_owners;
     size_t edge_count;
     size_t edge_capacity;
+    SolHandledEffect handled[256];
+    size_t handled_count;
     SolDefId current_function;
     SolCapabilityMemberId current_member;
     SolEffectWalkMode mode;
@@ -192,6 +199,21 @@ static bool sol_effect_row_append(
     row->atoms = grown;
     row->atoms[row->count++] = atom;
     return true;
+}
+
+static bool sol_effect_atom_is_handled(
+    const SolEffectChecker *checker,
+    const SolEffectAtom *atom
+) {
+    if (atom->argument_kind != SOL_EFFECT_ATOM_PARAMETER) return false;
+    for (size_t index = checker->handled_count; index > 0; --index) {
+        const SolHandledEffect *handled = &checker->handled[index - 1];
+        if (atom->parameter == handled->root
+            && sol_effect_span_equal(checker->source, atom->name, handled->name)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool sol_effect_parameter_is_capability(
@@ -616,6 +638,7 @@ static void sol_effect_process_call(SolEffectChecker *checker, const SolExpr *ca
         )) {
             continue;
         }
+        if (sol_effect_atom_is_handled(checker, &instantiated)) continue;
         if (checker->mode == SOL_EFFECT_WALK_INFER) {
             sol_effect_row_append(checker, caller, instantiated);
             continue;
@@ -748,6 +771,27 @@ static void sol_effect_expression(SolEffectChecker *checker, SolExprId expressio
         case SOL_EXPR_PROPAGATE:
             sol_effect_expression(checker, expression->as.propagated);
             break;
+        case SOL_EXPR_HANDLE: {
+            sol_effect_expression(checker, expression->as.handle.authority);
+            sol_effect_expression(checker, expression->as.handle.provider);
+            if (checker->mode == SOL_EFFECT_WALK_GRAPH) {
+                sol_effect_expression(checker, expression->as.handle.body);
+                break;
+            }
+            if (expression_id >= checker->types->handler_count
+                || checker->handled_count >= 256) {
+                checker->malformed = true;
+                break;
+            }
+            const SolHandler *handler = &checker->types->handlers[expression_id];
+            checker->handled[checker->handled_count++] = (SolHandledEffect){
+                .name = expression->as.handle.effect_name,
+                .root = handler->root,
+            };
+            sol_effect_expression(checker, expression->as.handle.body);
+            --checker->handled_count;
+            break;
+        }
         default:
             break;
     }
@@ -770,6 +814,7 @@ static void sol_effect_walk_function(
     checker->current_member = SOL_AST_NONE;
     checker->mode = mode;
     checker->depth = 0;
+    checker->handled_count = 0;
     sol_effect_expression(checker, item->body);
 }
 
@@ -788,6 +833,7 @@ static void sol_effect_walk_member(
     checker->current_member = member_id;
     checker->mode = SOL_EFFECT_WALK_VALIDATE;
     checker->depth = 0;
+    checker->handled_count = 0;
     sol_effect_expression(checker, member->body);
 }
 
@@ -831,7 +877,7 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         const SolExpr *expression = &syntax->expressions[index];
         bool valid = (int)expression->kind >= 0
-            && expression->kind <= SOL_EXPR_PROPAGATE
+            && expression->kind <= SOL_EXPR_HANDLE
             && sol_effect_span_valid(source, expression->span);
         switch (expression->kind) {
             case SOL_EXPR_PATH:
@@ -881,6 +927,16 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
                 break;
             case SOL_EXPR_PROPAGATE:
                 valid = valid && expression->as.propagated < syntax->expression_count;
+                break;
+            case SOL_EXPR_HANDLE:
+                valid = valid
+                    && sol_effect_span_valid(source, expression->as.handle.effect_name)
+                    && expression->as.handle.effect_name.start
+                        < expression->as.handle.effect_name.end
+                    && expression->as.handle.authority < syntax->expression_count
+                    && expression->as.handle.provider < syntax->expression_count
+                    && expression->as.handle.body < syntax->expression_count
+                    && syntax->expressions[expression->as.handle.body].kind == SOL_EXPR_BLOCK;
                 break;
             default:
                 break;
@@ -1252,6 +1308,30 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
                         &stack_count
                     );
                     break;
+                case SOL_EXPR_HANDLE:
+                    valid = sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.handle.authority,
+                        states,
+                        stack,
+                        &stack_count
+                    ) && sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.handle.provider,
+                        states,
+                        stack,
+                        &stack_count
+                    ) && sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.handle.body,
+                        states,
+                        stack,
+                        &stack_count
+                    );
+                    break;
                 default:
                     break;
             }
@@ -1460,6 +1540,12 @@ static SolParameterId sol_effect_expected_expression_origin(
         }
         return SOL_AST_NONE;
     }
+    if (expression->kind == SOL_EXPR_HANDLE) {
+        SolExprId body = expression->as.handle.body;
+        return body < checker->types->expression_count
+            ? expression_origins[body]
+            : SOL_AST_NONE;
+    }
     if (expression->kind == SOL_EXPR_BLOCK) {
         return sol_effect_block_origin(checker, expression, expression_origins);
     }
@@ -1615,6 +1701,12 @@ static void sol_effect_push_expression_provenance_dependencies(
         }
     } else if (!capability && expression->kind == SOL_EXPR_FIELD) {
         /* Capability expression provenance is validated before operation provenance. */
+    } else if (expression->kind == SOL_EXPR_HANDLE) {
+        sol_effect_push_provenance_dependency(
+            stack,
+            stack_count,
+            expression->as.handle.body
+        );
     }
 }
 
@@ -1763,6 +1855,144 @@ static bool sol_effect_semantic_type_equal(SolType left, SolType right) {
         && (!sol_effect_type_has_identity(left.kind) || left.definition == right.definition);
 }
 
+static bool sol_effect_member_is_family(
+    const SolEffectChecker *checker,
+    SolCapabilityMemberId member_id,
+    SolSpan effect_name
+) {
+    if (member_id >= checker->syntax->capability_member_count) return false;
+    const SolCapabilityMember *member = &checker->syntax->capability_members[member_id];
+    SolEffectId effect_id = member->first_effect;
+    if (effect_id == SOL_AST_NONE || effect_id >= checker->syntax->effect_count) return false;
+    const SolEffect *effect = &checker->syntax->effects[effect_id];
+    return effect->owner_kind == SOL_EFFECT_OWNER_CAPABILITY_MEMBER
+        && effect->owner == member_id
+        && effect->next == SOL_AST_NONE
+        && !effect->is_pure
+        && effect->has_argument
+        && sol_effect_span_equal(checker->source, effect->name, effect_name)
+        && sol_effect_span_text_equal(checker->source, effect->argument, "Self");
+}
+
+static bool sol_effect_member_is_pure(
+    const SolEffectChecker *checker,
+    SolCapabilityMemberId member_id
+) {
+    const SolCapabilityMember *member = &checker->syntax->capability_members[member_id];
+    if (!member->has_effect_clause) return false;
+    SolEffectId effect = member->first_effect;
+    size_t traversed = 0;
+    while (effect != SOL_AST_NONE) {
+        if (effect >= checker->syntax->effect_count
+            || traversed++ >= checker->syntax->effect_count) return false;
+        const SolEffect *entry = &checker->syntax->effects[effect];
+        if (entry->owner_kind != SOL_EFFECT_OWNER_CAPABILITY_MEMBER
+            || entry->owner != member_id || !entry->is_pure || entry->has_argument) {
+            return false;
+        }
+        effect = entry->next;
+    }
+    return true;
+}
+
+static bool sol_effect_member_signatures_equal(
+    const SolEffectChecker *checker,
+    SolCapabilityMemberId left_id,
+    SolCapabilityMemberId right_id
+) {
+    const SolCapabilityMember *left = &checker->syntax->capability_members[left_id];
+    const SolCapabilityMember *right = &checker->syntax->capability_members[right_id];
+    SolParameterId left_parameter = left->first_parameter;
+    SolParameterId right_parameter = right->first_parameter;
+    size_t traversed = 0;
+    while (left_parameter != SOL_AST_NONE && right_parameter != SOL_AST_NONE) {
+        if (left_parameter >= checker->syntax->parameter_count
+            || right_parameter >= checker->syntax->parameter_count
+            || traversed++ >= checker->syntax->parameter_count) return false;
+        const SolParameter *left_entry = &checker->syntax->parameters[left_parameter];
+        const SolParameter *right_entry = &checker->syntax->parameters[right_parameter];
+        if (left_entry->type_id >= checker->types->declared_type_count
+            || right_entry->type_id >= checker->types->declared_type_count
+            || !sol_effect_span_equal(checker->source, left_entry->name, right_entry->name)
+            || !sol_effect_semantic_type_equal(
+                checker->types->declared_types[left_entry->type_id],
+                checker->types->declared_types[right_entry->type_id]
+            )) return false;
+        left_parameter = left_entry->next;
+        right_parameter = right_entry->next;
+    }
+    return left_parameter == SOL_AST_NONE && right_parameter == SOL_AST_NONE
+        && left->return_type_id < checker->types->declared_type_count
+        && right->return_type_id < checker->types->declared_type_count
+        && sol_effect_semantic_type_equal(
+            checker->types->declared_types[left->return_type_id],
+            checker->types->declared_types[right->return_type_id]
+        );
+}
+
+static bool sol_effect_validate_handlers(const SolEffectChecker *checker) {
+    for (size_t index = 0; index < checker->syntax->expression_count; ++index) {
+        const SolExpr *expression = &checker->syntax->expressions[index];
+        const SolHandler *handler = &checker->types->handlers[index];
+        if (expression->kind != SOL_EXPR_HANDLE) {
+            if (handler->source_member != SOL_AST_NONE
+                || handler->provider_member != SOL_AST_NONE
+                || handler->root != SOL_AST_NONE) return false;
+            continue;
+        }
+        if (handler->source_member >= checker->syntax->capability_member_count
+            || handler->provider_member >= checker->syntax->capability_member_count
+            || handler->root >= checker->syntax->parameter_count) return false;
+        const SolCapabilityMember *source
+            = &checker->syntax->capability_members[handler->source_member];
+        const SolCapabilityMember *provider
+            = &checker->syntax->capability_members[handler->provider_member];
+        if (source->owner_item >= checker->syntax->item_count
+            || provider->owner_item >= checker->syntax->item_count
+            || !sol_effect_member_is_family(
+                checker,
+                handler->source_member,
+                expression->as.handle.effect_name
+            )
+            || !sol_effect_span_equal(checker->source, source->name, provider->name)
+            || !sol_effect_member_signatures_equal(
+                checker,
+                handler->source_member,
+                handler->provider_member
+            )
+            || !sol_effect_member_is_pure(checker, handler->provider_member)) return false;
+        size_t matches = 0;
+        for (size_t candidate = 0;
+            candidate < checker->syntax->capability_member_count;
+            ++candidate) {
+            const SolCapabilityMember *member
+                = &checker->syntax->capability_members[candidate];
+            if (member->owner_item < checker->syntax->item_count
+                && sol_effect_member_is_family(
+                    checker,
+                    candidate,
+                    expression->as.handle.effect_name
+                )) ++matches;
+        }
+        SolType authority = checker->types->expressions[expression->as.handle.authority];
+        SolType provider_type = checker->types->expressions[expression->as.handle.provider];
+        if (matches != 1
+            || authority.kind != SOL_TYPE_NOMINAL
+            || authority.definition != source->owner_item
+            || provider_type.kind != SOL_TYPE_NOMINAL
+            || provider_type.definition != provider->owner_item
+            || checker->types->expression_capability_origins[
+                expression->as.handle.authority
+            ] != handler->root
+            || checker->types->expression_capability_origins[
+                expression->as.handle.provider
+            ] == SOL_AST_NONE
+            || checker->parameter_owners[handler->root]
+                != checker->expression_owners[index]) return false;
+    }
+    return true;
+}
+
 static bool sol_effect_coercion_shape_matches(
     const SolEffectChecker *checker,
     const SolFunctionCoercion *coercion,
@@ -1836,6 +2066,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || types->declared_type_count != syntax->type_count
         || types->function_type_count > types->function_type_capacity
         || types->function_coercion_count > types->function_coercion_capacity
+        || types->handler_count != syntax->expression_count
         || ((types->function_coercion_count == 0)
             != (types->function_coercion_capacity == 0))
         || (types->expression_count != 0 && types->expressions == NULL)
@@ -1848,7 +2079,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (types->declared_type_count != 0 && types->declared_types == NULL)
         || (types->function_type_capacity != 0 && types->function_types == NULL)
         || (types->function_coercion_capacity != 0
-            && types->function_coercions == NULL)) {
+            && types->function_coercions == NULL)
+        || (types->handler_count != 0 && types->handlers == NULL)) {
         return false;
     }
     for (size_t index = 0; index < types->function_type_count; ++index) {
@@ -2084,7 +2316,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         }
     }
     if (!sol_effect_build_expression_owners(checker)
-        || !sol_effect_validate_local_resolutions(checker)) return false;
+        || !sol_effect_validate_local_resolutions(checker)
+        || !sol_effect_validate_handlers(checker)) return false;
     if (!sol_effect_hir_matches_source(checker)) return false;
     for (size_t index = 0; index < hir->local_count; ++index) {
         const SolHirLocal *local = &hir->locals[index];
