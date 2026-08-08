@@ -352,6 +352,8 @@ cmake --build build --target test
 
 This implementation is an experimental edition-2027 front end. Function bodies are parsed, names are resolved into an initial HIR, and expressions, calls, returns, built-in generic types, records, enum constructors, and matches over user enums and `Bool` are checked. Explicit effect rows form modular boundaries, while omitted private acyclic functions infer a least union row across direct operations and statically known calls, including formal-argument and `Self` substitution through immutable capability and bound-operation aliases. Safe computed capability and bound-operation provenance joins are supported for `if` and `match` when every reachable value has the same original parameter authority. Public functions, capability members, and recursive functions require explicit rows. Mixed or unknown computed provenance, recursive fixed-point inference, and general higher-order types are not supported. Contract blocks remain delimiter-checked. User-defined generics, ownership, and execution are also not implemented yet.
 
+Concrete remaining bootstrap work is tracked in [TODO.md](TODO.md).
+
 ## Compiler Architecture
 
 The proposed compiler pipeline is:
