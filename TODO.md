@@ -7,7 +7,8 @@ toolchain phases remain documented in the [README](README.md#roadmap).
 
 - [x] Infer recursive effect rows with a least fixed point over call-graph SCCs.
 - [x] Represent closed general function types with normalized semantic effect rows.
-- [ ] Check higher-order calls, callbacks, and function values with declared effects.
+- [x] Check higher-order calls, callbacks, and function values with closed declared effects.
+- [ ] Add effect-row polymorphism and row variables for generic higher-order functions.
 - [ ] Model restricted and wrapped capabilities without losing authority provenance.
 - [ ] Define and implement effect handlers and handled-row subtraction.
 - [ ] Decide how dynamic or mixed authority provenance is represented beyond the

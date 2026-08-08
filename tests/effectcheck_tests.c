@@ -1088,6 +1088,125 @@ static void test_malformed_function_type_effects_rejected(void) {
     free_compilation(&compilation);
 }
 
+static void test_higher_order_effects(void) {
+    static const char text[] =
+        "module higher_order_effects\n"
+        "function source(value: Int64) -> Int64 effects { clock.read } { return value }\n"
+        "function inferred_source(value: Int64) -> Int64 { return source(value) }\n"
+        "function pure_source(value: Int64) -> Int64 effects { pure } { return value }\n"
+        "function apply(\n"
+        "    value: Int64,\n"
+        "    callback: function(Int64) -> Int64 effects { clock.read },\n"
+        ") -> Int64 { return callback(value) }\n"
+        "function valid() -> Int64 effects { clock.read } { return apply(1, source) }\n"
+        "function alias_valid() -> Int64 effects { clock.read } {\n"
+        "    let callback = source\n"
+        "    return apply(1, callback)\n"
+        "}\n"
+        "function inferred_valid() -> Int64 effects { clock.read } {\n"
+        "    return apply(1, inferred_source)\n"
+        "}\n"
+        "function pure_valid() -> Int64 effects { clock.read } {\n"
+        "    return apply(1, pure_source)\n"
+        "}\n"
+        "function return_source() -> function(Int64) -> Int64 effects { clock.read } {\n"
+        "    return source\n"
+        "}\n"
+        "function missing(\n"
+        "    callback: function(Int64) -> Int64 effects { clock.read },\n"
+        ") -> Int64 effects { pure } { return callback(1) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-002") == 1);
+    CHECK(!has_diagnostic(&compilation, "SOL-EFFECT-006"));
+    CHECK(compilation.effects.functions[3].inferred);
+    CHECK(compilation.effects.functions[3].count == 1);
+    CHECK(row_has_effect(&compilation, &compilation.effects.functions[3], "clock.read"));
+    CHECK(compilation.types.function_coercion_count == 5);
+    free_compilation(&compilation);
+}
+
+static void test_incompatible_callback_effects(void) {
+    static const char text[] =
+        "module incompatible_callback_effects\n"
+        "capability Clock { function now() -> Int64 effects { clock.read<Self> } }\n"
+        "function network(value: Int64) -> Int64 effects { network.call } { return value }\n"
+        "function read(clock: capability Clock) -> Int64 effects { clock.read<clock> } {\n"
+        "    return clock.now()\n"
+        "}\n"
+        "function apply(\n"
+        "    value: Int64,\n"
+        "    callback: function(Int64) -> Int64 effects { clock.read },\n"
+        ") -> Int64 effects { clock.read } { return callback(value) }\n"
+        "function apply_capability(\n"
+        "    value: capability Clock,\n"
+        "    callback: function(capability Clock) -> Int64 effects { clock.read },\n"
+        ") -> Int64 effects { clock.read } { return callback(value) }\n"
+        "function bad_effect() -> Int64 effects { clock.read } { return apply(1, network) }\n"
+        "function bad_authority(clock: capability Clock) -> Int64 effects { clock.read } {\n"
+        "    return apply_capability(clock, read)\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-006") == 1);
+    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-007") == 1);
+    free_compilation(&compilation);
+}
+
+static void test_malformed_function_coercion_rejected(void) {
+    static const char text[] =
+        "module malformed_function_coercion\n"
+        "function source(value: Int64) -> Int64 effects { pure } { return value }\n"
+        "function apply(\n"
+        "    callback: function(Int64) -> Int64 effects { pure },\n"
+        ") -> Int64 effects { pure } { return callback(1) }\n"
+        "function invoke() -> Int64 effects { pure } { return apply(source) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.types.function_coercion_count == 1);
+    if (compilation.types.function_coercion_count == 1) {
+        sol_effect_table_free(&compilation.effects);
+        compilation.types.function_coercions[0].expression
+            = compilation.syntax.expression_count;
+        CHECK(!sol_effect_check(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+    }
+    free_compilation(&compilation);
+}
+
+static void test_static_bound_operation_callback(void) {
+    static const char text[] =
+        "module static_bound_operation_callback\n"
+        "capability Gateway {\n"
+        "    function send(value: Int64) -> Int64 effects { network.call<Primary> }\n"
+        "}\n"
+        "function apply(\n"
+        "    value: Int64,\n"
+        "    callback: function(Int64) -> Int64 effects { network.call<Primary> },\n"
+        ") -> Int64 effects { network.call<Primary> } { return callback(value) }\n"
+        "function valid(gateway: capability Gateway) -> Int64\n"
+        "effects { network.call<Primary> } { return apply(1, gateway.send) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.types.function_coercion_count == 1);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_private_pure_inference();
     test_forward_transitive_inference();
@@ -1119,6 +1238,10 @@ int main(void) {
     test_nonempty_effect_table_rejected();
     test_function_type_effects_are_not_performed();
     test_malformed_function_type_effects_rejected();
+    test_higher_order_effects();
+    test_incompatible_callback_effects();
+    test_malformed_function_coercion_rejected();
+    test_static_bound_operation_callback();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;

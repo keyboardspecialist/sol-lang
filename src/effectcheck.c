@@ -487,6 +487,7 @@ static bool sol_effect_instantiate_atom(
 typedef enum {
     SOL_EFFECT_CALL_NONE,
     SOL_EFFECT_CALL_FUNCTION,
+    SOL_EFFECT_CALL_SIGNATURE,
     SOL_EFFECT_CALL_MEMBER,
 } SolEffectCallKind;
 
@@ -526,6 +527,10 @@ static SolEffectCall sol_effect_resolve_call(
         result.kind = SOL_EFFECT_CALL_FUNCTION;
         result.target = resolution.target;
         result.first_parameter = checker->syntax->items[result.target].first_parameter;
+    } else if (callee_type.kind == SOL_TYPE_FUNCTION_SIGNATURE
+        && callee_type.definition < checker->types->function_type_count) {
+        result.kind = SOL_EFFECT_CALL_SIGNATURE;
+        result.target = callee_type.definition;
     } else if (callee_type.kind == SOL_TYPE_CAPABILITY_OPERATION
         && callee_type.definition < checker->syntax->capability_member_count) {
         result.kind = SOL_EFFECT_CALL_MEMBER;
@@ -583,16 +588,25 @@ static void sol_effect_process_call(SolEffectChecker *checker, const SolExpr *ca
         }
         return;
     }
-    const SolEffectRow *required = resolved.kind == SOL_EFFECT_CALL_FUNCTION
-        ? &checker->effects->functions[resolved.target]
-        : &checker->effects->capability_members[resolved.target];
+    const SolEffectAtom *required_atoms;
+    size_t required_count;
+    if (resolved.kind == SOL_EFFECT_CALL_FUNCTION) {
+        required_atoms = checker->effects->functions[resolved.target].atoms;
+        required_count = checker->effects->functions[resolved.target].count;
+    } else if (resolved.kind == SOL_EFFECT_CALL_SIGNATURE) {
+        required_atoms = checker->types->function_types[resolved.target].effects.atoms;
+        required_count = checker->types->function_types[resolved.target].effects.count;
+    } else {
+        required_atoms = checker->effects->capability_members[resolved.target].atoms;
+        required_count = checker->effects->capability_members[resolved.target].count;
+    }
     SolEffectRow *caller = &checker->effects->functions[checker->current_function];
-    for (size_t index = 0; index < required->count; ++index) {
+    for (size_t index = 0; index < required_count; ++index) {
         SolEffectAtom instantiated;
         if (!sol_effect_instantiate_atom(
             checker,
             call,
-            &required->atoms[index],
+            &required_atoms[index],
             resolved.first_parameter,
             resolved.receiver_parameter,
             &instantiated
@@ -1647,6 +1661,46 @@ static bool sol_effect_semantic_type_equal(SolType left, SolType right) {
         && (!sol_effect_type_has_identity(left.kind) || left.definition == right.definition);
 }
 
+static bool sol_effect_coercion_shape_matches(
+    const SolEffectChecker *checker,
+    const SolFunctionCoercion *coercion,
+    SolType actual
+) {
+    const SolFunctionType *expected
+        = &checker->types->function_types[coercion->expected.definition];
+    SolParameterId parameter;
+    SolType result;
+    if (actual.kind == SOL_TYPE_FUNCTION) {
+        parameter = checker->syntax->items[actual.definition].first_parameter;
+        result = checker->types->definitions[actual.definition];
+    } else {
+        const SolCapabilityMember *member
+            = &checker->syntax->capability_members[actual.definition];
+        if (member->return_type_id >= checker->types->declared_type_count) return false;
+        parameter = member->first_parameter;
+        result = checker->types->declared_types[member->return_type_id];
+    }
+    size_t index = 0;
+    while (parameter != SOL_AST_NONE && index < expected->parameter_count) {
+        if (parameter >= checker->syntax->parameter_count
+            || checker->syntax->parameters[parameter].type_id
+                >= checker->types->declared_type_count) {
+            return false;
+        }
+        SolType actual_parameter = checker->types->declared_types[
+            checker->syntax->parameters[parameter].type_id
+        ];
+        if (!sol_effect_semantic_type_equal(
+            actual_parameter,
+            expected->parameters[index]
+        )) return false;
+        parameter = checker->syntax->parameters[parameter].next;
+        ++index;
+    }
+    return parameter == SOL_AST_NONE && index == expected->parameter_count
+        && sol_effect_semantic_type_equal(result, expected->result);
+}
+
 static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
     const SolSource *source = checker->source;
     const SolSyntaxTree *syntax = checker->syntax;
@@ -1679,6 +1733,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || types->definition_count != hir->definition_count
         || types->declared_type_count != syntax->type_count
         || types->function_type_count > types->function_type_capacity
+        || types->function_coercion_count > types->function_coercion_capacity
+        || ((types->function_coercion_count == 0)
+            != (types->function_coercion_capacity == 0))
         || (types->expression_count != 0 && types->expressions == NULL)
         || (types->expression_count != 0 && types->expression_capability_origins == NULL)
         || (types->expression_count != 0 && types->expression_operation_origins == NULL)
@@ -1687,7 +1744,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (types->local_count != 0 && types->local_operation_origins == NULL)
         || (types->definition_count != 0 && types->definitions == NULL)
         || (types->declared_type_count != 0 && types->declared_types == NULL)
-        || (types->function_type_capacity != 0 && types->function_types == NULL)) {
+        || (types->function_type_capacity != 0 && types->function_types == NULL)
+        || (types->function_coercion_capacity != 0
+            && types->function_coercions == NULL)) {
         return false;
     }
     for (size_t index = 0; index < types->function_type_count; ++index) {
@@ -1784,6 +1843,25 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
                 return false;
             }
         }
+    }
+    for (size_t index = 0; index < types->function_coercion_count; ++index) {
+        const SolFunctionCoercion *coercion = &types->function_coercions[index];
+        if (coercion->expression >= syntax->expression_count
+            || coercion->expected.kind != SOL_TYPE_FUNCTION_SIGNATURE
+            || coercion->expected.definition >= types->function_type_count) {
+            return false;
+        }
+        SolType actual = types->expressions[coercion->expression];
+        if ((actual.kind == SOL_TYPE_FUNCTION
+                && (actual.definition >= syntax->item_count
+                    || syntax->items[actual.definition].kind != SOL_ITEM_FUNCTION))
+            || (actual.kind == SOL_TYPE_CAPABILITY_OPERATION
+                && actual.definition >= syntax->capability_member_count)
+            || (actual.kind != SOL_TYPE_FUNCTION
+                && actual.kind != SOL_TYPE_CAPABILITY_OPERATION)) {
+            return false;
+        }
+        if (!sol_effect_coercion_shape_matches(checker, coercion, actual)) return false;
     }
     for (size_t index = 0; index < syntax->item_count; ++index) {
         const SolSyntaxItem *item = &syntax->items[index];
@@ -2070,6 +2148,65 @@ static void sol_effect_infer_functions(
     }
 }
 
+static void sol_effect_validate_function_coercions(SolEffectChecker *checker) {
+    for (size_t index = 0; index < checker->types->function_coercion_count; ++index) {
+        const SolFunctionCoercion *coercion
+            = &checker->types->function_coercions[index];
+        SolType actual = checker->types->expressions[coercion->expression];
+        const SolEffectAtom *actual_atoms;
+        size_t actual_count;
+        if (actual.kind == SOL_TYPE_FUNCTION) {
+            actual_atoms = checker->effects->functions[actual.definition].atoms;
+            actual_count = checker->effects->functions[actual.definition].count;
+        } else if (actual.kind == SOL_TYPE_CAPABILITY_OPERATION) {
+            actual_atoms = checker->effects->capability_members[actual.definition].atoms;
+            actual_count = checker->effects->capability_members[actual.definition].count;
+        } else {
+            checker->malformed = true;
+            return;
+        }
+        const SolEffectSet *expected = &checker->types->function_types[
+            coercion->expected.definition
+        ].effects;
+        bool reported = false;
+        for (size_t atom = 0; atom < actual_count; ++atom) {
+            if (actual_atoms[atom].argument_kind == SOL_EFFECT_ATOM_PARAMETER
+                || actual_atoms[atom].argument_kind == SOL_EFFECT_ATOM_SELF) {
+                if (!reported) {
+                    sol_effect_error(
+                        checker,
+                        "SOL-EFFECT-007",
+                        checker->syntax->expressions[coercion->expression].span,
+                        "function value has authority-dependent effects that a closed callback type cannot represent"
+                    );
+                    reported = true;
+                }
+                continue;
+            }
+            bool found = false;
+            for (size_t candidate = 0; candidate < expected->count; ++candidate) {
+                if (sol_effect_atom_equal(
+                    checker,
+                    &actual_atoms[atom],
+                    &expected->atoms[candidate]
+                )) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found && !reported) {
+                sol_effect_error(
+                    checker,
+                    "SOL-EFFECT-006",
+                    checker->syntax->expressions[coercion->expression].span,
+                    "function value performs effects not permitted by the expected callback type"
+                );
+                reported = true;
+            }
+        }
+    }
+}
+
 bool sol_effect_check(
     const SolSource *source,
     const SolSyntaxTree *syntax,
@@ -2181,6 +2318,9 @@ bool sol_effect_check(
         size_t *components = sol_effect_find_components(&checker, &component_count);
         if (!checker.allocation_failed) {
             sol_effect_infer_functions(&checker, components, component_count);
+            if (!checker.malformed && !checker.allocation_failed) {
+                sol_effect_validate_function_coercions(&checker);
+            }
         }
         free(components);
         if (!checker.malformed && !checker.allocation_failed) {

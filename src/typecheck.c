@@ -415,6 +415,7 @@ void sol_type_table_free(SolTypeTable *table) {
         free(table->function_types[index].effects.atoms);
     }
     free(table->function_types);
+    free(table->function_coercions);
     memset(table, 0, sizeof(*table));
 }
 
@@ -841,6 +842,157 @@ static SolType sol_type_from_id(SolTypeChecker *checker, SolTypeId type_id) {
     return type;
 }
 
+static bool sol_type_effect_subset(
+    const SolTypeChecker *checker,
+    const SolEffectSet *actual,
+    const SolEffectSet *expected
+) {
+    for (size_t actual_index = 0; actual_index < actual->count; ++actual_index) {
+        bool found = false;
+        for (size_t expected_index = 0; expected_index < expected->count; ++expected_index) {
+            if (sol_type_effect_atom_equal(
+                checker,
+                &actual->atoms[actual_index],
+                &expected->atoms[expected_index]
+            )) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+static bool sol_type_signature_shape_matches_parameters(
+    SolTypeChecker *checker,
+    size_t expected_id,
+    SolParameterId parameter_id,
+    SolType result
+) {
+    if (expected_id >= checker->types->function_type_count) {
+        sol_type_malformed(checker);
+        return false;
+    }
+    size_t expected_count
+        = checker->types->function_types[expected_id].parameter_count;
+    size_t index = 0;
+    while (parameter_id != SOL_AST_NONE && index < expected_count) {
+        if (parameter_id >= checker->syntax->parameter_count) {
+            sol_type_malformed(checker);
+            return false;
+        }
+        SolType parameter = sol_type_from_id(
+            checker,
+            checker->syntax->parameters[parameter_id].type_id
+        );
+        if (!sol_type_equal(
+            parameter,
+            checker->types->function_types[expected_id].parameters[index]
+        )) return false;
+        parameter_id = checker->syntax->parameters[parameter_id].next;
+        ++index;
+    }
+    return parameter_id == SOL_AST_NONE && index == expected_count
+        && sol_type_equal(
+            result,
+            checker->types->function_types[expected_id].result
+        );
+}
+
+static bool sol_type_record_coercion(
+    SolTypeChecker *checker,
+    SolExprId expression,
+    SolType expected
+) {
+    SolTypeTable *types = checker->types;
+    if (types->function_coercion_count == types->function_coercion_capacity) {
+        size_t capacity = types->function_coercion_capacity == 0
+            ? 8
+            : types->function_coercion_capacity * 2;
+        if (capacity < types->function_coercion_capacity
+            || capacity > SIZE_MAX / sizeof(*types->function_coercions)) {
+            checker->allocation_failed = true;
+            return false;
+        }
+        SolFunctionCoercion *grown = realloc(
+            types->function_coercions,
+            capacity * sizeof(*types->function_coercions)
+        );
+        if (grown == NULL) {
+            checker->allocation_failed = true;
+            return false;
+        }
+        types->function_coercions = grown;
+        types->function_coercion_capacity = capacity;
+    }
+    types->function_coercions[types->function_coercion_count++] = (SolFunctionCoercion){
+        .expression = expression,
+        .expected = expected,
+    };
+    return true;
+}
+
+static bool sol_type_assignable(
+    SolTypeChecker *checker,
+    SolType expected,
+    SolType actual,
+    SolExprId expression
+) {
+    if (expected.kind != SOL_TYPE_FUNCTION_SIGNATURE) return sol_type_equal(expected, actual);
+    if (expected.definition >= checker->types->function_type_count) {
+        sol_type_malformed(checker);
+        return false;
+    }
+    const SolFunctionType *expected_function
+        = &checker->types->function_types[expected.definition];
+    if (actual.kind == SOL_TYPE_FUNCTION_SIGNATURE) {
+        if (actual.definition >= checker->types->function_type_count) {
+            sol_type_malformed(checker);
+            return false;
+        }
+        const SolFunctionType *actual_function
+            = &checker->types->function_types[actual.definition];
+        if (actual_function->parameter_count != expected_function->parameter_count
+            || !sol_type_equal(actual_function->result, expected_function->result)) {
+            return false;
+        }
+        for (size_t index = 0; index < actual_function->parameter_count; ++index) {
+            if (!sol_type_equal(
+                actual_function->parameters[index],
+                expected_function->parameters[index]
+            )) return false;
+        }
+        return sol_type_effect_subset(
+            checker,
+            &actual_function->effects,
+            &expected_function->effects
+        );
+    }
+    SolParameterId first_parameter = SOL_AST_NONE;
+    SolType result = {.kind = SOL_TYPE_ERROR};
+    if (actual.kind == SOL_TYPE_FUNCTION
+        && actual.definition < checker->syntax->item_count) {
+        first_parameter = checker->syntax->items[actual.definition].first_parameter;
+        result = checker->types->definitions[actual.definition];
+    } else if (actual.kind == SOL_TYPE_CAPABILITY_OPERATION
+        && actual.definition < checker->syntax->capability_member_count) {
+        const SolCapabilityMember *member
+            = &checker->syntax->capability_members[actual.definition];
+        first_parameter = member->first_parameter;
+        result = sol_type_from_id(checker, member->return_type_id);
+    } else {
+        return sol_type_equal(expected, actual);
+    }
+    if (!sol_type_signature_shape_matches_parameters(
+        checker,
+        expected.definition,
+        first_parameter,
+        result
+    )) return false;
+    return sol_type_record_coercion(checker, expression, expected);
+}
+
 static bool sol_type_allocate(SolTypeChecker *checker) {
     size_t expression_count = checker->syntax->expression_count;
     size_t local_count = checker->hir->local_count;
@@ -1162,7 +1314,12 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
         } else {
             SolType value = sol_type_expression(checker, statement->as.expression);
             if (statement->kind == SOL_STATEMENT_RETURN) {
-                if (!sol_type_equal(value, checker->expected_return)) {
+                if (!sol_type_assignable(
+                    checker,
+                    checker->expected_return,
+                    value,
+                    statement->as.expression
+                )) {
                     char message[160];
                     snprintf(
                         message,
@@ -1220,6 +1377,58 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
     }
     if (callee_type.kind == SOL_TYPE_VARIANT) {
         return sol_type_variant_call(checker, callee_type.definition, call);
+    }
+    if (callee_type.kind == SOL_TYPE_FUNCTION_SIGNATURE) {
+        if (callee_type.definition >= checker->types->function_type_count) {
+            sol_type_malformed(checker);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        const SolFunctionType *function
+            = &checker->types->function_types[callee_type.definition];
+        SolArgumentId argument_id = call->as.call.first_argument;
+        size_t argument_count = 0;
+        while (argument_id != SOL_AST_NONE) {
+            if (argument_id >= checker->syntax->argument_count
+                || argument_count >= checker->syntax->argument_count) {
+                sol_type_malformed(checker);
+                return (SolType){.kind = SOL_TYPE_ERROR};
+            }
+            const SolArgument *argument = &checker->syntax->arguments[argument_id];
+            SolType actual = sol_type_expression(checker, argument->value);
+            if (argument->is_named) {
+                sol_type_error(
+                    checker,
+                    "SOL-TYPE-012",
+                    argument->name,
+                    "calls through function values require positional arguments"
+                );
+            }
+            if (argument_count < function->parameter_count
+                && !sol_type_assignable(
+                    checker,
+                    function->parameters[argument_count],
+                    actual,
+                    argument->value
+                )) {
+                sol_type_error(
+                    checker,
+                    "SOL-TYPE-005",
+                    checker->syntax->expressions[argument->value].span,
+                    "function argument type does not match parameter type"
+                );
+            }
+            ++argument_count;
+            argument_id = argument->next;
+        }
+        if (argument_count != function->parameter_count) {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-006",
+                call->span,
+                "function call has the wrong number of arguments"
+            );
+        }
+        return function->result;
     }
     if (operation != SOL_AST_NONE) {
         const SolExpr *callee = &checker->syntax->expressions[call->as.call.callee];
@@ -1348,7 +1557,7 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
             used[matched] = true;
             const SolParameter *parameter = &checker->syntax->parameters[parameter_ids[matched]];
             SolType expected = sol_type_from_id(checker, parameter->type_id);
-            if (!sol_type_equal(expected, actual)) {
+            if (!sol_type_assignable(checker, expected, actual, argument->value)) {
                 sol_type_error(
                     checker,
                     "SOL-TYPE-005",
@@ -1556,7 +1765,7 @@ static SolType sol_type_variant_call(
                 checker,
                 checker->syntax->fields[field_ids[matched]].type
             );
-            if (!sol_type_equal(expected, actual)) {
+            if (!sol_type_assignable(checker, expected, actual, argument->value)) {
                 sol_type_error(
                     checker,
                     "SOL-TYPE-014",
@@ -1668,7 +1877,7 @@ static SolType sol_type_record(SolTypeChecker *checker, const SolExpr *record) {
                 checker,
                 checker->syntax->fields[field_ids[matched]].type
             );
-            if (!sol_type_equal(expected, actual)) {
+            if (!sol_type_assignable(checker, expected, actual, argument->value)) {
                 sol_type_error(
                     checker,
                     "SOL-TYPE-013",
@@ -2181,9 +2390,12 @@ bool sol_type_check(
         || types->locals != NULL || types->local_capability_origins != NULL
         || types->local_operation_origins != NULL || types->definitions != NULL
         || types->declared_types != NULL || types->function_types != NULL
+        || types->function_coercions != NULL
         || types->expression_count != 0 || types->local_count != 0
         || types->definition_count != 0 || types->declared_type_count != 0
-        || types->function_type_count != 0 || types->function_type_capacity != 0) {
+        || types->function_type_count != 0 || types->function_type_capacity != 0
+        || types->function_coercion_count != 0
+        || types->function_coercion_capacity != 0) {
         sol_type_malformed(&checker);
         return false;
     }
@@ -2394,7 +2606,12 @@ bool sol_type_check(
         memset(checker.states, 0, syntax->expression_count * sizeof(*checker.states));
         SolType body_type = sol_type_expression(&checker, item->body);
         if (body_type.kind != SOL_TYPE_NEVER
-            && !sol_type_equal(body_type, checker.expected_return)) {
+            && !sol_type_assignable(
+                &checker,
+                checker.expected_return,
+                body_type,
+                item->body
+            )) {
             char message[160];
             snprintf(
                 message,

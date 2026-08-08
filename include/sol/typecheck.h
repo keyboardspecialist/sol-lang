@@ -38,6 +38,11 @@ typedef struct {
 } SolFunctionType;
 
 typedef struct {
+    SolExprId expression;
+    SolType expected;
+} SolFunctionCoercion;
+
+typedef struct {
     SolType *expressions;
     size_t expression_count;
     /* Indexed by SolExprId; SOL_AST_NONE means no capability parameter origin. */
@@ -55,6 +60,9 @@ typedef struct {
     SolFunctionType *function_types;
     size_t function_type_count;
     size_t function_type_capacity;
+    SolFunctionCoercion *function_coercions;
+    size_t function_coercion_count;
+    size_t function_coercion_capacity;
 } SolTypeTable;
 
 void sol_type_table_init(SolTypeTable *table);

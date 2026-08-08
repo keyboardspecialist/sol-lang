@@ -590,14 +590,21 @@ static void test_general_function_types(void) {
         ") -> function() -> Int64 effects {} { return callback }\n"
         "function keep_optional(\n"
         "    callback: Option<function(Int64) -> Bool effects { pure }>,\n"
-        ") -> Option<function(Int64) -> Bool effects {}> { return callback }\n";
+        ") -> Option<function(Int64) -> Bool effects {}> { return callback }\n"
+        "function invoke(\n"
+        "    callback: function(Int64) -> Bool effects { pure },\n"
+        "    value: Int64,\n"
+        ") -> Bool { return callback(value) }\n"
+        "function widen(\n"
+        "    callback: function() -> Int64 effects { pure },\n"
+        ") -> function() -> Int64 effects { clock.read } { return callback }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
     if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
         sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
     }
     CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
-    CHECK(compilation.types.function_type_count == 4);
+    CHECK(compilation.types.function_type_count >= 4);
     for (size_t index = 0; index < compilation.types.function_type_count; ++index) {
         const SolFunctionType *function = &compilation.types.function_types[index];
         CHECK(function->result.kind != SOL_TYPE_ERROR);
@@ -618,12 +625,20 @@ static void test_invalid_general_function_types(void) {
         ") -> Int64 { return 1 }\n"
         "function invoke(\n"
         "    callback: function(Int64) -> Bool effects { pure },\n"
-        ") -> Bool { return callback(1) }\n";
+        ") -> Bool { return callback(true) }\n"
+        "function wrong_count(\n"
+        "    callback: function(Int64) -> Bool effects { pure },\n"
+        ") -> Bool { return callback() }\n"
+        "function named(\n"
+        "    callback: function(Int64) -> Bool effects { pure },\n"
+        ") -> Bool { return callback(value = 1) }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
     CHECK(has_diagnostic(&compilation, "SOL-TYPE-004"));
     CHECK(diagnostic_count(&compilation, "SOL-EFFECT-001") == 2);
-    CHECK(has_diagnostic(&compilation, "SOL-TYPE-010"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-005"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-006"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-012"));
     free_compilation(&compilation);
 }
 
