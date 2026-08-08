@@ -98,6 +98,11 @@ static void check_ast_links(const SolSyntaxTree *tree) {
     for (size_t index = 0; index < tree->type_count; ++index) {
         CHECK(tree->types[index].first_argument == SOL_AST_NONE
             || tree->types[index].first_argument < tree->type_argument_count);
+        if (tree->types[index].kind == SOL_SYNTAX_TYPE_FUNCTION) {
+            CHECK(tree->types[index].return_type < tree->type_count);
+            CHECK(tree->types[index].first_effect == SOL_AST_NONE
+                || tree->types[index].first_effect < tree->effect_count);
+        }
     }
     for (size_t index = 0; index < tree->type_argument_count; ++index) {
         CHECK(tree->type_arguments[index].type < tree->type_count);
@@ -128,6 +133,16 @@ static void check_ast_links(const SolSyntaxTree *tree) {
         CHECK(tree->match_arms[index].value < tree->expression_count);
         CHECK(tree->match_arms[index].next == SOL_AST_NONE
             || tree->match_arms[index].next < tree->match_arm_count);
+    }
+    for (size_t index = 0; index < tree->effect_count; ++index) {
+        const SolEffect *effect = &tree->effects[index];
+        CHECK(effect->next == SOL_AST_NONE || effect->next < tree->effect_count);
+        CHECK((effect->owner_kind == SOL_EFFECT_OWNER_ITEM
+                && effect->owner < tree->item_count)
+            || (effect->owner_kind == SOL_EFFECT_OWNER_CAPABILITY_MEMBER
+                && effect->owner < tree->capability_member_count)
+            || (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
+                && effect->owner < tree->type_count));
     }
     for (size_t index = 0; index < tree->capability_member_count; ++index) {
         CHECK(tree->capability_members[index].first_parameter == SOL_AST_NONE
@@ -634,6 +649,110 @@ static void test_multiline_record_return_rejected(void) {
     sol_source_free(&source);
 }
 
+static void test_function_types(void) {
+    static const char source_text[] =
+        "module function_types\n"
+        "record Holder {\n"
+        "    callback: function(Int64, Bool,) -> Text effects {\n"
+        "        clock.read\n"
+        "        network.call<Primary>\n"
+        "    },\n"
+        "}\n"
+        "function keep(\n"
+        "    callback: function(\n"
+        "        function() -> Int64 effects { pure },\n"
+        "    ) -> Text effects { memory.allocate },\n"
+        ") -> function(\n"
+        "    function() -> Int64 effects { pure },\n"
+        ") -> Text effects { memory.allocate } { return callback }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "function_types.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    if (sol_diagnostics_has_errors(&diagnostics)) {
+        sol_diagnostics_render_human(stderr, &source, &diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    size_t function_type_count = 0;
+    size_t type_effect_count = 0;
+    for (size_t index = 0; index < tree.type_count; ++index) {
+        if (tree.types[index].kind == SOL_SYNTAX_TYPE_FUNCTION) ++function_type_count;
+    }
+    for (size_t index = 0; index < tree.effect_count; ++index) {
+        if (tree.effects[index].owner_kind == SOL_EFFECT_OWNER_TYPE) {
+            ++type_effect_count;
+            CHECK(tree.types[tree.effects[index].owner].kind == SOL_SYNTAX_TYPE_FUNCTION);
+        }
+    }
+    CHECK(function_type_count == 5);
+    CHECK(type_effect_count == 6);
+    check_ast_links(&tree);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_function_type_requires_effects(void) {
+    static const char source_text[] =
+        "module function_type_recovery\n"
+        "function broken(callback: function(Int64) -> Bool) -> Bool { return true }\n"
+        "function recovered(actual: Int64) -> Int64 { return actual }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "function_type_recovery.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.item_count == 1);
+    CHECK(tree.parameter_count == 1);
+    check_ast_links(&tree);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_function_type_recovery_skips_nested_function(void) {
+    static const char source_text[] =
+        "module nested_function_type_recovery\n"
+        "function broken(\n"
+        "    value Int64,\n"
+        "    callback: function(Int64) -> Bool effects { pure },\n"
+        ") -> Bool { return true }\n"
+        "function recovered(actual: Int64) -> Int64 { return actual }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "nested_recovery.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.item_count == 1);
+    CHECK(tree.parameter_count == 1);
+    CHECK(tree.type_count == 2);
+    check_ast_links(&tree);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
 int main(void) {
     test_valid_declarations();
     test_missing_module();
@@ -650,6 +769,9 @@ int main(void) {
     test_capability_member_body_rejected();
     test_failed_function_parameter_rollback();
     test_multiline_record_return_rejected();
+    test_function_types();
+    test_function_type_requires_effects();
+    test_function_type_recovery_skips_nested_function();
     if (failures != 0) {
         fprintf(stderr, "%d frontend test failure(s)\n", failures);
         return 1;

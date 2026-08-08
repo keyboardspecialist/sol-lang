@@ -125,6 +125,27 @@ static void sol_resolver_malformed(SolResolver *resolver) {
     resolver->malformed = true;
 }
 
+static SolEffectId sol_resolver_effect_root(
+    const SolSyntaxTree *syntax,
+    const SolEffect *effect
+) {
+    switch (effect->owner_kind) {
+        case SOL_EFFECT_OWNER_ITEM:
+            return effect->owner < syntax->item_count
+                ? syntax->items[effect->owner].first_effect
+                : SOL_AST_NONE;
+        case SOL_EFFECT_OWNER_CAPABILITY_MEMBER:
+            return effect->owner < syntax->capability_member_count
+                ? syntax->capability_members[effect->owner].first_effect
+                : SOL_AST_NONE;
+        case SOL_EFFECT_OWNER_TYPE:
+            return effect->owner < syntax->type_count
+                ? syntax->types[effect->owner].first_effect
+                : SOL_AST_NONE;
+    }
+    return SOL_AST_NONE;
+}
+
 static bool sol_resolver_validate(SolResolver *resolver) {
     const SolSyntaxTree *syntax = resolver->syntax;
     if (syntax->item_count > syntax->item_capacity
@@ -180,6 +201,12 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             sol_resolver_malformed(resolver);
             return false;
         }
+        if (item->first_effect != SOL_AST_NONE
+            && (syntax->effects[item->first_effect].owner_kind != SOL_EFFECT_OWNER_ITEM
+                || syntax->effects[item->first_effect].owner != index)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
         if (item->kind != SOL_ITEM_CAPABILITY && item->first_member != SOL_AST_NONE) {
             sol_resolver_malformed(resolver);
             return false;
@@ -208,11 +235,21 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     }
     for (size_t index = 0; index < syntax->type_count; ++index) {
         const SolSyntaxType *type = &syntax->types[index];
-        if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_UNIT
+        if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_FUNCTION
             || !sol_span_valid(resolver->source, type->span)
             || !sol_span_valid(resolver->source, type->name)
             || (type->first_argument != SOL_AST_NONE
-                && type->first_argument >= syntax->type_argument_count)) {
+                && type->first_argument >= syntax->type_argument_count)
+            || (type->kind == SOL_SYNTAX_TYPE_FUNCTION
+                && (type->return_type >= syntax->type_count
+                    || (type->first_effect != SOL_AST_NONE
+                        && type->first_effect >= syntax->effect_count)))) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+        if (type->kind == SOL_SYNTAX_TYPE_FUNCTION && type->first_effect != SOL_AST_NONE
+            && (syntax->effects[type->first_effect].owner_kind != SOL_EFFECT_OWNER_TYPE
+                || syntax->effects[type->first_effect].owner != index)) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -285,9 +322,34 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || !sol_span_valid(resolver->source, effect->argument)
             || !sol_span_valid(resolver->source, effect->span)
             || (effect->next != SOL_AST_NONE && effect->next >= syntax->effect_count)
-            || effect->owner_item >= syntax->item_count
-            || (syntax->items[effect->owner_item].kind != SOL_ITEM_FUNCTION
-                && syntax->items[effect->owner_item].kind != SOL_ITEM_CAPABILITY)) {
+            || (int)effect->owner_kind < 0
+            || effect->owner_kind > SOL_EFFECT_OWNER_TYPE
+            || (effect->owner_kind == SOL_EFFECT_OWNER_ITEM
+                && (effect->owner >= syntax->item_count
+                    || syntax->items[effect->owner].kind != SOL_ITEM_FUNCTION))
+            || (effect->owner_kind == SOL_EFFECT_OWNER_CAPABILITY_MEMBER
+                && effect->owner >= syntax->capability_member_count)
+            || (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
+                && (effect->owner >= syntax->type_count
+                    || syntax->types[effect->owner].kind != SOL_SYNTAX_TYPE_FUNCTION))) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+        SolEffectId linked = sol_resolver_effect_root(syntax, effect);
+        size_t traversed = 0;
+        bool found = false;
+        while (linked != SOL_AST_NONE) {
+            if (linked >= syntax->effect_count
+                || traversed++ >= syntax->effect_count
+                || syntax->effects[linked].owner_kind != effect->owner_kind
+                || syntax->effects[linked].owner != effect->owner) {
+                sol_resolver_malformed(resolver);
+                return false;
+            }
+            if (linked == index) found = true;
+            linked = syntax->effects[linked].next;
+        }
+        if (!found) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -306,6 +368,13 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                 && member->next >= syntax->capability_member_count)
             || member->owner_item >= syntax->item_count
             || syntax->items[member->owner_item].kind != SOL_ITEM_CAPABILITY) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+        if (member->first_effect != SOL_AST_NONE
+            && (syntax->effects[member->first_effect].owner_kind
+                    != SOL_EFFECT_OWNER_CAPABILITY_MEMBER
+                || syntax->effects[member->first_effect].owner != index)) {
             sol_resolver_malformed(resolver);
             return false;
         }

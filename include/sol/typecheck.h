@@ -2,6 +2,7 @@
 #define SOL_TYPECHECK_H
 
 #include "sol/diagnostic.h"
+#include "sol/effect.h"
 #include "sol/hir.h"
 #include "sol/parser.h"
 
@@ -18,6 +19,7 @@ typedef enum {
     SOL_TYPE_NOMINAL,
     SOL_TYPE_OPAQUE,
     SOL_TYPE_FUNCTION,
+    SOL_TYPE_FUNCTION_SIGNATURE,
     SOL_TYPE_CAPABILITY_OPERATION,
     SOL_TYPE_VARIANT,
     SOL_TYPE_NEVER,
@@ -27,6 +29,13 @@ typedef struct {
     SolTypeKind kind;
     SolDefId definition;
 } SolType;
+
+typedef struct {
+    SolType *parameters;
+    size_t parameter_count;
+    SolType result;
+    SolEffectSet effects;
+} SolFunctionType;
 
 typedef struct {
     SolType *expressions;
@@ -43,6 +52,9 @@ typedef struct {
     size_t definition_count;
     SolType *declared_types;
     size_t declared_type_count;
+    SolFunctionType *function_types;
+    size_t function_type_count;
+    size_t function_type_capacity;
 } SolTypeTable;
 
 void sol_type_table_init(SolTypeTable *table);

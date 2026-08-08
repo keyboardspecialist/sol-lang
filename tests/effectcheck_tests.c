@@ -1040,6 +1040,54 @@ static void test_nonempty_effect_table_rejected(void) {
     free_compilation(&compilation);
 }
 
+static void test_function_type_effects_are_not_performed(void) {
+    static const char text[] =
+        "module function_type_effects\n"
+        "function keep(\n"
+        "    callback: function() -> Int64 effects { clock.read },\n"
+        ") -> function() -> Int64 effects { clock.read } { return callback }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.types.function_type_count == 1);
+    CHECK(compilation.types.function_types[0].effects.count == 1);
+    CHECK(compilation.effects.functions[0].inferred);
+    CHECK(compilation.effects.functions[0].count == 0);
+    free_compilation(&compilation);
+}
+
+static void test_malformed_function_type_effects_rejected(void) {
+    static const char text[] =
+        "module malformed_function_type_effects\n"
+        "function keep(\n"
+        "    callback: function() -> Int64 effects { clock.read },\n"
+        ") -> function() -> Int64 effects { clock.read } { return callback }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    sol_effect_table_free(&compilation.effects);
+    CHECK(compilation.types.function_type_count == 1);
+    SolEffectAtom *atoms = compilation.types.function_types[0].effects.atoms;
+    CHECK(atoms != NULL);
+    if (atoms != NULL) {
+        atoms[0].parameter = 0;
+        CHECK(!sol_effect_check(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+        atoms[0].parameter = SOL_AST_NONE;
+    }
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_private_pure_inference();
     test_forward_transitive_inference();
@@ -1069,6 +1117,8 @@ int main(void) {
     test_expression_cycle_rejected();
     test_forged_self_local_provenance_rejected();
     test_nonempty_effect_table_rejected();
+    test_function_type_effects_are_not_performed();
+    test_malformed_function_type_effects_rejected();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;

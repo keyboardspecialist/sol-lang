@@ -121,6 +121,7 @@ typedef struct {
 typedef enum {
     SOL_SYNTAX_TYPE_PATH,
     SOL_SYNTAX_TYPE_UNIT,
+    SOL_SYNTAX_TYPE_FUNCTION,
 } SolSyntaxTypeKind;
 
 typedef struct {
@@ -128,8 +129,16 @@ typedef struct {
     SolSpan span;
     SolSpan name;
     SolTypeArgumentId first_argument;
+    SolTypeId return_type;
+    SolEffectId first_effect;
     bool is_capability;
 } SolSyntaxType;
+
+typedef enum {
+    SOL_EFFECT_OWNER_ITEM,
+    SOL_EFFECT_OWNER_CAPABILITY_MEMBER,
+    SOL_EFFECT_OWNER_TYPE,
+} SolEffectOwnerKind;
 
 typedef struct {
     SolTypeId type;
@@ -182,7 +191,8 @@ typedef struct {
     SolSpan argument;
     SolSpan span;
     SolEffectId next;
-    size_t owner_item;
+    SolEffectOwnerKind owner_kind;
+    size_t owner;
     bool is_pure;
     bool has_argument;
 } SolEffect;

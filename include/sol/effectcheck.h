@@ -2,27 +2,13 @@
 #define SOL_EFFECTCHECK_H
 
 #include "sol/diagnostic.h"
+#include "sol/effect.h"
 #include "sol/hir.h"
 #include "sol/parser.h"
 #include "sol/typecheck.h"
 
 #include <stdbool.h>
 #include <stddef.h>
-
-typedef enum {
-    SOL_EFFECT_ATOM_NO_ARGUMENT,
-    SOL_EFFECT_ATOM_STATIC_PATH,
-    SOL_EFFECT_ATOM_PARAMETER,
-    SOL_EFFECT_ATOM_SELF,
-} SolEffectAtomArgumentKind;
-
-typedef struct {
-    SolSpan name;
-    SolSpan argument;
-    SolSpan span;
-    SolEffectAtomArgumentKind argument_kind;
-    SolParameterId parameter;
-} SolEffectAtom;
 
 typedef struct {
     SolEffectAtom *atoms;

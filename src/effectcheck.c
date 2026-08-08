@@ -285,7 +285,8 @@ static void sol_effect_validate_and_normalize_row(
     SolEffectChecker *checker,
     SolEffectId first_effect,
     SolSpan owner_span,
-    size_t owner_item,
+    SolEffectOwnerKind owner_kind,
+    size_t owner,
     SolParameterId first_parameter,
     bool member,
     SolEffectRow *row
@@ -300,7 +301,7 @@ static void sol_effect_validate_and_normalize_row(
             return;
         }
         const SolEffect *effect = &checker->syntax->effects[effect_id];
-        if (effect->owner_item != owner_item) {
+        if (effect->owner_kind != owner_kind || effect->owner != owner) {
             checker->malformed = true;
             return;
         }
@@ -1635,6 +1636,17 @@ static bool sol_effect_validate_provenance(
     return true;
 }
 
+static bool sol_effect_type_has_identity(SolTypeKind kind) {
+    return kind == SOL_TYPE_NOMINAL || kind == SOL_TYPE_OPAQUE
+        || kind == SOL_TYPE_FUNCTION || kind == SOL_TYPE_FUNCTION_SIGNATURE
+        || kind == SOL_TYPE_CAPABILITY_OPERATION || kind == SOL_TYPE_VARIANT;
+}
+
+static bool sol_effect_semantic_type_equal(SolType left, SolType right) {
+    return left.kind == right.kind
+        && (!sol_effect_type_has_identity(left.kind) || left.definition == right.definition);
+}
+
 static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
     const SolSource *source = checker->source;
     const SolSyntaxTree *syntax = checker->syntax;
@@ -1664,15 +1676,114 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (hir->local_count != 0 && hir->locals == NULL)
         || types->expression_count != syntax->expression_count
         || types->local_count != hir->local_count
+        || types->definition_count != hir->definition_count
         || types->declared_type_count != syntax->type_count
+        || types->function_type_count > types->function_type_capacity
         || (types->expression_count != 0 && types->expressions == NULL)
         || (types->expression_count != 0 && types->expression_capability_origins == NULL)
         || (types->expression_count != 0 && types->expression_operation_origins == NULL)
         || (types->local_count != 0 && types->locals == NULL)
         || (types->local_count != 0 && types->local_capability_origins == NULL)
         || (types->local_count != 0 && types->local_operation_origins == NULL)
-        || (types->declared_type_count != 0 && types->declared_types == NULL)) {
+        || (types->definition_count != 0 && types->definitions == NULL)
+        || (types->declared_type_count != 0 && types->declared_types == NULL)
+        || (types->function_type_capacity != 0 && types->function_types == NULL)) {
         return false;
+    }
+    for (size_t index = 0; index < types->function_type_count; ++index) {
+        const SolFunctionType *function = &types->function_types[index];
+        if ((function->parameter_count != 0 && function->parameters == NULL)
+            || (function->effects.count != 0 && function->effects.atoms == NULL)
+            || (int)function->result.kind < 0 || function->result.kind > SOL_TYPE_NEVER
+            || (function->result.kind == SOL_TYPE_FUNCTION_SIGNATURE
+                && function->result.definition >= index)
+            || (!sol_effect_type_has_identity(function->result.kind)
+                && function->result.definition != 0)) {
+            return false;
+        }
+        for (size_t parameter = 0; parameter < function->parameter_count; ++parameter) {
+            SolType type = function->parameters[parameter];
+            if ((int)type.kind < 0 || type.kind > SOL_TYPE_NEVER
+                || (type.kind == SOL_TYPE_FUNCTION_SIGNATURE && type.definition >= index)
+                || (!sol_effect_type_has_identity(type.kind) && type.definition != 0)) {
+                return false;
+            }
+        }
+        for (size_t atom = 0; atom < function->effects.count; ++atom) {
+            const SolEffectAtom *effect = &function->effects.atoms[atom];
+            if ((int)effect->argument_kind < 0
+                || effect->argument_kind > SOL_EFFECT_ATOM_STATIC_PATH
+                || !sol_effect_span_valid(source, effect->name)
+                || !sol_effect_span_valid(source, effect->argument)
+                || !sol_effect_span_valid(source, effect->span)
+                || effect->parameter != SOL_AST_NONE
+                || (effect->argument_kind == SOL_EFFECT_ATOM_NO_ARGUMENT
+                    && (effect->argument.start != 0 || effect->argument.end != 0))
+                || (effect->argument_kind == SOL_EFFECT_ATOM_STATIC_PATH
+                    && effect->argument.start == effect->argument.end)) {
+                return false;
+            }
+            for (size_t previous = 0; previous < atom; ++previous) {
+                if (sol_effect_atom_equal(
+                    checker,
+                    &function->effects.atoms[previous],
+                    effect
+                )) {
+                    return false;
+                }
+            }
+        }
+        for (size_t previous = 0; previous < index; ++previous) {
+            const SolFunctionType *other = &types->function_types[previous];
+            bool equal = function->parameter_count == other->parameter_count
+                && sol_effect_semantic_type_equal(function->result, other->result)
+                && function->effects.count == other->effects.count;
+            for (size_t parameter = 0; equal && parameter < function->parameter_count;
+                ++parameter) {
+                equal = sol_effect_semantic_type_equal(
+                    function->parameters[parameter],
+                    other->parameters[parameter]
+                );
+            }
+            for (size_t atom = 0; equal && atom < function->effects.count; ++atom) {
+                bool found = false;
+                for (size_t candidate = 0; candidate < other->effects.count; ++candidate) {
+                    if (sol_effect_atom_equal(
+                        checker,
+                        &function->effects.atoms[atom],
+                        &other->effects.atoms[candidate]
+                    )) {
+                        found = true;
+                        break;
+                    }
+                }
+                equal = found;
+            }
+            if (equal) return false;
+        }
+    }
+    const SolType *type_arenas[] = {
+        types->expressions,
+        types->locals,
+        types->definitions,
+        types->declared_types,
+    };
+    const size_t type_counts[] = {
+        types->expression_count,
+        types->local_count,
+        types->definition_count,
+        types->declared_type_count,
+    };
+    for (size_t arena = 0; arena < sizeof(type_arenas) / sizeof(type_arenas[0]); ++arena) {
+        for (size_t index = 0; index < type_counts[arena]; ++index) {
+            SolType type = type_arenas[arena][index];
+            if ((int)type.kind < 0 || type.kind > SOL_TYPE_NEVER
+                || (type.kind == SOL_TYPE_FUNCTION_SIGNATURE
+                    && type.definition >= types->function_type_count)
+                || (!sol_effect_type_has_identity(type.kind) && type.definition != 0)) {
+                return false;
+            }
+        }
     }
     for (size_t index = 0; index < syntax->item_count; ++index) {
         const SolSyntaxItem *item = &syntax->items[index];
@@ -1767,7 +1878,14 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || !sol_effect_span_valid(source, effect->argument)
             || !sol_effect_span_valid(source, effect->span)
             || (effect->next != SOL_AST_NONE && effect->next >= syntax->effect_count)
-            || effect->owner_item >= syntax->item_count) {
+            || (int)effect->owner_kind < 0
+            || effect->owner_kind > SOL_EFFECT_OWNER_TYPE
+            || (effect->owner_kind == SOL_EFFECT_OWNER_ITEM
+                && effect->owner >= syntax->item_count)
+            || (effect->owner_kind == SOL_EFFECT_OWNER_CAPABILITY_MEMBER
+                && effect->owner >= syntax->capability_member_count)
+            || (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
+                && effect->owner >= syntax->type_count)) {
             return false;
         }
     }
@@ -2018,6 +2136,7 @@ bool sol_effect_check(
                 &checker,
                 item->first_effect,
                 item->span,
+                SOL_EFFECT_OWNER_ITEM,
                 index,
                 item->first_parameter,
                 false,
@@ -2039,7 +2158,8 @@ bool sol_effect_check(
                 &checker,
                 member->first_effect,
                 member->span,
-                member->owner_item,
+                SOL_EFFECT_OWNER_CAPABILITY_MEMBER,
+                index,
                 member->first_parameter,
                 true,
                 row

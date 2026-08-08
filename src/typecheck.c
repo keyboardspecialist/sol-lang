@@ -44,6 +44,27 @@ static bool sol_type_span_valid(const SolSource *source, SolSpan span) {
     return source->text != NULL && span.start <= span.end && span.end <= source->length;
 }
 
+static SolEffectId sol_type_effect_root(
+    const SolSyntaxTree *syntax,
+    const SolEffect *effect
+) {
+    switch (effect->owner_kind) {
+        case SOL_EFFECT_OWNER_ITEM:
+            return effect->owner < syntax->item_count
+                ? syntax->items[effect->owner].first_effect
+                : SOL_AST_NONE;
+        case SOL_EFFECT_OWNER_CAPABILITY_MEMBER:
+            return effect->owner < syntax->capability_member_count
+                ? syntax->capability_members[effect->owner].first_effect
+                : SOL_AST_NONE;
+        case SOL_EFFECT_OWNER_TYPE:
+            return effect->owner < syntax->type_count
+                ? syntax->types[effect->owner].first_effect
+                : SOL_AST_NONE;
+    }
+    return SOL_AST_NONE;
+}
+
 static bool sol_type_validate(SolTypeChecker *checker) {
     const SolSyntaxTree *syntax = checker->syntax;
     const SolHirModule *hir = checker->hir;
@@ -135,11 +156,21 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     }
     for (size_t index = 0; index < syntax->type_count; ++index) {
         const SolSyntaxType *type = &syntax->types[index];
-        if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_UNIT
+        if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_FUNCTION
             || !sol_type_span_valid(checker->source, type->span)
             || !sol_type_span_valid(checker->source, type->name)
             || (type->first_argument != SOL_AST_NONE
-                && type->first_argument >= syntax->type_argument_count)) {
+                && type->first_argument >= syntax->type_argument_count)
+            || (type->kind == SOL_SYNTAX_TYPE_FUNCTION
+                && (type->return_type >= syntax->type_count
+                    || (type->first_effect != SOL_AST_NONE
+                        && type->first_effect >= syntax->effect_count)))) {
+            sol_type_malformed(checker);
+            return false;
+        }
+        if (type->kind == SOL_SYNTAX_TYPE_FUNCTION && type->first_effect != SOL_AST_NONE
+            && (syntax->effects[type->first_effect].owner_kind != SOL_EFFECT_OWNER_TYPE
+                || syntax->effects[type->first_effect].owner != index)) {
             sol_type_malformed(checker);
             return false;
         }
@@ -212,7 +243,33 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || !sol_type_span_valid(checker->source, effect->argument)
             || !sol_type_span_valid(checker->source, effect->span)
             || (effect->next != SOL_AST_NONE && effect->next >= syntax->effect_count)
-            || effect->owner_item >= syntax->item_count) {
+            || (int)effect->owner_kind < 0
+            || effect->owner_kind > SOL_EFFECT_OWNER_TYPE
+            || (effect->owner_kind == SOL_EFFECT_OWNER_ITEM
+                && (effect->owner >= syntax->item_count
+                    || syntax->items[effect->owner].kind != SOL_ITEM_FUNCTION))
+            || (effect->owner_kind == SOL_EFFECT_OWNER_CAPABILITY_MEMBER
+                && effect->owner >= syntax->capability_member_count)
+            || (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
+                && effect->owner >= syntax->type_count)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+        SolEffectId linked = sol_type_effect_root(syntax, effect);
+        size_t traversed = 0;
+        bool found = false;
+        while (linked != SOL_AST_NONE) {
+            if (linked >= syntax->effect_count
+                || traversed++ >= syntax->effect_count
+                || syntax->effects[linked].owner_kind != effect->owner_kind
+                || syntax->effects[linked].owner != effect->owner) {
+                sol_type_malformed(checker);
+                return false;
+            }
+            if (linked == index) found = true;
+            linked = syntax->effects[linked].next;
+        }
+        if (!found) {
             sol_type_malformed(checker);
             return false;
         }
@@ -353,6 +410,11 @@ void sol_type_table_free(SolTypeTable *table) {
     free(table->local_operation_origins);
     free(table->definitions);
     free(table->declared_types);
+    for (size_t index = 0; index < table->function_type_count; ++index) {
+        free(table->function_types[index].parameters);
+        free(table->function_types[index].effects.atoms);
+    }
+    free(table->function_types);
     memset(table, 0, sizeof(*table));
 }
 
@@ -379,6 +441,7 @@ static bool sol_type_equal(SolType left, SolType right) {
         && ((left.kind != SOL_TYPE_NOMINAL
                 && left.kind != SOL_TYPE_OPAQUE
                 && left.kind != SOL_TYPE_FUNCTION
+                && left.kind != SOL_TYPE_FUNCTION_SIGNATURE
                 && left.kind != SOL_TYPE_CAPABILITY_OPERATION
                 && left.kind != SOL_TYPE_VARIANT)
             || left.definition == right.definition);
@@ -393,12 +456,253 @@ static const char *sol_type_name(SolType type) {
         case SOL_TYPE_NOMINAL: return "nominal type";
         case SOL_TYPE_OPAQUE: return "generic type";
         case SOL_TYPE_FUNCTION: return "function";
+        case SOL_TYPE_FUNCTION_SIGNATURE: return "function type";
         case SOL_TYPE_CAPABILITY_OPERATION: return "capability operation";
         case SOL_TYPE_VARIANT: return "enum constructor";
         case SOL_TYPE_NEVER: return "Never";
         case SOL_TYPE_ERROR: return "error";
         default: return "unknown type";
     }
+}
+
+static int sol_type_effect_path_next_byte(
+    const SolSource *source,
+    SolSpan span,
+    size_t *cursor
+) {
+    while (*cursor < span.end) {
+        unsigned char byte = (unsigned char)source->text[*cursor];
+        if (byte == ' ' || byte == '\t' || byte == '\r' || byte == '\n') {
+            ++*cursor;
+            continue;
+        }
+        if (byte == '/' && *cursor + 1 < span.end && source->text[*cursor + 1] == '/') {
+            *cursor += 2;
+            while (*cursor < span.end
+                && source->text[*cursor] != '\r'
+                && source->text[*cursor] != '\n') {
+                ++*cursor;
+            }
+            continue;
+        }
+        if (byte == '/' && *cursor + 1 < span.end && source->text[*cursor + 1] == '*') {
+            *cursor += 2;
+            size_t depth = 1;
+            while (*cursor < span.end && depth != 0) {
+                if (*cursor + 1 < span.end && source->text[*cursor] == '/'
+                    && source->text[*cursor + 1] == '*') {
+                    ++depth;
+                    *cursor += 2;
+                } else if (*cursor + 1 < span.end && source->text[*cursor] == '*'
+                    && source->text[*cursor + 1] == '/') {
+                    --depth;
+                    *cursor += 2;
+                } else {
+                    ++*cursor;
+                }
+            }
+            continue;
+        }
+        ++*cursor;
+        return (int)byte;
+    }
+    return -1;
+}
+
+static bool sol_type_effect_span_equal(
+    const SolSource *source,
+    SolSpan left,
+    SolSpan right
+) {
+    size_t left_cursor = left.start;
+    size_t right_cursor = right.start;
+    for (;;) {
+        int left_byte = sol_type_effect_path_next_byte(source, left, &left_cursor);
+        int right_byte = sol_type_effect_path_next_byte(source, right, &right_cursor);
+        if (left_byte != right_byte) return false;
+        if (left_byte < 0) return true;
+    }
+}
+
+static bool sol_type_effect_atom_equal(
+    const SolTypeChecker *checker,
+    const SolEffectAtom *left,
+    const SolEffectAtom *right
+) {
+    return left->argument_kind == right->argument_kind
+        && sol_type_effect_span_equal(checker->source, left->name, right->name)
+        && (left->argument_kind != SOL_EFFECT_ATOM_STATIC_PATH
+            || sol_type_effect_span_equal(
+                checker->source,
+                left->argument,
+                right->argument
+            ));
+}
+
+static bool sol_type_effect_set_equal(
+    const SolTypeChecker *checker,
+    const SolEffectSet *left,
+    const SolEffectSet *right
+) {
+    if (left->count != right->count) return false;
+    for (size_t left_index = 0; left_index < left->count; ++left_index) {
+        bool found = false;
+        for (size_t right_index = 0; right_index < right->count; ++right_index) {
+            if (sol_type_effect_atom_equal(
+                checker,
+                &left->atoms[left_index],
+                &right->atoms[right_index]
+            )) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+static bool sol_type_normalize_effects(
+    SolTypeChecker *checker,
+    SolTypeId owner,
+    SolEffectId effect_id,
+    SolEffectSet *set
+) {
+    size_t entry_count = 0;
+    bool saw_pure = false;
+    while (effect_id != SOL_AST_NONE) {
+        if (effect_id >= checker->syntax->effect_count
+            || entry_count++ >= checker->syntax->effect_count) {
+            sol_type_malformed(checker);
+            return false;
+        }
+        const SolEffect *effect = &checker->syntax->effects[effect_id];
+        if (effect->owner_kind != SOL_EFFECT_OWNER_TYPE || effect->owner != owner) {
+            sol_type_malformed(checker);
+            return false;
+        }
+        if (effect->is_pure) {
+            saw_pure = true;
+            if (effect->has_argument) {
+                sol_type_error(
+                    checker,
+                    "SOL-EFFECT-001",
+                    effect->span,
+                    "pure cannot have an effect argument"
+                );
+            }
+        } else {
+            SolEffectAtom atom = {
+                .name = effect->name,
+                .argument = effect->argument,
+                .span = effect->span,
+                .argument_kind = effect->has_argument
+                    ? SOL_EFFECT_ATOM_STATIC_PATH
+                    : SOL_EFFECT_ATOM_NO_ARGUMENT,
+                .parameter = SOL_AST_NONE,
+            };
+            bool duplicate = false;
+            for (size_t index = 0; index < set->count; ++index) {
+                if (sol_type_effect_atom_equal(checker, &set->atoms[index], &atom)) {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate) {
+                sol_type_error(
+                    checker,
+                    "SOL-EFFECT-001",
+                    effect->span,
+                    "duplicate effect in function type row"
+                );
+            } else {
+                if (set->count == SIZE_MAX / sizeof(*set->atoms)) {
+                    checker->allocation_failed = true;
+                    return false;
+                }
+                SolEffectAtom *grown = realloc(
+                    set->atoms,
+                    (set->count + 1) * sizeof(*set->atoms)
+                );
+                if (grown == NULL) {
+                    checker->allocation_failed = true;
+                    return false;
+                }
+                set->atoms = grown;
+                set->atoms[set->count++] = atom;
+            }
+        }
+        effect_id = effect->next;
+    }
+    if (saw_pure && entry_count > 1) {
+        sol_type_error(
+            checker,
+            "SOL-EFFECT-001",
+            checker->syntax->types[owner].span,
+            "pure cannot be combined with other effects"
+        );
+    }
+    return true;
+}
+
+static bool sol_type_function_equal(
+    const SolTypeChecker *checker,
+    const SolFunctionType *left,
+    const SolFunctionType *right
+) {
+    if (left->parameter_count != right->parameter_count
+        || !sol_type_equal(left->result, right->result)
+        || !sol_type_effect_set_equal(checker, &left->effects, &right->effects)) {
+        return false;
+    }
+    for (size_t index = 0; index < left->parameter_count; ++index) {
+        if (!sol_type_equal(left->parameters[index], right->parameters[index])) return false;
+    }
+    return true;
+}
+
+static SolType sol_type_intern_function(
+    SolTypeChecker *checker,
+    SolFunctionType candidate
+) {
+    for (size_t index = 0; index < checker->types->function_type_count; ++index) {
+        if (sol_type_function_equal(
+            checker,
+            &checker->types->function_types[index],
+            &candidate
+        )) {
+            free(candidate.parameters);
+            free(candidate.effects.atoms);
+            return (SolType){.kind = SOL_TYPE_FUNCTION_SIGNATURE, .definition = index};
+        }
+    }
+    if (checker->types->function_type_count == checker->types->function_type_capacity) {
+        size_t capacity = checker->types->function_type_capacity == 0
+            ? 8
+            : checker->types->function_type_capacity * 2;
+        if (capacity < checker->types->function_type_capacity
+            || capacity > SIZE_MAX / sizeof(*checker->types->function_types)) {
+            checker->allocation_failed = true;
+            free(candidate.parameters);
+            free(candidate.effects.atoms);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        SolFunctionType *grown = realloc(
+            checker->types->function_types,
+            capacity * sizeof(*checker->types->function_types)
+        );
+        if (grown == NULL) {
+            checker->allocation_failed = true;
+            free(candidate.parameters);
+            free(candidate.effects.atoms);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        checker->types->function_types = grown;
+        checker->types->function_type_capacity = capacity;
+    }
+    size_t id = checker->types->function_type_count++;
+    checker->types->function_types[id] = candidate;
+    return (SolType){.kind = SOL_TYPE_FUNCTION_SIGNATURE, .definition = id};
 }
 
 static SolType sol_type_from_id(SolTypeChecker *checker, SolTypeId type_id) {
@@ -416,7 +720,56 @@ static SolType sol_type_from_id(SolTypeChecker *checker, SolTypeId type_id) {
     checker->declared_states[type_id] = 1;
     const SolSyntaxType *syntax_type = &checker->syntax->types[type_id];
     SolType type = {.kind = SOL_TYPE_ERROR};
-    if (syntax_type->kind == SOL_SYNTAX_TYPE_UNIT) {
+    if (syntax_type->kind == SOL_SYNTAX_TYPE_FUNCTION) {
+        size_t parameter_count = 0;
+        SolTypeArgumentId argument_id = syntax_type->first_argument;
+        while (argument_id != SOL_AST_NONE) {
+            if (argument_id >= checker->syntax->type_argument_count
+                || parameter_count++ >= checker->syntax->type_argument_count) {
+                sol_type_malformed(checker);
+                break;
+            }
+            argument_id = checker->syntax->type_arguments[argument_id].next;
+        }
+        SolFunctionType candidate = {0};
+        if (parameter_count != 0) {
+            if (parameter_count > SIZE_MAX / sizeof(*candidate.parameters)) {
+                checker->allocation_failed = true;
+            } else {
+                candidate.parameters = malloc(
+                    parameter_count * sizeof(*candidate.parameters)
+                );
+                if (candidate.parameters == NULL) checker->allocation_failed = true;
+            }
+        }
+        candidate.parameter_count = parameter_count;
+        bool valid = !checker->malformed && !checker->allocation_failed;
+        argument_id = syntax_type->first_argument;
+        for (size_t index = 0; valid && index < parameter_count; ++index) {
+            const SolTypeArgument *argument = &checker->syntax->type_arguments[argument_id];
+            candidate.parameters[index] = sol_type_from_id(checker, argument->type);
+            valid = candidate.parameters[index].kind != SOL_TYPE_ERROR;
+            argument_id = argument->next;
+        }
+        if (valid) {
+            candidate.result = sol_type_from_id(checker, syntax_type->return_type);
+            valid = candidate.result.kind != SOL_TYPE_ERROR;
+        }
+        if (valid) {
+            valid = sol_type_normalize_effects(
+                checker,
+                type_id,
+                syntax_type->first_effect,
+                &candidate.effects
+            );
+        }
+        if (valid) {
+            type = sol_type_intern_function(checker, candidate);
+        } else {
+            free(candidate.parameters);
+            free(candidate.effects.atoms);
+        }
+    } else if (syntax_type->kind == SOL_SYNTAX_TYPE_UNIT) {
         type = (SolType){.kind = SOL_TYPE_UNIT};
     } else if (syntax_type->first_argument != SOL_AST_NONE) {
         bool result_type = sol_type_span_equal(checker->source, syntax_type->name, "Result");
@@ -1827,9 +2180,10 @@ bool sol_type_check(
         || types->expression_operation_origins != NULL
         || types->locals != NULL || types->local_capability_origins != NULL
         || types->local_operation_origins != NULL || types->definitions != NULL
-        || types->declared_types != NULL
+        || types->declared_types != NULL || types->function_types != NULL
         || types->expression_count != 0 || types->local_count != 0
-        || types->definition_count != 0 || types->declared_type_count != 0) {
+        || types->definition_count != 0 || types->declared_type_count != 0
+        || types->function_type_count != 0 || types->function_type_capacity != 0) {
         sol_type_malformed(&checker);
         return false;
     }

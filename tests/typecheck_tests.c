@@ -568,6 +568,65 @@ static void test_invalid_capability_declarations(void) {
     free_compilation(&compilation);
 }
 
+static void test_general_function_types(void) {
+    static const char text[] =
+        "module general_function_types\n"
+        "capability Registry {\n"
+        "    function keep(\n"
+        "        callback: function(Int64) -> Bool effects { clock.read },\n"
+        "    ) -> function(Int64) -> Bool effects { clock.read } effects { pure }\n"
+        "}\n"
+        "function keep(\n"
+        "    callback: function(Int64) -> Bool effects {\n"
+        "        clock.read\n"
+        "        network.call<Primary>\n"
+        "    },\n"
+        ") -> function(Int64) -> Bool effects {\n"
+        "    network.call<Primary>\n"
+        "    clock.read\n"
+        "} { return callback }\n"
+        "function keep_pure(\n"
+        "    callback: function() -> Int64 effects { pure },\n"
+        ") -> function() -> Int64 effects {} { return callback }\n"
+        "function keep_optional(\n"
+        "    callback: Option<function(Int64) -> Bool effects { pure }>,\n"
+        ") -> Option<function(Int64) -> Bool effects {}> { return callback }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.types.function_type_count == 4);
+    for (size_t index = 0; index < compilation.types.function_type_count; ++index) {
+        const SolFunctionType *function = &compilation.types.function_types[index];
+        CHECK(function->result.kind != SOL_TYPE_ERROR);
+        CHECK(function->effects.count <= 2);
+    }
+    free_compilation(&compilation);
+}
+
+static void test_invalid_general_function_types(void) {
+    static const char text[] =
+        "module invalid_general_function_types\n"
+        "function wrong_effect(\n"
+        "    callback: function(Int64) -> Bool effects { clock.read },\n"
+        ") -> function(Int64) -> Bool effects { network.call } { return callback }\n"
+        "function invalid_rows(\n"
+        "    duplicate: function() -> Int64 effects { clock.read clock.read },\n"
+        "    mixed: function() -> Int64 effects { pure clock.read },\n"
+        ") -> Int64 { return 1 }\n"
+        "function invoke(\n"
+        "    callback: function(Int64) -> Bool effects { pure },\n"
+        ") -> Bool { return callback(1) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-004"));
+    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-001") == 2);
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-010"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -594,6 +653,8 @@ int main(void) {
     test_computed_capability_provenance();
     test_mixed_computed_capability_provenance();
     test_invalid_capability_declarations();
+    test_general_function_types();
+    test_invalid_general_function_types();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;

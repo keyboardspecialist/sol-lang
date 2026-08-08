@@ -251,6 +251,13 @@ static SolTypeId sol_parser_add_type(SolParser *parser, SolSyntaxType type) {
     return id;
 }
 
+static bool sol_parser_effect_clause(
+    SolParser *parser,
+    SolEffectOwnerKind owner_kind,
+    size_t owner,
+    SolEffectId *first_effect
+);
+
 static SolTypeArgumentId sol_parser_add_type_argument(
     SolParser *parser,
     SolTypeArgument argument
@@ -474,8 +481,75 @@ static bool sol_parser_type(SolParser *parser, SolSpan *span, SolTypeId *type_id
     SolSyntaxTypeKind kind;
     SolSpan name = {0};
     SolTypeArgumentId first_argument = SOL_AST_NONE;
+    SolTypeId return_type = SOL_AST_NONE;
+    SolEffectId first_effect = SOL_AST_NONE;
     bool is_capability = false;
-    if (sol_parser_match(parser, SOL_TOKEN_LEFT_PAREN)) {
+    SolTypeId reserved = SOL_AST_NONE;
+    if (sol_parser_kind(parser) == SOL_TOKEN_FUNCTION
+        && sol_parser_peek_kind(parser, 1) == SOL_TOKEN_LEFT_PAREN) {
+        sol_parser_advance(parser);
+        kind = SOL_SYNTAX_TYPE_FUNCTION;
+        reserved = sol_parser_add_type(parser, (SolSyntaxType){
+            .kind = SOL_SYNTAX_TYPE_FUNCTION,
+            .first_argument = SOL_AST_NONE,
+            .return_type = SOL_AST_NONE,
+            .first_effect = SOL_AST_NONE,
+        });
+        parsed = reserved != SOL_AST_NONE
+            && sol_parser_expect(
+                parser,
+                SOL_TOKEN_LEFT_PAREN,
+                "expected '(' after 'function' in function type"
+            );
+        SolTypeArgumentId last_argument = SOL_AST_NONE;
+        if (parsed && !sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+            for (;;) {
+                SolTypeId parameter_type;
+                if (!sol_parser_type(parser, NULL, &parameter_type)) {
+                    parsed = false;
+                    break;
+                }
+                SolTypeArgumentId argument = sol_parser_add_type_argument(
+                    parser,
+                    (SolTypeArgument){.type = parameter_type, .next = SOL_AST_NONE}
+                );
+                if (argument == SOL_AST_NONE) {
+                    parsed = false;
+                    break;
+                }
+                if (first_argument == SOL_AST_NONE) first_argument = argument;
+                else parser->tree->type_arguments[last_argument].next = argument;
+                last_argument = argument;
+                if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) break;
+                if (!sol_parser_expect(
+                    parser,
+                    SOL_TOKEN_COMMA,
+                    "expected ',' or ')' after function parameter type"
+                )) {
+                    parsed = false;
+                    break;
+                }
+                if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) break;
+            }
+        }
+        parsed = parsed && sol_parser_expect(
+            parser,
+            SOL_TOKEN_ARROW,
+            "expected '->' after function parameter types"
+        );
+        parsed = parsed && sol_parser_type(parser, NULL, &return_type);
+        parsed = parsed && sol_parser_expect(
+            parser,
+            SOL_TOKEN_EFFECTS,
+            "expected 'effects' after function return type"
+        );
+        parsed = parsed && sol_parser_effect_clause(
+            parser,
+            SOL_EFFECT_OWNER_TYPE,
+            reserved,
+            &first_effect
+        );
+    } else if (sol_parser_match(parser, SOL_TOKEN_LEFT_PAREN)) {
         kind = SOL_SYNTAX_TYPE_UNIT;
         parsed = sol_parser_expect(
             parser,
@@ -497,13 +571,18 @@ static bool sol_parser_type(SolParser *parser, SolSpan *span, SolTypeId *type_id
             && sol_token_is_trivia(parser->tokens->items[last_index].kind));
         SolToken last = parser->tokens->items[last_index];
         SolSpan type_span = {.start = first.span.start, .end = last.span.end};
-        SolTypeId parsed_type = sol_parser_add_type(parser, (SolSyntaxType){
+        SolSyntaxType type = {
             .kind = kind,
             .span = type_span,
             .name = name,
             .first_argument = first_argument,
+            .return_type = return_type,
+            .first_effect = first_effect,
             .is_capability = is_capability,
-        });
+        };
+        SolTypeId parsed_type = reserved;
+        if (reserved == SOL_AST_NONE) parsed_type = sol_parser_add_type(parser, type);
+        else parser->tree->types[reserved] = type;
         if (parsed_type == SOL_AST_NONE) {
             return false;
         }
@@ -1186,7 +1265,8 @@ static bool sol_parser_balanced_block(SolParser *parser, const char *description
 
 static bool sol_parser_effect_clause(
     SolParser *parser,
-    bool retain,
+    SolEffectOwnerKind owner_kind,
+    size_t owner,
     SolEffectId *first_effect
 ) {
     *first_effect = SOL_AST_NONE;
@@ -1220,21 +1300,20 @@ static bool sol_parser_effect_clause(
             }
             end = closing.span.end;
         }
-        if (retain) {
-            SolEffectId effect = sol_parser_add_effect(parser, (SolEffect){
-                .name = name,
-                .argument = argument,
-                .span = {.start = first.span.start, .end = end},
-                .next = SOL_AST_NONE,
-                .owner_item = parser->tree->item_count,
-                .is_pure = is_pure,
-                .has_argument = has_argument,
-            });
-            if (effect == SOL_AST_NONE) return false;
-            if (*first_effect == SOL_AST_NONE) *first_effect = effect;
-            else parser->tree->effects[last_effect].next = effect;
-            last_effect = effect;
-        }
+        SolEffectId effect = sol_parser_add_effect(parser, (SolEffect){
+            .name = name,
+            .argument = argument,
+            .span = {.start = first.span.start, .end = end},
+            .next = SOL_AST_NONE,
+            .owner_kind = owner_kind,
+            .owner = owner,
+            .is_pure = is_pure,
+            .has_argument = has_argument,
+        });
+        if (effect == SOL_AST_NONE) return false;
+        if (*first_effect == SOL_AST_NONE) *first_effect = effect;
+        else parser->tree->effects[last_effect].next = effect;
+        last_effect = effect;
         sol_parser_match(parser, SOL_TOKEN_COMMA);
     }
     return sol_parser_expect(parser, SOL_TOKEN_RIGHT_BRACE, "expected '}' after effects");
@@ -1348,6 +1427,7 @@ static bool sol_parser_parameters(
 static bool sol_parser_function(
     SolParser *parser,
     bool member,
+    size_t effect_owner,
     SolSpan *name,
     SolSpan *whole,
     SolExprId *body,
@@ -1416,7 +1496,12 @@ static bool sol_parser_function(
         last_clause = clause;
         if (clause == 1) {
             *has_effect_clause = true;
-            if (!sol_parser_effect_clause(parser, true, first_effect)) return false;
+            if (!sol_parser_effect_clause(
+                parser,
+                member ? SOL_EFFECT_OWNER_CAPABILITY_MEMBER : SOL_EFFECT_OWNER_ITEM,
+                effect_owner,
+                first_effect
+            )) return false;
         } else {
             sol_parser_balanced_block(parser, "expected a block after the function clause");
         }
@@ -1584,6 +1669,7 @@ static bool sol_parser_capability(
         if (!sol_parser_function(
             parser,
             true,
+            parser->tree->capability_member_count,
             &member_name,
             &member_span,
             &member_body,
@@ -1658,7 +1744,9 @@ static void sol_parser_recover_declaration(SolParser *parser, size_t failed_at) 
         sol_parser_advance(parser);
     }
     while (sol_parser_kind(parser) != SOL_TOKEN_EOF
-        && !sol_parser_is_declaration_start(sol_parser_kind(parser))) {
+        && (!sol_parser_is_declaration_start(sol_parser_kind(parser))
+            || (sol_parser_kind(parser) == SOL_TOKEN_FUNCTION
+                && sol_parser_peek_kind(parser, 1) == SOL_TOKEN_LEFT_PAREN))) {
         sol_parser_advance(parser);
     }
 }
@@ -1723,6 +1811,7 @@ static void sol_parser_declaration(SolParser *parser) {
         parsed = sol_parser_function(
             parser,
             false,
+            parser->tree->item_count,
             &name,
             &whole,
             &body,
