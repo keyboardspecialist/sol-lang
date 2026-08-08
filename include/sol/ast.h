@@ -207,6 +207,7 @@ typedef struct {
     SolCapabilityMemberId next;
     size_t owner_item;
     bool has_effect_clause;
+    bool result_authority_from_self;
 } SolCapabilityMember;
 
 #endif

@@ -1207,6 +1207,42 @@ static void test_static_bound_operation_callback(void) {
     free_compilation(&compilation);
 }
 
+static void test_restricted_capability_return_authority(void) {
+    static const char text[] =
+        "module restricted_capability_return\n"
+        "capability ReadFileSystem {\n"
+        "    function read() -> Int64 effects { filesystem.read<Self> }\n"
+        "}\n"
+        "capability FileSystem {\n"
+        "    function read_only() -> capability ReadFileSystem\n"
+        "    authority { result derives_from Self }\n"
+        "    effects { pure }\n"
+        "}\n"
+        "function valid(filesystem: capability FileSystem) -> Int64\n"
+        "effects { filesystem.read<filesystem> } {\n"
+        "    let restricted = filesystem.read_only()\n"
+        "    return restricted.read()\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolParameterId root = compilation.syntax.items[2].first_parameter;
+    bool found_restricted_call = false;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        if (compilation.syntax.expressions[index].kind == SOL_EXPR_CALL
+            && compilation.types.expressions[index].kind == SOL_TYPE_NOMINAL
+            && compilation.types.expressions[index].definition == 0) {
+            CHECK(compilation.types.expression_capability_origins[index] == root);
+            found_restricted_call = true;
+        }
+    }
+    CHECK(found_restricted_call);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_private_pure_inference();
     test_forward_transitive_inference();
@@ -1242,6 +1278,7 @@ int main(void) {
     test_incompatible_callback_effects();
     test_malformed_function_coercion_rejected();
     test_static_bound_operation_callback();
+    test_restricted_capability_return_authority();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;

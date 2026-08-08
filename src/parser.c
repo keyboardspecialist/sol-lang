@@ -114,6 +114,22 @@ static bool sol_parser_expect(SolParser *parser, SolTokenKind kind, const char *
     return false;
 }
 
+static bool sol_parser_expect_identifier_text(
+    SolParser *parser,
+    const char *text,
+    const char *message
+) {
+    SolToken token = sol_parser_current(parser);
+    if (token.kind == SOL_TOKEN_IDENTIFIER
+        && sol_token_text_equal(parser->source, token, text)) {
+        sol_parser_advance(parser);
+        return true;
+    }
+    sol_parser_error(parser, "SOL-PARSE-016", token, message);
+    if (token.kind != SOL_TOKEN_EOF) sol_parser_advance(parser);
+    return false;
+}
+
 static bool sol_parser_add_item(SolParser *parser, SolSyntaxItem item) {
     if (parser->tree->item_count == parser->tree->item_capacity) {
         if (parser->tree->item_capacity > SIZE_MAX / 2) {
@@ -1435,7 +1451,8 @@ static bool sol_parser_function(
     SolSpan *return_type,
     SolTypeId *return_type_id,
     SolEffectId *first_effect,
-    bool *has_effect_clause
+    bool *has_effect_clause,
+    bool *result_authority_from_self
 ) {
     *body = SOL_AST_NONE;
     *first_parameter = SOL_AST_NONE;
@@ -1443,6 +1460,7 @@ static bool sol_parser_function(
     *return_type_id = SOL_AST_NONE;
     *first_effect = SOL_AST_NONE;
     *has_effect_clause = false;
+    *result_authority_from_self = false;
     SolToken function_token = sol_parser_current(parser);
     if (!sol_parser_expect(parser, SOL_TOKEN_FUNCTION, "expected 'function'")) {
         return false;
@@ -1467,6 +1485,75 @@ static bool sol_parser_function(
     bool seen[4] = {false, false, false, false};
     for (;;) {
         SolTokenKind kind = sol_parser_kind(parser);
+        SolToken current = sol_parser_current(parser);
+        if (kind == SOL_TOKEN_IDENTIFIER
+            && sol_token_text_equal(parser->source, current, "authority")) {
+            sol_parser_advance(parser);
+            if (*result_authority_from_self) {
+                sol_parser_error(
+                    parser,
+                    "SOL-PARSE-016",
+                    current,
+                    "duplicate return authority clause"
+                );
+            }
+            if (!member) {
+                sol_parser_error(
+                    parser,
+                    "SOL-PARSE-016",
+                    current,
+                    "return authority clauses are currently limited to capability members"
+                );
+            }
+            bool valid_authority = sol_parser_expect(
+                parser,
+                SOL_TOKEN_LEFT_BRACE,
+                "expected '{' after authority"
+            );
+            valid_authority = valid_authority && sol_parser_expect_identifier_text(
+                parser,
+                "result",
+                "expected 'result' in return authority clause"
+            );
+            valid_authority = valid_authority && sol_parser_expect_identifier_text(
+                parser,
+                "derives_from",
+                "expected 'derives_from' in return authority clause"
+            );
+            valid_authority = valid_authority && sol_parser_expect_identifier_text(
+                parser,
+                "Self",
+                "expected 'Self' in return authority clause"
+            );
+            valid_authority = valid_authority && sol_parser_expect(
+                parser,
+                SOL_TOKEN_RIGHT_BRACE,
+                "expected '}' after authority"
+            );
+            if (!valid_authority) {
+                while (sol_parser_kind(parser) != SOL_TOKEN_RIGHT_BRACE
+                    && sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+                    sol_parser_advance(parser);
+                }
+                sol_parser_match(parser, SOL_TOKEN_RIGHT_BRACE);
+                return false;
+            }
+            const SolSyntaxType *authority_type
+                = &parser->tree->types[*return_type_id];
+            bool direct_capability = authority_type->kind == SOL_SYNTAX_TYPE_PATH
+                && authority_type->is_capability
+                && authority_type->first_argument == SOL_AST_NONE;
+            if (!direct_capability) {
+                sol_parser_error(
+                    parser,
+                    "SOL-PARSE-016",
+                    current,
+                    "return authority requires a direct capability result type"
+                );
+            }
+            *result_authority_from_self = member && direct_capability;
+            continue;
+        }
         unsigned int clause = 0;
         if (kind == SOL_TOKEN_EFFECTS) clause = 1;
         if (kind == SOL_TOKEN_REQUIRES) clause = 2;
@@ -1666,6 +1753,7 @@ static bool sol_parser_capability(
         SolTypeId member_return_type_id;
         SolEffectId member_effects;
         bool member_has_effects;
+        bool member_result_authority_from_self;
         if (!sol_parser_function(
             parser,
             true,
@@ -1677,13 +1765,16 @@ static bool sol_parser_capability(
             &member_return_type,
             &member_return_type_id,
             &member_effects,
-            &member_has_effects
+            &member_has_effects,
+            &member_result_authority_from_self
         )) {
             parser->tree->parameter_count = parameter_mark;
             parser->tree->type_count = type_mark;
             parser->tree->type_argument_count = type_argument_mark;
             parser->tree->effect_count = effect_mark;
-            if (sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+            if (sol_parser_kind(parser) != SOL_TOKEN_EOF
+                && sol_parser_kind(parser) != SOL_TOKEN_FUNCTION
+                && sol_parser_kind(parser) != SOL_TOKEN_RIGHT_BRACE) {
                 sol_parser_advance(parser);
             }
         } else {
@@ -1699,6 +1790,7 @@ static bool sol_parser_capability(
                     .next = SOL_AST_NONE,
                     .owner_item = parser->tree->item_count,
                     .has_effect_clause = member_has_effects,
+                    .result_authority_from_self = member_result_authority_from_self,
                 }
             );
             if (member == SOL_AST_NONE) return false;
@@ -1781,6 +1873,7 @@ static void sol_parser_declaration(SolParser *parser) {
     bool is_open = false;
     SolEffectId first_effect = SOL_AST_NONE;
     bool has_effect_clause = false;
+    bool result_authority_from_self = false;
     SolCapabilityMemberId first_member = SOL_AST_NONE;
     bool parsed = false;
     SolTokenKind kind = sol_parser_kind(parser);
@@ -1819,7 +1912,8 @@ static void sol_parser_declaration(SolParser *parser) {
             &return_type,
             &return_type_id,
             &first_effect,
-            &has_effect_clause
+            &has_effect_clause,
+            &result_authority_from_self
         );
     } else {
         sol_parser_error(

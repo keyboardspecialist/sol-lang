@@ -371,6 +371,11 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             sol_resolver_malformed(resolver);
             return false;
         }
+        if (member->result_authority_from_self
+            && !syntax->types[member->return_type_id].is_capability) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
         if (member->first_effect != SOL_AST_NONE
             && (syntax->effects[member->first_effect].owner_kind
                     != SOL_EFFECT_OWNER_CAPABILITY_MEMBER

@@ -291,6 +291,11 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             sol_type_malformed(checker);
             return false;
         }
+        if (member->result_authority_from_self
+            && !syntax->types[member->return_type_id].is_capability) {
+            sol_type_malformed(checker);
+            return false;
+        }
     }
     for (size_t index = 0; index < syntax->argument_count; ++index) {
         const SolArgument *argument = &syntax->arguments[index];
@@ -1253,6 +1258,19 @@ static SolParameterId sol_type_expression_origin(
         : checker->types->local_operation_origins;
     if (!capability && expression->kind == SOL_EXPR_FIELD) {
         return checker->types->expression_capability_origins[expression->as.field.base];
+    }
+    if (capability && expression->kind == SOL_EXPR_CALL) {
+        SolExprId callee = expression->as.call.callee;
+        if (callee < checker->types->expression_count) {
+            SolType callee_type = checker->types->expressions[callee];
+            if (callee_type.kind == SOL_TYPE_CAPABILITY_OPERATION
+                && callee_type.definition < checker->syntax->capability_member_count
+                && checker->syntax->capability_members[
+                    callee_type.definition
+                ].result_authority_from_self) {
+                return checker->types->expression_operation_origins[callee];
+            }
+        }
     }
     if (expression->kind == SOL_EXPR_PATH) {
         return sol_type_path_origin(checker, expression_id, local_origins);

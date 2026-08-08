@@ -8,8 +8,9 @@ toolchain phases remain documented in the [README](README.md#roadmap).
 - [x] Infer recursive effect rows with a least fixed point over call-graph SCCs.
 - [x] Represent closed general function types with normalized semantic effect rows.
 - [x] Check higher-order calls, callbacks, and function values with closed declared effects.
-- [ ] Add effect-row polymorphism and row variables for generic higher-order functions.
-- [ ] Model restricted and wrapped capabilities without losing authority provenance.
+- [x] Preserve receiver authority through explicitly declared, type-changing
+      capability-member restrictions.
+- [ ] Add free-function return-authority contracts and user-defined capability wrappers.
 - [ ] Define and implement effect handlers and handled-row subtraction.
 - [ ] Decide how dynamic or mixed authority provenance is represented beyond the
       current same-origin `if` and `match` joins.
@@ -19,6 +20,7 @@ toolchain phases remain documented in the [README](README.md#roadmap).
 - [ ] Parse contracts into structured syntax instead of balanced blocks.
 - [ ] Lower `requires`, `ensures`, `old`, and `result` into semantic obligations.
 - [ ] Implement user-defined generic types and generic function instantiation.
+- [ ] Integrate effect-row variables with generic function instantiation.
 - [ ] Add traits, implementations, constraints, and type-directed method resolution.
 - [ ] Add distinct and refined types with checked refinement predicates.
 - [ ] Resolve modules and imports across multiple source files and packages.

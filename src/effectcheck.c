@@ -1354,6 +1354,19 @@ static SolParameterId sol_effect_expected_expression_origin(
     if (!capability && expression->kind == SOL_EXPR_FIELD) {
         return checker->types->expression_capability_origins[expression->as.field.base];
     }
+    if (capability && expression->kind == SOL_EXPR_CALL) {
+        SolExprId callee = expression->as.call.callee;
+        if (callee < checker->types->expression_count) {
+            SolType callee_type = checker->types->expressions[callee];
+            if (callee_type.kind == SOL_TYPE_CAPABILITY_OPERATION
+                && callee_type.definition < checker->syntax->capability_member_count
+                && checker->syntax->capability_members[
+                    callee_type.definition
+                ].result_authority_from_self) {
+                return sol_effect_expected_expression_origin(checker, callee, false);
+            }
+        }
+    }
     if (expression->kind == SOL_EXPR_PATH) {
         SolResolution resolution = checker->hir->resolutions[expression_id];
         if (resolution.kind == SOL_RESOLUTION_LOCAL
@@ -1391,13 +1404,10 @@ static bool sol_effect_origin_matches_type(
     SolType parameter_type = checker->types->declared_types[parameter->type_id];
     if (!sol_effect_type_is_capability(checker, parameter_type)) return false;
     if (!operation) {
-        return sol_effect_type_is_capability(checker, value_type)
-            && value_type.definition == parameter_type.definition;
+        return sol_effect_type_is_capability(checker, value_type);
     }
     return value_type.kind == SOL_TYPE_CAPABILITY_OPERATION
-        && value_type.definition < checker->syntax->capability_member_count
-        && checker->syntax->capability_members[value_type.definition].owner_item
-            == parameter_type.definition;
+        && value_type.definition < checker->syntax->capability_member_count;
 }
 
 static bool sol_effect_validate_local_resolutions(const SolEffectChecker *checker) {
