@@ -50,10 +50,11 @@ effects {
     clock.read<clock>
 }
 requires {
-    true
+    user.name == user.name
 }
 ensures {
-    true
+    success => result == result
+    failure => user.name == old(user.name)
 } {
     return ok(user.name)
 }

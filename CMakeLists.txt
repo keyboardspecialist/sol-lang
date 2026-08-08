@@ -13,6 +13,7 @@ add_library(sol_compiler STATIC
     src/lexer.c
     src/parser.c
     src/source.c
+    src/syntax.c
     src/typecheck.c
 )
 

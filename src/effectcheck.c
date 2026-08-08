@@ -792,6 +792,10 @@ static void sol_effect_expression(SolEffectChecker *checker, SolExprId expressio
             --checker->handled_count;
             break;
         }
+        case SOL_EXPR_RESULT:
+        case SOL_EXPR_OLD:
+            checker->malformed = true;
+            break;
         default:
             break;
     }
@@ -877,7 +881,7 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         const SolExpr *expression = &syntax->expressions[index];
         bool valid = (int)expression->kind >= 0
-            && expression->kind <= SOL_EXPR_HANDLE
+            && expression->kind <= SOL_EXPR_OLD
             && sol_effect_span_valid(source, expression->span);
         switch (expression->kind) {
             case SOL_EXPR_PATH:
@@ -937,6 +941,9 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
                     && expression->as.handle.provider < syntax->expression_count
                     && expression->as.handle.body < syntax->expression_count
                     && syntax->expressions[expression->as.handle.body].kind == SOL_EXPR_BLOCK;
+                break;
+            case SOL_EXPR_OLD:
+                valid = valid && expression->as.old_expression < syntax->expression_count;
                 break;
             default:
                 break;
@@ -1063,6 +1070,10 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
     }
     size_t declared_roots = checker->syntax->item_count
         + checker->syntax->capability_member_count;
+    if (declared_roots > SIZE_MAX - checker->syntax->contract_condition_count) {
+        return false;
+    }
+    declared_roots += checker->syntax->contract_condition_count;
     if (declared_roots > SIZE_MAX - count) return false;
     checker->expression_owners = malloc(count * sizeof(*checker->expression_owners));
     unsigned char *states = calloc(count, sizeof(*states));
@@ -1111,13 +1122,26 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
             if (item->kind != SOL_ITEM_FUNCTION || item->body == SOL_AST_NONE) continue;
             owner = root;
             root_expression = item->body;
-        } else if (root < declared_roots) {
+        } else if (root < checker->syntax->item_count
+            + checker->syntax->capability_member_count) {
             const SolCapabilityMember *member = &checker->syntax->capability_members[
                 root - checker->syntax->item_count
             ];
             if (member->body == SOL_AST_NONE) continue;
             owner = member->owner_item;
             root_expression = member->body;
+        } else if (root < declared_roots) {
+            const SolContractCondition *condition
+                = &checker->syntax->contract_conditions[
+                    root - checker->syntax->item_count
+                        - checker->syntax->capability_member_count
+                ];
+            const SolContractClause *clause
+                = &checker->syntax->contract_clauses[condition->owner_clause];
+            owner = clause->owner_kind == SOL_CONTRACT_OWNER_ITEM
+                ? clause->owner
+                : checker->syntax->capability_members[clause->owner].owner_item;
+            root_expression = condition->expression;
         } else {
             root_expression = root - declared_roots;
             if (states[root_expression] != 0) continue;
@@ -1327,6 +1351,16 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
                         checker,
                         owner,
                         expression->as.handle.body,
+                        states,
+                        stack,
+                        &stack_count
+                    );
+                    break;
+                case SOL_EXPR_OLD:
+                    valid = sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.old_expression,
                         states,
                         stack,
                         &stack_count
@@ -2046,6 +2080,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || syntax->match_arm_count > syntax->match_arm_capacity
         || syntax->effect_count > syntax->effect_capacity
         || syntax->capability_member_count > syntax->capability_member_capacity
+        || syntax->contract_clause_count > syntax->contract_clause_capacity
+        || syntax->contract_condition_count > syntax->contract_condition_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
         || (syntax->expression_count != 0 && syntax->expressions == NULL)
         || (syntax->parameter_count != 0 && syntax->parameters == NULL)
@@ -2054,6 +2090,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (syntax->match_arm_count != 0 && syntax->match_arms == NULL)
         || (syntax->effect_count != 0 && syntax->effects == NULL)
         || (syntax->capability_member_count != 0 && syntax->capability_members == NULL)
+        || (syntax->contract_clause_count != 0 && syntax->contract_clauses == NULL)
+        || (syntax->contract_condition_count != 0
+            && syntax->contract_conditions == NULL)
         || hir->definition_count != syntax->item_count
         || hir->resolution_count != syntax->expression_count
         || hir->local_count > hir->local_capacity
@@ -2083,6 +2122,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (types->handler_count != 0 && types->handlers == NULL)) {
         return false;
     }
+    if (!sol_syntax_contracts_validate(source, syntax)) return false;
     for (size_t index = 0; index < types->function_type_count; ++index) {
         const SolFunctionType *function = &types->function_types[index];
         if ((function->parameter_count != 0 && function->parameters == NULL)
@@ -2207,6 +2247,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
                 && item->first_parameter >= syntax->parameter_count)
             || (item->first_member != SOL_AST_NONE
                 && item->first_member >= syntax->capability_member_count)
+            || (item->first_contract != SOL_AST_NONE
+                && item->first_contract >= syntax->contract_clause_count)
             || (item->capability_source != SOL_AST_NONE
                 && item->capability_source >= syntax->parameter_count)
             || (item->result_authority_parameter != SOL_AST_NONE
@@ -2356,6 +2398,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
                 && member->body >= syntax->expression_count)
             || (member->next != SOL_AST_NONE
                 && member->next >= syntax->capability_member_count)
+            || (member->first_contract != SOL_AST_NONE
+                && member->first_contract >= syntax->contract_clause_count)
             || member->owner_item >= syntax->item_count) {
             return false;
         }

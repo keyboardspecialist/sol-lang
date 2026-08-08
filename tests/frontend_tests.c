@@ -33,6 +33,8 @@ static void check_ast_links(const SolSyntaxTree *tree) {
             || tree->items[index].first_member < tree->capability_member_count);
         CHECK(tree->items[index].capability_source == SOL_AST_NONE
             || tree->items[index].capability_source < tree->parameter_count);
+        CHECK(tree->items[index].first_contract == SOL_AST_NONE
+            || tree->items[index].first_contract < tree->contract_clause_count);
     }
     for (size_t index = 0; index < tree->expression_count; ++index) {
         const SolExpr *expression = &tree->expressions[index];
@@ -79,6 +81,9 @@ static void check_ast_links(const SolSyntaxTree *tree) {
                 CHECK(expression->as.handle.provider < tree->expression_count);
                 CHECK(expression->as.handle.body < tree->expression_count);
                 CHECK(tree->expressions[expression->as.handle.body].kind == SOL_EXPR_BLOCK);
+                break;
+            case SOL_EXPR_OLD:
+                CHECK(expression->as.old_expression < tree->expression_count);
                 break;
             default:
                 break;
@@ -162,6 +167,22 @@ static void check_ast_links(const SolSyntaxTree *tree) {
             || tree->capability_members[index].body < tree->expression_count);
         CHECK(tree->capability_members[index].next == SOL_AST_NONE
             || tree->capability_members[index].next < tree->capability_member_count);
+        CHECK(tree->capability_members[index].first_contract == SOL_AST_NONE
+            || tree->capability_members[index].first_contract
+                < tree->contract_clause_count);
+    }
+    for (size_t index = 0; index < tree->contract_clause_count; ++index) {
+        CHECK(tree->contract_clauses[index].first_condition == SOL_AST_NONE
+            || tree->contract_clauses[index].first_condition
+                < tree->contract_condition_count);
+        CHECK(tree->contract_clauses[index].next == SOL_AST_NONE
+            || tree->contract_clauses[index].next < tree->contract_clause_count);
+    }
+    for (size_t index = 0; index < tree->contract_condition_count; ++index) {
+        CHECK(tree->contract_conditions[index].expression < tree->expression_count);
+        CHECK(tree->contract_conditions[index].owner_clause < tree->contract_clause_count);
+        CHECK(tree->contract_conditions[index].next == SOL_AST_NONE
+            || tree->contract_conditions[index].next < tree->contract_condition_count);
     }
 }
 
@@ -285,6 +306,174 @@ static void test_clause_order(void) {
     }
     CHECK(found);
 
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_structured_contract_syntax(void) {
+    static const char source_text[] =
+        "module contracts\n"
+        "capability Gate {\n"
+        "    function permit(value: Int64) -> Bool\n"
+        "    requires { value > 0 }\n"
+        "    ensures { result == old(value) }\n"
+        "}\n"
+        "function check(value: Int64, ready: Bool) -> Bool\n"
+        "requires {\n"
+        "    value > 0, ready\n"
+        "}\n"
+        "ensures {\n"
+        "    success => result == ready\n"
+        "    failure => old(value) == value\n"
+        "} { return ready }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "contracts.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    if (sol_diagnostics_has_errors(&diagnostics)) {
+        sol_diagnostics_render_human(stderr, &source, &diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.contract_clause_count == 4);
+    CHECK(tree.contract_condition_count == 6);
+    if (tree.item_count == 2 && tree.capability_member_count == 1
+        && tree.contract_clause_count == 4 && tree.contract_condition_count == 6) {
+        CHECK(tree.items[0].first_contract == SOL_AST_NONE);
+        CHECK(tree.capability_members[0].first_contract == 0);
+        CHECK(tree.items[1].first_contract == 2);
+        CHECK(tree.contract_clauses[0].kind == SOL_CONTRACT_REQUIRES);
+        CHECK(tree.contract_clauses[0].owner_kind
+            == SOL_CONTRACT_OWNER_CAPABILITY_MEMBER);
+        CHECK(tree.contract_clauses[0].owner == 0);
+        CHECK(tree.contract_clauses[1].kind == SOL_CONTRACT_ENSURES);
+        CHECK(tree.contract_clauses[2].next == 3);
+        CHECK(tree.contract_clauses[2].owner_kind == SOL_CONTRACT_OWNER_ITEM);
+        CHECK(tree.contract_clauses[2].owner == 1);
+        CHECK(tree.contract_conditions[4].outcome == SOL_CONTRACT_OUTCOME_SUCCESS);
+        CHECK(tree.contract_conditions[5].outcome == SOL_CONTRACT_OUTCOME_FAILURE);
+    }
+    size_t old_count = 0;
+    size_t result_count = 0;
+    for (size_t index = 0; index < tree.expression_count; ++index) {
+        old_count += tree.expressions[index].kind == SOL_EXPR_OLD ? 1 : 0;
+        result_count += tree.expressions[index].kind == SOL_EXPR_RESULT ? 1 : 0;
+    }
+    CHECK(old_count == 2);
+    CHECK(result_count == 2);
+    check_ast_links(&tree);
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_contract_diagnostics_and_recovery(void) {
+    static const char source_text[] =
+        "module malformed_contracts\n"
+        "function malformed(value: Int64) -> Bool\n"
+        "requires {\n"
+        "    old(value)\n"
+        "    result\n"
+        "    success => true\n"
+        "    true false\n"
+        "}\n"
+        "requires { true }\n"
+        "{ return true }\n"
+        "function recovered() -> Bool { return true }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "malformed_contracts.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.item_count == 2);
+    CHECK(tree.contract_clause_count == 2);
+    CHECK(tree.contract_condition_count == 6);
+    size_t contextual = 0;
+    size_t duplicates = 0;
+    for (size_t index = 0; index < diagnostics.count; ++index) {
+        contextual += strcmp(diagnostics.items[index].code, "SOL-PARSE-017") == 0 ? 1 : 0;
+        duplicates += strcmp(diagnostics.items[index].code, "SOL-PARSE-008") == 0 ? 1 : 0;
+    }
+    CHECK(contextual >= 4);
+    CHECK(duplicates == 1);
+    CHECK(tree.items[0].first_contract == 0);
+    CHECK(tree.contract_clauses[0].next == 1);
+    check_ast_links(&tree);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_contract_rollback(void) {
+    static const char source_text[] =
+        "module contract_rollback\n"
+        "function broken() -> Bool requires { true }\n"
+        "function recovered() -> Bool { return true }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "contract_rollback.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.item_count == 1);
+    CHECK(tree.contract_clause_count == 0);
+    CHECK(tree.contract_condition_count == 0);
+    CHECK(tree.items[0].first_contract == SOL_AST_NONE);
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_capability_contract_rollback(void) {
+    static const char source_text[] =
+        "module capability_contract_rollback\n"
+        "capability Gate {\n"
+        "    function broken() -> Bool requires { true } effects\n"
+        "    function recovered() -> Bool requires { true }\n"
+        "}\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "capability_contract_rollback.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.item_count == 1);
+    CHECK(tree.capability_member_count == 1);
+    CHECK(tree.contract_clause_count == 1);
+    CHECK(tree.contract_condition_count == 1);
+    if (tree.capability_member_count == 1 && tree.contract_clause_count == 1) {
+        CHECK(tree.capability_members[0].first_contract == 0);
+        CHECK(tree.contract_clauses[0].owner == 0);
+    }
+    check_ast_links(&tree);
     sol_syntax_tree_free(&tree);
     sol_diagnostics_free(&diagnostics);
     sol_tokens_free(&tokens);
@@ -907,6 +1096,10 @@ int main(void) {
     test_missing_module();
     test_nested_and_unterminated_comments();
     test_clause_order();
+    test_structured_contract_syntax();
+    test_contract_diagnostics_and_recovery();
+    test_contract_rollback();
+    test_capability_contract_rollback();
     test_carriage_return_positions();
     test_type_depth_limit();
     test_declaration_recovery();

@@ -4,6 +4,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef enum {
+    SOL_PARSER_CONTRACT_NONE,
+    SOL_PARSER_CONTRACT_REQUIRES,
+    SOL_PARSER_CONTRACT_ENSURES,
+} SolParserContractContext;
+
 typedef struct {
     const SolSource *source;
     const SolTokens *tokens;
@@ -12,6 +18,7 @@ typedef struct {
     size_t cursor;
     size_t type_depth;
     size_t expression_depth;
+    SolParserContractContext contract_context;
     bool suppress_record_literal;
     bool allocation_failed;
 } SolParser;
@@ -35,6 +42,8 @@ void sol_syntax_tree_free(SolSyntaxTree *tree) {
     free(tree->match_arms);
     free(tree->effects);
     free(tree->capability_members);
+    free(tree->contract_clauses);
+    free(tree->contract_conditions);
     memset(tree, 0, sizeof(*tree));
 }
 
@@ -413,6 +422,45 @@ static SolCapabilityMemberId sol_parser_add_capability_member(
     }
     SolCapabilityMemberId id = parser->tree->capability_member_count++;
     parser->tree->capability_members[id] = member;
+    return id;
+}
+
+static SolContractClauseId sol_parser_add_contract_clause(
+    SolParser *parser,
+    SolContractClause clause
+) {
+    if (parser->tree->contract_clause_count == parser->tree->contract_clause_capacity) {
+        SolContractClause *clauses = sol_parser_grow(
+            parser,
+            parser->tree->contract_clauses,
+            &parser->tree->contract_clause_capacity,
+            sizeof(*parser->tree->contract_clauses)
+        );
+        if (clauses == NULL) return SOL_AST_NONE;
+        parser->tree->contract_clauses = clauses;
+    }
+    SolContractClauseId id = parser->tree->contract_clause_count++;
+    parser->tree->contract_clauses[id] = clause;
+    return id;
+}
+
+static SolContractConditionId sol_parser_add_contract_condition(
+    SolParser *parser,
+    SolContractCondition condition
+) {
+    if (parser->tree->contract_condition_count
+        == parser->tree->contract_condition_capacity) {
+        SolContractCondition *conditions = sol_parser_grow(
+            parser,
+            parser->tree->contract_conditions,
+            &parser->tree->contract_condition_capacity,
+            sizeof(*parser->tree->contract_conditions)
+        );
+        if (conditions == NULL) return SOL_AST_NONE;
+        parser->tree->contract_conditions = conditions;
+    }
+    SolContractConditionId id = parser->tree->contract_condition_count++;
+    parser->tree->contract_conditions[id] = condition;
     return id;
 }
 
@@ -971,6 +1019,54 @@ static SolExprId sol_parser_primary_expression(SolParser *parser) {
             .as.bool_value = token.kind == SOL_TOKEN_TRUE,
         });
     }
+    if (token.kind == SOL_TOKEN_IDENTIFIER
+        && parser->contract_context != SOL_PARSER_CONTRACT_NONE
+        && sol_token_text_equal(parser->source, token, "result")) {
+        sol_parser_advance(parser);
+        if (parser->contract_context != SOL_PARSER_CONTRACT_ENSURES) {
+            sol_parser_error(
+                parser,
+                "SOL-PARSE-017",
+                token,
+                "'result' is only available in ensures clauses"
+            );
+        }
+        return sol_parser_add_expression(parser, (SolExpr){
+            .kind = SOL_EXPR_RESULT,
+            .span = token.span,
+        });
+    }
+    if (token.kind == SOL_TOKEN_IDENTIFIER
+        && parser->contract_context != SOL_PARSER_CONTRACT_NONE
+        && sol_token_text_equal(parser->source, token, "old")) {
+        sol_parser_advance(parser);
+        if (parser->contract_context != SOL_PARSER_CONTRACT_ENSURES) {
+            sol_parser_error(
+                parser,
+                "SOL-PARSE-017",
+                token,
+                "'old' is only available in ensures clauses"
+            );
+        }
+        if (!sol_parser_expect(
+            parser,
+            SOL_TOKEN_LEFT_PAREN,
+            "expected '(' after 'old'"
+        )) {
+            return sol_parser_add_expression(parser, (SolExpr){
+                .kind = SOL_EXPR_ERROR,
+                .span = token.span,
+            });
+        }
+        SolExprId operand = sol_parser_nested_expression(parser, 1);
+        SolToken closing = sol_parser_current(parser);
+        sol_parser_expect(parser, SOL_TOKEN_RIGHT_PAREN, "expected ')' after old expression");
+        return sol_parser_add_expression(parser, (SolExpr){
+            .kind = SOL_EXPR_OLD,
+            .span = {.start = token.span.start, .end = closing.span.end},
+            .as.old_expression = operand,
+        });
+    }
     if (token.kind == SOL_TOKEN_IDENTIFIER) {
         sol_parser_advance(parser);
         return sol_parser_add_expression(parser, (SolExpr){
@@ -1329,6 +1425,127 @@ static bool sol_parser_balanced_block(SolParser *parser, const char *description
     return true;
 }
 
+static bool sol_parser_contract_clause(
+    SolParser *parser,
+    SolContractClauseKind kind,
+    SolContractOwnerKind owner_kind,
+    size_t owner,
+    SolToken clause_token,
+    SolContractClauseId *clause_id
+) {
+    SolToken opening = sol_parser_current(parser);
+    if (!sol_parser_expect(
+        parser,
+        SOL_TOKEN_LEFT_BRACE,
+        "expected a block after the function clause"
+    )) {
+        return false;
+    }
+    SolContractClauseId clause = sol_parser_add_contract_clause(
+        parser,
+        (SolContractClause){
+            .kind = kind,
+            .span = {.start = clause_token.span.start, .end = opening.span.end},
+            .first_condition = SOL_AST_NONE,
+            .next = SOL_AST_NONE,
+            .owner_kind = owner_kind,
+            .owner = owner,
+        }
+    );
+    if (clause == SOL_AST_NONE) return false;
+    *clause_id = clause;
+
+    SolParserContractContext previous_context = parser->contract_context;
+    parser->contract_context = kind == SOL_CONTRACT_REQUIRES
+        ? SOL_PARSER_CONTRACT_REQUIRES
+        : SOL_PARSER_CONTRACT_ENSURES;
+    SolContractConditionId last_condition = SOL_AST_NONE;
+    while (sol_parser_kind(parser) != SOL_TOKEN_RIGHT_BRACE
+        && sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+        if (sol_parser_match(parser, SOL_TOKEN_COMMA)) {
+            sol_parser_error(
+                parser,
+                "SOL-PARSE-017",
+                parser->tokens->items[parser->cursor - 1],
+                "expected a contract condition before ','"
+            );
+            continue;
+        }
+        SolToken first = sol_parser_current(parser);
+        SolContractOutcomeKind outcome = SOL_CONTRACT_OUTCOME_ALWAYS;
+        if (first.kind == SOL_TOKEN_IDENTIFIER
+            && sol_parser_peek_kind(parser, 1) == SOL_TOKEN_FAT_ARROW
+            && (sol_token_text_equal(parser->source, first, "success")
+                || sol_token_text_equal(parser->source, first, "failure"))) {
+            outcome = sol_token_text_equal(parser->source, first, "success")
+                ? SOL_CONTRACT_OUTCOME_SUCCESS
+                : SOL_CONTRACT_OUTCOME_FAILURE;
+            sol_parser_advance(parser);
+            sol_parser_advance(parser);
+            if (kind != SOL_CONTRACT_ENSURES) {
+                sol_parser_error(
+                    parser,
+                    "SOL-PARSE-017",
+                    first,
+                    "success and failure outcomes are only available in ensures clauses"
+                );
+            }
+        }
+        size_t before = sol_parser_significant_index(parser);
+        SolExprId expression = sol_parser_expression(parser, 1);
+        if (expression == SOL_AST_NONE) {
+            parser->contract_context = previous_context;
+            return false;
+        }
+        const SolExpr *root = &parser->tree->expressions[expression];
+        SolContractConditionId condition = sol_parser_add_contract_condition(
+            parser,
+            (SolContractCondition){
+                .outcome = outcome,
+                .span = {.start = first.span.start, .end = root->span.end},
+                .expression = expression,
+                .next = SOL_AST_NONE,
+                .owner_clause = clause,
+            }
+        );
+        if (condition == SOL_AST_NONE) {
+            parser->contract_context = previous_context;
+            return false;
+        }
+        if (parser->tree->contract_clauses[clause].first_condition == SOL_AST_NONE) {
+            parser->tree->contract_clauses[clause].first_condition = condition;
+        } else {
+            parser->tree->contract_conditions[last_condition].next = condition;
+        }
+        last_condition = condition;
+
+        SolToken next = sol_parser_current(parser);
+        if (next.kind == SOL_TOKEN_RIGHT_BRACE || next.kind == SOL_TOKEN_EOF) continue;
+        if (sol_parser_match(parser, SOL_TOKEN_COMMA)) continue;
+        if (!sol_parser_has_line_break(parser, root->span.end, next.span.start)) {
+            sol_parser_error(
+                parser,
+                "SOL-PARSE-017",
+                next,
+                "expected a newline or ',' between contract conditions"
+            );
+        }
+        if (sol_parser_significant_index(parser) <= before
+            && sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+            sol_parser_advance(parser);
+        }
+    }
+    SolToken closing = sol_parser_current(parser);
+    bool closed = sol_parser_expect(
+        parser,
+        SOL_TOKEN_RIGHT_BRACE,
+        "expected '}' after contract conditions"
+    );
+    parser->tree->contract_clauses[clause].span.end = closing.span.end;
+    parser->contract_context = previous_context;
+    return closed;
+}
+
 static bool sol_parser_effect_clause(
     SolParser *parser,
     SolEffectOwnerKind owner_kind,
@@ -1503,6 +1720,7 @@ static bool sol_parser_function(
     SolTypeId *return_type_id,
     SolEffectId *first_effect,
     bool *has_effect_clause,
+    SolContractClauseId *first_contract,
     bool *result_authority_from_self,
     SolParameterId *result_authority_parameter
 ) {
@@ -1512,6 +1730,7 @@ static bool sol_parser_function(
     *return_type_id = SOL_AST_NONE;
     *first_effect = SOL_AST_NONE;
     *has_effect_clause = false;
+    *first_contract = SOL_AST_NONE;
     *result_authority_from_self = false;
     *result_authority_parameter = SOL_AST_NONE;
     SolToken function_token = sol_parser_current(parser);
@@ -1536,6 +1755,7 @@ static bool sol_parser_function(
 
     unsigned int last_clause = 0;
     bool seen[4] = {false, false, false, false};
+    SolContractClauseId last_contract = SOL_AST_NONE;
     for (;;) {
         SolTokenKind kind = sol_parser_kind(parser);
         SolToken current = sol_parser_current(parser);
@@ -1699,7 +1919,18 @@ static bool sol_parser_function(
                 first_effect
             )) return false;
         } else {
-            sol_parser_balanced_block(parser, "expected a block after the function clause");
+            SolContractClauseId contract;
+            if (!sol_parser_contract_clause(
+                parser,
+                clause == 2 ? SOL_CONTRACT_REQUIRES : SOL_CONTRACT_ENSURES,
+                member ? SOL_CONTRACT_OWNER_CAPABILITY_MEMBER : SOL_CONTRACT_OWNER_ITEM,
+                effect_owner,
+                clause_token,
+                &contract
+            )) return false;
+            if (*first_contract == SOL_AST_NONE) *first_contract = contract;
+            else parser->tree->contract_clauses[last_contract].next = contract;
+            last_contract = contract;
         }
     }
 
@@ -1903,6 +2134,8 @@ static bool sol_parser_capability(
         size_t pattern_mark = parser->tree->pattern_count;
         size_t pattern_binding_mark = parser->tree->pattern_binding_count;
         size_t match_arm_mark = parser->tree->match_arm_count;
+        size_t contract_clause_mark = parser->tree->contract_clause_count;
+        size_t contract_condition_mark = parser->tree->contract_condition_count;
         SolSpan member_name;
         SolSpan member_span;
         SolExprId member_body;
@@ -1911,6 +2144,7 @@ static bool sol_parser_capability(
         SolTypeId member_return_type_id;
         SolEffectId member_effects;
         bool member_has_effects;
+        SolContractClauseId member_contracts;
         bool member_result_authority_from_self;
         SolParameterId member_result_authority_parameter;
         if (!sol_parser_function(
@@ -1926,6 +2160,7 @@ static bool sol_parser_capability(
             &member_return_type_id,
             &member_effects,
             &member_has_effects,
+            &member_contracts,
             &member_result_authority_from_self,
             &member_result_authority_parameter
         )) {
@@ -1939,6 +2174,8 @@ static bool sol_parser_capability(
             parser->tree->pattern_count = pattern_mark;
             parser->tree->pattern_binding_count = pattern_binding_mark;
             parser->tree->match_arm_count = match_arm_mark;
+            parser->tree->contract_clause_count = contract_clause_mark;
+            parser->tree->contract_condition_count = contract_condition_mark;
             if (sol_parser_kind(parser) != SOL_TOKEN_EOF
                 && sol_parser_kind(parser) != SOL_TOKEN_FUNCTION
                 && sol_parser_kind(parser) != SOL_TOKEN_RIGHT_BRACE) {
@@ -1954,6 +2191,7 @@ static bool sol_parser_capability(
                     .return_type = member_return_type,
                     .return_type_id = member_return_type_id,
                     .first_effect = member_effects,
+                    .first_contract = member_contracts,
                     .body = member_body,
                     .next = SOL_AST_NONE,
                     .owner_item = parser->tree->item_count,
@@ -2026,6 +2264,8 @@ static void sol_parser_declaration(SolParser *parser) {
     size_t pattern_mark = parser->tree->pattern_count;
     size_t pattern_binding_mark = parser->tree->pattern_binding_count;
     size_t match_arm_mark = parser->tree->match_arm_count;
+    size_t contract_clause_mark = parser->tree->contract_clause_count;
+    size_t contract_condition_mark = parser->tree->contract_condition_count;
     size_t start = sol_parser_current(parser).span.start;
     while (sol_parser_kind(parser) == SOL_TOKEN_AT) {
         sol_parser_annotation(parser);
@@ -2047,6 +2287,7 @@ static void sol_parser_declaration(SolParser *parser) {
     bool is_open = false;
     SolEffectId first_effect = SOL_AST_NONE;
     bool has_effect_clause = false;
+    SolContractClauseId first_contract = SOL_AST_NONE;
     bool result_authority_from_self = false;
     SolParameterId result_authority_parameter = SOL_AST_NONE;
     SolCapabilityMemberId first_member = SOL_AST_NONE;
@@ -2096,6 +2337,7 @@ static void sol_parser_declaration(SolParser *parser) {
             &return_type_id,
             &first_effect,
             &has_effect_clause,
+            &first_contract,
             &result_authority_from_self,
             &result_authority_parameter
         );
@@ -2124,6 +2366,7 @@ static void sol_parser_declaration(SolParser *parser) {
             .is_open = is_open,
             .first_effect = first_effect,
             .has_effect_clause = has_effect_clause,
+            .first_contract = first_contract,
             .first_member = first_member,
             .result_authority_parameter = result_authority_parameter,
             .capability_source = capability_source,
@@ -2142,6 +2385,8 @@ static void sol_parser_declaration(SolParser *parser) {
         parser->tree->pattern_count = pattern_mark;
         parser->tree->pattern_binding_count = pattern_binding_mark;
         parser->tree->match_arm_count = match_arm_mark;
+        parser->tree->contract_clause_count = contract_clause_mark;
+        parser->tree->contract_condition_count = contract_condition_mark;
         sol_parser_recover_declaration(parser, failed_at);
     }
 }

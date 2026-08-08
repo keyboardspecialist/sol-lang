@@ -21,7 +21,7 @@ toolchain phases remain documented in the [README](README.md#roadmap).
 
 ## P0: Front-End Semantics
 
-- [ ] Parse contracts into structured syntax instead of balanced blocks.
+- [x] Parse contracts into structured syntax instead of balanced blocks.
 - [ ] Lower `requires`, `ensures`, `old`, and `result` into semantic obligations.
 - [ ] Implement user-defined generic types and generic function instantiation.
 - [ ] Integrate effect-row variables with generic function instantiation.

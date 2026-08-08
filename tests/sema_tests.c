@@ -353,6 +353,77 @@ static void test_malformed_handler_ast_rejected(void) {
     free_compilation(&compilation);
 }
 
+static void reset_hir_diagnostics(TestCompilation *compilation) {
+    sol_hir_module_free(&compilation->hir);
+    sol_hir_module_init(&compilation->hir);
+    sol_diagnostics_free(&compilation->diagnostics);
+    sol_diagnostics_init(&compilation->diagnostics);
+}
+
+static void test_contract_resolution_firewall_and_cycles(void) {
+    static const char text[] =
+        "module contract_resolution_firewall\n"
+        "function sample(value: Int64) -> Int64\n"
+        "requires { missing_precondition(value) }\n"
+        "ensures { result == old(missing_postcondition(value)) }\n"
+        "{ return value }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.syntax.contract_clause_count == 2);
+    CHECK(compilation.syntax.contract_condition_count == 2);
+    SolExprId old_expression = SOL_AST_NONE;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        const SolExpr *expression = &compilation.syntax.expressions[index];
+        if (expression->kind == SOL_EXPR_OLD) old_expression = index;
+        if (expression->kind == SOL_EXPR_OLD || expression->kind == SOL_EXPR_RESULT
+            || (expression->kind == SOL_EXPR_PATH
+                && (span_text_equal(
+                    &compilation.source,
+                    expression->as.name,
+                    "missing_precondition"
+                ) || span_text_equal(
+                    &compilation.source,
+                    expression->as.name,
+                    "missing_postcondition"
+                )))) {
+            CHECK(compilation.hir.resolutions[index].kind == SOL_RESOLUTION_NOT_APPLICABLE);
+        }
+    }
+    CHECK(!has_diagnostic(&compilation, "SOL-RESOLVE-002"));
+    CHECK(old_expression != SOL_AST_NONE);
+
+    SolContractConditionId first
+        = compilation.syntax.contract_clauses[0].first_condition;
+    SolContractConditionId next = compilation.syntax.contract_conditions[first].next;
+    compilation.syntax.contract_conditions[first].next = first;
+    reset_hir_diagnostics(&compilation);
+    CHECK(!sol_hir_lower(
+        &compilation.source,
+        &compilation.syntax,
+        &compilation.hir,
+        &compilation.diagnostics
+    ));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    compilation.syntax.contract_conditions[first].next = next;
+
+    if (old_expression != SOL_AST_NONE) {
+        SolExprId operand
+            = compilation.syntax.expressions[old_expression].as.old_expression;
+        compilation.syntax.expressions[old_expression].as.old_expression = old_expression;
+        reset_hir_diagnostics(&compilation);
+        CHECK(!sol_hir_lower(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+        compilation.syntax.expressions[old_expression].as.old_expression = operand;
+    }
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_successful_resolution();
     test_unresolved_name();
@@ -365,6 +436,7 @@ int main(void) {
     test_malformed_arena_metadata_rejected();
     test_derived_capability_resolution_and_malformed_body();
     test_malformed_handler_ast_rejected();
+    test_contract_resolution_firewall_and_cycles();
     if (failures != 0) {
         fprintf(stderr, "%d semantic test failure(s)\n", failures);
         return 1;

@@ -29,6 +29,7 @@ typedef struct {
     bool is_open;
     SolEffectId first_effect;
     bool has_effect_clause;
+    SolContractClauseId first_contract;
     SolCapabilityMemberId first_member;
     SolParameterId result_authority_parameter;
     SolParameterId capability_source;
@@ -79,6 +80,12 @@ typedef struct {
     SolCapabilityMember *capability_members;
     size_t capability_member_count;
     size_t capability_member_capacity;
+    SolContractClause *contract_clauses;
+    size_t contract_clause_count;
+    size_t contract_clause_capacity;
+    SolContractCondition *contract_conditions;
+    size_t contract_condition_count;
+    size_t contract_condition_capacity;
 } SolSyntaxTree;
 
 void sol_syntax_tree_init(SolSyntaxTree *tree);
@@ -88,6 +95,10 @@ bool sol_parse(
     const SolTokens *tokens,
     SolSyntaxTree *tree,
     SolDiagnostics *diagnostics
+);
+bool sol_syntax_contracts_validate(
+    const SolSource *source,
+    const SolSyntaxTree *tree
 );
 
 #endif

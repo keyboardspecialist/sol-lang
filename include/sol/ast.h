@@ -21,6 +21,8 @@ typedef size_t SolPatternBindingId;
 typedef size_t SolMatchArmId;
 typedef size_t SolEffectId;
 typedef size_t SolCapabilityMemberId;
+typedef size_t SolContractClauseId;
+typedef size_t SolContractConditionId;
 
 #define SOL_AST_NONE SIZE_MAX
 
@@ -41,6 +43,8 @@ typedef enum {
     SOL_EXPR_BLOCK,
     SOL_EXPR_PROPAGATE,
     SOL_EXPR_HANDLE,
+    SOL_EXPR_RESULT,
+    SOL_EXPR_OLD,
 } SolExprKind;
 
 typedef struct {
@@ -83,6 +87,7 @@ typedef struct {
             SolStatementId first_statement;
         } block;
         SolExprId propagated;
+        SolExprId old_expression;
         struct {
             SolSpan effect_name;
             SolExprId authority;
@@ -204,6 +209,39 @@ typedef struct {
     bool has_argument;
 } SolEffect;
 
+typedef enum {
+    SOL_CONTRACT_OWNER_ITEM,
+    SOL_CONTRACT_OWNER_CAPABILITY_MEMBER,
+} SolContractOwnerKind;
+
+typedef enum {
+    SOL_CONTRACT_REQUIRES,
+    SOL_CONTRACT_ENSURES,
+} SolContractClauseKind;
+
+typedef enum {
+    SOL_CONTRACT_OUTCOME_ALWAYS,
+    SOL_CONTRACT_OUTCOME_SUCCESS,
+    SOL_CONTRACT_OUTCOME_FAILURE,
+} SolContractOutcomeKind;
+
+typedef struct {
+    SolContractClauseKind kind;
+    SolSpan span;
+    SolContractConditionId first_condition;
+    SolContractClauseId next;
+    SolContractOwnerKind owner_kind;
+    size_t owner;
+} SolContractClause;
+
+typedef struct {
+    SolContractOutcomeKind outcome;
+    SolSpan span;
+    SolExprId expression;
+    SolContractConditionId next;
+    SolContractClauseId owner_clause;
+} SolContractCondition;
+
 typedef struct {
     SolSpan name;
     SolSpan span;
@@ -211,6 +249,7 @@ typedef struct {
     SolSpan return_type;
     SolTypeId return_type_id;
     SolEffectId first_effect;
+    SolContractClauseId first_contract;
     SolExprId body;
     SolCapabilityMemberId next;
     size_t owner_item;

@@ -775,6 +775,43 @@ static void test_invalid_handlers(void) {
     free_compilation(&compilation);
 }
 
+static void test_contract_type_firewall(void) {
+    static const char text[] =
+        "module contract_type_firewall\n"
+        "function sample(value: Int64) -> Int64\n"
+        "requires { missing + true }\n"
+        "ensures { result == old(\"not an integer\") }\n"
+        "{ return value }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.syntax.contract_condition_count == 2);
+    for (size_t index = 0; index < compilation.syntax.contract_condition_count; ++index) {
+        SolExprId expression = compilation.syntax.contract_conditions[index].expression;
+        CHECK(compilation.types.expressions[expression].kind == SOL_TYPE_UNKNOWN);
+        CHECK(compilation.types.expression_capability_origins[expression] == SOL_AST_NONE);
+        CHECK(compilation.types.expression_operation_origins[expression] == SOL_AST_NONE);
+    }
+
+    SolExprId expression = compilation.syntax.contract_conditions[0].expression;
+    compilation.syntax.contract_conditions[0].expression
+        = compilation.syntax.items[0].body;
+    sol_type_table_free(&compilation.types);
+    sol_type_table_init(&compilation.types);
+    sol_diagnostics_free(&compilation.diagnostics);
+    sol_diagnostics_init(&compilation.diagnostics);
+    CHECK(!sol_type_check(
+        &compilation.source,
+        &compilation.syntax,
+        &compilation.hir,
+        &compilation.types,
+        &compilation.diagnostics
+    ));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-003"));
+    compilation.syntax.contract_conditions[0].expression = expression;
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -808,6 +845,7 @@ int main(void) {
     test_derived_capability_cycles();
     test_handler_types_and_metadata();
     test_invalid_handlers();
+    test_contract_type_firewall();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;

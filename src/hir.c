@@ -162,6 +162,8 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         || syntax->match_arm_count > syntax->match_arm_capacity
         || syntax->effect_count > syntax->effect_capacity
         || syntax->capability_member_count > syntax->capability_member_capacity
+        || syntax->contract_clause_count > syntax->contract_clause_capacity
+        || syntax->contract_condition_count > syntax->contract_condition_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
         || (syntax->parameter_count != 0 && syntax->parameters == NULL)
         || (syntax->argument_count != 0 && syntax->arguments == NULL)
@@ -176,7 +178,10 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         || (syntax->match_arm_count != 0 && syntax->match_arms == NULL)
         || (syntax->effect_count != 0 && syntax->effects == NULL)
         || (syntax->capability_member_count != 0
-            && syntax->capability_members == NULL)) {
+            && syntax->capability_members == NULL)
+        || (syntax->contract_clause_count != 0 && syntax->contract_clauses == NULL)
+        || (syntax->contract_condition_count != 0
+            && syntax->contract_conditions == NULL)) {
         sol_resolver_malformed(resolver);
         return false;
     }
@@ -198,6 +203,8 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                 && item->first_effect >= syntax->effect_count)
             || (item->first_member != SOL_AST_NONE
                 && item->first_member >= syntax->capability_member_count)
+            || (item->first_contract != SOL_AST_NONE
+                && item->first_contract >= syntax->contract_clause_count)
             || (item->capability_source != SOL_AST_NONE
                 && item->capability_source >= syntax->parameter_count)) {
             sol_resolver_malformed(resolver);
@@ -410,6 +417,8 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                 && member->body >= syntax->expression_count)
             || (member->next != SOL_AST_NONE
                 && member->next >= syntax->capability_member_count)
+            || (member->first_contract != SOL_AST_NONE
+                && member->first_contract >= syntax->contract_clause_count)
             || member->owner_item >= syntax->item_count
             || syntax->items[member->owner_item].kind != SOL_ITEM_CAPABILITY) {
             sol_resolver_malformed(resolver);
@@ -463,7 +472,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         const SolExpr *expression = &syntax->expressions[index];
         bool valid = (int)expression->kind >= 0
-            && expression->kind <= SOL_EXPR_HANDLE
+            && expression->kind <= SOL_EXPR_OLD
             && sol_span_valid(resolver->source, expression->span);
         switch (expression->kind) {
             case SOL_EXPR_PATH:
@@ -524,6 +533,9 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                     && expression->as.handle.body < syntax->expression_count
                     && syntax->expressions[expression->as.handle.body].kind == SOL_EXPR_BLOCK;
                 break;
+            case SOL_EXPR_OLD:
+                valid = valid && expression->as.old_expression < syntax->expression_count;
+                break;
             default:
                 break;
         }
@@ -531,6 +543,10 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             sol_resolver_malformed(resolver);
             return false;
         }
+    }
+    if (!sol_syntax_contracts_validate(resolver->source, syntax)) {
+        sol_resolver_malformed(resolver);
+        return false;
     }
     return true;
 }
@@ -875,6 +891,10 @@ static void sol_resolver_expression(SolResolver *resolver, SolExprId expression_
             sol_resolver_expression(resolver, expression->as.handle.authority);
             sol_resolver_expression(resolver, expression->as.handle.provider);
             sol_resolver_expression(resolver, expression->as.handle.body);
+            break;
+        case SOL_EXPR_RESULT:
+        case SOL_EXPR_OLD:
+            sol_resolver_malformed(resolver);
             break;
         default:
             break;

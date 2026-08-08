@@ -963,6 +963,54 @@ static void test_expression_cycle_rejected(void) {
     free_compilation(&compilation);
 }
 
+static void test_contract_effect_firewall(void) {
+    static const char text[] =
+        "module contract_effect_firewall\n"
+        "capability Clock {\n"
+        "    function now() -> Int64 effects { clock.read<Self> }\n"
+        "}\n"
+        "function sample(clock: capability Clock) -> Int64\n"
+        "effects { pure }\n"
+        "requires { clock.now() == 1 }\n"
+        "ensures { result == old(clock.now()) }\n"
+        "{ return 1 }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    if (compilation.effects.functions == NULL) {
+        free_compilation(&compilation);
+        return;
+    }
+    CHECK(compilation.effects.functions[1].count == 0);
+    for (size_t index = 0; index < compilation.syntax.contract_condition_count; ++index) {
+        SolExprId expression = compilation.syntax.contract_conditions[index].expression;
+        CHECK(compilation.types.expressions[expression].kind == SOL_TYPE_UNKNOWN);
+    }
+
+    SolContractClauseId owner_clause
+        = compilation.syntax.contract_conditions[0].owner_clause;
+    compilation.syntax.contract_conditions[0].owner_clause
+        = compilation.syntax.contract_clause_count;
+    sol_effect_table_free(&compilation.effects);
+    sol_effect_table_init(&compilation.effects);
+    sol_diagnostics_free(&compilation.diagnostics);
+    sol_diagnostics_init(&compilation.diagnostics);
+    CHECK(!sol_effect_check(
+        &compilation.source,
+        &compilation.syntax,
+        &compilation.hir,
+        &compilation.types,
+        &compilation.effects,
+        &compilation.diagnostics
+    ));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+    compilation.syntax.contract_conditions[0].owner_clause = owner_clause;
+    free_compilation(&compilation);
+}
+
 static void test_forged_self_local_provenance_rejected(void) {
     static const char text[] =
         "module forged_self_local\n"
@@ -1467,6 +1515,7 @@ int main(void) {
     test_malformed_capability_arena_rejected();
     test_orphan_expression_children_rejected();
     test_expression_cycle_rejected();
+    test_contract_effect_firewall();
     test_forged_self_local_provenance_rejected();
     test_nonempty_effect_table_rejected();
     test_function_type_effects_are_not_performed();

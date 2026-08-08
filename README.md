@@ -188,20 +188,27 @@ function withdraw(
     account: Account,
     amount: Money
 ) -> Account
+effects {
+    pure
+}
 requires {
     amount > Money.zero
     account.state is active
     account.balance >= amount
 }
 ensures {
-    result.id == account.id
-    result.balance == account.balance - amount
-    result.state == account.state
-}
-effects {
-    pure
+    success => result.id == account.id
+    success => result.balance == old(account.balance) - amount
+    failure => account.balance == old(account.balance)
 }
 ```
+
+The bootstrap parser stores each `requires` and `ensures` clause and each
+newline- or comma-separated condition in deterministic arenas. Postconditions
+represent optional `success =>` and `failure =>` outcomes directly, and parse
+`old(expression)` and `result` as contextual expression forms. These contract
+expressions are deliberately not resolved, typed, effect-checked, lowered into
+obligations, or emitted as runtime checks yet.
 
 Verification is progressive rather than all-or-nothing. A project may choose among:
 
@@ -373,7 +380,7 @@ The language server is expected to expose typed syntax, inferred effects, owners
 
 ## Bootstrap Compiler
 
-The bootstrap compiler is written in C17 and currently provides a lossless lexer, a recovering parser for core declarations and function-body expressions, an arena-backed syntax AST, deterministic definition IDs, lexical name resolution, structural `Option`/`Result` types, checked records and enums, exhaustive matching, semantic effect rows with local inference across statically known calls, capability-backed exact handlers, and structured human or JSON diagnostics through `sol check`.
+The bootstrap compiler is written in C17 and currently provides a lossless lexer, a recovering parser for core declarations, structured function contracts, and function-body expressions, an arena-backed syntax AST, deterministic definition IDs, lexical name resolution, structural `Option`/`Result` types, checked records and enums, exhaustive matching, semantic effect rows with local inference across statically known calls, capability-backed exact handlers, and structured human or JSON diagnostics through `sol check`.
 
 ```text
 cmake -S . -B build -G Ninja -DSOL_ENABLE_SANITIZERS=ON
