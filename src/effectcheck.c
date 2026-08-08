@@ -586,11 +586,6 @@ static void sol_effect_process_call(SolEffectChecker *checker, const SolExpr *ca
         ? &checker->effects->functions[resolved.target]
         : &checker->effects->capability_members[resolved.target];
     SolEffectRow *caller = &checker->effects->functions[checker->current_function];
-    memset(
-        checker->reported_substitutions,
-        0,
-        checker->syntax->expression_count * sizeof(*checker->reported_substitutions)
-    );
     for (size_t index = 0; index < required->count; ++index) {
         SolEffectAtom instantiated;
         if (!sol_effect_instantiate_atom(
@@ -1837,27 +1832,25 @@ static bool sol_effect_prepare_graph(SolEffectChecker *checker) {
     return !checker->malformed && !checker->allocation_failed;
 }
 
-static unsigned char *sol_effect_find_recursive_functions(SolEffectChecker *checker) {
+static size_t *sol_effect_find_components(
+    SolEffectChecker *checker,
+    size_t *component_count_out
+) {
     size_t count = checker->syntax->item_count;
     if (count > SIZE_MAX / sizeof(SolDefId)
         || count > SIZE_MAX / sizeof(size_t)) {
         checker->allocation_failed = true;
         return NULL;
     }
-    unsigned char *recursive = calloc(count, sizeof(*recursive));
     unsigned char *state = calloc(count, sizeof(*state));
     size_t *component = malloc(count * sizeof(*component));
-    size_t *component_sizes = calloc(count, sizeof(*component_sizes));
     SolDefId *order = count == 0 ? NULL : malloc(count * sizeof(*order));
     SolDefId *stack = count == 0 ? NULL : malloc(count * sizeof(*stack));
     size_t *edge_stack = count == 0 ? NULL : malloc(count * sizeof(*edge_stack));
-    if (count != 0 && (recursive == NULL || state == NULL || component == NULL
-            || component_sizes == NULL || order == NULL || stack == NULL
-            || edge_stack == NULL)) {
-        free(recursive);
+    if (count != 0 && (state == NULL || component == NULL || order == NULL
+            || stack == NULL || edge_stack == NULL)) {
         free(state);
         free(component);
-        free(component_sizes);
         free(order);
         free(stack);
         free(edge_stack);
@@ -1903,7 +1896,6 @@ static unsigned char *sol_effect_find_recursive_functions(SolEffectChecker *chec
         component[root] = component_count;
         while (stack_count != 0) {
             SolDefId current = stack[--stack_count];
-            ++component_sizes[component_count];
             size_t edge = checker->first_incoming[current];
             while (edge != SOL_AST_NONE) {
                 SolDefId source = checker->edges[edge].from;
@@ -1917,74 +1909,47 @@ static unsigned char *sol_effect_find_recursive_functions(SolEffectChecker *chec
         ++component_count;
     }
 
-    for (size_t node = 0; node < count; ++node) {
-        if (component_sizes[component[node]] > 1) recursive[node] = 1;
-    }
-    for (size_t edge = 0; edge < checker->edge_count; ++edge) {
-        if (checker->edges[edge].from == checker->edges[edge].to) {
-            recursive[checker->edges[edge].from] = 1;
-        }
-    }
-
     free(state);
-    free(component);
-    free(component_sizes);
     free(order);
     free(stack);
     free(edge_stack);
-    return recursive;
+    *component_count_out = component_count;
+    return component;
 }
 
 static void sol_effect_infer_functions(
     SolEffectChecker *checker,
-    const unsigned char *recursive
+    const size_t *components,
+    size_t component_count
 ) {
     size_t count = checker->syntax->item_count;
-    unsigned char *ready = calloc(count, sizeof(*ready));
-    size_t *pending = calloc(count, sizeof(*pending));
-    SolDefId *queue = count == 0 ? NULL : malloc(count * sizeof(*queue));
-    if (count != 0 && (ready == NULL || pending == NULL || queue == NULL)) {
-        free(ready);
-        free(pending);
-        free(queue);
-        checker->allocation_failed = true;
-        return;
-    }
     for (size_t index = 0; index < count; ++index) {
         const SolSyntaxItem *item = &checker->syntax->items[index];
-        if (item->kind != SOL_ITEM_FUNCTION || item->has_effect_clause
-            || item->is_public || recursive[index]) {
-            ready[index] = 1;
+        if (item->kind == SOL_ITEM_FUNCTION && !item->has_effect_clause
+            && !item->is_public) {
+            checker->effects->functions[index].inferred = true;
         }
     }
-    for (size_t edge = 0; edge < checker->edge_count; ++edge) {
-        SolDefId from = checker->edges[edge].from;
-        SolDefId to = checker->edges[edge].to;
-        if (!ready[from] && !ready[to]) ++pending[from];
-    }
-    size_t queue_start = 0;
-    size_t queue_count = 0;
-    for (size_t index = 0; index < count; ++index) {
-        if (!ready[index] && pending[index] == 0) queue[queue_count++] = index;
-    }
-    while (queue_start < queue_count) {
-        SolDefId function = queue[queue_start++];
-        checker->effects->functions[function].inferred = true;
-        sol_effect_walk_function(checker, function, SOL_EFFECT_WALK_INFER);
-        ready[function] = 1;
-        size_t edge = checker->first_incoming[function];
-        while (edge != SOL_AST_NONE) {
-            SolDefId dependent = checker->edges[edge].from;
-            if (!ready[dependent] && pending[dependent] != 0) {
-                --pending[dependent];
-                if (pending[dependent] == 0) queue[queue_count++] = dependent;
+
+    while (component_count != 0 && !checker->malformed
+        && !checker->allocation_failed) {
+        size_t component = --component_count;
+        bool changed;
+        do {
+            changed = false;
+            for (size_t index = 0; index < count; ++index) {
+                const SolSyntaxItem *item = &checker->syntax->items[index];
+                if (components[index] != component || item->kind != SOL_ITEM_FUNCTION
+                    || item->has_effect_clause || item->is_public) {
+                    continue;
+                }
+                SolEffectRow *row = &checker->effects->functions[index];
+                size_t previous_count = row->count;
+                sol_effect_walk_function(checker, index, SOL_EFFECT_WALK_INFER);
+                if (row->count != previous_count) changed = true;
             }
-            edge = checker->edges[edge].next_incoming;
-        }
+        } while (changed && !checker->malformed && !checker->allocation_failed);
     }
-    free(ready);
-    free(pending);
-    free(queue);
 }
 
 bool sol_effect_check(
@@ -2044,10 +2009,6 @@ bool sol_effect_check(
         checker.allocation_failed = true;
     }
 
-    unsigned char *boundary_reported = calloc(syntax->item_count, sizeof(*boundary_reported));
-    if (syntax->item_count != 0 && boundary_reported == NULL) {
-        checker.allocation_failed = true;
-    }
     if (!checker.allocation_failed) {
         for (size_t index = 0; index < syntax->item_count; ++index) {
             const SolSyntaxItem *item = &syntax->items[index];
@@ -2069,7 +2030,6 @@ bool sol_effect_check(
                     item->span,
                     "public functions must declare an explicit effects clause"
                 );
-                boundary_reported[index] = 1;
             }
         }
         for (size_t index = 0; index < syntax->capability_member_count; ++index) {
@@ -2097,24 +2057,12 @@ bool sol_effect_check(
 
     if (!checker.malformed && !checker.allocation_failed
         && sol_effect_prepare_graph(&checker)) {
-        unsigned char *recursive = sol_effect_find_recursive_functions(&checker);
-        size_t count = syntax->item_count;
+        size_t component_count = 0;
+        size_t *components = sol_effect_find_components(&checker, &component_count);
         if (!checker.allocation_failed) {
-            for (size_t index = 0; index < count; ++index) {
-                const SolSyntaxItem *item = &syntax->items[index];
-                if (item->kind == SOL_ITEM_FUNCTION && !item->has_effect_clause
-                    && recursive[index] && !boundary_reported[index]) {
-                    sol_effect_error(
-                        &checker,
-                        "SOL-EFFECT-005",
-                        item->span,
-                        "recursive functions must declare an explicit effects clause"
-                    );
-                }
-            }
-            sol_effect_infer_functions(&checker, recursive);
+            sol_effect_infer_functions(&checker, components, component_count);
         }
-        free(recursive);
+        free(components);
         if (!checker.malformed && !checker.allocation_failed) {
             for (size_t index = 0; index < syntax->item_count; ++index) {
                 const SolSyntaxItem *item = &syntax->items[index];
@@ -2125,7 +2073,6 @@ bool sol_effect_check(
         }
     }
 
-    free(boundary_reported);
     free(checker.edges);
     free(checker.first_outgoing);
     free(checker.first_incoming);

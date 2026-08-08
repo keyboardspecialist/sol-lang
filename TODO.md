@@ -5,7 +5,7 @@ toolchain phases remain documented in the [README](README.md#roadmap).
 
 ## P0: Effect System
 
-- [ ] Infer recursive effect rows with a least fixed point over call-graph SCCs.
+- [x] Infer recursive effect rows with a least fixed point over call-graph SCCs.
 - [ ] Represent general function types with semantic effect rows.
 - [ ] Check higher-order calls, callbacks, and function values with declared effects.
 - [ ] Model restricted and wrapped capabilities without losing authority provenance.

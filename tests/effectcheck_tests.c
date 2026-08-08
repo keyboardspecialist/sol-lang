@@ -118,6 +118,22 @@ static bool row_has_effect(
     return false;
 }
 
+static bool row_has_parameter_effect(
+    const TestCompilation *compilation,
+    const SolEffectRow *row,
+    const char *name,
+    SolParameterId parameter
+) {
+    for (size_t index = 0; index < row->count; ++index) {
+        if (row->atoms[index].argument_kind == SOL_EFFECT_ATOM_PARAMETER
+            && row->atoms[index].parameter == parameter
+            && span_equals(&compilation->source, row->atoms[index].name, name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void test_private_pure_inference(void) {
     static const char text[] =
         "module private_pure\n"
@@ -198,14 +214,16 @@ static void test_explicit_effect_boundaries(void) {
     static const char text[] =
         "module explicit_boundaries\n"
         "capability Clock { function now() -> Int64 }\n"
-        "public function exposed() -> Int64 { return 1 }\n";
+        "public function exposed(value: Int64) -> Int64 {\n"
+        "    return if value == 0 { 0 } else { exposed(value - 1) }\n"
+        "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
     CHECK(diagnostic_count(&compilation, "SOL-EFFECT-005") == 2);
     free_compilation(&compilation);
 }
 
-static void test_recursive_omitted_effect_boundaries(void) {
+static void test_recursive_pure_inference(void) {
     static const char text[] =
         "module recursive_boundaries\n"
         "function direct(value: Int64) -> Int64 {\n"
@@ -215,10 +233,118 @@ static void test_recursive_omitted_effect_boundaries(void) {
         "function right(value: Int64) -> Int64 { return left(value) }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
-    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-005") == 3);
-    CHECK(!compilation.effects.functions[0].inferred);
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.effects.functions[0].inferred);
+    CHECK(compilation.effects.functions[0].count == 0);
+    CHECK(compilation.effects.functions[1].inferred);
+    CHECK(compilation.effects.functions[1].count == 0);
+    CHECK(compilation.effects.functions[2].inferred);
+    CHECK(compilation.effects.functions[2].count == 0);
+    free_compilation(&compilation);
+}
+
+static void test_recursive_parameter_effect_fixed_point(void) {
+    static const char text[] =
+        "module recursive_parameter_effects\n"
+        "capability Clock { function now() -> Int64 effects { clock.read<Self> } }\n"
+        "function left(\n"
+        "    first: capability Clock,\n"
+        "    second: capability Clock,\n"
+        "    depth: Int64,\n"
+        ") -> Int64 { return right(first, second, depth) }\n"
+        "function right(\n"
+        "    first: capability Clock,\n"
+        "    second: capability Clock,\n"
+        "    depth: Int64,\n"
+        ") -> Int64 {\n"
+        "    return if depth == 0 { first.now() } else { left(second, first, depth - 1) }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    for (SolDefId function = 1; function <= 2; ++function) {
+        const SolSyntaxItem *item = &compilation.syntax.items[function];
+        SolParameterId first = item->first_parameter;
+        SolParameterId second = compilation.syntax.parameters[first].next;
+        const SolEffectRow *row = &compilation.effects.functions[function];
+        CHECK(row->inferred);
+        CHECK(row->count == 2);
+        CHECK(row_has_parameter_effect(&compilation, row, "clock.read", first));
+        CHECK(row_has_parameter_effect(&compilation, row, "clock.read", second));
+    }
+    free_compilation(&compilation);
+}
+
+static void test_mixed_recursive_effect_boundary(void) {
+    static const char text[] =
+        "module mixed_recursive_boundary\n"
+        "function inferred(value: Int64) -> Int64 {\n"
+        "    return if value == 0 { 0 } else { declared(value - 1) }\n"
+        "}\n"
+        "function declared(value: Int64) -> Int64 effects { service.read } {\n"
+        "    return if value == 0 { 0 } else { inferred(value - 1) }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.effects.functions[0].inferred);
+    CHECK(compilation.effects.functions[0].count == 1);
+    CHECK(row_has_effect(&compilation, &compilation.effects.functions[0], "service.read"));
     CHECK(!compilation.effects.functions[1].inferred);
-    CHECK(!compilation.effects.functions[2].inferred);
+    free_compilation(&compilation);
+}
+
+static void test_explicit_caller_checks_recursive_fixed_point(void) {
+    static const char text[] =
+        "module recursive_caller_validation\n"
+        "function source() -> Int64 effects { clock.read } { return 1 }\n"
+        "function left(value: Int64) -> Int64 { return right(value) }\n"
+        "function right(value: Int64) -> Int64 {\n"
+        "    return if value == 0 { source() } else { left(value - 1) }\n"
+        "}\n"
+        "function caller(value: Int64) -> Int64 effects { pure } { return left(value) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-002") == 1);
+    for (SolDefId function = 1; function <= 2; ++function) {
+        CHECK(compilation.effects.functions[function].inferred);
+        CHECK(compilation.effects.functions[function].count == 1);
+        CHECK(row_has_effect(
+            &compilation,
+            &compilation.effects.functions[function],
+            "clock.read"
+        ));
+    }
+    free_compilation(&compilation);
+}
+
+static void test_recursive_substitution_diagnostic_deduplication(void) {
+    static const char text[] =
+        "module recursive_substitution_diagnostic\n"
+        "capability Clock { function now() -> Int64 effects { clock.read<Self> } }\n"
+        "function helper(clock: capability Clock) -> Int64\n"
+        "effects { clock.read<clock> } { return clock.now() }\n"
+        "function source() -> Int64 effects { service.read } { return 1 }\n"
+        "function recursive(\n"
+        "    flag: Bool,\n"
+        "    first: capability Clock,\n"
+        "    second: capability Clock,\n"
+        "    depth: Int64,\n"
+        ") -> Int64 {\n"
+        "    let value = helper(if flag { first } else { second })\n"
+        "    return if depth == 0 { value + source() } else {\n"
+        "        value + recursive(flag, first, second, depth - 1)\n"
+        "    }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-003") == 1);
+    CHECK(compilation.effects.functions[3].inferred);
+    CHECK(compilation.effects.functions[3].count == 1);
+    CHECK(row_has_effect(&compilation, &compilation.effects.functions[3], "service.read"));
     free_compilation(&compilation);
 }
 
@@ -920,7 +1046,11 @@ int main(void) {
     test_capability_self_inference_identity();
     test_branch_argument_union_and_deduplication();
     test_explicit_effect_boundaries();
-    test_recursive_omitted_effect_boundaries();
+    test_recursive_pure_inference();
+    test_recursive_parameter_effect_fixed_point();
+    test_mixed_recursive_effect_boundary();
+    test_explicit_caller_checks_recursive_fixed_point();
+    test_recursive_substitution_diagnostic_deduplication();
     test_explicit_recursive_effect_rows();
     test_explicit_caller_checks_inferred_helper();
     test_valid_effect_propagation();

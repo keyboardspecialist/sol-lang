@@ -27,6 +27,7 @@ typedef struct {
 typedef struct {
     SolEffectAtom *atoms;
     size_t count;
+    /* Omitted private rows are inferred, including rows in recursive call SCCs. */
     bool inferred;
 } SolEffectRow;
 
