@@ -3202,6 +3202,13 @@ static void sol_type_contracts(
     SolContractClauseId clause_id,
     SolType result
 ) {
+    const SolTypeApplication *result_application = sol_type_application(
+        checker->types,
+        result
+    );
+    bool result_has_outcomes = result_application != NULL
+        && result_application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT
+        && result_application->argument_count == 2;
     size_t clause_count = 0;
     while (clause_id != SOL_AST_NONE) {
         if (clause_id >= checker->syntax->contract_clause_count
@@ -3221,6 +3228,16 @@ static void sol_type_contracts(
             }
             const SolContractCondition *condition
                 = &checker->syntax->contract_conditions[condition_id];
+            if (condition->outcome != SOL_CONTRACT_OUTCOME_ALWAYS
+                && result.kind != SOL_TYPE_ERROR
+                && !result_has_outcomes) {
+                sol_type_error(
+                    checker,
+                    "SOL-CONTRACT-005",
+                    condition->span,
+                    "success and failure postconditions require a Result return type"
+                );
+            }
             checker->in_contract = true;
             checker->in_old = false;
             checker->contract_kind = clause->kind;

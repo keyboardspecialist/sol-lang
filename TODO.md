@@ -1,67 +1,51 @@
 # Sol Compiler TODO
 
 This list tracks concrete bootstrap-compiler work. The broader language and
-toolchain phases remain documented in the [README](README.md#roadmap).
+toolchain phases remain documented in the [README](README.md#roadmap). Impact
+and complexity use a 1-5 scale, where 5 is foundational or architectural.
+Ordering accounts for dependencies rather than only the impact/complexity ratio.
 
-## P0: Effect System
+## Completed Foundation
 
-- [x] Infer recursive effect rows with a least fixed point over call-graph SCCs.
-- [x] Represent closed general function types with normalized semantic effect rows.
-- [x] Check higher-order calls, callbacks, and function values with closed declared effects.
-- [x] Preserve receiver authority through explicitly declared, type-changing
-      capability-member restrictions.
-- [x] Preserve declared parameter authority through exact capability-returning
-      functions and aliases.
-- [x] Add closed nominal, single-source user-defined capability wrappers with
-      checked member implementations and root-preserving `Self` effects.
-- [x] Add capability-backed exact effect handlers with scoped, root-sensitive
-      handled-row subtraction and preserved runtime interception metadata.
-- [x] Decide how dynamic or mixed authority provenance is represented beyond the
-      current same-origin `if` and `match` joins.
+- [x] Closed normalized effect rows, recursive SCC inference, higher-order calls,
+      callback checking, and exact function and bound-operation effects.
+- [x] Capability provenance, authority-preserving returns, nominal single-source
+      wrappers, exact handlers, and normalized finite mixed-root sets.
+- [x] Structured contracts and resolved, typed, pure semantic obligation templates.
+- [x] Reproducible Typst Design Specification v0.2 and generated official PDF.
 
-## P0: Front-End Semantics
+## Prioritized Work
 
-- [x] Parse contracts into structured syntax instead of balanced blocks.
-- [x] Lower `requires`, `ensures`, `old`, and `result` into resolved, typed,
-      pure semantic obligation templates after effect inference.
-- [ ] Implement user-defined generic types and generic function instantiation.
-- [ ] Integrate effect-row variables with generic function instantiation.
-- [ ] Add traits, implementations, constraints, and type-directed method resolution.
-- [ ] Add distinct and refined types with checked refinement predicates.
-- [ ] Resolve modules and imports across multiple source files and packages.
-
-## P1: Ownership And Resources
-
-- [ ] Define and check affine moves, copies, and use-after-move errors.
-- [ ] Implement lexical shared and exclusive borrows.
-- [ ] Track regions, deterministic cleanup, and resource lifetimes.
-- [ ] Add explicit unsafe boundaries and initial FFI rules.
-- [ ] Integrate ownership facts with effects, contracts, and diagnostics.
-
-## P1: Execution
-
-- [ ] Define a canonical typed Sol IR.
-- [ ] Implement an interpreter suitable for language and conformance tests.
-- [ ] Add `sol test` for examples, unit tests, and properties.
-- [ ] Select and integrate an established native or WebAssembly backend.
-- [ ] Implement package entry points and `sol build` / `sol run`.
-
-## P1: Canonical Tooling
-
-- [ ] Implement the canonical formatter and enforce idempotence.
-- [ ] Stabilize serialized syntax, HIR, type, effect, and diagnostic schemas.
-- [ ] Add `sol effects` authority and call-graph inspection.
-- [ ] Expose semantic information through a language server.
-- [ ] Add stable semantic IDs, references, and rename support.
-
-## P2: Verification And Change Tooling
-
-- [ ] Generate runtime checks and proof obligations from contracts.
-- [ ] Integrate an SMT solver with configurable proof policies and caching.
-- [ ] Add examples, properties, generated boundary tests, and ghost state.
-- [ ] Implement semantic patches and patch validation.
-- [ ] Produce API compatibility and semantic change reports.
-- [ ] Generate bounded context bundles for editor and agent workflows.
+| Done | Order | Task | Impact | Complexity | Primary dependency |
+| --- | ---: | --- | ---: | ---: | --- |
+| [x] | 1 | Decide and restrict `success` and `failure` on non-`Result` contracts | 4 | 2 | Contract templates |
+| [ ] | 2 | Implement user-defined generic types and generic function instantiation | 5 | 5 | Type interning |
+| [ ] | 3 | Integrate effect-row variables with generic function instantiation | 5 | 5 | Generics |
+| [ ] | 4 | Add traits, implementations, constraints, and type-directed method resolution | 5 | 5 | Generics |
+| [ ] | 5 | Resolve modules and imports across multiple files and packages | 5 | 5 | Name resolution |
+| [ ] | 6 | Implement the canonical formatter and enforce idempotence | 4 | 3 | Parser and token stream |
+| [ ] | 7 | Close authority gaps for static and unparameterized effects | 5 | 4 | Capability model |
+| [ ] | 8 | Add distinct and refined types with checked predicates | 4 | 4 | Generics and contracts |
+| [ ] | 9 | Define stable semantic IDs, references, and rename identity | 5 | 5 | Modules and packages |
+| [ ] | 10 | Define a canonical typed Sol IR | 5 | 5 | Types, traits, and IDs |
+| [ ] | 11 | Implement an interpreter for language conformance tests | 5 | 4 | Typed IR |
+| [ ] | 12 | Add `sol test` for examples, unit tests, and properties | 4 | 3 | Interpreter |
+| [ ] | 13 | Add `sol effects` authority and call-graph inspection | 3 | 2 | Effect tables |
+| [ ] | 14 | Stabilize serialized syntax, HIR, type, effect, contract, and diagnostic schemas | 4 | 5 | Stable IDs and IR |
+| [ ] | 15 | Define and check affine moves, copies, and use-after-move errors | 5 | 5 | Typed IR |
+| [ ] | 16 | Implement lexical shared and exclusive borrows | 5 | 5 | Affine ownership |
+| [ ] | 17 | Track regions, deterministic cleanup, and resource lifetimes | 5 | 5 | Borrow checking |
+| [ ] | 18 | Add explicit unsafe boundaries and initial FFI rules | 4 | 4 | Ownership and effects |
+| [ ] | 19 | Integrate ownership facts with effects, contracts, and diagnostics | 5 | 5 | Ownership pipeline |
+| [ ] | 20 | Generate runtime contract checks and normalized proof obligations | 5 | 5 | IR and ownership |
+| [ ] | 21 | Add properties, generated boundary tests, and ghost state | 4 | 4 | Interpreter and obligations |
+| [ ] | 22 | Integrate SMT proof policies, solver execution, and caching | 4 | 5 | Logical obligation IR |
+| [ ] | 23 | Select and integrate an established native or WebAssembly backend | 5 | 5 | IR and ownership |
+| [ ] | 24 | Implement package entry points and `sol build` / `sol run` | 5 | 4 | Modules and backend |
+| [ ] | 25 | Expose semantic information through a language server | 4 | 5 | Stable schemas and IDs |
+| [ ] | 26 | Implement semantic patches and patch validation | 4 | 5 | Stable IDs and public IR |
+| [ ] | 27 | Produce API compatibility and semantic change reports | 4 | 5 | Public IR and patches |
+| [ ] | 28 | Generate bounded context bundles for editor and agent workflows | 3 | 4 | Semantic graph |
 
 ## Milestone Discipline
 

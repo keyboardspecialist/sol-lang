@@ -320,14 +320,14 @@ static void test_structured_contract_syntax(void) {
         "    requires { value > 0 }\n"
         "    ensures { result == old(value) }\n"
         "}\n"
-        "function check(value: Int64, ready: Bool) -> Bool\n"
+        "function check(value: Int64, ready: Bool) -> Result<Bool, Bool>\n"
         "requires {\n"
         "    value > 0, ready\n"
         "}\n"
         "ensures {\n"
         "    success => result == ready\n"
         "    failure => old(value) == value\n"
-        "} { return ready }\n";
+        "} { return ok(ready) }\n";
     SolSource source;
     SolTokens tokens;
     SolDiagnostics diagnostics;

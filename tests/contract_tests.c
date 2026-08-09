@@ -125,7 +125,7 @@ static void test_obligations_result_and_snapshots(void) {
         "requires { positive(value) }\n"
         "ensures {\n"
         "    result == old(value)\n"
-        "    success => old(value) == old(value)\n"
+        "    old(value) == old(value)\n"
         "}\n"
         "{ return value }\n"
         "function fallible(value: Int64) -> Result<Int64, Failure> effects { pure }\n"
@@ -261,12 +261,34 @@ static void test_contract_type_errors(void) {
     CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-001"));
     free_compilation(&compilation);
 
+    static const char non_result_outcomes[] =
+        "module non_result_outcomes\n"
+        "function sample() -> Int64 effects { pure }\n"
+        "ensures { success => true, failure => true } { return 1 }\n";
+    CHECK(compile_source(&compilation, non_result_outcomes));
+    CHECK(diagnostic_count(&compilation, "SOL-CONTRACT-005") == 2);
+    if (diagnostic_count(&compilation, "SOL-CONTRACT-005") == 2) {
+        CHECK(span_equals(
+            &compilation.source,
+            compilation.diagnostics.items[0].span,
+            "success => true"
+        ));
+        CHECK(span_equals(
+            &compilation.source,
+            compilation.diagnostics.items[1].span,
+            "failure => true"
+        ));
+    }
+    free_compilation(&compilation);
+
     static const char result_failure[] =
         "module result_failure\n"
-        "function sample() -> Int64 effects { pure }\n"
-        "ensures { failure => result == 1 } { return 1 }\n";
+        "enum Failure { invalid }\n"
+        "function sample() -> Result<Int64, Failure> effects { pure }\n"
+        "ensures { failure => result == 1 } { return ok(1) }\n";
     CHECK(compile_source(&compilation, result_failure));
     CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-003"));
+    CHECK(!has_diagnostic(&compilation, "SOL-CONTRACT-005"));
     free_compilation(&compilation);
 
     static const char old_forms[] =
@@ -395,6 +417,32 @@ static void test_table_determinism_and_malformed_input(void) {
     CHECK(!sol_diagnostics_has_errors(&second.diagnostics));
     CHECK(tables_equal(&first.contracts, &second.contracts));
 
+    TestCompilation malformed;
+    CHECK(compile_source(&malformed, text));
+    CHECK(!sol_diagnostics_has_errors(&malformed.diagnostics));
+    SolContractOutcomeKind malformed_outcome
+        = malformed.syntax.contract_conditions[0].outcome;
+    malformed.syntax.contract_conditions[0].outcome
+        = (SolContractOutcomeKind)(SOL_CONTRACT_OUTCOME_FAILURE + 1);
+    sol_contract_table_free(&malformed.contracts);
+    sol_effect_table_free(&malformed.effects);
+    sol_type_table_free(&malformed.types);
+    sol_contract_table_init(&malformed.contracts);
+    sol_effect_table_init(&malformed.effects);
+    sol_type_table_init(&malformed.types);
+    sol_diagnostics_free(&malformed.diagnostics);
+    sol_diagnostics_init(&malformed.diagnostics);
+    CHECK(!sol_type_check(
+        &malformed.source,
+        &malformed.syntax,
+        &malformed.hir,
+        &malformed.types,
+        &malformed.diagnostics
+    ));
+    CHECK(has_diagnostic(&malformed, "SOL-INTERNAL-003"));
+    malformed.syntax.contract_conditions[0].outcome = malformed_outcome;
+    free_compilation(&malformed);
+
     sol_contract_table_free(&first.contracts);
     sol_contract_table_init(&first.contracts);
     SolContractClauseId owner = first.syntax.contract_conditions[0].owner_clause;
@@ -412,6 +460,25 @@ static void test_table_determinism_and_malformed_input(void) {
     ));
     CHECK(has_diagnostic(&first, "SOL-INTERNAL-005"));
     first.syntax.contract_conditions[0].owner_clause = owner;
+
+    sol_contract_table_free(&first.contracts);
+    sol_contract_table_init(&first.contracts);
+    SolContractOutcomeKind outcome = first.syntax.contract_conditions[0].outcome;
+    first.syntax.contract_conditions[0].outcome
+        = (SolContractOutcomeKind)(SOL_CONTRACT_OUTCOME_FAILURE + 1);
+    sol_diagnostics_free(&first.diagnostics);
+    sol_diagnostics_init(&first.diagnostics);
+    CHECK(!sol_contract_lower(
+        &first.source,
+        &first.syntax,
+        &first.hir,
+        &first.types,
+        &first.effects,
+        &first.contracts,
+        &first.diagnostics
+    ));
+    CHECK(has_diagnostic(&first, "SOL-INTERNAL-005"));
+    first.syntax.contract_conditions[0].outcome = outcome;
 
     sol_contract_table_free(&first.contracts);
     sol_contract_table_init(&first.contracts);

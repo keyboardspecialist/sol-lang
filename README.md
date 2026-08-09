@@ -201,7 +201,7 @@ Preconditions, postconditions, invariants, refinements, ghost state, examples, a
 function withdraw(
     account: Account,
     amount: Money
-) -> Account
+) -> Result<Account, WithdrawalError>
 effects {
     pure
 }
@@ -224,9 +224,10 @@ expressions resolve in a fresh declaration-signature scope, use ordinary
 expression typing, must produce `Bool`, and may call only finalized-pure
 functions, operations, or closed callbacks. Body locals and a derived
 capability wrapper's private source are not part of its interface scope.
-Postconditions expose an ordinary return through `result`; a `success =>`
-condition over `Result<T, E>` exposes `T`, while failure conditions have no
-result binding. Every `old(expression)` records a distinct typed entry-state
+Postconditions expose an ordinary return through `result`. Outcome prefixes are
+available only on declarations returning `Result<T, E>`: a `success =>`
+condition exposes `T`, while `failure =>` has no result binding. Every
+`old(expression)` records a distinct typed entry-state
 snapshot. Nested `old` and `old(result)` are rejected. The deterministic public
 table records owner, clause kind, outcome, predicate and type, result binding,
 and snapshot metadata. It is a semantic template only: runtime checks,

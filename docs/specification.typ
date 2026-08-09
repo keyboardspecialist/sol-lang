@@ -148,7 +148,7 @@
     ([Version], [0.2 Concept Draft]),
     ([Date], [August 9, 2026]),
     ([Status], [Concept Draft with Executable-Core Decisions]),
-    ([Baseline], [Target design updated through bootstrap compiler HEAD `e6ef23a`]),
+    ([Baseline], [Target design updated through the current executable-core checkpoint]),
     ([Primary objective], [Define a language whose semantics, tooling, and source representation optimize safe maintenance by humans and AI systems.]),
     ([Normative vocabulary], [MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY distinguish required, recommended, and optional behavior.]),
     ([Authority], [`docs/specification.typ` is authoritative. The root v0.2 PDF is generated from it.]),
@@ -839,9 +839,7 @@ Contract calls are allowed only after their exact target effects are finalized a
 
 For this bootstrap rule, pure means an empty finalized observable-effect row. It does not yet prove termination, determinism, absence of mutation, or mathematical referential transparency.
 
-In ordinary postconditions, `result` has the declared return type. For `Result<T, E>`, a `success =>` condition binds `result: T`; `failure =>` has no result binding. Outcome prefixes are accepted only in `ensures`. Each syntactic `old(expression)` creates its own typed entry-state snapshot, even if operands repeat. `old` is limited to postconditions; nested `old` and `old(result)` are rejected.
-
-The parser currently permits `success` and `failure` on non-`Result` return types. The target meaning of failure for such declarations is unresolved; this permissiveness is a bootstrap artifact, not a settled outcome protocol.
+In ordinary postconditions, `result` has the declared return type. Outcome prefixes are available only on declarations returning `Result<T, E>`: a `success =>` condition binds `result: T`, while `failure =>` has no result binding. A prefixed condition on any other return type is rejected with `SOL-CONTRACT-005`. Each syntactic `old(expression)` creates its own typed entry-state snapshot, even if operands repeat. `old` is limited to postconditions; nested `old` and `old(result)` are rejected.
 
 The public deterministic template table records sequential obligation identity, owner kind/identity, clause kind, outcome, predicate and `Bool` type, result availability/type, and contiguous snapshot identity/operand/type metadata. It is deliberately a template, not proof success.
 
@@ -1489,7 +1487,7 @@ Begin with a deliberately small core proving interactions among canonical syntax
 
 == Executable Bootstrap Baseline
 
-As of HEAD `e6ef23a`, the C17 bootstrap provides:
+The current C17 bootstrap provides:
 
 - Lossless lexing, recovering parsing for core declarations/contracts/body expressions, arena syntax, deterministic definition IDs, lexical single-module HIR resolution, and human/JSON diagnostics.
 - Primitive types; exact interned `Option<T>` and `Result<T, E>` applications; records; closed/open enums; constructors; exhaustive user-enum and `Bool` matching; expression/call/return checking.
@@ -1557,7 +1555,7 @@ Some v0.1 questions now have partial executable decisions:
 
 - *Handlers:* 1.0 policy is still open, but the bootstrap has chosen exact capability-backed singleton-target handlers as a safe experimental subset. Broader resumptive/general handlers await ownership interaction work.
 - *Mixed authority:* representation is decided for the bootstrap as normalized finite lexical may-origin sets with conservative expansion; runtime dynamic authority matching and long-term IR/ABI representation remain open.
-- *Contract front end:* syntax, signature-scope resolution, `Bool` typing, purity, outcomes, snapshots, and deterministic template shape are decided. Enforcement mode, runtime fallback, logical IR, and proof discharge remain open.
+- *Contract front end:* syntax, signature-scope resolution, `Bool` typing, purity, `Result`-only outcomes, snapshots, and deterministic template shape are decided. Enforcement mode, runtime fallback, logical IR, and proof discharge remain open.
 - *Recursive effects:* the bootstrap decision is least-fixed-point SCC inference for omitted private closed rows. The target design of row variables and polymorphic recursive effects remains open.
 
 Genuinely open target-design questions are:
@@ -1777,7 +1775,7 @@ option_type := "Option" "<" type ">"
 function_type := "function" "(" type_list? ")" "->" type effect_clause
 ```)
 
-In canonical bootstrap source, `authority` precedes `effects`, followed by `requires` and `ensures`; each clause occurs at most once. Newlines or commas separate contract conditions. `success` and `failure` are valid only in `ensures`; `result` and `old` are contextual contract forms, and `old` is valid only in postconditions. A free-function authority source names a direct capability parameter, while a capability member uses `Self`. Exact handlers always have an explicitly parameterized target.
+In canonical bootstrap source, `authority` precedes `effects`, followed by `requires` and `ensures`; each clause occurs at most once. Newlines or commas separate contract conditions. `success` and `failure` are valid only in `ensures` on declarations returning `Result<T, E>`; `result` and `old` are contextual contract forms, and `old` is valid only in postconditions. A free-function authority source names a direct capability parameter, while a capability member uses `Self`. Exact handlers always have an explicitly parameterized target.
 
 #heading(level: 1, numbering: none)[Appendix B. Standard Effect Taxonomy]
 
