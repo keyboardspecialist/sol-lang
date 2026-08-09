@@ -288,6 +288,39 @@ static SolEffectAtom sol_effect_normalize_atom(
         atom.parameter = parameter;
     } else {
         atom.argument_kind = SOL_EFFECT_ATOM_STATIC_PATH;
+        SolDefId owner = SOL_AST_NONE;
+        if (effect->owner_kind == SOL_EFFECT_OWNER_ITEM) {
+            owner = effect->owner;
+        } else if (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
+            && effect->owner < checker->syntax->type_count) {
+            owner = checker->syntax->types[effect->owner].owner_item;
+        }
+        if (owner < checker->syntax->item_count) {
+            SolTypeParameterId type_parameter
+                = checker->syntax->items[owner].first_type_parameter;
+            size_t traversed = 0;
+            while (type_parameter != SOL_AST_NONE) {
+                if (type_parameter >= checker->syntax->type_parameter_count
+                    || traversed++ >= checker->syntax->type_parameter_count) {
+                    checker->malformed = true;
+                    break;
+                }
+                if (sol_effect_span_equal(
+                    checker->source,
+                    checker->syntax->type_parameters[type_parameter].name,
+                    effect->argument
+                )) {
+                    sol_effect_error(
+                        checker,
+                        "SOL-EFFECT-006",
+                        effect->argument,
+                        "a type parameter cannot be used as effect authority"
+                    );
+                    break;
+                }
+                type_parameter = checker->syntax->type_parameters[type_parameter].next;
+            }
+        }
     }
     return atom;
 }
@@ -758,6 +791,9 @@ static void sol_effect_expression(SolEffectChecker *checker, SolExprId expressio
             sol_effect_expression(checker, expression->as.call.callee);
             sol_effect_arguments(checker, expression->as.call.first_argument);
             break;
+        case SOL_EXPR_TYPE_APPLICATION:
+            sol_effect_expression(checker, expression->as.type_application.base);
+            break;
         case SOL_EXPR_FIELD:
             sol_effect_expression(checker, expression->as.field.base);
             break;
@@ -917,7 +953,7 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         const SolExpr *expression = &syntax->expressions[index];
         bool valid = (int)expression->kind >= 0
-            && expression->kind <= SOL_EXPR_OLD
+            && expression->kind <= SOL_EXPR_TYPE_APPLICATION
             && sol_effect_span_valid(source, expression->span);
         switch (expression->kind) {
             case SOL_EXPR_PATH:
@@ -936,6 +972,12 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
                     && expression->as.call.callee < syntax->expression_count
                     && (expression->as.call.first_argument == SOL_AST_NONE
                         || expression->as.call.first_argument < syntax->argument_count);
+                break;
+            case SOL_EXPR_TYPE_APPLICATION:
+                valid = valid
+                    && expression->as.type_application.base < syntax->expression_count
+                    && expression->as.type_application.first_argument
+                        < syntax->type_argument_count;
                 break;
             case SOL_EXPR_FIELD:
                 valid = valid
@@ -1015,7 +1057,8 @@ static bool sol_effect_hir_matches_source(SolEffectChecker *checker) {
         && !sol_diagnostics_has_errors(&diagnostics)
         && rebuilt.definition_count == checker->hir->definition_count
         && rebuilt.local_count == checker->hir->local_count
-        && rebuilt.resolution_count == checker->hir->resolution_count;
+        && rebuilt.resolution_count == checker->hir->resolution_count
+        && rebuilt.type_resolution_count == checker->hir->type_resolution_count;
     for (size_t index = 0; matches && index < rebuilt.definition_count; ++index) {
         const SolHirDefinition *left = &rebuilt.definitions[index];
         const SolHirDefinition *right = &checker->hir->definitions[index];
@@ -1035,7 +1078,14 @@ static bool sol_effect_hir_matches_source(SolEffectChecker *checker) {
     }
     for (size_t index = 0; matches && index < rebuilt.resolution_count; ++index) {
         matches = rebuilt.resolutions[index].kind == checker->hir->resolutions[index].kind
-            && rebuilt.resolutions[index].target == checker->hir->resolutions[index].target;
+            && rebuilt.resolutions[index].target == checker->hir->resolutions[index].target
+            && rebuilt.expression_owners[index] == checker->hir->expression_owners[index];
+    }
+    for (size_t index = 0; matches && index < rebuilt.type_resolution_count; ++index) {
+        matches = rebuilt.type_resolutions[index].kind
+                == checker->hir->type_resolutions[index].kind
+            && rebuilt.type_resolutions[index].target
+                == checker->hir->type_resolutions[index].target;
     }
     if (!completed && !sol_diagnostics_has_errors(&diagnostics)) {
         checker->allocation_failed = true;
@@ -1249,6 +1299,16 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
                         expression->as.call.first_argument,
                         states,
                         argument_owners,
+                        stack,
+                        &stack_count
+                    );
+                    break;
+                case SOL_EXPR_TYPE_APPLICATION:
+                    valid = sol_effect_schedule_owned_expression(
+                        checker,
+                        owner,
+                        expression->as.type_application.base,
+                        states,
                         stack,
                         &stack_count
                     );
@@ -2022,7 +2082,8 @@ static bool sol_effect_validate_provenance(
 static bool sol_effect_type_has_identity(SolTypeKind kind) {
     return kind == SOL_TYPE_NOMINAL || kind == SOL_TYPE_APPLICATION
         || kind == SOL_TYPE_FUNCTION || kind == SOL_TYPE_FUNCTION_SIGNATURE
-        || kind == SOL_TYPE_CAPABILITY_OPERATION || kind == SOL_TYPE_VARIANT;
+        || kind == SOL_TYPE_CAPABILITY_OPERATION || kind == SOL_TYPE_VARIANT
+        || kind == SOL_TYPE_PARAMETER;
 }
 
 static bool sol_effect_semantic_type_equal(SolType left, SolType right) {
@@ -2218,6 +2279,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || syntax->parameter_count > syntax->parameter_capacity
         || syntax->argument_count > syntax->argument_capacity
         || syntax->statement_count > syntax->statement_capacity
+        || syntax->type_count > syntax->type_capacity
+        || syntax->type_argument_count > syntax->type_argument_capacity
+        || syntax->type_parameter_count > syntax->type_parameter_capacity
         || syntax->match_arm_count > syntax->match_arm_capacity
         || syntax->effect_count > syntax->effect_capacity
         || syntax->capability_member_count > syntax->capability_member_capacity
@@ -2228,6 +2292,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (syntax->parameter_count != 0 && syntax->parameters == NULL)
         || (syntax->argument_count != 0 && syntax->arguments == NULL)
         || (syntax->statement_count != 0 && syntax->statements == NULL)
+        || (syntax->type_count != 0 && syntax->types == NULL)
+        || (syntax->type_argument_count != 0 && syntax->type_arguments == NULL)
+        || (syntax->type_parameter_count != 0 && syntax->type_parameters == NULL)
         || (syntax->match_arm_count != 0 && syntax->match_arms == NULL)
         || (syntax->effect_count != 0 && syntax->effects == NULL)
         || (syntax->capability_member_count != 0 && syntax->capability_members == NULL)
@@ -2236,15 +2303,20 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             && syntax->contract_conditions == NULL)
         || hir->definition_count != syntax->item_count
         || hir->resolution_count != syntax->expression_count
+        || hir->type_resolution_count != syntax->type_count
         || hir->local_count > hir->local_capacity
         || (hir->definition_count != 0 && hir->definitions == NULL)
         || (hir->resolution_count != 0 && hir->resolutions == NULL)
+        || (hir->resolution_count != 0 && hir->expression_owners == NULL)
+        || (hir->type_resolution_count != 0 && hir->type_resolutions == NULL)
         || (hir->local_count != 0 && hir->locals == NULL)
         || types->expression_count != syntax->expression_count
         || types->local_count != hir->local_count
         || types->definition_count != hir->definition_count
         || types->declared_type_count != syntax->type_count
         || types->type_application_count > types->type_application_capacity
+        || types->type_application_argument_count
+            > types->type_application_argument_capacity
         || types->function_type_count > types->function_type_capacity
         || types->function_coercion_count > types->function_coercion_capacity
         || types->provenance_count > types->provenance_capacity
@@ -2254,6 +2326,10 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || ((types->provenance_root_count == 0)
             != (types->provenance_root_capacity == 0))
         || types->handler_count != syntax->expression_count
+        || types->call_instantiation_count != syntax->expression_count
+        || types->call_instantiation_argument_count
+            > types->call_instantiation_argument_capacity
+        || types->variant_constructor_count > types->variant_constructor_capacity
         || ((types->function_coercion_count == 0)
             != (types->function_coercion_capacity == 0))
         || (types->expression_count != 0 && types->expressions == NULL)
@@ -2265,12 +2341,20 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (types->definition_count != 0 && types->definitions == NULL)
         || (types->declared_type_count != 0 && types->declared_types == NULL)
         || (types->type_application_capacity != 0 && types->type_applications == NULL)
+        || (types->type_application_argument_capacity != 0
+            && types->type_application_arguments == NULL)
         || (types->function_type_capacity != 0 && types->function_types == NULL)
         || (types->function_coercion_capacity != 0
             && types->function_coercions == NULL)
         || (types->provenance_capacity != 0 && types->provenances == NULL)
         || (types->provenance_root_capacity != 0 && types->provenance_roots == NULL)
-        || (types->handler_count != 0 && types->handlers == NULL)) {
+        || (types->handler_count != 0 && types->handlers == NULL)
+        || (types->call_instantiation_count != 0
+            && types->call_instantiations == NULL)
+        || (types->call_instantiation_argument_capacity != 0
+            && types->call_instantiation_arguments == NULL)
+        || (types->variant_constructor_capacity != 0
+            && types->variant_constructors == NULL)) {
         return false;
     }
     if (!sol_syntax_contracts_validate(source, syntax)) return false;
@@ -2299,56 +2383,182 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         provenance_root_offset += provenance.count;
     }
     if (provenance_root_offset != types->provenance_root_count) return false;
+    size_t application_argument_offset = 0;
     for (size_t index = 0; index < types->type_application_count; ++index) {
         const SolTypeApplication *application = &types->type_applications[index];
+        const SolType *arguments = NULL;
+        size_t argument_count = 0;
         size_t expected = application->constructor == SOL_TYPE_CONSTRUCTOR_OPTION
             ? 1
             : application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT ? 2 : 0;
-        if (application->argument_count != expected) return false;
+        if (application->constructor == SOL_TYPE_CONSTRUCTOR_USER
+            && application->definition < syntax->item_count) {
+            SolTypeParameterId parameter
+                = syntax->items[application->definition].first_type_parameter;
+            while (parameter != SOL_AST_NONE) {
+                if (parameter >= syntax->type_parameter_count
+                    || expected++ >= syntax->type_parameter_count
+                    || syntax->type_parameters[parameter].owner_item
+                        != application->definition) return false;
+                parameter = syntax->type_parameters[parameter].next;
+            }
+        }
+        if (application->argument_count == 0
+            || application->argument_count != expected
+            || application->argument_offset != application_argument_offset
+            || !sol_type_application_arguments(
+                types,
+                (SolType){SOL_TYPE_APPLICATION, index},
+                &arguments,
+                &argument_count
+            )
+            || argument_count != expected
+            || (application->constructor != SOL_TYPE_CONSTRUCTOR_USER
+                && application->definition != SOL_AST_NONE)
+            || (application->constructor == SOL_TYPE_CONSTRUCTOR_USER
+                && (application->definition >= syntax->item_count
+                    || (syntax->items[application->definition].kind != SOL_ITEM_RECORD
+                        && syntax->items[application->definition].kind != SOL_ITEM_ENUM)))) {
+            return false;
+        }
         for (size_t argument = 0; argument < application->argument_count; ++argument) {
-            SolType type = application->arguments[argument];
-            if ((int)type.kind < 0 || type.kind > SOL_TYPE_NEVER
+            SolType type = arguments[argument];
+            if (!sol_type_exact_reference_valid(syntax, types, type)
                 || (type.kind == SOL_TYPE_APPLICATION && type.definition >= index)
-                || (type.kind == SOL_TYPE_FUNCTION_SIGNATURE
-                    && type.definition >= types->function_type_count)
-                || (!sol_effect_type_has_identity(type.kind) && type.definition != 0)) {
+                ) {
                 return false;
             }
         }
         for (size_t previous = 0; previous < index; ++previous) {
             const SolTypeApplication *other = &types->type_applications[previous];
+            const SolType *other_arguments = NULL;
+            size_t other_count = 0;
+            if (!sol_type_application_arguments(
+                types,
+                (SolType){SOL_TYPE_APPLICATION, previous},
+                &other_arguments,
+                &other_count
+            )) return false;
             bool equal = application->constructor == other->constructor
-                && application->argument_count == other->argument_count;
+                && application->definition == other->definition
+                && argument_count == other_count;
             for (size_t argument = 0; equal && argument < application->argument_count;
                 ++argument) {
                 equal = sol_effect_semantic_type_equal(
-                    application->arguments[argument],
-                    other->arguments[argument]
+                    arguments[argument],
+                    other_arguments[argument]
                 );
             }
             if (equal) return false;
+        }
+        application_argument_offset += argument_count;
+    }
+    if (application_argument_offset != types->type_application_argument_count) return false;
+    size_t call_argument_total = 0;
+    for (size_t expression = 0; expression < types->call_instantiation_count; ++expression) {
+        const SolCallInstantiation *instantiation
+            = &types->call_instantiations[expression];
+        if (instantiation->function == SOL_AST_NONE) {
+            if (instantiation->argument_count != 0 || instantiation->argument_offset != 0) {
+                return false;
+            }
+            continue;
+        }
+        if (syntax->expressions[expression].kind != SOL_EXPR_CALL
+            || instantiation->function >= syntax->item_count
+            || syntax->items[instantiation->function].kind != SOL_ITEM_FUNCTION) {
+            return false;
+        }
+        size_t expected = 0;
+        SolTypeParameterId parameter
+            = syntax->items[instantiation->function].first_type_parameter;
+        while (parameter != SOL_AST_NONE) {
+            if (parameter >= syntax->type_parameter_count
+                || expected++ >= syntax->type_parameter_count) return false;
+            parameter = syntax->type_parameters[parameter].next;
+        }
+        const SolType *arguments = NULL;
+        size_t argument_count = 0;
+        SolExprId callee = syntax->expressions[expression].as.call.callee;
+        if (expected == 0 || expected != instantiation->argument_count
+            || callee >= types->expression_count
+            || types->expressions[callee].kind != SOL_TYPE_FUNCTION
+            || types->expressions[callee].definition != instantiation->function
+            || !sol_type_call_instantiation_arguments(
+                types,
+                expression,
+                &arguments,
+                &argument_count
+            )
+            || argument_count != expected
+            || !sol_type_call_instantiation_valid(
+                checker->source,
+                syntax,
+                types,
+                expression
+            )) return false;
+        if (call_argument_total > SIZE_MAX - argument_count) return false;
+        call_argument_total += argument_count;
+        for (size_t index = 0; index < expected; ++index) {
+            if (!sol_type_exact_reference_valid(syntax, types, arguments[index])) {
+                return false;
+            }
+        }
+        for (size_t previous = 0; previous < expression; ++previous) {
+            const SolCallInstantiation *other = &types->call_instantiations[previous];
+            if (other->function == SOL_AST_NONE) continue;
+            size_t left_end = instantiation->argument_offset + argument_count;
+            size_t right_end = other->argument_offset + other->argument_count;
+            if (instantiation->argument_offset < right_end
+                && other->argument_offset < left_end) return false;
+        }
+    }
+    if (call_argument_total != types->call_instantiation_argument_count) return false;
+    for (size_t index = 0; index < types->variant_constructor_count; ++index) {
+        const SolVariantConstructor *constructor = &types->variant_constructors[index];
+        if (constructor->variant >= syntax->variant_count
+            || !sol_type_exact_reference_valid(syntax, types, constructor->owner)) {
+            return false;
+        }
+        SolDefId owner = syntax->variants[constructor->variant].owner_item;
+        bool owner_matches = constructor->owner.kind == SOL_TYPE_NOMINAL
+            && constructor->owner.definition == owner;
+        const SolTypeApplication *application = sol_type_application(
+            types,
+            constructor->owner
+        );
+        owner_matches = owner_matches
+            || (application != NULL
+                && application->constructor == SOL_TYPE_CONSTRUCTOR_USER
+                && application->definition == owner);
+        if (!owner_matches || owner >= syntax->item_count
+            || syntax->items[owner].kind != SOL_ITEM_ENUM
+            || syntax->variants[constructor->variant].first_field == SOL_AST_NONE) {
+            return false;
+        }
+        for (size_t previous = 0; previous < index; ++previous) {
+            const SolVariantConstructor *other = &types->variant_constructors[previous];
+            if (other->variant == constructor->variant
+                && sol_effect_semantic_type_equal(other->owner, constructor->owner)) {
+                return false;
+            }
         }
     }
     for (size_t index = 0; index < types->function_type_count; ++index) {
         const SolFunctionType *function = &types->function_types[index];
         if ((function->parameter_count != 0 && function->parameters == NULL)
             || (function->effects.count != 0 && function->effects.atoms == NULL)
-            || (int)function->result.kind < 0 || function->result.kind > SOL_TYPE_NEVER
+            || !sol_type_exact_reference_valid(syntax, types, function->result)
             || (function->result.kind == SOL_TYPE_FUNCTION_SIGNATURE
                 && function->result.definition >= index)
-            || (function->result.kind == SOL_TYPE_APPLICATION
-                && function->result.definition >= types->type_application_count)
-            || (!sol_effect_type_has_identity(function->result.kind)
-                && function->result.definition != 0)) {
+            ) {
             return false;
         }
         for (size_t parameter = 0; parameter < function->parameter_count; ++parameter) {
             SolType type = function->parameters[parameter];
-            if ((int)type.kind < 0 || type.kind > SOL_TYPE_NEVER
+            if (!sol_type_exact_reference_valid(syntax, types, type)
                 || (type.kind == SOL_TYPE_FUNCTION_SIGNATURE && type.definition >= index)
-                || (type.kind == SOL_TYPE_APPLICATION
-                    && type.definition >= types->type_application_count)
-                || (!sol_effect_type_has_identity(type.kind) && type.definition != 0)) {
+                ) {
                 return false;
             }
         }
@@ -2420,12 +2630,10 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
     for (size_t arena = 0; arena < sizeof(type_arenas) / sizeof(type_arenas[0]); ++arena) {
         for (size_t index = 0; index < type_counts[arena]; ++index) {
             SolType type = type_arenas[arena][index];
-            if ((int)type.kind < 0 || type.kind > SOL_TYPE_NEVER
-                || (type.kind == SOL_TYPE_FUNCTION_SIGNATURE
-                    && type.definition >= types->function_type_count)
-                || (type.kind == SOL_TYPE_APPLICATION
-                    && type.definition >= types->type_application_count)
-                || (!sol_effect_type_has_identity(type.kind) && type.definition != 0)) {
+            bool recovery = type.kind == SOL_TYPE_UNKNOWN || type.kind == SOL_TYPE_ERROR
+                || type.kind == SOL_TYPE_NEVER;
+            if ((recovery && type.definition != 0)
+                || (!recovery && !sol_type_exact_reference_valid(syntax, types, type))) {
                 return false;
             }
         }

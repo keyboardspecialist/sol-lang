@@ -50,7 +50,7 @@ static bool sol_contract_type_valid(
     const SolContractLowerer *lowerer,
     SolType type
 ) {
-    if ((int)type.kind < 0 || type.kind > SOL_TYPE_NEVER) return false;
+    if ((int)type.kind < 0 || type.kind > SOL_TYPE_PARAMETER) return false;
     switch (type.kind) {
         case SOL_TYPE_NOMINAL:
             return type.definition < lowerer->syntax->item_count
@@ -65,7 +65,9 @@ static bool sol_contract_type_valid(
         case SOL_TYPE_CAPABILITY_OPERATION:
             return type.definition < lowerer->syntax->capability_member_count;
         case SOL_TYPE_VARIANT:
-            return type.definition < lowerer->syntax->variant_count;
+            return type.definition < lowerer->types->variant_constructor_count;
+        case SOL_TYPE_PARAMETER:
+            return type.definition < lowerer->syntax->type_parameter_count;
         default:
             return type.definition == 0;
     }
@@ -80,24 +82,47 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
     if (!sol_syntax_contracts_validate(lowerer->source, syntax)
         || hir->definition_count != syntax->item_count
         || hir->resolution_count != syntax->expression_count
+        || hir->type_resolution_count != syntax->type_count
         || hir->local_count > hir->local_capacity
+        || syntax->type_count > syntax->type_capacity
+        || syntax->type_argument_count > syntax->type_argument_capacity
+        || syntax->type_parameter_count > syntax->type_parameter_capacity
         || types->expression_count != syntax->expression_count
         || types->local_count != hir->local_count
         || types->definition_count != syntax->item_count
         || types->declared_type_count != syntax->type_count
         || types->type_application_count > types->type_application_capacity
+        || types->type_application_argument_count
+            > types->type_application_argument_capacity
         || types->function_type_count > types->function_type_capacity
+        || types->call_instantiation_count != syntax->expression_count
+        || types->call_instantiation_argument_count
+            > types->call_instantiation_argument_capacity
+        || types->variant_constructor_count > types->variant_constructor_capacity
         || effects->function_count != syntax->item_count
         || effects->capability_member_count != syntax->capability_member_count
         || (hir->definition_count != 0 && hir->definitions == NULL)
         || (hir->resolution_count != 0 && hir->resolutions == NULL)
+        || (hir->resolution_count != 0 && hir->expression_owners == NULL)
+        || (hir->type_resolution_count != 0 && hir->type_resolutions == NULL)
         || (hir->local_count != 0 && hir->locals == NULL)
+        || (syntax->type_count != 0 && syntax->types == NULL)
+        || (syntax->type_argument_count != 0 && syntax->type_arguments == NULL)
+        || (syntax->type_parameter_count != 0 && syntax->type_parameters == NULL)
         || (types->expression_count != 0 && types->expressions == NULL)
         || (types->local_count != 0 && types->locals == NULL)
         || (types->definition_count != 0 && types->definitions == NULL)
         || (types->declared_type_count != 0 && types->declared_types == NULL)
         || (types->type_application_capacity != 0 && types->type_applications == NULL)
+        || (types->type_application_argument_capacity != 0
+            && types->type_application_arguments == NULL)
         || (types->function_type_capacity != 0 && types->function_types == NULL)
+        || (types->call_instantiation_count != 0
+            && types->call_instantiations == NULL)
+        || (types->call_instantiation_argument_capacity != 0
+            && types->call_instantiation_arguments == NULL)
+        || (types->variant_constructor_capacity != 0
+            && types->variant_constructors == NULL)
         || (effects->function_count != 0 && effects->functions == NULL)
         || (effects->capability_member_count != 0
             && effects->capability_members == NULL)
@@ -120,39 +145,197 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
             return false;
         }
     }
+    size_t application_argument_offset = 0;
     for (size_t index = 0; index < types->type_application_count; ++index) {
         const SolTypeApplication *application = &types->type_applications[index];
+        const SolType *arguments = NULL;
+        size_t argument_count = 0;
         size_t expected = application->constructor == SOL_TYPE_CONSTRUCTOR_OPTION
             ? 1
             : application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT ? 2 : 0;
-        if (application->argument_count != expected) return false;
+        if (application->constructor == SOL_TYPE_CONSTRUCTOR_USER
+            && application->definition < syntax->item_count) {
+            SolTypeParameterId parameter
+                = syntax->items[application->definition].first_type_parameter;
+            while (parameter != SOL_AST_NONE) {
+                if (parameter >= syntax->type_parameter_count
+                    || expected++ >= syntax->type_parameter_count) return false;
+                parameter = syntax->type_parameters[parameter].next;
+            }
+        }
+        if (application->argument_count != expected || expected == 0
+            || application->argument_offset != application_argument_offset
+            || !sol_type_application_arguments(
+                types,
+                (SolType){SOL_TYPE_APPLICATION, index},
+                &arguments,
+                &argument_count
+            )
+            || argument_count != expected
+            || (application->constructor != SOL_TYPE_CONSTRUCTOR_USER
+                && application->definition != SOL_AST_NONE)
+            || (application->constructor == SOL_TYPE_CONSTRUCTOR_USER
+                && (application->definition >= syntax->item_count
+                    || (syntax->items[application->definition].kind != SOL_ITEM_RECORD
+                        && syntax->items[application->definition].kind != SOL_ITEM_ENUM)))) {
+            return false;
+        }
         for (size_t argument = 0; argument < expected; ++argument) {
-            SolType type = application->arguments[argument];
-            if (!sol_contract_type_valid(lowerer, type)
+            SolType type = arguments[argument];
+            if (!sol_type_exact_reference_valid(syntax, types, type)
                 || (type.kind == SOL_TYPE_APPLICATION && type.definition >= index)) {
                 return false;
             }
         }
         for (size_t previous = 0; previous < index; ++previous) {
             const SolTypeApplication *other = &types->type_applications[previous];
+            const SolType *other_arguments = NULL;
+            size_t other_count = 0;
+            if (!sol_type_application_arguments(
+                types,
+                (SolType){SOL_TYPE_APPLICATION, previous},
+                &other_arguments,
+                &other_count
+            )) return false;
             bool equal = application->constructor == other->constructor
-                && application->argument_count == other->argument_count;
+                && application->definition == other->definition
+                && argument_count == other_count;
             for (size_t argument = 0; equal && argument < expected; ++argument) {
-                equal = application->arguments[argument].kind
-                        == other->arguments[argument].kind
-                    && application->arguments[argument].definition
-                        == other->arguments[argument].definition;
+                equal = arguments[argument].kind == other_arguments[argument].kind
+                    && arguments[argument].definition
+                        == other_arguments[argument].definition;
             }
             if (equal) return false;
+        }
+        application_argument_offset += expected;
+    }
+    if (application_argument_offset != types->type_application_argument_count) return false;
+    size_t call_argument_total = 0;
+    for (size_t expression = 0; expression < types->call_instantiation_count; ++expression) {
+        const SolCallInstantiation *instantiation
+            = &types->call_instantiations[expression];
+        if (instantiation->function == SOL_AST_NONE) {
+            if (instantiation->argument_count != 0 || instantiation->argument_offset != 0) {
+                return false;
+            }
+            continue;
+        }
+        if (syntax->expressions[expression].kind != SOL_EXPR_CALL
+            || instantiation->function >= syntax->item_count
+            || syntax->items[instantiation->function].kind != SOL_ITEM_FUNCTION) {
+            return false;
+        }
+        size_t expected = 0;
+        SolTypeParameterId parameter
+            = syntax->items[instantiation->function].first_type_parameter;
+        while (parameter != SOL_AST_NONE) {
+            if (parameter >= syntax->type_parameter_count
+                || expected++ >= syntax->type_parameter_count) return false;
+            parameter = syntax->type_parameters[parameter].next;
+        }
+        const SolType *arguments = NULL;
+        size_t argument_count = 0;
+        SolExprId callee = syntax->expressions[expression].as.call.callee;
+        if (expected == 0 || instantiation->argument_count != expected
+            || callee >= types->expression_count
+            || types->expressions[callee].kind != SOL_TYPE_FUNCTION
+            || types->expressions[callee].definition != instantiation->function
+            || !sol_type_call_instantiation_arguments(
+                types,
+                expression,
+                &arguments,
+                &argument_count
+            )
+            || argument_count != expected
+            || !sol_type_call_instantiation_valid(
+                lowerer->source,
+                syntax,
+                types,
+                expression
+            )) {
+            return false;
+        }
+        if (call_argument_total > SIZE_MAX - argument_count) return false;
+        call_argument_total += argument_count;
+        for (size_t argument = 0; argument < argument_count; ++argument) {
+            if (!sol_type_exact_reference_valid(syntax, types, arguments[argument])) {
+                return false;
+            }
+        }
+        for (size_t previous = 0; previous < expression; ++previous) {
+            const SolCallInstantiation *other = &types->call_instantiations[previous];
+            if (other->function == SOL_AST_NONE) continue;
+            size_t left_end = instantiation->argument_offset + argument_count;
+            size_t right_end = other->argument_offset + other->argument_count;
+            if (instantiation->argument_offset < right_end
+                && other->argument_offset < left_end) return false;
+        }
+    }
+    if (call_argument_total != types->call_instantiation_argument_count) return false;
+    for (size_t index = 0; index < types->variant_constructor_count; ++index) {
+        const SolVariantConstructor *constructor = &types->variant_constructors[index];
+        if (constructor->variant >= syntax->variant_count
+            || !sol_type_exact_reference_valid(syntax, types, constructor->owner)) {
+            return false;
+        }
+        SolDefId owner = syntax->variants[constructor->variant].owner_item;
+        bool owner_matches = constructor->owner.kind == SOL_TYPE_NOMINAL
+            && constructor->owner.definition == owner;
+        const SolTypeApplication *application = sol_type_application(
+            types,
+            constructor->owner
+        );
+        owner_matches = owner_matches
+            || (application != NULL
+                && application->constructor == SOL_TYPE_CONSTRUCTOR_USER
+                && application->definition == owner);
+        if (!owner_matches || owner >= syntax->item_count
+            || syntax->items[owner].kind != SOL_ITEM_ENUM
+            || syntax->variants[constructor->variant].first_field == SOL_AST_NONE) {
+            return false;
+        }
+        for (size_t previous = 0; previous < index; ++previous) {
+            const SolVariantConstructor *other = &types->variant_constructors[previous];
+            if (other->variant == constructor->variant
+                && other->owner.kind == constructor->owner.kind
+                && other->owner.definition == constructor->owner.definition) return false;
         }
     }
     for (size_t index = 0; index < types->function_type_count; ++index) {
         const SolFunctionType *function = &types->function_types[index];
         if ((function->parameter_count != 0 && function->parameters == NULL)
             || (function->effects.count != 0 && function->effects.atoms == NULL)
-            || !sol_contract_type_valid(lowerer, function->result)) return false;
+            || !sol_type_exact_reference_valid(syntax, types, function->result)
+            || (function->result.kind == SOL_TYPE_FUNCTION_SIGNATURE
+                && function->result.definition >= index)) return false;
         for (size_t parameter = 0; parameter < function->parameter_count; ++parameter) {
-            if (!sol_contract_type_valid(lowerer, function->parameters[parameter])) {
+            SolType type = function->parameters[parameter];
+            if (!sol_type_exact_reference_valid(syntax, types, type)
+                || (type.kind == SOL_TYPE_FUNCTION_SIGNATURE
+                    && type.definition >= index)) {
+                return false;
+            }
+        }
+    }
+    const SolType *type_arenas[] = {
+        types->expressions,
+        types->locals,
+        types->definitions,
+        types->declared_types,
+    };
+    const size_t type_counts[] = {
+        types->expression_count,
+        types->local_count,
+        types->definition_count,
+        types->declared_type_count,
+    };
+    for (size_t arena = 0; arena < sizeof(type_arenas) / sizeof(type_arenas[0]); ++arena) {
+        for (size_t index = 0; index < type_counts[arena]; ++index) {
+            SolType type = type_arenas[arena][index];
+            bool recovery = type.kind == SOL_TYPE_UNKNOWN || type.kind == SOL_TYPE_ERROR
+                || type.kind == SOL_TYPE_NEVER;
+            if ((recovery && type.definition != 0)
+                || (!recovery && !sol_type_exact_reference_valid(syntax, types, type))) {
                 return false;
             }
         }
@@ -326,6 +509,13 @@ static void sol_contract_expression(
             sol_contract_expression(lowerer, expression->as.call.callee, in_old);
             sol_contract_arguments(lowerer, expression->as.call.first_argument, in_old);
             break;
+        case SOL_EXPR_TYPE_APPLICATION:
+            sol_contract_expression(
+                lowerer,
+                expression->as.type_application.base,
+                in_old
+            );
+            break;
         case SOL_EXPR_FIELD:
             sol_contract_expression(lowerer, expression->as.field.base, in_old);
             break;
@@ -440,11 +630,19 @@ static SolResultBinding sol_contract_result_binding(
         lowerer->types,
         binding.type
     );
+    const SolType *arguments = NULL;
+    size_t argument_count = 0;
     if (condition->outcome == SOL_CONTRACT_OUTCOME_SUCCESS
         && application != NULL
         && application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT
-        && application->argument_count == 2) {
-        binding.type = application->arguments[0];
+        && sol_type_application_arguments(
+            lowerer->types,
+            binding.type,
+            &arguments,
+            &argument_count
+        )
+        && argument_count == 2) {
+        binding.type = arguments[0];
     }
     return binding;
 }

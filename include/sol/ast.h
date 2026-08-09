@@ -14,6 +14,7 @@ typedef size_t SolArgumentId;
 typedef size_t SolParameterId;
 typedef size_t SolTypeId;
 typedef size_t SolTypeArgumentId;
+typedef size_t SolTypeParameterId;
 typedef size_t SolFieldId;
 typedef size_t SolVariantId;
 typedef size_t SolPatternId;
@@ -45,6 +46,7 @@ typedef enum {
     SOL_EXPR_HANDLE,
     SOL_EXPR_RESULT,
     SOL_EXPR_OLD,
+    SOL_EXPR_TYPE_APPLICATION,
 } SolExprKind;
 
 typedef struct {
@@ -66,6 +68,10 @@ typedef struct {
             SolExprId callee;
             SolArgumentId first_argument;
         } call;
+        struct {
+            SolExprId base;
+            SolTypeArgumentId first_argument;
+        } type_application;
         struct {
             SolExprId base;
             SolSpan name;
@@ -144,6 +150,7 @@ typedef struct {
     SolTypeId return_type;
     SolEffectId first_effect;
     bool is_capability;
+    size_t owner_item;
 } SolSyntaxType;
 
 typedef enum {
@@ -156,6 +163,12 @@ typedef struct {
     SolTypeId type;
     SolTypeArgumentId next;
 } SolTypeArgument;
+
+typedef struct {
+    SolSpan name;
+    SolTypeParameterId next;
+    size_t owner_item;
+} SolTypeParameter;
 
 typedef struct {
     SolSpan name;

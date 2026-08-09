@@ -35,6 +35,8 @@ void sol_hir_module_free(SolHirModule *module) {
     free(module->definitions);
     free(module->locals);
     free(module->resolutions);
+    free(module->expression_owners);
+    free(module->type_resolutions);
     memset(module, 0, sizeof(*module));
 }
 
@@ -146,6 +148,41 @@ static SolEffectId sol_resolver_effect_root(
     return SOL_AST_NONE;
 }
 
+static bool sol_resolver_validate_type_graph(
+    SolResolver *resolver,
+    SolTypeId type_id,
+    unsigned char *states,
+    size_t depth
+) {
+    if (type_id >= resolver->syntax->type_count || depth >= 4096) return false;
+    if (states[type_id] == 1) return false;
+    if (states[type_id] == 2) return true;
+    states[type_id] = 1;
+    const SolSyntaxType *type = &resolver->syntax->types[type_id];
+    SolTypeArgumentId argument = type->first_argument;
+    size_t traversed = 0;
+    while (argument != SOL_AST_NONE) {
+        if (argument >= resolver->syntax->type_argument_count
+            || traversed++ >= resolver->syntax->type_argument_count
+            || !sol_resolver_validate_type_graph(
+                resolver,
+                resolver->syntax->type_arguments[argument].type,
+                states,
+                depth + 1
+            )) return false;
+        argument = resolver->syntax->type_arguments[argument].next;
+    }
+    if (type->kind == SOL_SYNTAX_TYPE_FUNCTION
+        && !sol_resolver_validate_type_graph(
+            resolver,
+            type->return_type,
+            states,
+            depth + 1
+        )) return false;
+    states[type_id] = 2;
+    return true;
+}
+
 static bool sol_resolver_validate(SolResolver *resolver) {
     const SolSyntaxTree *syntax = resolver->syntax;
     if (syntax->item_count > syntax->item_capacity
@@ -155,6 +192,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         || syntax->expression_count > syntax->expression_capacity
         || syntax->type_count > syntax->type_capacity
         || syntax->type_argument_count > syntax->type_argument_capacity
+        || syntax->type_parameter_count > syntax->type_parameter_capacity
         || syntax->field_count > syntax->field_capacity
         || syntax->variant_count > syntax->variant_capacity
         || syntax->pattern_count > syntax->pattern_capacity
@@ -171,6 +209,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         || (syntax->expression_count != 0 && syntax->expressions == NULL)
         || (syntax->type_count != 0 && syntax->types == NULL)
         || (syntax->type_argument_count != 0 && syntax->type_arguments == NULL)
+        || (syntax->type_parameter_count != 0 && syntax->type_parameters == NULL)
         || (syntax->field_count != 0 && syntax->fields == NULL)
         || (syntax->variant_count != 0 && syntax->variants == NULL)
         || (syntax->pattern_count != 0 && syntax->patterns == NULL)
@@ -206,7 +245,9 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || (item->first_contract != SOL_AST_NONE
                 && item->first_contract >= syntax->contract_clause_count)
             || (item->capability_source != SOL_AST_NONE
-                && item->capability_source >= syntax->parameter_count)) {
+                && item->capability_source >= syntax->parameter_count)
+            || (item->first_type_parameter != SOL_AST_NONE
+                && item->first_type_parameter >= syntax->type_parameter_count)) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -287,6 +328,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_FUNCTION
             || !sol_span_valid(resolver->source, type->span)
             || !sol_span_valid(resolver->source, type->name)
+            || type->owner_item >= syntax->item_count
             || (type->first_argument != SOL_AST_NONE
                 && type->first_argument >= syntax->type_argument_count)
             || (type->kind == SOL_SYNTAX_TYPE_FUNCTION
@@ -303,6 +345,16 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             return false;
         }
     }
+    for (size_t index = 0; index < syntax->type_parameter_count; ++index) {
+        const SolTypeParameter *parameter = &syntax->type_parameters[index];
+        if (!sol_span_valid(resolver->source, parameter->name)
+            || parameter->owner_item >= syntax->item_count
+            || (parameter->next != SOL_AST_NONE
+                && parameter->next >= syntax->type_parameter_count)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
     for (size_t index = 0; index < syntax->type_argument_count; ++index) {
         const SolTypeArgument *argument = &syntax->type_arguments[index];
         if (argument->type >= syntax->type_count
@@ -311,6 +363,83 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             sol_resolver_malformed(resolver);
             return false;
         }
+    }
+    for (size_t target = 0; target < syntax->type_argument_count; ++target) {
+        size_t references = 0;
+        for (size_t type = 0; type < syntax->type_count; ++type) {
+            SolTypeArgumentId argument = syntax->types[type].first_argument;
+            size_t traversed = 0;
+            while (argument != SOL_AST_NONE) {
+                if (argument >= syntax->type_argument_count
+                    || traversed++ >= syntax->type_argument_count) {
+                    sol_resolver_malformed(resolver);
+                    return false;
+                }
+                references += argument == target ? 1 : 0;
+                argument = syntax->type_arguments[argument].next;
+            }
+        }
+        for (size_t expression = 0; expression < syntax->expression_count; ++expression) {
+            if (syntax->expressions[expression].kind
+                != SOL_EXPR_TYPE_APPLICATION) continue;
+            SolTypeArgumentId argument = syntax->expressions[
+                expression
+            ].as.type_application.first_argument;
+            size_t traversed = 0;
+            while (argument != SOL_AST_NONE) {
+                if (argument >= syntax->type_argument_count
+                    || traversed++ >= syntax->type_argument_count) {
+                    sol_resolver_malformed(resolver);
+                    return false;
+                }
+                references += argument == target ? 1 : 0;
+                argument = syntax->type_arguments[argument].next;
+            }
+        }
+        if (references != 1) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    for (size_t target = 0; target < syntax->type_parameter_count; ++target) {
+        size_t references = 0;
+        for (size_t item = 0; item < syntax->item_count; ++item) {
+            SolTypeParameterId parameter = syntax->items[item].first_type_parameter;
+            size_t traversed = 0;
+            while (parameter != SOL_AST_NONE) {
+                if (parameter >= syntax->type_parameter_count
+                    || traversed++ >= syntax->type_parameter_count
+                    || syntax->type_parameters[parameter].owner_item != item) {
+                    sol_resolver_malformed(resolver);
+                    return false;
+                }
+                references += parameter == target ? 1 : 0;
+                parameter = syntax->type_parameters[parameter].next;
+            }
+        }
+        if (references != 1) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    unsigned char *type_states = calloc(syntax->type_count, 1);
+    if (syntax->type_count != 0 && type_states == NULL) {
+        resolver->allocation_failed = true;
+        return false;
+    }
+    bool type_graph_valid = true;
+    for (SolTypeId type = 0; type_graph_valid && type < syntax->type_count; ++type) {
+        type_graph_valid = sol_resolver_validate_type_graph(
+            resolver,
+            type,
+            type_states,
+            0
+        );
+    }
+    free(type_states);
+    if (!type_graph_valid) {
+        sol_resolver_malformed(resolver);
+        return false;
     }
     for (size_t index = 0; index < syntax->field_count; ++index) {
         const SolField *field = &syntax->fields[index];
@@ -472,7 +601,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         const SolExpr *expression = &syntax->expressions[index];
         bool valid = (int)expression->kind >= 0
-            && expression->kind <= SOL_EXPR_OLD
+            && expression->kind <= SOL_EXPR_TYPE_APPLICATION
             && sol_span_valid(resolver->source, expression->span);
         switch (expression->kind) {
             case SOL_EXPR_PATH:
@@ -491,6 +620,12 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                     && expression->as.call.callee < syntax->expression_count
                     && (expression->as.call.first_argument == SOL_AST_NONE
                         || expression->as.call.first_argument < syntax->argument_count);
+                break;
+            case SOL_EXPR_TYPE_APPLICATION:
+                valid = valid
+                    && expression->as.type_application.base < syntax->expression_count
+                    && expression->as.type_application.first_argument
+                        < syntax->type_argument_count;
                 break;
             case SOL_EXPR_FIELD:
                 valid = valid
@@ -554,12 +689,14 @@ static bool sol_resolver_validate(SolResolver *resolver) {
 static bool sol_resolver_allocate(SolResolver *resolver) {
     const SolSyntaxTree *syntax = resolver->syntax;
     if (syntax->item_count > SIZE_MAX / sizeof(*resolver->module->definitions)
-        || syntax->expression_count > SIZE_MAX / sizeof(*resolver->module->resolutions)) {
+        || syntax->expression_count > SIZE_MAX / sizeof(*resolver->module->resolutions)
+        || syntax->type_count > SIZE_MAX / sizeof(*resolver->module->type_resolutions)) {
         return false;
     }
 
     resolver->module->definition_count = syntax->item_count;
     resolver->module->resolution_count = syntax->expression_count;
+    resolver->module->type_resolution_count = syntax->type_count;
     resolver->module->definitions = calloc(
         syntax->item_count,
         sizeof(*resolver->module->definitions)
@@ -568,10 +705,22 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
         syntax->expression_count,
         sizeof(*resolver->module->resolutions)
     );
+    resolver->module->expression_owners = malloc(
+        syntax->expression_count * sizeof(*resolver->module->expression_owners)
+    );
+    resolver->module->type_resolutions = calloc(
+        syntax->type_count,
+        sizeof(*resolver->module->type_resolutions)
+    );
 
     if ((syntax->item_count != 0 && resolver->module->definitions == NULL)
-        || (syntax->expression_count != 0 && resolver->module->resolutions == NULL)) {
+        || (syntax->expression_count != 0 && resolver->module->resolutions == NULL)
+        || (syntax->expression_count != 0 && resolver->module->expression_owners == NULL)
+        || (syntax->type_count != 0 && resolver->module->type_resolutions == NULL)) {
         return false;
+    }
+    for (size_t index = 0; index < syntax->expression_count; ++index) {
+        resolver->module->expression_owners[index] = SOL_AST_NONE;
     }
     resolver->expression_states = calloc(
         syntax->expression_count,
@@ -810,6 +959,13 @@ static void sol_resolver_expression(SolResolver *resolver, SolExprId expression_
         sol_resolver_malformed(resolver);
         return;
     }
+    if (resolver->module->expression_owners[expression_id] == SOL_AST_NONE) {
+        resolver->module->expression_owners[expression_id] = resolver->current_definition;
+    } else if (resolver->module->expression_owners[expression_id]
+        != resolver->current_definition) {
+        sol_resolver_malformed(resolver);
+        return;
+    }
     if (resolver->expression_states[expression_id] == 1) {
         sol_resolver_malformed(resolver);
         return;
@@ -858,6 +1014,9 @@ static void sol_resolver_expression(SolResolver *resolver, SolExprId expression_
         case SOL_EXPR_CALL:
             sol_resolver_expression(resolver, expression->as.call.callee);
             sol_resolver_arguments(resolver, expression->as.call.first_argument);
+            break;
+        case SOL_EXPR_TYPE_APPLICATION:
+            sol_resolver_expression(resolver, expression->as.type_application.base);
             break;
         case SOL_EXPR_FIELD:
             {
@@ -942,6 +1101,108 @@ static void sol_resolver_collect_definitions(SolResolver *resolver) {
             .name = item->name,
             .syntax_item = index,
         };
+    }
+}
+
+static SolTypeResolution sol_resolver_builtin_type(
+    const SolSource *source,
+    SolSpan name
+) {
+    if (sol_span_text_equal(source, name, "Int64")) {
+        return (SolTypeResolution){SOL_TYPE_RESOLUTION_BUILTIN, SOL_TYPE_BUILTIN_INT64};
+    }
+    if (sol_span_text_equal(source, name, "Bool")) {
+        return (SolTypeResolution){SOL_TYPE_RESOLUTION_BUILTIN, SOL_TYPE_BUILTIN_BOOL};
+    }
+    if (sol_span_text_equal(source, name, "Text")) {
+        return (SolTypeResolution){SOL_TYPE_RESOLUTION_BUILTIN, SOL_TYPE_BUILTIN_TEXT};
+    }
+    if (sol_span_text_equal(source, name, "Option")) {
+        return (SolTypeResolution){SOL_TYPE_RESOLUTION_BUILTIN, SOL_TYPE_BUILTIN_OPTION};
+    }
+    if (sol_span_text_equal(source, name, "Result")) {
+        return (SolTypeResolution){SOL_TYPE_RESOLUTION_BUILTIN, SOL_TYPE_BUILTIN_RESULT};
+    }
+    return (SolTypeResolution){SOL_TYPE_RESOLUTION_ERROR, SOL_AST_NONE};
+}
+
+static void sol_resolver_resolve_types(SolResolver *resolver) {
+    for (size_t owner = 0; owner < resolver->syntax->item_count; ++owner) {
+        SolTypeParameterId parameter = resolver->syntax->items[owner].first_type_parameter;
+        size_t traversed = 0;
+        while (parameter != SOL_AST_NONE) {
+            if (parameter >= resolver->syntax->type_parameter_count
+                || traversed++ >= resolver->syntax->type_parameter_count
+                || resolver->syntax->type_parameters[parameter].owner_item != owner) {
+                sol_resolver_malformed(resolver);
+                return;
+            }
+            SolTypeParameterId previous = resolver->syntax->items[owner].first_type_parameter;
+            while (previous != parameter) {
+                if (sol_span_equal(
+                    resolver->source,
+                    resolver->syntax->type_parameters[previous].name,
+                    resolver->syntax->type_parameters[parameter].name
+                )) {
+                    sol_diagnostics_add(
+                        resolver->diagnostics,
+                        "SOL-RESOLVE-005",
+                        SOL_SEVERITY_ERROR,
+                        resolver->syntax->type_parameters[parameter].name,
+                        "duplicate generic parameter name"
+                    );
+                    break;
+                }
+                previous = resolver->syntax->type_parameters[previous].next;
+            }
+            parameter = resolver->syntax->type_parameters[parameter].next;
+        }
+    }
+    for (size_t type_id = 0; type_id < resolver->syntax->type_count; ++type_id) {
+        const SolSyntaxType *type = &resolver->syntax->types[type_id];
+        if (type->kind != SOL_SYNTAX_TYPE_PATH) continue;
+        SolTypeParameterId parameter
+            = resolver->syntax->items[type->owner_item].first_type_parameter;
+        size_t traversed = 0;
+        while (parameter != SOL_AST_NONE) {
+            if (traversed++ >= resolver->syntax->type_parameter_count) {
+                sol_resolver_malformed(resolver);
+                return;
+            }
+            if (sol_span_equal(
+                resolver->source,
+                resolver->syntax->type_parameters[parameter].name,
+                type->name
+            )) {
+                resolver->module->type_resolutions[type_id] = (SolTypeResolution){
+                    SOL_TYPE_RESOLUTION_PARAMETER,
+                    parameter,
+                };
+                break;
+            }
+            parameter = resolver->syntax->type_parameters[parameter].next;
+        }
+        if (parameter != SOL_AST_NONE) continue;
+        SolTypeResolution resolution = sol_resolver_builtin_type(resolver->source, type->name);
+        if (resolution.kind == SOL_TYPE_RESOLUTION_ERROR) {
+            for (size_t definition = 0;
+                definition < resolver->module->definition_count;
+                ++definition) {
+                if (resolver->module->definitions[definition].kind != SOL_ITEM_FUNCTION
+                    && sol_path_span_equal(
+                        resolver->source,
+                        resolver->module->definitions[definition].name,
+                        type->name
+                    )) {
+                    resolution = (SolTypeResolution){
+                        SOL_TYPE_RESOLUTION_DEFINITION,
+                        definition,
+                    };
+                    break;
+                }
+            }
+        }
+        resolver->module->type_resolutions[type_id] = resolution;
     }
 }
 
@@ -1075,6 +1336,7 @@ bool sol_hir_lower(
     }
 
     sol_resolver_collect_definitions(&resolver);
+    sol_resolver_resolve_types(&resolver);
     for (size_t index = 0; index < syntax->item_count; ++index) {
         if (syntax->items[index].kind == SOL_ITEM_FUNCTION) {
             sol_resolver_function(&resolver, index);

@@ -33,6 +33,7 @@ static void sol_type_error(
     SolSpan span,
     const char *message
 );
+static bool sol_type_span_equal(const SolSource *source, SolSpan span, const char *text);
 
 static void sol_type_malformed(SolTypeChecker *checker) {
     if (!checker->malformed) {
@@ -48,6 +49,58 @@ static void sol_type_malformed(SolTypeChecker *checker) {
 
 static bool sol_type_span_valid(const SolSource *source, SolSpan span) {
     return source->text != NULL && span.start <= span.end && span.end <= source->length;
+}
+
+static int sol_type_path_next_byte(
+    const SolSource *source,
+    SolSpan span,
+    size_t *cursor
+) {
+    while (*cursor < span.end) {
+        unsigned char byte = (unsigned char)source->text[*cursor];
+        if (byte == ' ' || byte == '\t' || byte == '\r' || byte == '\n') {
+            ++*cursor;
+            continue;
+        }
+        if (byte == '/' && *cursor + 1 < span.end && source->text[*cursor + 1] == '/') {
+            *cursor += 2;
+            while (*cursor < span.end && source->text[*cursor] != '\r'
+                && source->text[*cursor] != '\n') ++*cursor;
+            continue;
+        }
+        if (byte == '/' && *cursor + 1 < span.end && source->text[*cursor + 1] == '*') {
+            *cursor += 2;
+            size_t depth = 1;
+            while (*cursor < span.end && depth != 0) {
+                if (*cursor + 1 < span.end && source->text[*cursor] == '/'
+                    && source->text[*cursor + 1] == '*') {
+                    ++depth;
+                    *cursor += 2;
+                } else if (*cursor + 1 < span.end && source->text[*cursor] == '*'
+                    && source->text[*cursor + 1] == '/') {
+                    --depth;
+                    *cursor += 2;
+                } else {
+                    ++*cursor;
+                }
+            }
+            continue;
+        }
+        ++*cursor;
+        return (int)byte;
+    }
+    return -1;
+}
+
+static bool sol_type_path_equal(const SolSource *source, SolSpan left, SolSpan right) {
+    size_t left_cursor = left.start;
+    size_t right_cursor = right.start;
+    for (;;) {
+        int left_byte = sol_type_path_next_byte(source, left, &left_cursor);
+        int right_byte = sol_type_path_next_byte(source, right, &right_cursor);
+        if (left_byte != right_byte) return false;
+        if (left_byte < 0) return true;
+    }
 }
 
 static SolEffectId sol_type_effect_root(
@@ -82,6 +135,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || syntax->expression_count > syntax->expression_capacity
         || syntax->type_count > syntax->type_capacity
         || syntax->type_argument_count > syntax->type_argument_capacity
+        || syntax->type_parameter_count > syntax->type_parameter_capacity
         || syntax->field_count > syntax->field_capacity
         || syntax->variant_count > syntax->variant_capacity
         || syntax->pattern_count > syntax->pattern_capacity
@@ -98,6 +152,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || (syntax->expression_count != 0 && syntax->expressions == NULL)
         || (syntax->type_count != 0 && syntax->types == NULL)
         || (syntax->type_argument_count != 0 && syntax->type_arguments == NULL)
+        || (syntax->type_parameter_count != 0 && syntax->type_parameters == NULL)
         || (syntax->field_count != 0 && syntax->fields == NULL)
         || (syntax->variant_count != 0 && syntax->variants == NULL)
         || (syntax->pattern_count != 0 && syntax->patterns == NULL)
@@ -111,10 +166,13 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             && syntax->contract_conditions == NULL)
         || hir->definition_count != syntax->item_count
         || hir->resolution_count != syntax->expression_count
+        || hir->type_resolution_count != syntax->type_count
         || hir->local_count > hir->local_capacity
         || syntax->parameter_count > SIZE_MAX - syntax->argument_count
         || (hir->definition_count != 0 && hir->definitions == NULL)
         || (hir->resolution_count != 0 && hir->resolutions == NULL)
+        || (hir->resolution_count != 0 && hir->expression_owners == NULL)
+        || (hir->type_resolution_count != 0 && hir->type_resolutions == NULL)
         || (hir->local_count != 0 && hir->locals == NULL)) {
         sol_type_malformed(checker);
         return false;
@@ -141,6 +199,8 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                 && item->first_contract >= syntax->contract_clause_count)
             || (item->capability_source != SOL_AST_NONE
                 && item->capability_source >= syntax->parameter_count)
+            || (item->first_type_parameter != SOL_AST_NONE
+                && item->first_type_parameter >= syntax->type_parameter_count)
             || definition->syntax_item != index
             || definition->kind != item->kind
             || !sol_type_span_valid(checker->source, definition->name)) {
@@ -214,6 +274,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_FUNCTION
             || !sol_type_span_valid(checker->source, type->span)
             || !sol_type_span_valid(checker->source, type->name)
+            || type->owner_item >= syntax->item_count
             || (type->first_argument != SOL_AST_NONE
                 && type->first_argument >= syntax->type_argument_count)
             || (type->kind == SOL_SYNTAX_TYPE_FUNCTION
@@ -226,6 +287,16 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         if (type->kind == SOL_SYNTAX_TYPE_FUNCTION && type->first_effect != SOL_AST_NONE
             && (syntax->effects[type->first_effect].owner_kind != SOL_EFFECT_OWNER_TYPE
                 || syntax->effects[type->first_effect].owner != index)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->type_parameter_count; ++index) {
+        const SolTypeParameter *parameter = &syntax->type_parameters[index];
+        if (!sol_type_span_valid(checker->source, parameter->name)
+            || parameter->owner_item >= syntax->item_count
+            || (parameter->next != SOL_AST_NONE
+                && parameter->next >= syntax->type_parameter_count)) {
             sol_type_malformed(checker);
             return false;
         }
@@ -384,7 +455,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         const SolExpr *expression = &syntax->expressions[index];
         bool valid = (int)expression->kind >= 0
-            && expression->kind <= SOL_EXPR_OLD
+            && expression->kind <= SOL_EXPR_TYPE_APPLICATION
             && sol_type_span_valid(checker->source, expression->span);
         switch (expression->kind) {
             case SOL_EXPR_UNARY:
@@ -400,6 +471,12 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                     && expression->as.call.callee < syntax->expression_count
                     && (expression->as.call.first_argument == SOL_AST_NONE
                         || expression->as.call.first_argument < syntax->argument_count);
+                break;
+            case SOL_EXPR_TYPE_APPLICATION:
+                valid = valid
+                    && expression->as.type_application.base < syntax->expression_count
+                    && expression->as.type_application.first_argument
+                        < syntax->type_argument_count;
                 break;
             case SOL_EXPR_FIELD:
                 valid = valid && expression->as.field.base < syntax->expression_count;
@@ -464,6 +541,97 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             sol_type_malformed(checker);
             return false;
         }
+        if (hir->expression_owners[index] >= hir->definition_count) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->type_count; ++index) {
+        SolTypeResolution resolution = hir->type_resolutions[index];
+        const SolSyntaxType *type = &syntax->types[index];
+        if ((int)resolution.kind < 0 || resolution.kind > SOL_TYPE_RESOLUTION_PARAMETER
+            || (resolution.kind == SOL_TYPE_RESOLUTION_BUILTIN
+                && resolution.target > SOL_TYPE_BUILTIN_RESULT)
+            || (resolution.kind == SOL_TYPE_RESOLUTION_DEFINITION
+                && resolution.target >= hir->definition_count)
+            || (resolution.kind == SOL_TYPE_RESOLUTION_PARAMETER
+                && resolution.target >= syntax->type_parameter_count)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+        if (type->kind != SOL_SYNTAX_TYPE_PATH) {
+            if (resolution.kind != SOL_TYPE_RESOLUTION_ERROR) {
+                sol_type_malformed(checker);
+                return false;
+            }
+            continue;
+        }
+        if (resolution.kind == SOL_TYPE_RESOLUTION_PARAMETER) {
+            const SolTypeParameter *parameter
+                = &syntax->type_parameters[resolution.target];
+            if (parameter->owner_item != type->owner_item
+                || !sol_type_path_equal(checker->source, parameter->name, type->name)) {
+                sol_type_malformed(checker);
+                return false;
+            }
+        } else if (resolution.kind == SOL_TYPE_RESOLUTION_DEFINITION) {
+            const SolHirDefinition *definition = &hir->definitions[resolution.target];
+            if (definition->kind == SOL_ITEM_FUNCTION
+                || !sol_type_path_equal(checker->source, definition->name, type->name)) {
+                sol_type_malformed(checker);
+                return false;
+            }
+        } else if (resolution.kind == SOL_TYPE_RESOLUTION_BUILTIN) {
+            const char *name = resolution.target == SOL_TYPE_BUILTIN_INT64
+                ? "Int64"
+                : resolution.target == SOL_TYPE_BUILTIN_BOOL
+                    ? "Bool"
+                    : resolution.target == SOL_TYPE_BUILTIN_TEXT
+                        ? "Text"
+                        : resolution.target == SOL_TYPE_BUILTIN_OPTION
+                            ? "Option"
+                            : "Result";
+            if (!sol_type_span_equal(checker->source, type->name, name)) {
+                sol_type_malformed(checker);
+                return false;
+            }
+        } else {
+            bool resolvable = sol_type_span_equal(checker->source, type->name, "Int64")
+                || sol_type_span_equal(checker->source, type->name, "Bool")
+                || sol_type_span_equal(checker->source, type->name, "Text")
+                || sol_type_span_equal(checker->source, type->name, "Option")
+                || sol_type_span_equal(checker->source, type->name, "Result");
+            SolTypeParameterId parameter
+                = syntax->items[type->owner_item].first_type_parameter;
+            size_t traversed = 0;
+            while (!resolvable && parameter != SOL_AST_NONE) {
+                if (parameter >= syntax->type_parameter_count
+                    || traversed++ >= syntax->type_parameter_count) {
+                    sol_type_malformed(checker);
+                    return false;
+                }
+                resolvable = sol_type_path_equal(
+                    checker->source,
+                    syntax->type_parameters[parameter].name,
+                    type->name
+                );
+                parameter = syntax->type_parameters[parameter].next;
+            }
+            for (size_t definition = 0;
+                !resolvable && definition < hir->definition_count;
+                ++definition) {
+                resolvable = hir->definitions[definition].kind != SOL_ITEM_FUNCTION
+                    && sol_type_path_equal(
+                        checker->source,
+                        hir->definitions[definition].name,
+                        type->name
+                    );
+            }
+            if (resolvable) {
+                sol_type_malformed(checker);
+                return false;
+            }
+        }
     }
     for (size_t index = 0; index < hir->local_count; ++index) {
         const SolHirLocal *local = &hir->locals[index];
@@ -500,6 +668,7 @@ void sol_type_table_free(SolTypeTable *table) {
     free(table->definitions);
     free(table->declared_types);
     free(table->type_applications);
+    free(table->type_application_arguments);
     for (size_t index = 0; index < table->function_type_count; ++index) {
         free(table->function_types[index].parameters);
         free(table->function_types[index].effects.atoms);
@@ -509,6 +678,9 @@ void sol_type_table_free(SolTypeTable *table) {
     free(table->provenances);
     free(table->provenance_roots);
     free(table->handlers);
+    free(table->call_instantiations);
+    free(table->call_instantiation_arguments);
+    free(table->variant_constructors);
     memset(table, 0, sizeof(*table));
 }
 
@@ -521,6 +693,114 @@ const SolTypeApplication *sol_type_application(
         return NULL;
     }
     return &table->type_applications[type.definition];
+}
+
+bool sol_type_application_arguments(
+    const SolTypeTable *table,
+    SolType type,
+    const SolType **arguments,
+    size_t *count
+) {
+    if (arguments != NULL) *arguments = NULL;
+    if (count != NULL) *count = 0;
+    const SolTypeApplication *application = sol_type_application(table, type);
+    if (application == NULL || arguments == NULL || count == NULL
+        || table->type_application_argument_count
+            > table->type_application_argument_capacity
+        || (table->type_application_argument_capacity != 0
+            && table->type_application_arguments == NULL)
+        || application->argument_count == 0
+        || application->argument_offset > table->type_application_argument_count
+        || application->argument_count > table->type_application_argument_count
+            - application->argument_offset) {
+        return false;
+    }
+    *arguments = table->type_application_arguments + application->argument_offset;
+    *count = application->argument_count;
+    return true;
+}
+
+bool sol_type_call_instantiation_arguments(
+    const SolTypeTable *table,
+    SolExprId expression,
+    const SolType **arguments,
+    size_t *count
+) {
+    if (arguments != NULL) *arguments = NULL;
+    if (count != NULL) *count = 0;
+    const SolCallInstantiation *instantiation = sol_type_call_instantiation(
+        table,
+        expression
+    );
+    if (instantiation == NULL || arguments == NULL || count == NULL
+        || table->call_instantiation_argument_count
+            > table->call_instantiation_argument_capacity
+        || (table->call_instantiation_argument_capacity != 0
+            && table->call_instantiation_arguments == NULL)
+        || instantiation->argument_count == 0
+        || instantiation->argument_offset > table->call_instantiation_argument_count
+        || instantiation->argument_count > table->call_instantiation_argument_count
+            - instantiation->argument_offset) {
+        return false;
+    }
+    *arguments = table->call_instantiation_arguments + instantiation->argument_offset;
+    *count = instantiation->argument_count;
+    return true;
+}
+
+const SolVariantConstructor *sol_type_variant_constructor(
+    const SolTypeTable *table,
+    SolType type
+) {
+    if (table == NULL || type.kind != SOL_TYPE_VARIANT
+        || table->variant_constructor_count > table->variant_constructor_capacity
+        || type.definition >= table->variant_constructor_count
+        || table->variant_constructors == NULL) return NULL;
+    return &table->variant_constructors[type.definition];
+}
+
+bool sol_type_exact_reference_valid(
+    const SolSyntaxTree *syntax,
+    const SolTypeTable *table,
+    SolType type
+) {
+    if (syntax == NULL || table == NULL || (int)type.kind < 0
+        || type.kind > SOL_TYPE_PARAMETER || type.kind == SOL_TYPE_UNKNOWN
+        || type.kind == SOL_TYPE_ERROR || type.kind == SOL_TYPE_NEVER) return false;
+    switch (type.kind) {
+        case SOL_TYPE_NOMINAL:
+            return type.definition < syntax->item_count
+                && syntax->items != NULL
+                && syntax->items[type.definition].kind != SOL_ITEM_FUNCTION;
+        case SOL_TYPE_APPLICATION:
+            return type.definition < table->type_application_count;
+        case SOL_TYPE_FUNCTION:
+            return type.definition < syntax->item_count && syntax->items != NULL
+                && syntax->items[type.definition].kind == SOL_ITEM_FUNCTION;
+        case SOL_TYPE_FUNCTION_SIGNATURE:
+            return type.definition < table->function_type_count;
+        case SOL_TYPE_CAPABILITY_OPERATION:
+            return type.definition < syntax->capability_member_count;
+        case SOL_TYPE_VARIANT:
+            return type.definition < table->variant_constructor_count;
+        case SOL_TYPE_PARAMETER:
+            return type.definition < syntax->type_parameter_count;
+        default:
+            return type.definition == 0;
+    }
+}
+
+const SolCallInstantiation *sol_type_call_instantiation(
+    const SolTypeTable *table,
+    SolExprId expression
+) {
+    if (table == NULL || table->call_instantiation_count != table->expression_count
+        || expression >= table->call_instantiation_count
+        || table->call_instantiations == NULL
+        || table->call_instantiations[expression].function == SOL_AST_NONE) {
+        return NULL;
+    }
+    return &table->call_instantiations[expression];
 }
 
 bool sol_type_provenance(
@@ -718,8 +998,329 @@ static bool sol_type_equal(SolType left, SolType right) {
                 && left.kind != SOL_TYPE_FUNCTION
                 && left.kind != SOL_TYPE_FUNCTION_SIGNATURE
                 && left.kind != SOL_TYPE_CAPABILITY_OPERATION
-                && left.kind != SOL_TYPE_VARIANT)
+                && left.kind != SOL_TYPE_VARIANT
+                && left.kind != SOL_TYPE_PARAMETER)
             || left.definition == right.definition);
+}
+
+static bool sol_type_exact_equal(SolType left, SolType right) {
+    return left.kind == right.kind && left.definition == right.definition;
+}
+
+static bool sol_type_effect_set_identity_equal(
+    const SolEffectSet *left,
+    const SolEffectSet *right
+) {
+    if (left->count != right->count
+        || (left->count != 0 && (left->atoms == NULL || right->atoms == NULL))) return false;
+    for (size_t index = 0; index < left->count; ++index) {
+        const SolEffectAtom *left_atom = &left->atoms[index];
+        bool found = false;
+        for (size_t candidate = 0; candidate < right->count; ++candidate) {
+            const SolEffectAtom *right_atom = &right->atoms[candidate];
+            if (left_atom->name.start == right_atom->name.start
+                && left_atom->name.end == right_atom->name.end
+                && left_atom->argument.start == right_atom->argument.start
+                && left_atom->argument.end == right_atom->argument.end
+                && left_atom->span.start == right_atom->span.start
+                && left_atom->span.end == right_atom->span.end
+                && left_atom->argument_kind == right_atom->argument_kind
+                && left_atom->parameter == right_atom->parameter) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+static bool sol_type_instantiation_parameter_index(
+    const SolSyntaxTree *syntax,
+    SolDefId owner,
+    SolTypeParameterId target,
+    size_t argument_count,
+    size_t *result
+) {
+    if (owner >= syntax->item_count || syntax->items == NULL
+        || syntax->type_parameters == NULL) return false;
+    SolTypeParameterId parameter = syntax->items[owner].first_type_parameter;
+    for (size_t index = 0; index < argument_count; ++index) {
+        if (parameter == SOL_AST_NONE || parameter >= syntax->type_parameter_count) {
+            return false;
+        }
+        if (parameter == target) {
+            *result = index;
+            return true;
+        }
+        parameter = syntax->type_parameters[parameter].next;
+    }
+    return false;
+}
+
+static bool sol_type_matches_instantiation(
+    const SolSyntaxTree *syntax,
+    const SolTypeTable *table,
+    SolType pattern,
+    SolType actual,
+    SolDefId owner,
+    const SolType *arguments,
+    size_t argument_count,
+    size_t depth
+) {
+    if (table->function_type_count == SIZE_MAX
+        || table->type_application_count > SIZE_MAX - table->function_type_count - 1
+        || depth > table->type_application_count + table->function_type_count + 1) {
+        return false;
+    }
+    if (pattern.kind == SOL_TYPE_PARAMETER) {
+        size_t index = 0;
+        if (sol_type_instantiation_parameter_index(
+            syntax,
+            owner,
+            pattern.definition,
+            argument_count,
+            &index
+        )) return sol_type_exact_equal(arguments[index], actual);
+    }
+    if (!sol_type_exact_equal(pattern, actual)) {
+        if (pattern.kind != actual.kind) return false;
+        if (pattern.kind != SOL_TYPE_APPLICATION
+            && pattern.kind != SOL_TYPE_FUNCTION_SIGNATURE) return false;
+    }
+    if (pattern.kind == SOL_TYPE_APPLICATION) {
+        const SolTypeApplication *left = sol_type_application(table, pattern);
+        const SolTypeApplication *right = sol_type_application(table, actual);
+        const SolType *left_arguments = NULL;
+        const SolType *right_arguments = NULL;
+        size_t left_count = 0;
+        size_t right_count = 0;
+        if (left == NULL || right == NULL
+            || left->constructor != right->constructor
+            || left->definition != right->definition
+            || !sol_type_application_arguments(
+                table,
+                pattern,
+                &left_arguments,
+                &left_count
+            )
+            || !sol_type_application_arguments(
+                table,
+                actual,
+                &right_arguments,
+                &right_count
+            )
+            || left_count != right_count) return false;
+        for (size_t index = 0; index < left_count; ++index) {
+            if (!sol_type_matches_instantiation(
+                syntax,
+                table,
+                left_arguments[index],
+                right_arguments[index],
+                owner,
+                arguments,
+                argument_count,
+                depth + 1
+            )) return false;
+        }
+    } else if (pattern.kind == SOL_TYPE_FUNCTION_SIGNATURE) {
+        if (pattern.definition >= table->function_type_count
+            || actual.definition >= table->function_type_count
+            || table->function_types == NULL) return false;
+        const SolFunctionType *left = &table->function_types[pattern.definition];
+        const SolFunctionType *right = &table->function_types[actual.definition];
+        if (left->parameter_count != right->parameter_count
+            || (left->parameter_count != 0
+                && (left->parameters == NULL || right->parameters == NULL))
+            || !sol_type_effect_set_identity_equal(&left->effects, &right->effects)) {
+            return false;
+        }
+        for (size_t index = 0; index < left->parameter_count; ++index) {
+            if (!sol_type_matches_instantiation(
+                syntax,
+                table,
+                left->parameters[index],
+                right->parameters[index],
+                owner,
+                arguments,
+                argument_count,
+                depth + 1
+            )) return false;
+        }
+        if (!sol_type_matches_instantiation(
+            syntax,
+            table,
+            left->result,
+            right->result,
+            owner,
+            arguments,
+            argument_count,
+            depth + 1
+        )) return false;
+    }
+    return true;
+}
+
+static bool sol_type_instantiated_argument_matches(
+    const SolSyntaxTree *syntax,
+    const SolTypeTable *table,
+    SolType pattern,
+    SolType actual,
+    SolExprId expression,
+    SolDefId owner,
+    const SolType *arguments,
+    size_t argument_count
+) {
+    if (sol_type_matches_instantiation(
+        syntax,
+        table,
+        pattern,
+        actual,
+        owner,
+        arguments,
+        argument_count,
+        0
+    )) return true;
+    for (size_t index = 0; index < table->function_coercion_count; ++index) {
+        const SolFunctionCoercion *coercion = &table->function_coercions[index];
+        if (coercion->expression == expression
+            && sol_type_matches_instantiation(
+                syntax,
+                table,
+                pattern,
+                coercion->expected,
+                owner,
+                arguments,
+                argument_count,
+                0
+            )) return true;
+    }
+    return false;
+}
+
+bool sol_type_call_instantiation_valid(
+    const SolSource *source,
+    const SolSyntaxTree *syntax,
+    const SolTypeTable *table,
+    SolExprId expression
+) {
+    const SolCallInstantiation *instantiation = sol_type_call_instantiation(
+        table,
+        expression
+    );
+    const SolType *arguments = NULL;
+    size_t argument_count = 0;
+    if (source == NULL || source->text == NULL || syntax == NULL || table == NULL
+        || instantiation == NULL || syntax->expressions == NULL
+        || (syntax->parameter_count != 0 && syntax->parameters == NULL)
+        || (syntax->argument_count != 0 && syntax->arguments == NULL)
+        || syntax->type_parameters == NULL
+        || table->expressions == NULL
+        || table->definitions == NULL || table->declared_types == NULL
+        || table->function_coercion_count > table->function_coercion_capacity
+        || (table->function_coercion_count != 0 && table->function_coercions == NULL)
+        || instantiation->function >= syntax->item_count
+        || instantiation->function >= table->definition_count
+        || syntax->items == NULL
+        || syntax->items[instantiation->function].kind != SOL_ITEM_FUNCTION
+        || expression >= syntax->expression_count
+        || syntax->expressions[expression].kind != SOL_EXPR_CALL
+        || !sol_type_call_instantiation_arguments(
+            table,
+            expression,
+            &arguments,
+            &argument_count
+        )) return false;
+    const SolSyntaxItem *function = &syntax->items[instantiation->function];
+    SolTypeParameterId type_parameter = function->first_type_parameter;
+    for (size_t index = 0; index < argument_count; ++index) {
+        if (type_parameter == SOL_AST_NONE
+            || type_parameter >= syntax->type_parameter_count) return false;
+        type_parameter = syntax->type_parameters[type_parameter].next;
+    }
+    if (type_parameter != SOL_AST_NONE) return false;
+    if (!sol_type_matches_instantiation(
+        syntax,
+        table,
+        table->definitions[instantiation->function],
+        table->expressions[expression],
+        instantiation->function,
+        arguments,
+        argument_count,
+        0
+    )) return false;
+
+    size_t parameter_count = 0;
+    SolParameterId parameter = function->first_parameter;
+    while (parameter != SOL_AST_NONE) {
+        if (parameter >= syntax->parameter_count
+            || parameter_count++ >= syntax->parameter_count) return false;
+        parameter = syntax->parameters[parameter].next;
+    }
+    bool *used = parameter_count == 0 ? NULL : calloc(parameter_count, sizeof(*used));
+    if (parameter_count != 0 && used == NULL) return false;
+    SolArgumentId argument = syntax->expressions[expression].as.call.first_argument;
+    size_t positional = 0;
+    size_t supplied = 0;
+    bool valid = true;
+    while (valid && argument != SOL_AST_NONE) {
+        if (argument >= syntax->argument_count || supplied++ >= syntax->argument_count) {
+            valid = false;
+            break;
+        }
+        const SolArgument *actual_argument = &syntax->arguments[argument];
+        size_t matched = SIZE_MAX;
+        SolParameterId matched_parameter = SOL_AST_NONE;
+        parameter = function->first_parameter;
+        for (size_t index = 0; index < parameter_count; ++index) {
+            if (parameter == SOL_AST_NONE || parameter >= syntax->parameter_count) {
+                valid = false;
+                break;
+            }
+            if ((!actual_argument->is_named && index == positional)
+                || (actual_argument->is_named
+                    && actual_argument->name.start <= actual_argument->name.end
+                    && actual_argument->name.end <= source->length
+                    && syntax->parameters[parameter].name.start
+                        <= syntax->parameters[parameter].name.end
+                    && syntax->parameters[parameter].name.end <= source->length
+                    && sol_type_name_equal(
+                        source,
+                        actual_argument->name,
+                        syntax->parameters[parameter].name
+                    ))) {
+                matched = index;
+                matched_parameter = parameter;
+                break;
+            }
+            parameter = syntax->parameters[parameter].next;
+        }
+        if (!actual_argument->is_named) ++positional;
+        if (!valid || matched == SIZE_MAX || used[matched]
+            || actual_argument->value >= table->expression_count
+            || syntax->parameters[matched_parameter].type_id >= table->declared_type_count) {
+            valid = false;
+            break;
+        }
+        used[matched] = true;
+        valid = sol_type_instantiated_argument_matches(
+            syntax,
+            table,
+            table->declared_types[syntax->parameters[matched_parameter].type_id],
+            table->expressions[actual_argument->value],
+            actual_argument->value,
+            instantiation->function,
+            arguments,
+            argument_count
+        );
+        argument = actual_argument->next;
+    }
+    if (supplied != parameter_count) valid = false;
+    for (size_t index = 0; valid && index < parameter_count; ++index) {
+        if (!used[index]) valid = false;
+    }
+    free(used);
+    return valid;
 }
 
 static const char *sol_type_name(SolType type) {
@@ -735,6 +1336,7 @@ static const char *sol_type_name(SolType type) {
         case SOL_TYPE_CAPABILITY_OPERATION: return "capability operation";
         case SOL_TYPE_VARIANT: return "enum constructor";
         case SOL_TYPE_NEVER: return "Never";
+        case SOL_TYPE_PARAMETER: return "type parameter";
         case SOL_TYPE_ERROR: return "error";
         default: return "unknown type";
     }
@@ -876,6 +1478,35 @@ static bool sol_type_normalize_effects(
                     : SOL_EFFECT_ATOM_NO_ARGUMENT,
                 .parameter = SOL_AST_NONE,
             };
+            if (effect->has_argument
+                && owner < checker->syntax->type_count) {
+                SolDefId declaration = checker->syntax->types[owner].owner_item;
+                SolTypeParameterId parameter = checker->syntax->items[
+                    declaration
+                ].first_type_parameter;
+                size_t traversed = 0;
+                while (parameter != SOL_AST_NONE) {
+                    if (parameter >= checker->syntax->type_parameter_count
+                        || traversed++ >= checker->syntax->type_parameter_count) {
+                        sol_type_malformed(checker);
+                        break;
+                    }
+                    if (sol_type_name_equal(
+                        checker->source,
+                        checker->syntax->type_parameters[parameter].name,
+                        effect->argument
+                    )) {
+                        sol_type_error(
+                            checker,
+                            "SOL-EFFECT-006",
+                            effect->argument,
+                            "a type parameter cannot be used as effect authority"
+                        );
+                        break;
+                    }
+                    parameter = checker->syntax->type_parameters[parameter].next;
+                }
+            }
             bool duplicate = false;
             for (size_t index = 0; index < set->count; ++index) {
                 if (sol_type_effect_atom_equal(checker, &set->atoms[index], &atom)) {
@@ -926,12 +1557,14 @@ static bool sol_type_function_equal(
     const SolFunctionType *right
 ) {
     if (left->parameter_count != right->parameter_count
-        || !sol_type_equal(left->result, right->result)
+        || !sol_type_exact_equal(left->result, right->result)
         || !sol_type_effect_set_equal(checker, &left->effects, &right->effects)) {
         return false;
     }
     for (size_t index = 0; index < left->parameter_count; ++index) {
-        if (!sol_type_equal(left->parameters[index], right->parameters[index])) return false;
+        if (!sol_type_exact_equal(left->parameters[index], right->parameters[index])) {
+            return false;
+        }
     }
     return true;
 }
@@ -982,23 +1615,52 @@ static SolType sol_type_intern_function(
 
 static SolType sol_type_intern_application(
     SolTypeChecker *checker,
-    SolTypeApplication candidate
+    SolTypeConstructor constructor,
+    SolDefId definition,
+    SolType *arguments,
+    size_t argument_count
 ) {
+    if (argument_count == 0 || arguments == NULL) {
+        free(arguments);
+        sol_type_malformed(checker);
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    for (size_t argument = 0; argument < argument_count; ++argument) {
+        SolTypeKind kind = arguments[argument].kind;
+        if (kind == SOL_TYPE_UNKNOWN || kind == SOL_TYPE_ERROR || kind == SOL_TYPE_NEVER) {
+            free(arguments);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+    }
     for (size_t index = 0; index < checker->types->type_application_count; ++index) {
         const SolTypeApplication *application
             = &checker->types->type_applications[index];
-        if (application->constructor != candidate.constructor
-            || application->argument_count != candidate.argument_count) {
+        if (application->constructor != constructor
+            || application->definition != definition
+            || application->argument_count != argument_count) {
             continue;
         }
+        const SolType *existing = NULL;
+        size_t existing_count = 0;
+        if (!sol_type_application_arguments(
+            checker->types,
+            (SolType){SOL_TYPE_APPLICATION, index},
+            &existing,
+            &existing_count
+        )) {
+            free(arguments);
+            sol_type_malformed(checker);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
         bool equal = true;
-        for (size_t argument = 0; argument < candidate.argument_count; ++argument) {
-            equal = equal && sol_type_equal(
-                application->arguments[argument],
-                candidate.arguments[argument]
+        for (size_t argument = 0; argument < argument_count; ++argument) {
+            equal = equal && sol_type_exact_equal(
+                existing[argument],
+                arguments[argument]
             );
         }
         if (equal) {
+            free(arguments);
             return (SolType){.kind = SOL_TYPE_APPLICATION, .definition = index};
         }
     }
@@ -1010,6 +1672,7 @@ static SolType sol_type_intern_application(
         if (capacity < checker->types->type_application_capacity
             || capacity > SIZE_MAX / sizeof(*checker->types->type_applications)) {
             checker->allocation_failed = true;
+            free(arguments);
             return (SolType){.kind = SOL_TYPE_ERROR};
         }
         SolTypeApplication *grown = realloc(
@@ -1018,14 +1681,83 @@ static SolType sol_type_intern_application(
         );
         if (grown == NULL) {
             checker->allocation_failed = true;
+            free(arguments);
             return (SolType){.kind = SOL_TYPE_ERROR};
         }
         checker->types->type_applications = grown;
         checker->types->type_application_capacity = capacity;
     }
+    if (argument_count > SIZE_MAX - checker->types->type_application_argument_count) {
+        checker->allocation_failed = true;
+        free(arguments);
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    size_t required = checker->types->type_application_argument_count + argument_count;
+    if (required > checker->types->type_application_argument_capacity) {
+        size_t capacity = checker->types->type_application_argument_capacity == 0
+            ? 16
+            : checker->types->type_application_argument_capacity;
+        while (capacity < required) {
+            if (capacity > SIZE_MAX / 2) {
+                checker->allocation_failed = true;
+                free(arguments);
+                return (SolType){.kind = SOL_TYPE_ERROR};
+            }
+            capacity *= 2;
+        }
+        if (capacity > SIZE_MAX / sizeof(*checker->types->type_application_arguments)) {
+            checker->allocation_failed = true;
+            free(arguments);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        SolType *grown = realloc(
+            checker->types->type_application_arguments,
+            capacity * sizeof(*checker->types->type_application_arguments)
+        );
+        if (grown == NULL) {
+            checker->allocation_failed = true;
+            free(arguments);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        checker->types->type_application_arguments = grown;
+        checker->types->type_application_argument_capacity = capacity;
+    }
     size_t id = checker->types->type_application_count++;
-    checker->types->type_applications[id] = candidate;
+    checker->types->type_applications[id] = (SolTypeApplication){
+        .constructor = constructor,
+        .definition = definition,
+        .argument_offset = checker->types->type_application_argument_count,
+        .argument_count = argument_count,
+    };
+    memcpy(
+        checker->types->type_application_arguments
+            + checker->types->type_application_argument_count,
+        arguments,
+        argument_count * sizeof(*arguments)
+    );
+    checker->types->type_application_argument_count = required;
+    free(arguments);
     return (SolType){.kind = SOL_TYPE_APPLICATION, .definition = id};
+}
+
+static size_t sol_type_parameter_count(SolTypeChecker *checker, SolDefId definition) {
+    if (definition >= checker->syntax->item_count) {
+        sol_type_malformed(checker);
+        return 0;
+    }
+    size_t count = 0;
+    SolTypeParameterId parameter
+        = checker->syntax->items[definition].first_type_parameter;
+    while (parameter != SOL_AST_NONE) {
+        if (parameter >= checker->syntax->type_parameter_count
+            || count++ >= checker->syntax->type_parameter_count
+            || checker->syntax->type_parameters[parameter].owner_item != definition) {
+            sol_type_malformed(checker);
+            return 0;
+        }
+        parameter = checker->syntax->type_parameters[parameter].next;
+    }
+    return count;
 }
 
 static SolType sol_type_from_id(SolTypeChecker *checker, SolTypeId type_id) {
@@ -1094,17 +1826,44 @@ static SolType sol_type_from_id(SolTypeChecker *checker, SolTypeId type_id) {
         }
     } else if (syntax_type->kind == SOL_SYNTAX_TYPE_UNIT) {
         type = (SolType){.kind = SOL_TYPE_UNIT};
-    } else if (syntax_type->first_argument != SOL_AST_NONE) {
-        bool result_type = sol_type_span_equal(checker->source, syntax_type->name, "Result");
-        bool option_type = sol_type_span_equal(checker->source, syntax_type->name, "Option");
-        size_t expected_count = result_type ? 2 : option_type ? 1 : 0;
+    } else {
+        SolTypeResolution resolution = checker->hir->type_resolutions[type_id];
+        if (syntax_type->is_capability
+            && (syntax_type->first_argument != SOL_AST_NONE
+                || resolution.kind != SOL_TYPE_RESOLUTION_DEFINITION
+                || resolution.target >= checker->syntax->item_count
+                || checker->syntax->items[resolution.target].kind
+                    != SOL_ITEM_CAPABILITY)) {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-009",
+                syntax_type->span,
+                "capability qualifies only a direct capability declaration"
+            );
+            checker->declared_states[type_id] = 2;
+            checker->types->declared_types[type_id] = type;
+            return type;
+        }
+        size_t expected_count = 0;
+        SolTypeConstructor constructor = SOL_TYPE_CONSTRUCTOR_USER;
+        SolDefId definition = SOL_AST_NONE;
+        if (resolution.kind == SOL_TYPE_RESOLUTION_BUILTIN) {
+            if (resolution.target == SOL_TYPE_BUILTIN_OPTION) {
+                expected_count = 1;
+                constructor = SOL_TYPE_CONSTRUCTOR_OPTION;
+            } else if (resolution.target == SOL_TYPE_BUILTIN_RESULT) {
+                expected_count = 2;
+                constructor = SOL_TYPE_CONSTRUCTOR_RESULT;
+            }
+        } else if (resolution.kind == SOL_TYPE_RESOLUTION_DEFINITION) {
+            definition = resolution.target;
+            expected_count = sol_type_parameter_count(checker, definition);
+        }
+        if (syntax_type->first_argument != SOL_AST_NONE) {
         size_t count = 0;
-        bool valid = expected_count != 0;
-        SolTypeApplication candidate = {
-            .constructor = result_type
-                ? SOL_TYPE_CONSTRUCTOR_RESULT
-                : SOL_TYPE_CONSTRUCTOR_OPTION,
-        };
+        bool valid = expected_count != 0
+            && resolution.kind != SOL_TYPE_RESOLUTION_PARAMETER;
+        SolType *candidate_arguments = NULL;
         SolTypeArgumentId argument_id = syntax_type->first_argument;
         while (argument_id != SOL_AST_NONE) {
             if (count++ >= checker->syntax->type_argument_count) {
@@ -1115,51 +1874,86 @@ static SolType sol_type_from_id(SolTypeChecker *checker, SolTypeId type_id) {
             const SolTypeArgument *argument = &checker->syntax->type_arguments[argument_id];
             SolType argument_type = sol_type_from_id(checker, argument->type);
             valid = valid && argument_type.kind != SOL_TYPE_ERROR;
-            if (count <= 2) candidate.arguments[count - 1] = argument_type;
             argument_id = argument->next;
         }
-        if (!valid || count != expected_count) {
-            sol_type_error(
+        if (count != 0 && count <= SIZE_MAX / sizeof(*candidate_arguments)) {
+            candidate_arguments = malloc(count * sizeof(*candidate_arguments));
+            if (candidate_arguments == NULL) checker->allocation_failed = true;
+        }
+        argument_id = syntax_type->first_argument;
+        for (size_t index = 0; candidate_arguments != NULL && index < count; ++index) {
+            candidate_arguments[index] = sol_type_from_id(
                 checker,
-                "SOL-TYPE-009",
-                syntax_type->span,
-                "unsupported generic type or incorrect generic arity"
+                checker->syntax->type_arguments[argument_id].type
             );
-        } else {
-            candidate.argument_count = count;
-            type = sol_type_intern_application(checker, candidate);
+            argument_id = checker->syntax->type_arguments[argument_id].next;
         }
-    } else if (!syntax_type->is_capability
-        && sol_type_span_equal(checker->source, syntax_type->name, "Int64")) {
-        type = (SolType){.kind = SOL_TYPE_INT64};
-    } else if (!syntax_type->is_capability
-        && sol_type_span_equal(checker->source, syntax_type->name, "Bool")) {
-        type = (SolType){.kind = SOL_TYPE_BOOL};
-    } else if (!syntax_type->is_capability
-        && sol_type_span_equal(checker->source, syntax_type->name, "Text")) {
-        type = (SolType){.kind = SOL_TYPE_TEXT};
-    } else {
-        for (size_t index = 0; index < checker->hir->definition_count; ++index) {
-            const SolHirDefinition *definition = &checker->hir->definitions[index];
-            bool capability_matches = syntax_type->is_capability
-                == (definition->kind == SOL_ITEM_CAPABILITY);
-            if (definition->kind != SOL_ITEM_FUNCTION
-                && capability_matches
-                && sol_type_name_equal(
-                    checker->source,
-                    definition->name,
-                    syntax_type->name
-                )) {
-                type = (SolType){.kind = SOL_TYPE_NOMINAL, .definition = index};
-                break;
-            }
-        }
-        if (type.kind == SOL_TYPE_ERROR) {
+        if (!valid || count != expected_count) {
+            free(candidate_arguments);
             sol_type_error(
                 checker,
                 "SOL-TYPE-009",
                 syntax_type->span,
-                "unresolved declared type"
+                resolution.kind == SOL_TYPE_RESOLUTION_PARAMETER
+                    ? "type parameters cannot be applied"
+                    : "generic type application has incorrect arity or constructor"
+            );
+        } else if (!checker->allocation_failed) {
+            type = sol_type_intern_application(
+                checker,
+                constructor,
+                definition,
+                candidate_arguments,
+                count
+            );
+        }
+        } else if (resolution.kind == SOL_TYPE_RESOLUTION_PARAMETER) {
+            type = (SolType){.kind = SOL_TYPE_PARAMETER, .definition = resolution.target};
+        } else if (resolution.kind == SOL_TYPE_RESOLUTION_BUILTIN
+            && !syntax_type->is_capability) {
+            if (resolution.target == SOL_TYPE_BUILTIN_INT64) {
+                type = (SolType){.kind = SOL_TYPE_INT64};
+            } else if (resolution.target == SOL_TYPE_BUILTIN_BOOL) {
+                type = (SolType){.kind = SOL_TYPE_BOOL};
+            } else if (resolution.target == SOL_TYPE_BUILTIN_TEXT) {
+                type = (SolType){.kind = SOL_TYPE_TEXT};
+            } else {
+                sol_type_error(
+                    checker,
+                    "SOL-TYPE-009",
+                    syntax_type->span,
+                    "generic type constructor requires explicit arguments"
+                );
+            }
+        } else if (resolution.kind == SOL_TYPE_RESOLUTION_DEFINITION) {
+            const SolSyntaxItem *item = &checker->syntax->items[resolution.target];
+            bool capability_matches = syntax_type->is_capability
+                == (item->kind == SOL_ITEM_CAPABILITY);
+            if (!capability_matches) {
+                sol_type_error(
+                    checker,
+                    "SOL-TYPE-009",
+                    syntax_type->span,
+                    "capability type qualifier does not match the declaration"
+                );
+            } else if (expected_count != 0) {
+                sol_type_error(
+                    checker,
+                    "SOL-TYPE-009",
+                    syntax_type->span,
+                    "generic type constructor requires explicit arguments"
+                );
+            } else {
+                type = (SolType){.kind = SOL_TYPE_NOMINAL, .definition = resolution.target};
+            }
+        } else {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-009",
+                syntax_type->span,
+                sol_type_span_equal(checker->source, syntax_type->name, "_")
+                    ? "generic wildcard arguments are unsupported"
+                    : "unresolved declared type"
             );
         }
     }
@@ -1186,6 +1980,253 @@ static bool sol_type_effect_subset(
             }
         }
         if (!found) return false;
+    }
+    return true;
+}
+
+static SolType sol_type_substitute(
+    SolTypeChecker *checker,
+    SolType type,
+    SolDefId owner,
+    const SolType *arguments,
+    size_t argument_count
+) {
+    if (type.kind == SOL_TYPE_PARAMETER) {
+        SolTypeParameterId parameter = checker->syntax->items[owner].first_type_parameter;
+        for (size_t index = 0; index < argument_count && parameter != SOL_AST_NONE; ++index) {
+            if (parameter == type.definition) return arguments[index];
+            parameter = checker->syntax->type_parameters[parameter].next;
+        }
+        return type;
+    }
+    if (type.kind == SOL_TYPE_APPLICATION) {
+        const SolTypeApplication *stored = sol_type_application(checker->types, type);
+        const SolType *stored_arguments = NULL;
+        size_t count = 0;
+        if (stored == NULL || !sol_type_application_arguments(
+            checker->types,
+            type,
+            &stored_arguments,
+            &count
+        )) {
+            sol_type_malformed(checker);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        SolTypeApplication descriptor = *stored;
+        SolType *original = malloc(count * sizeof(*original));
+        SolType *substituted = malloc(count * sizeof(*substituted));
+        if (original == NULL || substituted == NULL) {
+            free(original);
+            free(substituted);
+            checker->allocation_failed = true;
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        memcpy(original, stored_arguments, count * sizeof(*original));
+        bool changed = false;
+        for (size_t index = 0; index < count; ++index) {
+            substituted[index] = sol_type_substitute(
+                checker,
+                original[index],
+                owner,
+                arguments,
+                argument_count
+            );
+            changed = changed || !sol_type_exact_equal(
+                substituted[index],
+                original[index]
+            );
+        }
+        free(original);
+        if (!changed) {
+            free(substituted);
+            return type;
+        }
+        return sol_type_intern_application(
+            checker,
+            descriptor.constructor,
+            descriptor.definition,
+            substituted,
+            count
+        );
+    }
+    if (type.kind == SOL_TYPE_FUNCTION_SIGNATURE) {
+        if (type.definition >= checker->types->function_type_count) {
+            sol_type_malformed(checker);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        const SolFunctionType *stored = &checker->types->function_types[type.definition];
+        SolFunctionType candidate = {
+            .parameter_count = stored->parameter_count,
+            .result = stored->result,
+        };
+        SolType *original = NULL;
+        if (stored->parameter_count != 0) {
+            original = malloc(stored->parameter_count * sizeof(*original));
+            candidate.parameters = malloc(
+                stored->parameter_count * sizeof(*candidate.parameters)
+            );
+            if (original == NULL || candidate.parameters == NULL) {
+                free(original);
+                free(candidate.parameters);
+                checker->allocation_failed = true;
+                return (SolType){.kind = SOL_TYPE_ERROR};
+            }
+            memcpy(
+                original,
+                stored->parameters,
+                stored->parameter_count * sizeof(*original)
+            );
+        }
+        SolType original_result = stored->result;
+        if (stored->effects.count != 0) {
+            candidate.effects.atoms = malloc(
+                stored->effects.count * sizeof(*candidate.effects.atoms)
+            );
+            if (candidate.effects.atoms == NULL) {
+                free(original);
+                free(candidate.parameters);
+                checker->allocation_failed = true;
+                return (SolType){.kind = SOL_TYPE_ERROR};
+            }
+            memcpy(
+                candidate.effects.atoms,
+                stored->effects.atoms,
+                stored->effects.count * sizeof(*candidate.effects.atoms)
+            );
+            candidate.effects.count = stored->effects.count;
+        }
+        bool changed = false;
+        for (size_t index = 0; index < candidate.parameter_count; ++index) {
+            candidate.parameters[index] = sol_type_substitute(
+                checker,
+                original[index],
+                owner,
+                arguments,
+                argument_count
+            );
+            changed = changed || !sol_type_exact_equal(
+                candidate.parameters[index],
+                original[index]
+            );
+        }
+        candidate.result = sol_type_substitute(
+            checker,
+            original_result,
+            owner,
+            arguments,
+            argument_count
+        );
+        changed = changed || !sol_type_exact_equal(candidate.result, original_result);
+        free(original);
+        if (!changed) {
+            free(candidate.parameters);
+            free(candidate.effects.atoms);
+            return type;
+        }
+        return sol_type_intern_function(checker, candidate);
+    }
+    return type;
+}
+
+static bool sol_type_infer_argument(
+    SolTypeChecker *checker,
+    SolType pattern,
+    SolType actual,
+    SolDefId owner,
+    SolType *arguments,
+    size_t argument_count,
+    bool *conflict
+) {
+    if (pattern.kind == SOL_TYPE_PARAMETER) {
+        SolTypeParameterId parameter = checker->syntax->items[owner].first_type_parameter;
+        for (size_t index = 0; index < argument_count && parameter != SOL_AST_NONE; ++index) {
+            if (parameter == pattern.definition) {
+                if (arguments[index].kind == SOL_TYPE_UNKNOWN) {
+                    if (actual.kind == SOL_TYPE_UNKNOWN || actual.kind == SOL_TYPE_ERROR
+                        || actual.kind == SOL_TYPE_NEVER) return false;
+                    arguments[index] = actual;
+                    return true;
+                }
+                if (!sol_type_exact_equal(arguments[index], actual)) *conflict = true;
+                return !*conflict;
+            }
+            parameter = checker->syntax->type_parameters[parameter].next;
+        }
+        return true;
+    }
+    if (pattern.kind == SOL_TYPE_APPLICATION && actual.kind == SOL_TYPE_APPLICATION) {
+        const SolTypeApplication *left = sol_type_application(checker->types, pattern);
+        const SolTypeApplication *right = sol_type_application(checker->types, actual);
+        const SolType *left_arguments = NULL;
+        const SolType *right_arguments = NULL;
+        size_t left_count = 0;
+        size_t right_count = 0;
+        if (left == NULL || right == NULL
+            || !sol_type_application_arguments(
+                checker->types,
+                pattern,
+                &left_arguments,
+                &left_count
+            )
+            || !sol_type_application_arguments(
+                checker->types,
+                actual,
+                &right_arguments,
+                &right_count
+            )) {
+            sol_type_malformed(checker);
+            return false;
+        }
+        if (left->constructor != right->constructor || left->definition != right->definition
+            || left_count != right_count) {
+            *conflict = true;
+            return false;
+        }
+        for (size_t index = 0; index < left_count; ++index) {
+            if (!sol_type_infer_argument(
+                checker,
+                left_arguments[index],
+                right_arguments[index],
+                owner,
+                arguments,
+                argument_count,
+                conflict
+            )) return false;
+        }
+    } else if (pattern.kind == SOL_TYPE_FUNCTION_SIGNATURE
+        && actual.kind == SOL_TYPE_FUNCTION_SIGNATURE) {
+        if (pattern.definition >= checker->types->function_type_count
+            || actual.definition >= checker->types->function_type_count) {
+            sol_type_malformed(checker);
+            return false;
+        }
+        const SolFunctionType *left = &checker->types->function_types[pattern.definition];
+        const SolFunctionType *right = &checker->types->function_types[actual.definition];
+        if (left->parameter_count != right->parameter_count
+            || !sol_type_effect_set_equal(checker, &left->effects, &right->effects)) {
+            *conflict = true;
+            return false;
+        }
+        for (size_t index = 0; index < left->parameter_count; ++index) {
+            if (!sol_type_infer_argument(
+                checker,
+                left->parameters[index],
+                right->parameters[index],
+                owner,
+                arguments,
+                argument_count,
+                conflict
+            )) return false;
+        }
+        if (!sol_type_infer_argument(
+            checker,
+            left->result,
+            right->result,
+            owner,
+            arguments,
+            argument_count,
+            conflict
+        )) return false;
     }
     return true;
 }
@@ -1299,6 +2340,15 @@ static bool sol_type_assignable(
     SolType result = {.kind = SOL_TYPE_ERROR};
     if (actual.kind == SOL_TYPE_FUNCTION
         && actual.definition < checker->syntax->item_count) {
+        if (sol_type_parameter_count(checker, actual.definition) != 0) {
+            sol_type_error(
+                checker,
+                "SOL-TYPE-020",
+                checker->syntax->expressions[expression].span,
+                "generic functions cannot be coerced to callbacks in this bootstrap"
+            );
+            return false;
+        }
         first_parameter = checker->syntax->items[actual.definition].first_parameter;
         result = checker->types->definitions[actual.definition];
     } else if (actual.kind == SOL_TYPE_CAPABILITY_OPERATION
@@ -1329,6 +2379,7 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         || expression_count > SIZE_MAX
             / sizeof(*checker->types->expression_operation_origins)
         || expression_count > SIZE_MAX / sizeof(*checker->types->handlers)
+        || expression_count > SIZE_MAX / sizeof(*checker->types->call_instantiations)
         || local_count > SIZE_MAX / sizeof(*checker->types->locals)
         || local_count > SIZE_MAX / sizeof(*checker->types->local_capability_origins)
         || local_count > SIZE_MAX / sizeof(*checker->types->local_operation_origins)
@@ -1359,6 +2410,10 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         sizeof(*checker->types->declared_types)
     );
     checker->types->handlers = malloc(expression_count * sizeof(*checker->types->handlers));
+    checker->types->call_instantiations = calloc(
+        expression_count,
+        sizeof(*checker->types->call_instantiations)
+    );
     checker->states = calloc(expression_count, sizeof(*checker->states));
     checker->declared_states = calloc(
         checker->syntax->type_count,
@@ -1369,6 +2424,7 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
                 || checker->types->expression_capability_origins == NULL
                 || checker->types->expression_operation_origins == NULL
                 || checker->types->handlers == NULL
+                || checker->types->call_instantiations == NULL
                 || checker->states == NULL))
         || (local_count != 0
             && (checker->types->locals == NULL
@@ -1386,6 +2442,7 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     checker->types->definition_count = definition_count;
     checker->types->declared_type_count = checker->syntax->type_count;
     checker->types->handler_count = expression_count;
+    checker->types->call_instantiation_count = expression_count;
     for (size_t index = 0; index < expression_count; ++index) {
         checker->types->expression_capability_origins[index] = SOL_PROVENANCE_NONE;
         checker->types->expression_operation_origins[index] = SOL_PROVENANCE_NONE;
@@ -1394,6 +2451,7 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
             .provider_member = SOL_AST_NONE,
             .root = SOL_AST_NONE,
         };
+        checker->types->call_instantiations[index].function = SOL_AST_NONE;
     }
     for (size_t index = 0; index < local_count; ++index) {
         checker->types->local_capability_origins[index] = SOL_PROVENANCE_NONE;
@@ -1421,9 +2479,171 @@ static void sol_type_error(
 static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression_id);
 static SolType sol_type_variant_call(
     SolTypeChecker *checker,
-    SolVariantId variant,
+    SolType constructor,
     const SolExpr *call
 );
+
+static SolType sol_type_intern_variant_constructor(
+    SolTypeChecker *checker,
+    SolVariantId variant,
+    SolType owner
+) {
+    for (size_t index = 0; index < checker->types->variant_constructor_count; ++index) {
+        const SolVariantConstructor *candidate
+            = &checker->types->variant_constructors[index];
+        if (candidate->variant == variant
+            && sol_type_exact_equal(candidate->owner, owner)) {
+            return (SolType){.kind = SOL_TYPE_VARIANT, .definition = index};
+        }
+    }
+    if (checker->types->variant_constructor_count
+        == checker->types->variant_constructor_capacity) {
+        size_t capacity = checker->types->variant_constructor_capacity == 0
+            ? 8
+            : checker->types->variant_constructor_capacity * 2;
+        if (capacity < checker->types->variant_constructor_capacity
+            || capacity > SIZE_MAX / sizeof(*checker->types->variant_constructors)) {
+            checker->allocation_failed = true;
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        SolVariantConstructor *grown = realloc(
+            checker->types->variant_constructors,
+            capacity * sizeof(*checker->types->variant_constructors)
+        );
+        if (grown == NULL) {
+            checker->allocation_failed = true;
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        checker->types->variant_constructors = grown;
+        checker->types->variant_constructor_capacity = capacity;
+    }
+    size_t id = checker->types->variant_constructor_count++;
+    checker->types->variant_constructors[id] = (SolVariantConstructor){
+        .variant = variant,
+        .owner = owner,
+    };
+    return (SolType){.kind = SOL_TYPE_VARIANT, .definition = id};
+}
+
+static SolDefId sol_type_nominal_definition(
+    SolTypeChecker *checker,
+    SolType type
+) {
+    if (type.kind == SOL_TYPE_NOMINAL) return type.definition;
+    const SolTypeApplication *application = sol_type_application(checker->types, type);
+    return application != NULL && application->constructor == SOL_TYPE_CONSTRUCTOR_USER
+        ? application->definition
+        : SOL_AST_NONE;
+}
+
+static SolType sol_type_member_template(
+    SolTypeChecker *checker,
+    SolType owner_type,
+    SolType template
+) {
+    const SolTypeApplication *application = sol_type_application(
+        checker->types,
+        owner_type
+    );
+    const SolType *stored_arguments = NULL;
+    size_t argument_count = 0;
+    if (application == NULL || application->constructor != SOL_TYPE_CONSTRUCTOR_USER) {
+        return template;
+    }
+    if (!sol_type_application_arguments(
+        checker->types,
+        owner_type,
+        &stored_arguments,
+        &argument_count
+    )) {
+        sol_type_malformed(checker);
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    SolType *arguments = malloc(argument_count * sizeof(*arguments));
+    if (arguments == NULL) {
+        checker->allocation_failed = true;
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    memcpy(arguments, stored_arguments, argument_count * sizeof(*arguments));
+    SolDefId definition = application->definition;
+    SolType result = sol_type_substitute(
+        checker,
+        template,
+        definition,
+        arguments,
+        argument_count
+    );
+    free(arguments);
+    return result;
+}
+
+static SolType sol_type_expression_application(
+    SolTypeChecker *checker,
+    const SolExpr *expression
+) {
+    SolType base = sol_type_expression(checker, expression->as.type_application.base);
+    SolDefId definition = base.kind == SOL_TYPE_FUNCTION
+        ? base.definition
+        : sol_type_nominal_definition(checker, base);
+    size_t count = 0;
+    SolTypeArgumentId argument = expression->as.type_application.first_argument;
+    while (argument != SOL_AST_NONE) {
+        if (argument >= checker->syntax->type_argument_count
+            || count++ >= checker->syntax->type_argument_count) {
+            sol_type_malformed(checker);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        argument = checker->syntax->type_arguments[argument].next;
+    }
+    if (definition == SOL_AST_NONE || definition >= checker->syntax->item_count) {
+        sol_type_error(
+            checker,
+            "SOL-TYPE-016",
+            expression->span,
+            "type arguments can only be applied to a generic declaration"
+        );
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    size_t expected = sol_type_parameter_count(checker, definition);
+    if (expected == 0 || count != expected) {
+        sol_type_error(
+            checker,
+            "SOL-TYPE-016",
+            expression->span,
+            expected == 0
+                ? "type arguments cannot be applied to a nongeneric declaration"
+                : "explicit type argument count does not match the declaration"
+        );
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    if (base.kind == SOL_TYPE_FUNCTION) return base;
+    SolType *arguments = malloc(count * sizeof(*arguments));
+    if (arguments == NULL) {
+        checker->allocation_failed = true;
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    argument = expression->as.type_application.first_argument;
+    bool valid = true;
+    for (size_t index = 0; index < count; ++index) {
+        arguments[index] = sol_type_from_id(
+            checker,
+            checker->syntax->type_arguments[argument].type
+        );
+        valid = valid && arguments[index].kind != SOL_TYPE_ERROR;
+        argument = checker->syntax->type_arguments[argument].next;
+    }
+    if (!valid) {
+        free(arguments);
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    return sol_type_intern_application(
+        checker,
+        SOL_TYPE_CONSTRUCTOR_USER,
+        definition,
+        arguments,
+        count
+    );
+}
 
 static SolLocalId sol_type_find_local(
     SolTypeChecker *checker,
@@ -1831,13 +3051,75 @@ static SolResolution sol_type_callee_resolution(
     SolExprId callee_id
 ) {
     const SolExpr *callee = &checker->syntax->expressions[callee_id];
+    while (callee->kind == SOL_EXPR_TYPE_APPLICATION) {
+        callee_id = callee->as.type_application.base;
+        callee = &checker->syntax->expressions[callee_id];
+    }
     if (callee->kind == SOL_EXPR_PATH || callee->kind == SOL_EXPR_FIELD) {
         return checker->hir->resolutions[callee_id];
     }
     return (SolResolution){.kind = SOL_RESOLUTION_NOT_APPLICABLE};
 }
 
-static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
+static bool sol_type_record_call_instantiation(
+    SolTypeChecker *checker,
+    SolExprId expression,
+    SolDefId function,
+    const SolType *arguments,
+    size_t count
+) {
+    SolTypeTable *table = checker->types;
+    if (count == 0 || arguments == NULL
+        || count > SIZE_MAX - table->call_instantiation_argument_count) {
+        sol_type_malformed(checker);
+        return false;
+    }
+    size_t required = table->call_instantiation_argument_count + count;
+    if (required > table->call_instantiation_argument_capacity) {
+        size_t capacity = table->call_instantiation_argument_capacity == 0
+            ? 16
+            : table->call_instantiation_argument_capacity;
+        while (capacity < required) {
+            if (capacity > SIZE_MAX / 2) {
+                checker->allocation_failed = true;
+                return false;
+            }
+            capacity *= 2;
+        }
+        if (capacity > SIZE_MAX / sizeof(*table->call_instantiation_arguments)) {
+            checker->allocation_failed = true;
+            return false;
+        }
+        SolType *grown = realloc(
+            table->call_instantiation_arguments,
+            capacity * sizeof(*table->call_instantiation_arguments)
+        );
+        if (grown == NULL) {
+            checker->allocation_failed = true;
+            return false;
+        }
+        table->call_instantiation_arguments = grown;
+        table->call_instantiation_argument_capacity = capacity;
+    }
+    table->call_instantiations[expression] = (SolCallInstantiation){
+        .function = function,
+        .argument_offset = table->call_instantiation_argument_count,
+        .argument_count = count,
+    };
+    memcpy(
+        table->call_instantiation_arguments + table->call_instantiation_argument_count,
+        arguments,
+        count * sizeof(*arguments)
+    );
+    table->call_instantiation_argument_count = required;
+    return true;
+}
+
+static SolType sol_type_call(
+    SolTypeChecker *checker,
+    SolExprId call_id,
+    const SolExpr *call
+) {
     SolType callee_type = sol_type_expression(checker, call->as.call.callee);
     SolResolution resolution = sol_type_callee_resolution(checker, call->as.call.callee);
     SolDefId target = SOL_AST_NONE;
@@ -1855,7 +3137,7 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
         operation = callee_type.definition;
     }
     if (callee_type.kind == SOL_TYPE_VARIANT) {
-        return sol_type_variant_call(checker, callee_type.definition, call);
+        return sol_type_variant_call(checker, callee_type, call);
     }
     if (callee_type.kind == SOL_TYPE_FUNCTION_SIGNATURE) {
         if (callee_type.definition >= checker->types->function_type_count) {
@@ -1941,6 +3223,32 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
 
     SolParameterId first_parameter;
     SolType result;
+    size_t generic_count = target == SOL_AST_NONE
+        ? 0
+        : sol_type_parameter_count(checker, target);
+    SolType *generic_arguments = generic_count == 0
+        ? NULL
+        : calloc(generic_count, sizeof(*generic_arguments));
+    if (generic_count != 0 && generic_arguments == NULL) {
+        checker->allocation_failed = true;
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    bool explicit_arguments = checker->syntax->expressions[
+        call->as.call.callee
+    ].kind == SOL_EXPR_TYPE_APPLICATION;
+    if (explicit_arguments && generic_count != 0) {
+        SolTypeArgumentId type_argument = checker->syntax->expressions[
+            call->as.call.callee
+        ].as.type_application.first_argument;
+        for (size_t index = 0; index < generic_count; ++index) {
+            if (type_argument == SOL_AST_NONE) break;
+            generic_arguments[index] = sol_type_from_id(
+                checker,
+                checker->syntax->type_arguments[type_argument].type
+            );
+            type_argument = checker->syntax->type_arguments[type_argument].next;
+        }
+    }
     if (operation != SOL_AST_NONE) {
         const SolCapabilityMember *member = &checker->syntax->capability_members[operation];
         first_parameter = member->first_parameter;
@@ -1954,22 +3262,32 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
     while (parameter_id != SOL_AST_NONE) {
         if (parameter_count++ >= checker->syntax->parameter_count) {
             sol_type_malformed(checker);
+            free(generic_arguments);
             return (SolType){.kind = SOL_TYPE_ERROR};
         }
         parameter_id = checker->syntax->parameters[parameter_id].next;
     }
     SolParameterId *parameter_ids = NULL;
     bool *used = NULL;
+    SolType *actual_types = NULL;
+    SolExprId *actual_expressions = NULL;
     if (parameter_count != 0) {
         if (parameter_count > SIZE_MAX / sizeof(*parameter_ids)) {
             checker->allocation_failed = true;
+            free(generic_arguments);
             return (SolType){.kind = SOL_TYPE_ERROR};
         }
         parameter_ids = malloc(parameter_count * sizeof(*parameter_ids));
         used = calloc(parameter_count, sizeof(*used));
-        if (parameter_ids == NULL || used == NULL) {
+        actual_types = calloc(parameter_count, sizeof(*actual_types));
+        actual_expressions = malloc(parameter_count * sizeof(*actual_expressions));
+        if (parameter_ids == NULL || used == NULL || actual_types == NULL
+            || actual_expressions == NULL) {
             free(parameter_ids);
             free(used);
+            free(actual_types);
+            free(actual_expressions);
+            free(generic_arguments);
             checker->allocation_failed = true;
             return (SolType){.kind = SOL_TYPE_ERROR};
         }
@@ -1989,6 +3307,9 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
             sol_type_malformed(checker);
             free(parameter_ids);
             free(used);
+            free(actual_types);
+            free(actual_expressions);
+            free(generic_arguments);
             return (SolType){.kind = SOL_TYPE_ERROR};
         }
         const SolArgument *argument = &checker->syntax->arguments[argument_id];
@@ -2035,14 +3356,27 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
             }
             used[matched] = true;
             const SolParameter *parameter = &checker->syntax->parameters[parameter_ids[matched]];
-            SolType expected = sol_type_from_id(checker, parameter->type_id);
-            if (!sol_type_assignable(checker, expected, actual, argument->value)) {
-                sol_type_error(
+            actual_types[matched] = actual;
+            actual_expressions[matched] = argument->value;
+            if (generic_count != 0 && !explicit_arguments) {
+                bool conflict = false;
+                sol_type_infer_argument(
                     checker,
-                    "SOL-TYPE-005",
-                    checker->syntax->expressions[argument->value].span,
-                    "function argument type does not match parameter type"
+                    sol_type_from_id(checker, parameter->type_id),
+                    actual,
+                    target,
+                    generic_arguments,
+                    generic_count,
+                    &conflict
                 );
+                if (conflict) {
+                    sol_type_error(
+                        checker,
+                        "SOL-TYPE-017",
+                        checker->syntax->expressions[argument->value].span,
+                        "generic argument inference produced conflicting exact types"
+                    );
+                }
             }
         }
         argument_id = argument->next;
@@ -2060,8 +3394,70 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
             "function call has the wrong number of arguments"
         );
     }
+    bool complete = true;
+    for (size_t index = 0; index < generic_count; ++index) {
+        if (generic_arguments[index].kind == SOL_TYPE_UNKNOWN
+            || generic_arguments[index].kind == SOL_TYPE_ERROR
+            || generic_arguments[index].kind == SOL_TYPE_NEVER) complete = false;
+    }
+    if (generic_count != 0 && !complete) {
+        sol_type_error(
+            checker,
+            "SOL-TYPE-018",
+            call->span,
+            "generic call has an uninferred type argument"
+        );
+    }
+    if (complete) {
+        for (size_t index = 0; index < parameter_count; ++index) {
+            if (!used[index]) continue;
+            const SolParameter *parameter = &checker->syntax->parameters[parameter_ids[index]];
+            SolType expected = sol_type_from_id(checker, parameter->type_id);
+            if (generic_count != 0) {
+                expected = sol_type_substitute(
+                    checker,
+                    expected,
+                    target,
+                    generic_arguments,
+                    generic_count
+                );
+            }
+            if (!sol_type_assignable(
+                checker,
+                expected,
+                actual_types[index],
+                actual_expressions[index]
+            )) {
+                sol_type_error(
+                    checker,
+                    "SOL-TYPE-005",
+                    checker->syntax->expressions[actual_expressions[index]].span,
+                    "function argument type does not match parameter type"
+                );
+            }
+        }
+        if (generic_count != 0) {
+            result = sol_type_substitute(
+                checker,
+                result,
+                target,
+                generic_arguments,
+                generic_count
+            );
+            sol_type_record_call_instantiation(
+                checker,
+                call_id,
+                target,
+                generic_arguments,
+                generic_count
+            );
+        }
+    }
     free(parameter_ids);
     free(used);
+    free(actual_types);
+    free(actual_expressions);
+    free(generic_arguments);
     return invalid_operation_origin ? (SolType){.kind = SOL_TYPE_ERROR} : result;
 }
 
@@ -2380,13 +3776,19 @@ static SolDefId sol_type_variant_owner(SolTypeChecker *checker, SolVariantId var
 
 static SolType sol_type_variant_call(
     SolTypeChecker *checker,
-    SolVariantId variant_id,
+    SolType constructor_type,
     const SolExpr *call
 ) {
-    if (variant_id >= checker->syntax->variant_count) {
+    const SolVariantConstructor *constructor = sol_type_variant_constructor(
+        checker->types,
+        constructor_type
+    );
+    if (constructor == NULL || constructor->variant >= checker->syntax->variant_count) {
         sol_type_malformed(checker);
         return (SolType){.kind = SOL_TYPE_ERROR};
     }
+    SolVariantId variant_id = constructor->variant;
+    SolType owner_type = constructor->owner;
     SolDefId owner = sol_type_variant_owner(checker, variant_id);
     if (owner == SOL_AST_NONE) return (SolType){.kind = SOL_TYPE_ERROR};
     const SolVariant *variant = &checker->syntax->variants[variant_id];
@@ -2477,6 +3879,7 @@ static SolType sol_type_variant_call(
                 checker,
                 checker->syntax->fields[field_ids[matched]].type
             );
+            expected = sol_type_member_template(checker, owner_type, expected);
             if (!sol_type_assignable(checker, expected, actual, argument->value)) {
                 sol_type_error(
                     checker,
@@ -2500,13 +3903,16 @@ static SolType sol_type_variant_call(
     }
     free(field_ids);
     free(used);
-    return (SolType){.kind = SOL_TYPE_NOMINAL, .definition = owner};
+    return owner_type.kind == SOL_TYPE_UNKNOWN
+        ? (SolType){.kind = SOL_TYPE_NOMINAL, .definition = owner}
+        : owner_type;
 }
 
 static SolType sol_type_record(SolTypeChecker *checker, const SolExpr *record) {
     SolExprId type_expression = record->as.record.type;
     SolResolution resolution = checker->hir->resolutions[type_expression];
-    sol_type_expression(checker, type_expression);
+    SolType record_type = sol_type_expression(checker, type_expression);
+    SolDefId record_definition = sol_type_nominal_definition(checker, record_type);
     if (resolution.kind == SOL_RESOLUTION_DEFINITION
         && resolution.target < checker->types->definition_count
         && checker->syntax->items[resolution.target].kind == SOL_ITEM_CAPABILITY) {
@@ -2576,9 +3982,8 @@ static SolType sol_type_record(SolTypeChecker *checker, const SolExpr *record) {
             ? (SolType){.kind = SOL_TYPE_NOMINAL, .definition = resolution.target}
             : (SolType){.kind = SOL_TYPE_ERROR};
     }
-    if (resolution.kind != SOL_RESOLUTION_DEFINITION
-        || resolution.target >= checker->types->definition_count
-        || checker->syntax->items[resolution.target].kind != SOL_ITEM_RECORD) {
+    if (record_definition >= checker->types->definition_count
+        || checker->syntax->items[record_definition].kind != SOL_ITEM_RECORD) {
         sol_type_arguments(checker, record->as.record.first_field);
         sol_type_error(
             checker,
@@ -2590,7 +3995,7 @@ static SolType sol_type_record(SolTypeChecker *checker, const SolExpr *record) {
     }
 
     size_t field_count = 0;
-    SolFieldId field_id = checker->syntax->items[resolution.target].first_field;
+    SolFieldId field_id = checker->syntax->items[record_definition].first_field;
     while (field_id != SOL_AST_NONE) {
         if (field_count++ >= checker->syntax->field_count) {
             sol_type_malformed(checker);
@@ -2612,7 +4017,7 @@ static SolType sol_type_record(SolTypeChecker *checker, const SolExpr *record) {
         checker->allocation_failed = true;
         return (SolType){.kind = SOL_TYPE_ERROR};
     }
-    field_id = checker->syntax->items[resolution.target].first_field;
+    field_id = checker->syntax->items[record_definition].first_field;
     for (size_t index = 0; index < field_count; ++index) {
         field_ids[index] = field_id;
         field_id = checker->syntax->fields[field_id].next;
@@ -2658,6 +4063,7 @@ static SolType sol_type_record(SolTypeChecker *checker, const SolExpr *record) {
                 checker,
                 checker->syntax->fields[field_ids[matched]].type
             );
+            expected = sol_type_member_template(checker, record_type, expected);
             if (!sol_type_assignable(checker, expected, actual, argument->value)) {
                 sol_type_error(
                     checker,
@@ -2682,17 +4088,17 @@ static SolType sol_type_record(SolTypeChecker *checker, const SolExpr *record) {
     }
     free(used);
     free(field_ids);
-    return (SolType){.kind = SOL_TYPE_NOMINAL, .definition = resolution.target};
+    return record_type;
 }
 
 static SolType sol_type_match(SolTypeChecker *checker, const SolExpr *match_expression) {
     SolType scrutinee = sol_type_expression(checker, match_expression->as.match_expr.scrutinee);
+    SolDefId scrutinee_definition = sol_type_nominal_definition(checker, scrutinee);
     size_t case_count = scrutinee.kind == SOL_TYPE_BOOL ? 2 : 0;
     SolVariantId *variants = NULL;
-    if (scrutinee.kind == SOL_TYPE_NOMINAL
-        && scrutinee.definition < checker->syntax->item_count
-        && checker->syntax->items[scrutinee.definition].kind == SOL_ITEM_ENUM) {
-        SolVariantId variant = checker->syntax->items[scrutinee.definition].first_variant;
+    if (scrutinee_definition < checker->syntax->item_count
+        && checker->syntax->items[scrutinee_definition].kind == SOL_ITEM_ENUM) {
+        SolVariantId variant = checker->syntax->items[scrutinee_definition].first_variant;
         while (variant != SOL_AST_NONE) {
             if (case_count++ >= checker->syntax->variant_count) {
                 sol_type_malformed(checker);
@@ -2709,7 +4115,7 @@ static SolType sol_type_match(SolTypeChecker *checker, const SolExpr *match_expr
             checker->allocation_failed = true;
             return (SolType){.kind = SOL_TYPE_ERROR};
         }
-        variant = checker->syntax->items[scrutinee.definition].first_variant;
+        variant = checker->syntax->items[scrutinee_definition].first_variant;
         for (size_t index = 0; index < case_count; ++index) {
             variants[index] = variant;
             variant = checker->syntax->variants[variant].next;
@@ -2723,11 +4129,10 @@ static SolType sol_type_match(SolTypeChecker *checker, const SolExpr *match_expr
     }
 
     bool wildcard = false;
-    bool enum_scrutinee = scrutinee.kind == SOL_TYPE_NOMINAL
-        && scrutinee.definition < checker->syntax->item_count
-        && checker->syntax->items[scrutinee.definition].kind == SOL_ITEM_ENUM;
+    bool enum_scrutinee = scrutinee_definition < checker->syntax->item_count
+        && checker->syntax->items[scrutinee_definition].kind == SOL_ITEM_ENUM;
     bool open_enum = enum_scrutinee
-        && checker->syntax->items[scrutinee.definition].is_open;
+        && checker->syntax->items[scrutinee_definition].is_open;
     bool finite_domain = scrutinee.kind == SOL_TYPE_BOOL || (enum_scrutinee && !open_enum);
     bool have_result = false;
     SolType result = {.kind = SOL_TYPE_UNKNOWN};
@@ -2775,12 +4180,10 @@ static SolType sol_type_match(SolTypeChecker *checker, const SolExpr *match_expr
                 }
                 covered[index] = true;
             }
-        } else if (scrutinee.kind == SOL_TYPE_NOMINAL
-            && scrutinee.definition < checker->syntax->item_count
-            && checker->syntax->items[scrutinee.definition].kind == SOL_ITEM_ENUM) {
+        } else if (enum_scrutinee) {
             matched_variant = sol_type_find_variant(
                 checker,
-                scrutinee.definition,
+                scrutinee_definition,
                 pattern->name
             );
             if (matched_variant == SOL_AST_NONE) {
@@ -2827,9 +4230,10 @@ static SolType sol_type_match(SolTypeChecker *checker, const SolExpr *match_expr
             }
             SolLocalId local = sol_type_find_local(checker, SOL_LOCAL_PATTERN, binding);
             if (local != SOL_AST_NONE) {
-                checker->types->locals[local] = sol_type_from_id(
+                checker->types->locals[local] = sol_type_member_template(
                     checker,
-                    checker->syntax->fields[payload].type
+                    scrutinee,
+                    sol_type_from_id(checker, checker->syntax->fields[payload].type)
                 );
             }
             binding = checker->syntax->pattern_bindings[binding].next;
@@ -2989,7 +4393,10 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
             break;
         }
         case SOL_EXPR_CALL:
-            type = sol_type_call(checker, expression);
+            type = sol_type_call(checker, expression_id, expression);
+            break;
+        case SOL_EXPR_TYPE_APPLICATION:
+            type = sol_type_expression_application(checker, expression);
             break;
         case SOL_EXPR_FIELD:
             if (checker->hir->resolutions[expression_id].kind == SOL_RESOLUTION_DEFINITION) {
@@ -2999,12 +4406,12 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
                     : checker->types->definitions[definition];
             } else {
                 SolType base = sol_type_expression(checker, expression->as.field.base);
-                if (base.kind == SOL_TYPE_NOMINAL
-                    && base.definition < checker->syntax->item_count
-                    && checker->syntax->items[base.definition].kind == SOL_ITEM_RECORD) {
+                SolDefId base_definition = sol_type_nominal_definition(checker, base);
+                if (base_definition < checker->syntax->item_count
+                    && checker->syntax->items[base_definition].kind == SOL_ITEM_RECORD) {
                     SolFieldId field = sol_type_find_field(
                         checker,
-                        base.definition,
+                        base_definition,
                         expression->as.field.name
                     );
                     if (field == SOL_AST_NONE) {
@@ -3016,16 +4423,22 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
                         );
                         type = (SolType){.kind = SOL_TYPE_ERROR};
                     } else {
-                        type = sol_type_from_id(checker, checker->syntax->fields[field].type);
+                        type = sol_type_member_template(
+                            checker,
+                            base,
+                            sol_type_from_id(checker, checker->syntax->fields[field].type)
+                        );
                     }
-                } else if (base.kind == SOL_TYPE_NOMINAL
-                    && base.definition < checker->syntax->item_count
-                    && checker->syntax->items[base.definition].kind == SOL_ITEM_ENUM) {
+                } else if (base_definition < checker->syntax->item_count
+                    && checker->syntax->items[base_definition].kind == SOL_ITEM_ENUM) {
                     SolResolution base_resolution = checker->hir->resolutions[
                         expression->as.field.base
                     ];
-                    if (base_resolution.kind != SOL_RESOLUTION_DEFINITION
-                        || base_resolution.target != base.definition) {
+                    bool explicit_head = checker->syntax->expressions[
+                        expression->as.field.base
+                    ].kind == SOL_EXPR_TYPE_APPLICATION;
+                    if (!explicit_head && (base_resolution.kind != SOL_RESOLUTION_DEFINITION
+                        || base_resolution.target != base_definition)) {
                         sol_type_error(
                             checker,
                             "SOL-TYPE-014",
@@ -3036,7 +4449,7 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
                     } else {
                         SolVariantId variant = sol_type_find_variant(
                             checker,
-                            base.definition,
+                            base_definition,
                             expression->as.field.name
                         );
                         if (variant == SOL_AST_NONE) {
@@ -3050,7 +4463,11 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
                         } else if (checker->syntax->variants[variant].first_field == SOL_AST_NONE) {
                             type = base;
                         } else {
-                            type = (SolType){.kind = SOL_TYPE_VARIANT, .definition = variant};
+                            type = sol_type_intern_variant_constructor(
+                                checker,
+                                variant,
+                                base
+                            );
                         }
                     }
                 } else if (base.kind == SOL_TYPE_NOMINAL
@@ -3155,11 +4572,19 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
                     checker->types,
                     type
                 );
+                const SolType *arguments = NULL;
+                size_t argument_count = 0;
                 if (checker->contract_outcome == SOL_CONTRACT_OUTCOME_SUCCESS
                     && application != NULL
                     && application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT
-                    && application->argument_count == 2) {
-                    type = application->arguments[0];
+                    && sol_type_application_arguments(
+                        checker->types,
+                        type,
+                        &arguments,
+                        &argument_count
+                    )
+                    && argument_count == 2) {
+                    type = arguments[0];
                 }
             }
             break;
@@ -3293,15 +4718,25 @@ bool sol_type_check(
         || types->type_applications != NULL || types->function_coercions != NULL
         || types->provenances != NULL || types->provenance_roots != NULL
         || types->handlers != NULL
+        || types->call_instantiations != NULL
+        || types->type_application_arguments != NULL
+        || types->call_instantiation_arguments != NULL
+        || types->variant_constructors != NULL
         || types->expression_count != 0 || types->local_count != 0
         || types->definition_count != 0 || types->declared_type_count != 0
         || types->type_application_count != 0 || types->type_application_capacity != 0
+        || types->type_application_argument_count != 0
+        || types->type_application_argument_capacity != 0
         || types->function_type_count != 0 || types->function_type_capacity != 0
         || types->function_coercion_count != 0
         || types->function_coercion_capacity != 0
         || types->provenance_count != 0 || types->provenance_capacity != 0
         || types->provenance_root_count != 0 || types->provenance_root_capacity != 0
-        || types->handler_count != 0) {
+        || types->handler_count != 0 || types->call_instantiation_count != 0
+        || types->call_instantiation_argument_count != 0
+        || types->call_instantiation_argument_capacity != 0
+        || types->variant_constructor_count != 0
+        || types->variant_constructor_capacity != 0) {
         sol_type_malformed(&checker);
         return false;
     }
@@ -3638,6 +5073,52 @@ bool sol_type_check(
             );
         }
     }
+    if (syntax->item_count != 0
+        && syntax->item_count > SIZE_MAX / syntax->item_count) {
+        checker.allocation_failed = true;
+    } else {
+        size_t graph_size = syntax->item_count * syntax->item_count;
+        unsigned char *calls = calloc(graph_size, 1);
+        if (graph_size != 0 && calls == NULL) {
+            checker.allocation_failed = true;
+        } else {
+            for (SolExprId expression = 0;
+                expression < syntax->expression_count;
+                ++expression) {
+                if (syntax->expressions[expression].kind != SOL_EXPR_CALL) continue;
+                SolExprId callee = syntax->expressions[expression].as.call.callee;
+                SolType callee_type = checker.types->expressions[callee];
+                if (callee_type.kind != SOL_TYPE_FUNCTION
+                    || callee_type.definition >= syntax->item_count) continue;
+                SolDefId owner = hir->expression_owners[expression];
+                if (owner < syntax->item_count) {
+                    calls[owner * syntax->item_count + callee_type.definition] = 1;
+                }
+            }
+            for (size_t through = 0; through < syntax->item_count; ++through) {
+                for (size_t from = 0; from < syntax->item_count; ++from) {
+                    if (!calls[from * syntax->item_count + through]) continue;
+                    for (size_t to = 0; to < syntax->item_count; ++to) {
+                        if (calls[through * syntax->item_count + to]) {
+                            calls[from * syntax->item_count + to] = 1;
+                        }
+                    }
+                }
+            }
+            for (SolDefId function = 0; function < syntax->item_count; ++function) {
+                if (calls[function * syntax->item_count + function]
+                    && sol_type_parameter_count(&checker, function) != 0) {
+                    sol_type_error(
+                        &checker,
+                        "SOL-TYPE-019",
+                        syntax->items[function].name,
+                        "recursive generic function calls are unsupported"
+                    );
+                }
+            }
+        }
+        free(calls);
+    }
     unsigned char *call_callees = calloc(syntax->expression_count, sizeof(*call_callees));
     if (syntax->expression_count != 0 && call_callees == NULL) {
         checker.allocation_failed = true;
@@ -3664,6 +5145,32 @@ bool sol_type_check(
         }
     }
     free(call_callees);
+
+    unsigned char *applied_heads = calloc(syntax->expression_count, 1);
+    if (syntax->expression_count != 0 && applied_heads == NULL) {
+        checker.allocation_failed = true;
+    } else {
+        for (size_t index = 0; index < syntax->expression_count; ++index) {
+            if (syntax->expressions[index].kind == SOL_EXPR_TYPE_APPLICATION) {
+                applied_heads[syntax->expressions[index].as.type_application.base] = 1;
+            }
+        }
+        for (size_t index = 0; index < syntax->expression_count; ++index) {
+            SolType type = checker.types->expressions[index];
+            if (type.kind != SOL_TYPE_NOMINAL || applied_heads[index]
+                || type.definition >= syntax->item_count
+                || (syntax->items[type.definition].kind != SOL_ITEM_RECORD
+                    && syntax->items[type.definition].kind != SOL_ITEM_ENUM)
+                || sol_type_parameter_count(&checker, type.definition) == 0) continue;
+            sol_type_error(
+                &checker,
+                "SOL-TYPE-016",
+                syntax->expressions[index].span,
+                "generic type constructors require explicit type arguments"
+            );
+        }
+    }
+    free(applied_heads);
 
     free(checker.states);
     free(checker.declared_states);

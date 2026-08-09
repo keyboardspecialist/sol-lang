@@ -23,6 +23,7 @@ typedef enum {
     SOL_TYPE_CAPABILITY_OPERATION,
     SOL_TYPE_VARIANT,
     SOL_TYPE_NEVER,
+    SOL_TYPE_PARAMETER,
 } SolTypeKind;
 
 typedef struct {
@@ -33,13 +34,27 @@ typedef struct {
 typedef enum {
     SOL_TYPE_CONSTRUCTOR_OPTION,
     SOL_TYPE_CONSTRUCTOR_RESULT,
+    SOL_TYPE_CONSTRUCTOR_USER,
 } SolTypeConstructor;
 
 typedef struct {
     SolTypeConstructor constructor;
-    SolType arguments[2];
+    /* SOL_AST_NONE for builtins; otherwise the record/enum SolDefId. */
+    SolDefId definition;
+    size_t argument_offset;
     size_t argument_count;
 } SolTypeApplication;
+
+typedef struct {
+    SolDefId function;
+    size_t argument_offset;
+    size_t argument_count;
+} SolCallInstantiation;
+
+typedef struct {
+    SolVariantId variant;
+    SolType owner;
+} SolVariantConstructor;
 
 typedef struct {
     SolType *parameters;
@@ -91,6 +106,9 @@ typedef struct {
     SolTypeApplication *type_applications;
     size_t type_application_count;
     size_t type_application_capacity;
+    SolType *type_application_arguments;
+    size_t type_application_argument_count;
+    size_t type_application_argument_capacity;
     SolFunctionType *function_types;
     size_t function_type_count;
     size_t function_type_capacity;
@@ -107,11 +125,51 @@ typedef struct {
     /* Indexed by SolExprId; non-handler entries contain SOL_AST_NONE fields. */
     SolHandler *handlers;
     size_t handler_count;
+    /* Indexed by SolExprId; non-call entries have function == SOL_AST_NONE. */
+    SolCallInstantiation *call_instantiations;
+    size_t call_instantiation_count;
+    SolType *call_instantiation_arguments;
+    size_t call_instantiation_argument_count;
+    size_t call_instantiation_argument_capacity;
+    SolVariantConstructor *variant_constructors;
+    size_t variant_constructor_count;
+    size_t variant_constructor_capacity;
 } SolTypeTable;
 
 void sol_type_table_init(SolTypeTable *table);
 void sol_type_table_free(SolTypeTable *table);
 const SolTypeApplication *sol_type_application(
+    const SolTypeTable *table,
+    SolType type
+);
+bool sol_type_application_arguments(
+    const SolTypeTable *table,
+    SolType type,
+    const SolType **arguments,
+    size_t *count
+);
+const SolCallInstantiation *sol_type_call_instantiation(
+    const SolTypeTable *table,
+    SolExprId expression
+);
+bool sol_type_call_instantiation_arguments(
+    const SolTypeTable *table,
+    SolExprId expression,
+    const SolType **arguments,
+    size_t *count
+);
+bool sol_type_call_instantiation_valid(
+    const SolSource *source,
+    const SolSyntaxTree *syntax,
+    const SolTypeTable *table,
+    SolExprId expression
+);
+const SolVariantConstructor *sol_type_variant_constructor(
+    const SolTypeTable *table,
+    SolType type
+);
+bool sol_type_exact_reference_valid(
+    const SolSyntaxTree *syntax,
     const SolTypeTable *table,
     SolType type
 );

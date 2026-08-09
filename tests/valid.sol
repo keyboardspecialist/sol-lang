@@ -12,6 +12,27 @@ enum GreetError {
     invalid(field: Text),
 }
 
+record Box<T> {
+    value: T,
+}
+
+enum Either<L, R> {
+    left(value: L),
+    right(value: R),
+}
+
+function identity<T>(value: T) -> T effects { pure } {
+    return value
+}
+
+function boxed_name(user: User) -> Box<Text> effects { pure } {
+    return Box<Text> { value = identity(user.name) }
+}
+
+function left_name(user: User) -> Either<Text, GreetError> effects { pure } {
+    return Either<Text, GreetError>.left(value = identity<Text>(user.name))
+}
+
 capability Clock {
     function now() -> Int64
     effects {

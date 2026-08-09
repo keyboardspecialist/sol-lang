@@ -26,6 +26,8 @@ typedef struct {
     SolHirModule hir;
 } TestCompilation;
 
+static void reset_hir_diagnostics(TestCompilation *compilation);
+
 static bool compile_source(TestCompilation *compilation, const char *text) {
     memset(compilation, 0, sizeof(*compilation));
     sol_tokens_init(&compilation->tokens);
@@ -142,6 +144,100 @@ static void test_duplicate_declaration(void) {
     CHECK(compile_source(&compilation, text));
     CHECK(sol_diagnostics_has_errors(&compilation.diagnostics));
     CHECK(has_diagnostic(&compilation, "SOL-RESOLVE-001"));
+    free_compilation(&compilation);
+}
+
+static void test_generic_type_namespace(void) {
+    static const char text[] =
+        "module generic_namespace\n"
+        "record Box<T> { value: T, }\n"
+        "enum Pair<T, U> { pair(first: T, second: U), }\n"
+        "function project<T>(box: Box<T>) -> T { return box.value }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.hir.type_resolution_count == compilation.syntax.type_count);
+    size_t parameter_resolutions = 0;
+    size_t definition_resolutions = 0;
+    for (size_t index = 0; index < compilation.hir.type_resolution_count; ++index) {
+        SolTypeResolution resolution = compilation.hir.type_resolutions[index];
+        parameter_resolutions += resolution.kind == SOL_TYPE_RESOLUTION_PARAMETER ? 1 : 0;
+        definition_resolutions += resolution.kind == SOL_TYPE_RESOLUTION_DEFINITION ? 1 : 0;
+        if (resolution.kind == SOL_TYPE_RESOLUTION_PARAMETER) {
+            CHECK(compilation.syntax.type_parameters[resolution.target].owner_item
+                == compilation.syntax.types[index].owner_item);
+        }
+    }
+    CHECK(parameter_resolutions == 5);
+    CHECK(definition_resolutions == 1);
+    free_compilation(&compilation);
+}
+
+static void test_duplicate_and_malformed_generic_parameters(void) {
+    static const char duplicate[] =
+        "module duplicate_generic\nrecord Box<T, T> { value: T, }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, duplicate));
+    CHECK(has_diagnostic(&compilation, "SOL-RESOLVE-005"));
+    free_compilation(&compilation);
+
+    static const char valid[] =
+        "module malformed_generic\nrecord Box<T> { value: T, }\n";
+    CHECK(compile_source(&compilation, valid));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    compilation.syntax.type_parameters[0].next = 0;
+    reset_hir_diagnostics(&compilation);
+    CHECK(!sol_hir_lower(
+        &compilation.source,
+        &compilation.syntax,
+        &compilation.hir,
+        &compilation.diagnostics
+    ));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    free_compilation(&compilation);
+
+    static const char application[] =
+        "module malformed_type_arguments\n"
+        "record Box<T> { value: T, }\n"
+        "function sample(value: Box<Int64>) -> Box<Int64> { return value }\n";
+    CHECK(compile_source(&compilation, application));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.syntax.type_argument_count == 2);
+    if (compilation.syntax.type_argument_count == 2) {
+        compilation.syntax.type_arguments[0].next = 0;
+        reset_hir_diagnostics(&compilation);
+        CHECK(!sol_hir_lower(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    }
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation, application));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolTypeId cyclic_type = SOL_AST_NONE;
+    for (SolTypeId type = 0; type < compilation.syntax.type_count; ++type) {
+        if (compilation.syntax.types[type].first_argument != SOL_AST_NONE) {
+            cyclic_type = type;
+            break;
+        }
+    }
+    CHECK(cyclic_type != SOL_AST_NONE);
+    if (cyclic_type != SOL_AST_NONE) {
+        SolTypeArgumentId argument = compilation.syntax.types[cyclic_type].first_argument;
+        compilation.syntax.type_arguments[argument].type = cyclic_type;
+        reset_hir_diagnostics(&compilation);
+        CHECK(!sol_hir_lower(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    }
     free_compilation(&compilation);
 }
 
@@ -428,6 +524,8 @@ int main(void) {
     test_successful_resolution();
     test_unresolved_name();
     test_duplicate_declaration();
+    test_generic_type_namespace();
+    test_duplicate_and_malformed_generic_parameters();
     test_scope_rules();
     test_qualified_function_resolution();
     test_qualified_duplicate_normalization();

@@ -171,10 +171,20 @@ static void test_obligations_result_and_snapshots(void) {
     const SolTypeApplication *application = sol_type_application(&compilation.types, fallible);
     CHECK(application != NULL);
     if (application != NULL) {
+        const SolType *arguments = NULL;
+        size_t argument_count = 0;
         CHECK(application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT);
-        CHECK(application->argument_count == 2);
-        CHECK(application->arguments[0].kind == SOL_TYPE_INT64);
-        CHECK(application->arguments[1].kind == SOL_TYPE_NOMINAL);
+        CHECK(sol_type_application_arguments(
+            &compilation.types,
+            fallible,
+            &arguments,
+            &argument_count
+        ));
+        CHECK(argument_count == 2);
+        if (arguments != NULL) {
+            CHECK(arguments[0].kind == SOL_TYPE_INT64);
+            CHECK(arguments[1].kind == SOL_TYPE_NOMINAL);
+        }
     }
 
     bool found_definition = false;
@@ -215,6 +225,89 @@ static void test_member_contract_ownership(void) {
     }
     CHECK(compilation.contracts.obligations[1].result.available);
     CHECK(compilation.contracts.obligations[1].result.type.kind == SOL_TYPE_INT64);
+    free_compilation(&compilation);
+}
+
+static void test_generic_contract_templates(void) {
+    static const char text[] =
+        "module generic_contracts\n"
+        "enum Failure { invalid }\n"
+        "function identity<T>(value: T) -> T effects { pure }\n"
+        "ensures { result == old(value) } { return value }\n"
+        "function fallible<T>(value: T) -> Result<T, Failure> effects { pure }\n"
+        "ensures { success => result == old(value) } { return ok(value) }\n"
+        "function first() -> Int64 effects { pure } { return identity(1) }\n"
+        "function second() -> Text effects { pure } { return identity<Text>(\"x\") }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.contracts.obligation_count == 2);
+    CHECK(compilation.contracts.snapshot_count == 2);
+    CHECK(compilation.contracts.obligations[0].result.type.kind == SOL_TYPE_PARAMETER);
+    CHECK(compilation.contracts.obligations[1].result.type.kind == SOL_TYPE_PARAMETER);
+    size_t identity_calls = 0;
+    for (size_t expression = 0; expression < compilation.syntax.expression_count; ++expression) {
+        const SolCallInstantiation *instantiation = sol_type_call_instantiation(
+            &compilation.types,
+            expression
+        );
+        if (instantiation != NULL && instantiation->function == 1) ++identity_calls;
+    }
+    CHECK(identity_calls == 2);
+    SolExprId generic_call = SOL_AST_NONE;
+    for (size_t expression = 0; expression < compilation.syntax.expression_count; ++expression) {
+        if (sol_type_call_instantiation(&compilation.types, expression) != NULL) {
+            generic_call = expression;
+            break;
+        }
+    }
+    CHECK(generic_call != SOL_AST_NONE);
+    if (generic_call != SOL_AST_NONE) {
+        size_t offset = compilation.types.call_instantiations[
+            generic_call
+        ].argument_offset;
+        SolType argument = compilation.types.call_instantiation_arguments[offset];
+        compilation.types.call_instantiation_arguments[offset]
+            = (SolType){.kind = SOL_TYPE_BOOL};
+        sol_contract_table_free(&compilation.contracts);
+        sol_contract_table_init(&compilation.contracts);
+        sol_diagnostics_free(&compilation.diagnostics);
+        sol_diagnostics_init(&compilation.diagnostics);
+        CHECK(!sol_contract_lower(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.contracts,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-005"));
+        compilation.types.call_instantiation_arguments[offset] = argument;
+
+        size_t count = compilation.types.call_instantiations[
+            generic_call
+        ].argument_count;
+        compilation.types.call_instantiations[generic_call].argument_count = 0;
+        sol_contract_table_free(&compilation.contracts);
+        sol_contract_table_init(&compilation.contracts);
+        sol_diagnostics_free(&compilation.diagnostics);
+        sol_diagnostics_init(&compilation.diagnostics);
+        CHECK(!sol_contract_lower(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.contracts,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-005"));
+        compilation.types.call_instantiations[generic_call].argument_count = count;
+    }
     free_compilation(&compilation);
 }
 
@@ -485,8 +578,8 @@ static void test_table_determinism_and_malformed_input(void) {
     sol_diagnostics_free(&first.diagnostics);
     sol_diagnostics_init(&first.diagnostics);
     CHECK(first.types.type_application_count != 0);
-    SolType argument = first.types.type_applications[0].arguments[0];
-    first.types.type_applications[0].arguments[0] = (SolType){
+    SolType argument = first.types.type_application_arguments[0];
+    first.types.type_application_arguments[0] = (SolType){
         .kind = SOL_TYPE_APPLICATION,
         .definition = 0,
     };
@@ -500,7 +593,7 @@ static void test_table_determinism_and_malformed_input(void) {
         &first.diagnostics
     ));
     CHECK(has_diagnostic(&first, "SOL-INTERNAL-005"));
-    first.types.type_applications[0].arguments[0] = argument;
+    first.types.type_application_arguments[0] = argument;
     free_compilation(&first);
     free_compilation(&second);
 }
@@ -508,6 +601,7 @@ static void test_table_determinism_and_malformed_input(void) {
 int main(void) {
     test_obligations_result_and_snapshots();
     test_member_contract_ownership();
+    test_generic_contract_templates();
     test_signature_scope_boundaries();
     test_contract_type_errors();
     test_purity_and_effect_firewall();

@@ -94,6 +94,26 @@ static size_t diagnostic_count(const TestCompilation *compilation, const char *c
     return count;
 }
 
+static bool span_text_equal(const SolSource *source, SolSpan span, const char *text) {
+    size_t length = span.end - span.start;
+    return strlen(text) == length
+        && memcmp(source->text + span.start, text, length) == 0;
+}
+
+static bool rerun_typecheck(TestCompilation *compilation) {
+    sol_type_table_free(&compilation->types);
+    sol_type_table_init(&compilation->types);
+    sol_diagnostics_free(&compilation->diagnostics);
+    sol_diagnostics_init(&compilation->diagnostics);
+    return sol_type_check(
+        &compilation->source,
+        &compilation->syntax,
+        &compilation->hir,
+        &compilation->types,
+        &compilation->diagnostics
+    );
+}
+
 static bool provenance_equals(
     const SolTypeTable *types,
     SolProvenanceId id,
@@ -281,6 +301,73 @@ static void test_malformed_hir_rejected(void) {
     free_compilation(&compilation);
 }
 
+static void test_forged_type_resolutions_rejected(void) {
+    static const char text[] =
+        "module forged_type_resolutions\n"
+        "record Left {}\n"
+        "record Right {}\n"
+        "function generic<T, U>(value: T) -> T { return value }\n"
+        "function sample(value: Left) -> Int64 { return 1 }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolTypeId left = SOL_AST_NONE;
+    SolTypeId integer = SOL_AST_NONE;
+    SolTypeId parameter = SOL_AST_NONE;
+    for (SolTypeId type = 0; type < compilation.syntax.type_count; ++type) {
+        if (span_text_equal(&compilation.source, compilation.syntax.types[type].name, "Left")) {
+            left = type;
+        } else if (span_text_equal(
+            &compilation.source,
+            compilation.syntax.types[type].name,
+            "Int64"
+        )) {
+            integer = type;
+        } else if (span_text_equal(
+            &compilation.source,
+            compilation.syntax.types[type].name,
+            "T"
+        )) {
+            parameter = type;
+        }
+    }
+    CHECK(left != SOL_AST_NONE);
+    CHECK(integer != SOL_AST_NONE);
+    CHECK(parameter != SOL_AST_NONE);
+
+    if (left != SOL_AST_NONE) {
+        SolTypeResolution original = compilation.hir.type_resolutions[left];
+        compilation.hir.type_resolutions[left]
+            = (SolTypeResolution){SOL_TYPE_RESOLUTION_DEFINITION, 1};
+        CHECK(!rerun_typecheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-003"));
+        compilation.hir.type_resolutions[left] = original;
+    }
+    if (integer != SOL_AST_NONE) {
+        SolTypeResolution original = compilation.hir.type_resolutions[integer];
+        compilation.hir.type_resolutions[integer]
+            = (SolTypeResolution){SOL_TYPE_RESOLUTION_BUILTIN, SOL_TYPE_BUILTIN_BOOL};
+        CHECK(!rerun_typecheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-003"));
+        compilation.hir.type_resolutions[integer] = original;
+    }
+    if (parameter != SOL_AST_NONE) {
+        SolTypeResolution original = compilation.hir.type_resolutions[parameter];
+        compilation.hir.type_resolutions[parameter]
+            = (SolTypeResolution){SOL_TYPE_RESOLUTION_PARAMETER, 1};
+        CHECK(!rerun_typecheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-003"));
+        compilation.hir.type_resolutions[parameter] = original;
+    }
+    if (left != SOL_AST_NONE) {
+        compilation.hir.type_resolutions[left]
+            = (SolTypeResolution){SOL_TYPE_RESOLUTION_ERROR, SOL_AST_NONE};
+        CHECK(!rerun_typecheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-003"));
+    }
+    free_compilation(&compilation);
+}
+
 static void test_structural_generic_types(void) {
     static const char text[] =
         "module generic_types\n"
@@ -304,16 +391,34 @@ static void test_structural_generic_types(void) {
     CHECK(option != NULL);
     CHECK(result != NULL);
     if (option != NULL) {
+        const SolType *arguments = NULL;
+        size_t count = 0;
         CHECK(option->constructor == SOL_TYPE_CONSTRUCTOR_OPTION);
-        CHECK(option->argument_count == 1);
-        CHECK(option->arguments[0].kind == SOL_TYPE_INT64);
+        CHECK(sol_type_application_arguments(
+            &compilation.types,
+            compilation.types.definitions[1],
+            &arguments,
+            &count
+        ));
+        CHECK(count == 1);
+        if (arguments != NULL) CHECK(arguments[0].kind == SOL_TYPE_INT64);
     }
     if (result != NULL) {
+        const SolType *arguments = NULL;
+        size_t count = 0;
         CHECK(result->constructor == SOL_TYPE_CONSTRUCTOR_RESULT);
-        CHECK(result->argument_count == 2);
-        CHECK(result->arguments[0].kind == SOL_TYPE_INT64);
-        CHECK(result->arguments[1].kind == SOL_TYPE_NOMINAL);
-        CHECK(result->arguments[1].definition == 0);
+        CHECK(sol_type_application_arguments(
+            &compilation.types,
+            compilation.types.definitions[2],
+            &arguments,
+            &count
+        ));
+        CHECK(count == 2);
+        if (arguments != NULL) {
+            CHECK(arguments[0].kind == SOL_TYPE_INT64);
+            CHECK(arguments[1].kind == SOL_TYPE_NOMINAL);
+            CHECK(arguments[1].definition == 0);
+        }
     }
     free_compilation(&compilation);
 }
@@ -326,6 +431,286 @@ static void test_invalid_generic_component(void) {
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
     CHECK(has_diagnostic(&compilation, "SOL-TYPE-009"));
+    free_compilation(&compilation);
+}
+
+static void test_user_generics_and_instantiations(void) {
+    static const char text[] =
+        "module user_generics\n"
+        "record Box<T> { value: T, }\n"
+        "enum Either<L, R> { left(value: L), right(value: R), empty, }\n"
+        "function identity<T>(value: T) -> T { return value }\n"
+        "function unbox<T>(box: Box<T>) -> T { return box.value }\n"
+        "function explicit() -> Int64 { return identity<Int64>(1) }\n"
+        "function inferred() -> Text { return identity(\"text\") }\n"
+        "function named() -> Int64 { return identity(value = 2) }\n"
+        "function boxed() -> Box<Int64> { return Box<Int64> { value = 3, } }\n"
+        "function nested() -> Int64 { return unbox(Box<Int64> { value = 4, }) }\n"
+        "function left() -> Either<Int64, Text> {\n"
+        "    return Either<Int64, Text>.left(value = 5)\n"
+        "}\n"
+        "function right() -> Either<Int64, Text> {\n"
+        "    return Either<Int64, Text>.right(value = \"right\")\n"
+        "}\n"
+        "function read(value: Either<Int64, Text>) -> Int64 {\n"
+        "    return match value {\n"
+        "        left(number) => number\n"
+        "        right(message) => 0\n"
+        "        empty => 1\n"
+        "    }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    size_t generic_calls = 0;
+    bool saw_explicit = false;
+    bool saw_nested = false;
+    for (size_t expression = 0; expression < compilation.syntax.expression_count; ++expression) {
+        const SolCallInstantiation *instantiation = sol_type_call_instantiation(
+            &compilation.types,
+            expression
+        );
+        if (instantiation == NULL) continue;
+        const SolType *arguments = NULL;
+        size_t argument_count = 0;
+        CHECK(instantiation->argument_count == 1);
+        CHECK(sol_type_call_instantiation_arguments(
+            &compilation.types,
+            expression,
+            &arguments,
+            &argument_count
+        ));
+        CHECK(argument_count == 1);
+        if (arguments != NULL) {
+            CHECK(arguments[0].kind == SOL_TYPE_INT64
+                || arguments[0].kind == SOL_TYPE_TEXT);
+        }
+        saw_explicit = saw_explicit
+            || compilation.syntax.expressions[
+                compilation.syntax.expressions[expression].as.call.callee
+            ].kind == SOL_EXPR_TYPE_APPLICATION;
+        saw_nested = saw_nested || instantiation->function == 3;
+        ++generic_calls;
+    }
+    CHECK(generic_calls == 4);
+    CHECK(saw_explicit);
+    CHECK(saw_nested);
+
+    SolType boxed = compilation.types.definitions[7];
+    const SolType *arguments = NULL;
+    size_t argument_count = 0;
+    CHECK(sol_type_application_arguments(
+        &compilation.types,
+        boxed,
+        &arguments,
+        &argument_count
+    ));
+    CHECK(argument_count == 1);
+    if (arguments != NULL) CHECK(arguments[0].kind == SOL_TYPE_INT64);
+    const SolTypeApplication *application = sol_type_application(&compilation.types, boxed);
+    CHECK(application != NULL);
+    if (application != NULL) {
+        CHECK(application->constructor == SOL_TYPE_CONSTRUCTOR_USER);
+        CHECK(application->definition == 0);
+    }
+    free_compilation(&compilation);
+}
+
+static void test_nested_generic_substitution_growth(void) {
+    static const char text[] =
+        "module nested_substitution\n"
+        "enum Empty {}\n"
+        "function build<T>(empty: Empty, value: T)\n"
+        "    -> Option<Option<Option<Option<Option<Option<Option<Option<Option<Option<Option<Option<T>>>>>>>>>>>> {\n"
+        "    return match empty {}\n"
+        "}\n"
+        "function probe(empty: Empty) -> () {\n"
+        "    let built = build(empty, 1)\n"
+        "    return ()\n"
+        "}\n"
+        "function marker<T>() -> () { return () }\n"
+        "function marker_probe() -> () { return marker<Int64>() }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.types.type_application_count >= 24);
+    free_compilation(&compilation);
+}
+
+static void test_generic_variant_constructor_identity(void) {
+    static const char text[] =
+        "module generic_variants\n"
+        "enum Choice<T> { some(value: T), }\n"
+        "function integer() -> Choice<Int64> {\n"
+        "    let first = Choice<Int64>.some\n"
+        "    let second = Choice<Int64>.some\n"
+        "    return first(value = 1)\n"
+        "}\n"
+        "function text() -> Choice<Text> { return Choice<Text>.some(value = \"x\") }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.types.variant_constructor_count == 2);
+    if (compilation.types.variant_constructor_count == 2) {
+        const SolVariantConstructor *left = &compilation.types.variant_constructors[0];
+        const SolVariantConstructor *right = &compilation.types.variant_constructors[1];
+        CHECK(left->variant == right->variant);
+        CHECK(left->owner.kind == SOL_TYPE_APPLICATION);
+        CHECK(right->owner.kind == SOL_TYPE_APPLICATION);
+        CHECK(left->owner.definition != right->owner.definition);
+        bool saw_int = false;
+        bool saw_text = false;
+        for (size_t index = 0; index < 2; ++index) {
+            const SolType *arguments = NULL;
+            size_t argument_count = 0;
+            CHECK(sol_type_application_arguments(
+                &compilation.types,
+                compilation.types.variant_constructors[index].owner,
+                &arguments,
+                &argument_count
+            ));
+            CHECK(argument_count == 1);
+            if (arguments != NULL) {
+                saw_int = saw_int || arguments[0].kind == SOL_TYPE_INT64;
+                saw_text = saw_text || arguments[0].kind == SOL_TYPE_TEXT;
+            }
+        }
+        CHECK(saw_int);
+        CHECK(saw_text);
+    }
+    free_compilation(&compilation);
+}
+
+static void test_generic_function_signature_substitution_and_inference(void) {
+    static const char text[] =
+        "module generic_callbacks\n"
+        "enum Empty {}\n"
+        "function choose<T>(\n"
+        "    callback: function(T) -> T effects { pure },\n"
+        "    empty: Empty,\n"
+        ") -> T effects { pure } { return match empty {} }\n"
+        "function explicit(\n"
+        "    callback: function(Int64) -> Int64 effects { pure },\n"
+        "    empty: Empty,\n"
+        ") -> Int64 effects { pure } { return choose<Int64>(callback, empty) }\n"
+        "function inferred(\n"
+        "    callback: function(Text) -> Text effects { pure },\n"
+        "    empty: Empty,\n"
+        ") -> Text effects { pure } { return choose(callback, empty) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    size_t calls = 0;
+    bool saw_int = false;
+    bool saw_text = false;
+    for (SolExprId expression = 0; expression < compilation.syntax.expression_count;
+        ++expression) {
+        const SolCallInstantiation *instantiation = sol_type_call_instantiation(
+            &compilation.types,
+            expression
+        );
+        if (instantiation == NULL || instantiation->function != 1) continue;
+        const SolType *arguments = NULL;
+        size_t argument_count = 0;
+        CHECK(sol_type_call_instantiation_arguments(
+            &compilation.types,
+            expression,
+            &arguments,
+            &argument_count
+        ));
+        CHECK(argument_count == 1);
+        if (arguments != NULL) {
+            saw_int = saw_int || arguments[0].kind == SOL_TYPE_INT64;
+            saw_text = saw_text || arguments[0].kind == SOL_TYPE_TEXT;
+        }
+        ++calls;
+    }
+    CHECK(calls == 2);
+    CHECK(saw_int);
+    CHECK(saw_text);
+    free_compilation(&compilation);
+}
+
+static void test_invalid_capability_qualified_generic_types(void) {
+    static const char text[] =
+        "module generic_capabilities\n"
+        "record Box<T> { value: T, }\n"
+        "capability Clock {}\n"
+        "function parameter<T>(value: capability T) -> T { return value }\n"
+        "function application(value: capability Box<Int64>) -> Int64 { return 1 }\n"
+        "function builtin(value: capability Option<Int64>) -> Int64 { return 1 }\n"
+        "function valid(clock: capability Clock) -> Int64 { return 1 }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(diagnostic_count(&compilation, "SOL-TYPE-009") >= 3);
+    free_compilation(&compilation);
+}
+
+static void test_generic_recursion_through_nongeneric_helper(void) {
+    static const char text[] =
+        "module indirect_generic_recursion\n"
+        "function generic<T>(value: T) -> T { let ignored = helper() return value }\n"
+        "function helper() -> Int64 { return generic(1) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-019"));
+    free_compilation(&compilation);
+}
+
+static void test_invalid_user_generics(void) {
+    static const char text[] =
+        "module invalid_user_generics\n"
+        "record Box<T> { value: T, }\n"
+        "record Plain { value: Int64, }\n"
+        "enum Either<L, R> { left(value: L), right(value: R), }\n"
+        "enum Empty {}\n"
+        "function same<T>(left: T, right: T) -> T { return left }\n"
+        "function first<T, U>(left: T, right: U) -> T { return left }\n"
+        "function result_only<T>(empty: Empty) -> T { return match empty {} }\n"
+        "function conflict() -> Int64 { return same(1, true) }\n"
+        "function uninferred(empty: Empty) -> Int64 { return result_only(empty) }\n"
+        "function explicit_arity() -> Int64 { return same<Int64, Bool>(1, 2) }\n"
+        "function partial() -> Int64 { return first<Int64>(1, true) }\n"
+        "function wildcard() -> Int64 { return same<_>(1, 2) }\n"
+        "function recur<T>(value: T) -> T { return recur(value) }\n"
+        "function recursive_left<T>(value: T) -> T { return recursive_right(value) }\n"
+        "function recursive_right<T>(value: T) -> T { return recursive_left(value) }\n"
+        "function consume(callback: function(Int64) -> Int64 effects { pure }) -> Int64 {\n"
+        "    return callback(1)\n"
+        "}\n"
+        "function generic_callback() -> Int64 { return consume(same) }\n"
+        "function invalid_effect_authority<T>(\n"
+        "    callback: function() -> T effects { service.read<T> },\n"
+        ") -> T { return callback() }\n"
+        "function wrong_box() -> Box<Int64> { return Box<Int64> { value = true } }\n"
+        "function wrong_enum() -> Either<Int64, Text> {\n"
+        "    return Either<Int64, Text>.left(value = true)\n"
+        "}\n"
+        "function bare_type(value: Box) -> Box { return value }\n"
+        "function applied_plain(value: Plain<Int64>) -> Plain<Int64> { return value }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-017"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-018"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-019"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-020"));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-006"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-013"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-014"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-009"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-016"));
     free_compilation(&compilation);
 }
 
@@ -976,8 +1361,16 @@ int main(void) {
     test_local_function_call_and_unreachable();
     test_invalid_named_arguments();
     test_malformed_hir_rejected();
+    test_forged_type_resolutions_rejected();
     test_structural_generic_types();
     test_invalid_generic_component();
+    test_user_generics_and_instantiations();
+    test_nested_generic_substitution_growth();
+    test_generic_variant_constructor_identity();
+    test_generic_function_signature_substitution_and_inference();
+    test_invalid_capability_qualified_generic_types();
+    test_generic_recursion_through_nongeneric_helper();
+    test_invalid_user_generics();
     test_record_fields();
     test_invalid_record_fields();
     test_invalid_record_declaration();

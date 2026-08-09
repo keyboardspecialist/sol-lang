@@ -10,6 +10,26 @@
 typedef size_t SolDefId;
 typedef size_t SolLocalId;
 
+typedef enum {
+    SOL_TYPE_RESOLUTION_ERROR,
+    SOL_TYPE_RESOLUTION_BUILTIN,
+    SOL_TYPE_RESOLUTION_DEFINITION,
+    SOL_TYPE_RESOLUTION_PARAMETER,
+} SolTypeResolutionKind;
+
+typedef enum {
+    SOL_TYPE_BUILTIN_INT64,
+    SOL_TYPE_BUILTIN_BOOL,
+    SOL_TYPE_BUILTIN_TEXT,
+    SOL_TYPE_BUILTIN_OPTION,
+    SOL_TYPE_BUILTIN_RESULT,
+} SolTypeBuiltin;
+
+typedef struct {
+    SolTypeResolutionKind kind;
+    size_t target;
+} SolTypeResolution;
+
 typedef struct {
     SolItemKind kind;
     SolSpan name;
@@ -57,6 +77,11 @@ typedef struct {
     size_t local_capacity;
     SolResolution *resolutions;
     size_t resolution_count;
+    /* Indexed by SolExprId. */
+    SolDefId *expression_owners;
+    /* Indexed by SolTypeId; path types have declaration-owned resolutions. */
+    SolTypeResolution *type_resolutions;
+    size_t type_resolution_count;
 } SolHirModule;
 
 void sol_hir_module_init(SolHirModule *module);

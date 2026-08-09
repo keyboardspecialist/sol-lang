@@ -98,7 +98,8 @@ static bool sol_structure_expression(
     }
     validator->expressions[expression_id] = 1;
     const SolExpr *expression = &validator->tree->expressions[expression_id];
-    bool valid = (int)expression->kind >= 0 && expression->kind <= SOL_EXPR_OLD
+    bool valid = (int)expression->kind >= 0
+        && expression->kind <= SOL_EXPR_TYPE_APPLICATION
         && sol_structure_span_valid(validator, expression->span);
     switch (expression->kind) {
         case SOL_EXPR_UNARY:
@@ -138,6 +139,14 @@ static bool sol_structure_expression(
                     context,
                     depth + 1
                 );
+            break;
+        case SOL_EXPR_TYPE_APPLICATION:
+            valid = valid && sol_structure_expression(
+                validator,
+                expression->as.type_application.base,
+                context,
+                depth + 1
+            );
             break;
         case SOL_EXPR_FIELD:
             valid = valid && sol_structure_expression(

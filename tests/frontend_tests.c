@@ -17,6 +17,12 @@ static int failures = 0;
         } \
     } while (0)
 
+static bool span_text_equal(const SolSource *source, SolSpan span, const char *text) {
+    size_t length = span.end - span.start;
+    return strlen(text) == length
+        && memcmp(source->text + span.start, text, length) == 0;
+}
+
 static void check_ast_links(const SolSyntaxTree *tree) {
     for (size_t index = 0; index < tree->item_count; ++index) {
         CHECK(tree->items[index].body == SOL_AST_NONE
@@ -35,6 +41,8 @@ static void check_ast_links(const SolSyntaxTree *tree) {
             || tree->items[index].capability_source < tree->parameter_count);
         CHECK(tree->items[index].first_contract == SOL_AST_NONE
             || tree->items[index].first_contract < tree->contract_clause_count);
+        CHECK(tree->items[index].first_type_parameter == SOL_AST_NONE
+            || tree->items[index].first_type_parameter < tree->type_parameter_count);
     }
     for (size_t index = 0; index < tree->expression_count; ++index) {
         const SolExpr *expression = &tree->expressions[index];
@@ -50,6 +58,11 @@ static void check_ast_links(const SolSyntaxTree *tree) {
                 CHECK(expression->as.call.callee < tree->expression_count);
                 CHECK(expression->as.call.first_argument == SOL_AST_NONE
                     || expression->as.call.first_argument < tree->argument_count);
+                break;
+            case SOL_EXPR_TYPE_APPLICATION:
+                CHECK(expression->as.type_application.base < tree->expression_count);
+                CHECK(expression->as.type_application.first_argument
+                    < tree->type_argument_count);
                 break;
             case SOL_EXPR_FIELD:
                 CHECK(expression->as.field.base < tree->expression_count);
@@ -121,6 +134,11 @@ static void check_ast_links(const SolSyntaxTree *tree) {
         CHECK(tree->type_arguments[index].type < tree->type_count);
         CHECK(tree->type_arguments[index].next == SOL_AST_NONE
             || tree->type_arguments[index].next < tree->type_argument_count);
+    }
+    for (size_t index = 0; index < tree->type_parameter_count; ++index) {
+        CHECK(tree->type_parameters[index].owner_item < tree->item_count);
+        CHECK(tree->type_parameters[index].next == SOL_AST_NONE
+            || tree->type_parameters[index].next < tree->type_parameter_count);
     }
     for (size_t index = 0; index < tree->field_count; ++index) {
         CHECK(tree->fields[index].type < tree->type_count);
@@ -235,6 +253,169 @@ static void test_valid_declarations(void) {
     }
     CHECK(covered == source.length);
 
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_generic_syntax_and_comparison_disambiguation(void) {
+    static const char source_text[] =
+        "module generic_syntax\n"
+        "record Box<T,> { value: T, }\n"
+        "enum Either<L, R,> { left(value: L), right(value: R), }\n"
+        "function identity<T,>(value: T) -> T { return value }\n"
+        "function sample(a: Int64, b: Int64, c: Int64) -> Bool {\n"
+        "    let box = Box<Int64> { value = identity<Int64>(1), }\n"
+        "    let left = Either<Int64, Text,>.left(value = box.value)\n"
+        "    return a < b && b > c\n"
+        "}\n"
+        "function function_head(\n"
+        "    callback: function(Int64) -> Int64 effects { pure },\n"
+        ") -> Int64 {\n"
+        "    return identity<function(Int64) -> Int64 effects { pure }>(callback)(1)\n"
+        "}\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "generic_syntax.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    if (sol_diagnostics_has_errors(&diagnostics)) {
+        sol_diagnostics_render_human(stderr, &source, &diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.type_parameter_count == 4);
+    size_t applications = 0;
+    size_t comparisons = 0;
+    for (size_t index = 0; index < tree.expression_count; ++index) {
+        applications += tree.expressions[index].kind == SOL_EXPR_TYPE_APPLICATION ? 1 : 0;
+        comparisons += tree.expressions[index].kind == SOL_EXPR_BINARY
+            && (tree.expressions[index].as.binary.operator_kind == SOL_TOKEN_LESS
+                || tree.expressions[index].as.binary.operator_kind == SOL_TOKEN_GREATER)
+            ? 1
+            : 0;
+    }
+    CHECK(applications == 4);
+    CHECK(comparisons == 2);
+    check_ast_links(&tree);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_unsupported_generic_syntax(void) {
+    static const char source_text[] =
+        "module unsupported_generics\n"
+        "record Bounded<T: Bound> {}\n"
+        "function defaulted<T = Int64>(value: T) -> T { return value }\n"
+        "capability Generic<T> {}\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "unsupported_generics.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    size_t unsupported = 0;
+    for (size_t index = 0; index < diagnostics.count; ++index) {
+        unsupported += strcmp(diagnostics.items[index].code, "SOL-PARSE-018") == 0 ? 1 : 0;
+    }
+    CHECK(unsupported == 3);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_generic_lookahead_recovery_and_spans(void) {
+    static const char valid_text[] =
+        "module generic_lookahead\n"
+        "function identity<T>(value: T) -> T { return value }\n"
+        "function comparisons(a: Int64, b: Int64, c: Int64) -> Bool {\n"
+        "    let value = identity<Option<Int64>>(some(1))\n"
+        "    return a<b && b>c\n"
+        "}\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "generic_lookahead.sol", valid_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    size_t applications = 0;
+    size_t comparisons = 0;
+    for (size_t index = 0; index < tree.expression_count; ++index) {
+        const SolExpr *expression = &tree.expressions[index];
+        if (expression->kind == SOL_EXPR_TYPE_APPLICATION) {
+            ++applications;
+            CHECK(span_text_equal(&source, expression->span, "identity<Option<Int64>>"));
+        }
+        comparisons += expression->kind == SOL_EXPR_BINARY
+            && (expression->as.binary.operator_kind == SOL_TOKEN_LESS
+                || expression->as.binary.operator_kind == SOL_TOKEN_GREATER)
+            ? 1
+            : 0;
+    }
+    CHECK(applications == 1);
+    CHECK(comparisons == 2);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+
+    static const char malformed_text[] =
+        "module malformed_application\n"
+        "function identity<T>(value: T) -> T { return value }\n"
+        "function sample() -> Int64 { return identity<Int64(1) }\n";
+    CHECK(sol_source_from_text(&source, "malformed_application.sol", malformed_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    size_t malformed = 0;
+    size_t calls = 0;
+    for (size_t index = 0; index < diagnostics.count; ++index) {
+        malformed += strcmp(diagnostics.items[index].code, "SOL-PARSE-019") == 0 ? 1 : 0;
+    }
+    for (size_t index = 0; index < tree.expression_count; ++index) {
+        calls += tree.expressions[index].kind == SOL_EXPR_CALL ? 1 : 0;
+    }
+    CHECK(malformed == 1);
+    CHECK(calls == 1);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+
+    static const char nested_bound_text[] =
+        "module nested_bound\n"
+        "record Bounded<T: Option<Result<Int64, Text>>> {}\n"
+        "function following() -> Int64 { return 1 }\n";
+    CHECK(sol_source_from_text(&source, "nested_bound.sol", nested_bound_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(tree.item_count == 2);
+    CHECK(diagnostics.count == 1);
+    if (diagnostics.count == 1) {
+        CHECK(strcmp(diagnostics.items[0].code, "SOL-PARSE-018") == 0);
+    }
     sol_syntax_tree_free(&tree);
     sol_diagnostics_free(&diagnostics);
     sol_tokens_free(&tokens);
@@ -1093,6 +1274,9 @@ static void test_malformed_handle_expressions(void) {
 
 int main(void) {
     test_valid_declarations();
+    test_generic_syntax_and_comparison_disambiguation();
+    test_unsupported_generic_syntax();
+    test_generic_lookahead_recovery_and_spans();
     test_missing_module();
     test_nested_and_unterminated_comments();
     test_clause_order();

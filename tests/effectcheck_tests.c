@@ -101,6 +101,21 @@ static size_t diagnostic_count(const TestCompilation *compilation, const char *c
     return count;
 }
 
+static bool rerun_effectcheck(TestCompilation *compilation) {
+    sol_effect_table_free(&compilation->effects);
+    sol_effect_table_init(&compilation->effects);
+    sol_diagnostics_free(&compilation->diagnostics);
+    sol_diagnostics_init(&compilation->diagnostics);
+    return sol_effect_check(
+        &compilation->source,
+        &compilation->syntax,
+        &compilation->hir,
+        &compilation->types,
+        &compilation->effects,
+        &compilation->diagnostics
+    );
+}
+
 static bool span_equals(const SolSource *source, SolSpan span, const char *text) {
     size_t length = span.end - span.start;
     return strlen(text) == length
@@ -166,6 +181,189 @@ static void test_private_pure_inference(void) {
     CHECK(compilation.effects.function_count == compilation.syntax.item_count);
     CHECK(compilation.effects.functions[0].inferred);
     CHECK(compilation.effects.functions[0].count == 0);
+    free_compilation(&compilation);
+}
+
+static void test_generic_closed_effect_rows(void) {
+    static const char text[] =
+        "module generic_effects\n"
+        "capability Clock { function now() -> Int64 effects { clock.read<Self> } }\n"
+        "function pass<T>(value: T, clock: capability Clock) -> T\n"
+        "effects { clock.read<clock> } { let ignored = clock.now() return value }\n"
+        "function integer(clock: capability Clock) -> Int64\n"
+        "effects { clock.read<clock> } { return pass(1, clock) }\n"
+        "function text(clock: capability Clock) -> Text\n"
+        "effects { clock.read<clock> } { return pass<Text>(\"text\", clock) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.effects.functions[1].count == 1);
+    CHECK(!compilation.effects.functions[1].inferred);
+    size_t instantiations = 0;
+    for (size_t expression = 0; expression < compilation.syntax.expression_count; ++expression) {
+        const SolCallInstantiation *instantiation = sol_type_call_instantiation(
+            &compilation.types,
+            expression
+        );
+        if (instantiation != NULL && instantiation->function == 1) ++instantiations;
+    }
+    CHECK(instantiations == 2);
+    free_compilation(&compilation);
+}
+
+static void test_type_parameter_is_not_effect_authority(void) {
+    static const char text[] =
+        "module generic_authority\n"
+        "function invalid<T>(value: T) -> T effects { service.read<T> } { return value }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-006"));
+    free_compilation(&compilation);
+}
+
+static void test_malformed_generic_instantiation_rejected(void) {
+    static const char text[] =
+        "module malformed_generic_instantiation\n"
+        "function identity<T>(value: T) -> T { return value }\n"
+        "function call() -> Int64 { return identity(1) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolExprId call = SOL_AST_NONE;
+    for (size_t expression = 0; expression < compilation.syntax.expression_count; ++expression) {
+        if (sol_type_call_instantiation(&compilation.types, expression) != NULL) {
+            call = expression;
+        }
+    }
+    CHECK(call != SOL_AST_NONE);
+    if (call != SOL_AST_NONE) {
+        SolType *arguments = compilation.types.call_instantiation_arguments;
+        compilation.types.call_instantiation_arguments = NULL;
+        sol_effect_table_free(&compilation.effects);
+        sol_diagnostics_free(&compilation.diagnostics);
+        sol_diagnostics_init(&compilation.diagnostics);
+        CHECK(!sol_effect_check(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+        compilation.types.call_instantiation_arguments = arguments;
+    }
+    free_compilation(&compilation);
+}
+
+static void test_forged_generic_type_metadata_rejected(void) {
+    static const char text[] =
+        "module forged_generic_metadata\n"
+        "record Box<T> { value: T, }\n"
+        "enum Choice<T> { some(value: T), }\n"
+        "function identity<T>(value: T) -> T { return value }\n"
+        "function other<T>(value: T) -> T { return value }\n"
+        "function make() -> Choice<Int64> {\n"
+        "    let box = Box<Int64> { value = 1, }\n"
+        "    let value = identity(2)\n"
+        "    return Choice<Int64>.some(value = value)\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolExprId call = SOL_AST_NONE;
+    for (SolExprId expression = 0; expression < compilation.syntax.expression_count;
+        ++expression) {
+        if (sol_type_call_instantiation(&compilation.types, expression) != NULL) {
+            call = expression;
+            break;
+        }
+    }
+    CHECK(call != SOL_AST_NONE);
+    CHECK(compilation.types.type_application_count >= 2);
+    CHECK(compilation.types.variant_constructor_count != 0);
+
+    if (call != SOL_AST_NONE) {
+        size_t offset = compilation.types.call_instantiations[call].argument_offset;
+        SolType original = compilation.types.call_instantiation_arguments[offset];
+        compilation.types.call_instantiation_arguments[offset]
+            = (SolType){.kind = SOL_TYPE_BOOL};
+        CHECK(!rerun_effectcheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+        compilation.types.call_instantiation_arguments[offset] = original;
+
+        SolDefId function = compilation.types.call_instantiations[call].function;
+        compilation.types.call_instantiations[call].function = 3;
+        CHECK(!rerun_effectcheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+        compilation.types.call_instantiations[call].function = function;
+    }
+
+    SolExprId primitive = SOL_AST_NONE;
+    for (SolExprId expression = 0; expression < compilation.types.expression_count;
+        ++expression) {
+        if (compilation.types.expressions[expression].kind == SOL_TYPE_INT64) {
+            primitive = expression;
+            break;
+        }
+    }
+    CHECK(primitive != SOL_AST_NONE);
+    if (primitive != SOL_AST_NONE) {
+        compilation.types.expressions[primitive].definition = 1;
+        CHECK(!rerun_effectcheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+        compilation.types.expressions[primitive].definition = 0;
+    }
+
+    SolTypeApplication *first = NULL;
+    SolTypeApplication *second = NULL;
+    for (size_t index = 0; index < compilation.types.type_application_count; ++index) {
+        SolTypeApplication *application = &compilation.types.type_applications[index];
+        if (application->constructor != SOL_TYPE_CONSTRUCTOR_USER) continue;
+        if (first == NULL) first = application;
+        else if (application->argument_count == first->argument_count) {
+            second = application;
+            break;
+        }
+    }
+    CHECK(first != NULL);
+    CHECK(second != NULL);
+    if (first != NULL && second != NULL) {
+        SolDefId definition = second->definition;
+        second->definition = first->definition;
+        CHECK(!rerun_effectcheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+        second->definition = definition;
+    }
+
+    SolTypeApplication *box_application = NULL;
+    for (size_t index = 0; index < compilation.types.type_application_count; ++index) {
+        if (compilation.types.type_applications[index].constructor
+                == SOL_TYPE_CONSTRUCTOR_USER
+            && compilation.types.type_applications[index].definition == 0) {
+            box_application = &compilation.types.type_applications[index];
+            break;
+        }
+    }
+    CHECK(box_application != NULL);
+    if (compilation.types.variant_constructor_count != 0 && box_application != NULL) {
+        SolType owner = compilation.types.variant_constructors[0].owner;
+        size_t first_id = (size_t)(box_application - compilation.types.type_applications);
+        compilation.types.variant_constructors[0].owner
+            = (SolType){SOL_TYPE_APPLICATION, first_id};
+        CHECK(!rerun_effectcheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+        compilation.types.variant_constructors[0].owner = owner;
+    }
+
+    SolType *application_arguments = compilation.types.type_application_arguments;
+    compilation.types.type_application_arguments = NULL;
+    CHECK(!rerun_effectcheck(&compilation));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+    compilation.types.type_application_arguments = application_arguments;
     free_compilation(&compilation);
 }
 
@@ -1818,6 +2016,10 @@ static void test_forged_handler_metadata_rejected(void) {
 
 int main(void) {
     test_private_pure_inference();
+    test_generic_closed_effect_rows();
+    test_type_parameter_is_not_effect_authority();
+    test_malformed_generic_instantiation_rejected();
+    test_forged_generic_type_metadata_rejected();
     test_forward_transitive_inference();
     test_capability_self_inference_identity();
     test_branch_argument_union_and_deduplication();

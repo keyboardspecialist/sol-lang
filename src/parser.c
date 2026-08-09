@@ -35,6 +35,7 @@ void sol_syntax_tree_free(SolSyntaxTree *tree) {
     free(tree->parameters);
     free(tree->types);
     free(tree->type_arguments);
+    free(tree->type_parameters);
     free(tree->fields);
     free(tree->variants);
     free(tree->patterns);
@@ -302,6 +303,25 @@ static SolTypeArgumentId sol_parser_add_type_argument(
     }
     SolTypeArgumentId id = parser->tree->type_argument_count++;
     parser->tree->type_arguments[id] = argument;
+    return id;
+}
+
+static SolTypeParameterId sol_parser_add_type_parameter(
+    SolParser *parser,
+    SolTypeParameter parameter
+) {
+    if (parser->tree->type_parameter_count == parser->tree->type_parameter_capacity) {
+        SolTypeParameter *parameters = sol_parser_grow(
+            parser,
+            parser->tree->type_parameters,
+            &parser->tree->type_parameter_capacity,
+            sizeof(*parser->tree->type_parameters)
+        );
+        if (parameters == NULL) return SOL_AST_NONE;
+        parser->tree->type_parameters = parameters;
+    }
+    SolTypeParameterId id = parser->tree->type_parameter_count++;
+    parser->tree->type_parameters[id] = parameter;
     return id;
 }
 
@@ -644,6 +664,7 @@ static bool sol_parser_type(SolParser *parser, SolSpan *span, SolTypeId *type_id
             .return_type = return_type,
             .first_effect = first_effect,
             .is_capability = is_capability,
+            .owner_item = parser->tree->item_count,
         };
         SolTypeId parsed_type = reserved;
         if (reserved == SOL_AST_NONE) parsed_type = sol_parser_add_type(parser, type);
@@ -751,6 +772,176 @@ static bool sol_parser_has_line_break(SolParser *parser, size_t start, size_t en
         }
     }
     return false;
+}
+
+static size_t sol_parser_next_significant(const SolParser *parser, size_t index) {
+    while (index < parser->tokens->count
+        && sol_token_is_trivia(parser->tokens->items[index].kind)) {
+        ++index;
+    }
+    return index;
+}
+
+typedef enum {
+    SOL_TYPE_LOOKAHEAD_NONE,
+    SOL_TYPE_LOOKAHEAD_VALID,
+    SOL_TYPE_LOOKAHEAD_MALFORMED,
+} SolTypeLookaheadKind;
+
+typedef struct {
+    SolTypeLookaheadKind kind;
+    size_t closing;
+} SolTypeLookahead;
+
+static SolTokenKind sol_parser_lookahead_kind(const SolParser *parser, size_t *index) {
+    *index = sol_parser_next_significant(parser, *index);
+    return *index < parser->tokens->count
+        ? parser->tokens->items[*index].kind
+        : SOL_TOKEN_EOF;
+}
+
+static bool sol_parser_lookahead_type(const SolParser *parser, size_t *index, size_t depth);
+
+static bool sol_parser_lookahead_type_list(
+    const SolParser *parser,
+    size_t *index,
+    SolTokenKind closing,
+    size_t depth
+) {
+    if (sol_parser_lookahead_kind(parser, index) == closing) {
+        ++*index;
+        return true;
+    }
+    for (;;) {
+        if (!sol_parser_lookahead_type(parser, index, depth + 1)) return false;
+        SolTokenKind kind = sol_parser_lookahead_kind(parser, index);
+        if (kind == closing) {
+            ++*index;
+            return true;
+        }
+        if (kind != SOL_TOKEN_COMMA) return false;
+        ++*index;
+        if (sol_parser_lookahead_kind(parser, index) == closing) {
+            ++*index;
+            return true;
+        }
+    }
+}
+
+static bool sol_parser_lookahead_type(const SolParser *parser, size_t *index, size_t depth) {
+    if (depth >= 256) return false;
+    SolTokenKind kind = sol_parser_lookahead_kind(parser, index);
+    if (kind == SOL_TOKEN_FUNCTION) {
+        ++*index;
+        if (sol_parser_lookahead_kind(parser, index) != SOL_TOKEN_LEFT_PAREN) return false;
+        ++*index;
+        if (!sol_parser_lookahead_type_list(
+            parser,
+            index,
+            SOL_TOKEN_RIGHT_PAREN,
+            depth
+        )) return false;
+        if (sol_parser_lookahead_kind(parser, index) != SOL_TOKEN_ARROW) return false;
+        ++*index;
+        if (!sol_parser_lookahead_type(parser, index, depth + 1)) return false;
+        if (sol_parser_lookahead_kind(parser, index) != SOL_TOKEN_EFFECTS) return false;
+        ++*index;
+        if (sol_parser_lookahead_kind(parser, index) != SOL_TOKEN_LEFT_BRACE) return false;
+        size_t braces = 0;
+        do {
+            kind = sol_parser_lookahead_kind(parser, index);
+            if (kind == SOL_TOKEN_EOF) return false;
+            if (kind == SOL_TOKEN_LEFT_BRACE) ++braces;
+            if (kind == SOL_TOKEN_RIGHT_BRACE) --braces;
+            ++*index;
+        } while (braces != 0);
+        return true;
+    }
+    if (kind == SOL_TOKEN_LEFT_PAREN) {
+        ++*index;
+        if (sol_parser_lookahead_kind(parser, index) != SOL_TOKEN_RIGHT_PAREN) return false;
+        ++*index;
+        return true;
+    }
+    if (kind == SOL_TOKEN_CAPABILITY) {
+        ++*index;
+        kind = sol_parser_lookahead_kind(parser, index);
+    }
+    if (kind != SOL_TOKEN_IDENTIFIER) return false;
+    ++*index;
+    while (sol_parser_lookahead_kind(parser, index) == SOL_TOKEN_DOT) {
+        ++*index;
+        if (sol_parser_lookahead_kind(parser, index) != SOL_TOKEN_IDENTIFIER) return false;
+        ++*index;
+    }
+    if (sol_parser_lookahead_kind(parser, index) == SOL_TOKEN_LESS) {
+        ++*index;
+        if (!sol_parser_lookahead_type_list(
+            parser,
+            index,
+            SOL_TOKEN_GREATER,
+            depth
+        )) return false;
+    }
+    return true;
+}
+
+static SolTypeLookahead sol_parser_expression_type_arguments(SolParser *parser) {
+    size_t index = sol_parser_next_significant(parser, parser->cursor);
+    if (index >= parser->tokens->count
+        || parser->tokens->items[index].kind != SOL_TOKEN_LESS) {
+        return (SolTypeLookahead){0};
+    }
+    ++index;
+    if (!sol_parser_lookahead_type(parser, &index, 0)) {
+        return (SolTypeLookahead){0};
+    }
+    for (;;) {
+        SolTokenKind kind = sol_parser_lookahead_kind(parser, &index);
+        if (kind == SOL_TOKEN_GREATER) {
+            size_t closing = index++;
+            kind = sol_parser_lookahead_kind(parser, &index);
+            if (kind == SOL_TOKEN_LEFT_PAREN || kind == SOL_TOKEN_DOT
+                || kind == SOL_TOKEN_LEFT_BRACE) {
+                return (SolTypeLookahead){SOL_TYPE_LOOKAHEAD_VALID, closing};
+            }
+            return (SolTypeLookahead){0};
+        }
+        if (kind == SOL_TOKEN_COMMA) {
+            ++index;
+            if (sol_parser_lookahead_kind(parser, &index) == SOL_TOKEN_GREATER) continue;
+            if (!sol_parser_lookahead_type(parser, &index, 0)) {
+                return (SolTypeLookahead){SOL_TYPE_LOOKAHEAD_MALFORMED, 0};
+            }
+            continue;
+        }
+        if (kind == SOL_TOKEN_LEFT_PAREN) {
+            return (SolTypeLookahead){SOL_TYPE_LOOKAHEAD_MALFORMED, 0};
+        }
+        return (SolTypeLookahead){0};
+    }
+}
+
+static void sol_parser_recover_expression_type_arguments(SolParser *parser) {
+    sol_parser_match(parser, SOL_TOKEN_LESS);
+    size_t depth = 0;
+    while (sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+        SolTokenKind kind = sol_parser_kind(parser);
+        if (kind == SOL_TOKEN_LESS) {
+            ++depth;
+        } else if (kind == SOL_TOKEN_GREATER) {
+            if (depth == 0) {
+                sol_parser_advance(parser);
+                return;
+            }
+            --depth;
+        } else if (kind == SOL_TOKEN_LEFT_PAREN && depth == 0) {
+            return;
+        } else if (kind == SOL_TOKEN_RIGHT_BRACE && depth == 0) {
+            return;
+        }
+        sol_parser_advance(parser);
+    }
 }
 
 static SolParsedArguments sol_parser_argument_list(SolParser *parser, SolTokenKind closing) {
@@ -1155,7 +1346,37 @@ static SolExprId sol_parser_postfix_expression(SolParser *parser) {
     SolExprId expression = sol_parser_primary_expression(parser);
     while (expression != SOL_AST_NONE) {
         SolTokenKind kind = sol_parser_kind(parser);
-        if (kind == SOL_TOKEN_LEFT_PAREN) {
+        SolExprKind expression_kind = parser->tree->expressions[expression].kind;
+        bool path_like = expression_kind == SOL_EXPR_PATH
+            || expression_kind == SOL_EXPR_FIELD
+            || expression_kind == SOL_EXPR_TYPE_APPLICATION;
+        SolTypeLookahead type_arguments = kind == SOL_TOKEN_LESS && path_like
+            ? sol_parser_expression_type_arguments(parser)
+            : (SolTypeLookahead){0};
+        if (type_arguments.kind == SOL_TYPE_LOOKAHEAD_VALID) {
+            SolTypeArgumentId first_argument;
+            if (!sol_parser_type_arguments(parser, &first_argument)) break;
+            size_t end = parser->tokens->items[type_arguments.closing].span.end;
+            expression = sol_parser_add_expression(parser, (SolExpr){
+                .kind = SOL_EXPR_TYPE_APPLICATION,
+                .span = {
+                    .start = parser->tree->expressions[expression].span.start,
+                    .end = end,
+                },
+                .as.type_application = {
+                    .base = expression,
+                    .first_argument = first_argument,
+                },
+            });
+        } else if (type_arguments.kind == SOL_TYPE_LOOKAHEAD_MALFORMED) {
+            sol_parser_error(
+                parser,
+                "SOL-PARSE-019",
+                sol_parser_current(parser),
+                "malformed explicit type argument list; expected ',' or '>'"
+            );
+            sol_parser_recover_expression_type_arguments(parser);
+        } else if (kind == SOL_TOKEN_LEFT_PAREN) {
             sol_parser_advance(parser);
             SolParsedArguments arguments = sol_parser_argument_list(parser, SOL_TOKEN_RIGHT_PAREN);
             if (!arguments.closed) {
@@ -1197,8 +1418,8 @@ static SolExprId sol_parser_postfix_expression(SolParser *parser) {
                 parser->tree->expressions[expression].span.end,
                 sol_parser_current(parser).span.start
             )) {
-            SolExprKind expression_kind = parser->tree->expressions[expression].kind;
-            if (expression_kind != SOL_EXPR_PATH && expression_kind != SOL_EXPR_FIELD) {
+            if (expression_kind != SOL_EXPR_PATH && expression_kind != SOL_EXPR_FIELD
+                && expression_kind != SOL_EXPR_TYPE_APPLICATION) {
                 break;
             }
             sol_parser_advance(parser);
@@ -1308,7 +1529,8 @@ static void sol_parser_check_multiline_record(SolParser *parser, SolExprId value
     if (value != SOL_AST_NONE
         && sol_parser_kind(parser) == SOL_TOKEN_LEFT_BRACE
         && (parser->tree->expressions[value].kind == SOL_EXPR_PATH
-            || parser->tree->expressions[value].kind == SOL_EXPR_FIELD)
+            || parser->tree->expressions[value].kind == SOL_EXPR_FIELD
+            || parser->tree->expressions[value].kind == SOL_EXPR_TYPE_APPLICATION)
         && sol_parser_has_line_break(
             parser,
             parser->tree->expressions[value].span.end,
@@ -1707,6 +1929,91 @@ static bool sol_parser_parameters(
     }
 }
 
+static bool sol_parser_generic_parameters(
+    SolParser *parser,
+    bool supported,
+    SolTypeParameterId *first_parameter
+) {
+    *first_parameter = SOL_AST_NONE;
+    if (!sol_parser_match(parser, SOL_TOKEN_LESS)) return true;
+    SolToken opening = parser->tokens->items[parser->cursor - 1];
+    if (!supported) {
+        sol_parser_error(
+            parser,
+            "SOL-PARSE-018",
+            opening,
+            "generic parameters are unsupported on this declaration"
+        );
+    }
+    if (sol_parser_match(parser, SOL_TOKEN_GREATER)) {
+        sol_parser_error(
+            parser,
+            "SOL-PARSE-018",
+            parser->tokens->items[parser->cursor - 1],
+            "generic parameter lists cannot be empty"
+        );
+        return true;
+    }
+    SolTypeParameterId last = SOL_AST_NONE;
+    for (;;) {
+        SolToken name = sol_parser_current(parser);
+        if (!sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER, "expected a generic parameter name")) {
+            return false;
+        }
+        if (sol_token_text_equal(parser->source, name, "_")) {
+            sol_parser_error(
+                parser,
+                "SOL-PARSE-018",
+                name,
+                "'_' is not a generic parameter name"
+            );
+        }
+        if (sol_parser_kind(parser) == SOL_TOKEN_COLON
+            || sol_parser_kind(parser) == SOL_TOKEN_EQUAL) {
+            sol_parser_error(
+                parser,
+                "SOL-PARSE-018",
+                sol_parser_current(parser),
+                "generic bounds and defaults are unsupported"
+            );
+            size_t nested = 0;
+            while (sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+                SolTokenKind kind = sol_parser_kind(parser);
+                if (kind == SOL_TOKEN_LESS) {
+                    ++nested;
+                } else if (kind == SOL_TOKEN_GREATER) {
+                    if (nested == 0) break;
+                    --nested;
+                } else if (kind == SOL_TOKEN_COMMA && nested == 0) {
+                    break;
+                }
+                sol_parser_advance(parser);
+            }
+        }
+        if (supported) {
+            SolTypeParameterId parameter = sol_parser_add_type_parameter(
+                parser,
+                (SolTypeParameter){
+                    .name = name.span,
+                    .next = SOL_AST_NONE,
+                    .owner_item = parser->tree->item_count,
+                }
+            );
+            if (parameter == SOL_AST_NONE) return false;
+            if (*first_parameter == SOL_AST_NONE) *first_parameter = parameter;
+            else parser->tree->type_parameters[last].next = parameter;
+            last = parameter;
+        }
+        if (sol_parser_match(parser, SOL_TOKEN_GREATER)) return true;
+        if (!sol_parser_expect(
+            parser,
+            SOL_TOKEN_COMMA,
+            "expected ',' between generic parameters"
+        )) return false;
+        if (sol_parser_match(parser, SOL_TOKEN_GREATER)) return true;
+    }
+}
+
 static bool sol_parser_function(
     SolParser *parser,
     bool member,
@@ -1722,7 +2029,8 @@ static bool sol_parser_function(
     bool *has_effect_clause,
     SolContractClauseId *first_contract,
     bool *result_authority_from_self,
-    SolParameterId *result_authority_parameter
+    SolParameterId *result_authority_parameter,
+    SolTypeParameterId *first_type_parameter
 ) {
     *body = SOL_AST_NONE;
     *first_parameter = SOL_AST_NONE;
@@ -1733,6 +2041,7 @@ static bool sol_parser_function(
     *first_contract = SOL_AST_NONE;
     *result_authority_from_self = false;
     *result_authority_parameter = SOL_AST_NONE;
+    *first_type_parameter = SOL_AST_NONE;
     SolToken function_token = sol_parser_current(parser);
     if (!sol_parser_expect(parser, SOL_TOKEN_FUNCTION, "expected 'function'")) {
         return false;
@@ -1740,6 +2049,7 @@ static bool sol_parser_function(
     if (!sol_parser_path(parser, name, "expected a function name")) {
         return false;
     }
+    if (!sol_parser_generic_parameters(parser, !member, first_type_parameter)) return false;
     if (!sol_parser_expect(parser, SOL_TOKEN_LEFT_PAREN, "expected '(' after the function name")) {
         return false;
     }
@@ -1969,7 +2279,8 @@ static bool sol_parser_record(
     SolParser *parser,
     SolSpan *name,
     SolSpan *whole,
-    SolFieldId *first_field
+    SolFieldId *first_field,
+    SolTypeParameterId *first_type_parameter
 ) {
     SolToken opening = sol_parser_advance(parser);
     SolToken name_token = sol_parser_current(parser);
@@ -1977,6 +2288,7 @@ static bool sol_parser_record(
         return false;
     }
     *name = name_token.span;
+    if (!sol_parser_generic_parameters(parser, true, first_type_parameter)) return false;
     if (!sol_parser_expect(parser, SOL_TOKEN_LEFT_BRACE, "expected '{' after the record name")) {
         return false;
     }
@@ -1997,7 +2309,8 @@ static bool sol_parser_enum(
     SolParser *parser,
     SolSpan *name,
     SolSpan *whole,
-    SolVariantId *first_variant
+    SolVariantId *first_variant,
+    SolTypeParameterId *first_type_parameter
 ) {
     *first_variant = SOL_AST_NONE;
     SolVariantId last_variant = SOL_AST_NONE;
@@ -2007,6 +2320,7 @@ static bool sol_parser_enum(
         return false;
     }
     *name = name_token.span;
+    if (!sol_parser_generic_parameters(parser, true, first_type_parameter)) return false;
     if (!sol_parser_expect(parser, SOL_TOKEN_LEFT_BRACE, "expected '{' after the enum name")) {
         return false;
     }
@@ -2079,6 +2393,8 @@ static bool sol_parser_capability(
         return false;
     }
     *name = name_token.span;
+    SolTypeParameterId unsupported_parameters;
+    if (!sol_parser_generic_parameters(parser, false, &unsupported_parameters)) return false;
     bool derived = false;
     SolToken derives = sol_parser_current(parser);
     if (derives.kind == SOL_TOKEN_IDENTIFIER
@@ -2147,6 +2463,7 @@ static bool sol_parser_capability(
         SolContractClauseId member_contracts;
         bool member_result_authority_from_self;
         SolParameterId member_result_authority_parameter;
+        SolTypeParameterId member_type_parameters;
         if (!sol_parser_function(
             parser,
             true,
@@ -2162,7 +2479,8 @@ static bool sol_parser_capability(
             &member_has_effects,
             &member_contracts,
             &member_result_authority_from_self,
-            &member_result_authority_parameter
+            &member_result_authority_parameter,
+            &member_type_parameters
         )) {
             parser->tree->parameter_count = parameter_mark;
             parser->tree->type_count = type_mark;
@@ -2254,6 +2572,7 @@ static void sol_parser_declaration(SolParser *parser) {
     size_t parameter_mark = parser->tree->parameter_count;
     size_t type_mark = parser->tree->type_count;
     size_t type_argument_mark = parser->tree->type_argument_count;
+    size_t type_parameter_mark = parser->tree->type_parameter_count;
     size_t field_mark = parser->tree->field_count;
     size_t variant_mark = parser->tree->variant_count;
     size_t effect_mark = parser->tree->effect_count;
@@ -2292,11 +2611,18 @@ static void sol_parser_declaration(SolParser *parser) {
     SolParameterId result_authority_parameter = SOL_AST_NONE;
     SolCapabilityMemberId first_member = SOL_AST_NONE;
     SolParameterId capability_source = SOL_AST_NONE;
+    SolTypeParameterId first_type_parameter = SOL_AST_NONE;
     bool parsed = false;
     SolTokenKind kind = sol_parser_kind(parser);
     if (kind == SOL_TOKEN_RECORD) {
         item_kind = SOL_ITEM_RECORD;
-        parsed = sol_parser_record(parser, &name, &whole, &first_field);
+        parsed = sol_parser_record(
+            parser,
+            &name,
+            &whole,
+            &first_field,
+            &first_type_parameter
+        );
     } else if (kind == SOL_TOKEN_OPEN || kind == SOL_TOKEN_ENUM) {
         if (kind == SOL_TOKEN_OPEN) {
             is_open = true;
@@ -2312,7 +2638,13 @@ static void sol_parser_declaration(SolParser *parser) {
             }
         }
         item_kind = SOL_ITEM_ENUM;
-        parsed = sol_parser_enum(parser, &name, &whole, &first_variant);
+        parsed = sol_parser_enum(
+            parser,
+            &name,
+            &whole,
+            &first_variant,
+            &first_type_parameter
+        );
     } else if (kind == SOL_TOKEN_CAPABILITY) {
         item_kind = SOL_ITEM_CAPABILITY;
         parsed = sol_parser_capability(
@@ -2339,7 +2671,8 @@ static void sol_parser_declaration(SolParser *parser) {
             &has_effect_clause,
             &first_contract,
             &result_authority_from_self,
-            &result_authority_parameter
+            &result_authority_parameter,
+            &first_type_parameter
         );
     } else {
         sol_parser_error(
@@ -2370,11 +2703,13 @@ static void sol_parser_declaration(SolParser *parser) {
             .first_member = first_member,
             .result_authority_parameter = result_authority_parameter,
             .capability_source = capability_source,
+            .first_type_parameter = first_type_parameter,
         });
     } else {
         parser->tree->parameter_count = parameter_mark;
         parser->tree->type_count = type_mark;
         parser->tree->type_argument_count = type_argument_mark;
+        parser->tree->type_parameter_count = type_parameter_mark;
         parser->tree->field_count = field_mark;
         parser->tree->variant_count = variant_mark;
         parser->tree->effect_count = effect_mark;
