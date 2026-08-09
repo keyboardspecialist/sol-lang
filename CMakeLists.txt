@@ -6,6 +6,25 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 option(SOL_ENABLE_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
 
+find_program(TYPST_EXECUTABLE typst)
+if(TYPST_EXECUTABLE)
+    add_custom_target(manual
+        COMMAND ${TYPST_EXECUTABLE} compile
+            ${CMAKE_CURRENT_SOURCE_DIR}/docs/specification.typ
+            ${CMAKE_CURRENT_SOURCE_DIR}/Sol_Programming_Language_Design_Specification_v0.2.pdf
+        DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/docs/specification.typ
+        COMMENT "Building Sol Design Specification v0.2"
+        VERBATIM
+    )
+else()
+    add_custom_target(manual
+        COMMAND ${CMAKE_COMMAND} -E echo
+            "Typst was not found. Install Typst 0.15.1, reconfigure CMake, or run: typst compile docs/specification.typ Sol_Programming_Language_Design_Specification_v0.2.pdf"
+        COMMAND ${CMAKE_COMMAND} -E false
+        VERBATIM
+    )
+endif()
+
 add_library(sol_compiler STATIC
     src/contract.c
     src/diagnostic.c

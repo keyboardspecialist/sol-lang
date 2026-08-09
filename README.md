@@ -6,6 +6,18 @@
 
 Sol is designed for software written and maintained collaboratively by humans and AI systems. It treats effects, authority, contracts, resource behavior, semantic identity, and change consequences as first-class parts of the program rather than context that must be reconstructed from conventions, comments, and repository archaeology.
 
+## Design Specification
+
+The current official manual is [Design Specification v0.2](Sol_Programming_Language_Design_Specification_v0.2.pdf). Its authoritative editable source is [`docs/specification.typ`](docs/specification.typ); the PDF is generated and should not be edited directly. The v0.1 PDF remains available as a historical artifact.
+
+Build the manual offline with Typst 0.15.1:
+
+```text
+typst compile docs/specification.typ Sol_Programming_Language_Design_Specification_v0.2.pdf
+```
+
+When CMake finds Typst during configuration, `cmake --build build --target manual` runs the same build.
+
 The central idea is simple:
 
 > Make intent machine-checkable, make context local, and make ambiguity syntactically expensive.
