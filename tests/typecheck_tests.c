@@ -280,6 +280,29 @@ static void test_structural_generic_types(void) {
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
     CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.types.type_application_count == 2);
+    const SolTypeApplication *option = sol_type_application(
+        &compilation.types,
+        compilation.types.definitions[1]
+    );
+    const SolTypeApplication *result = sol_type_application(
+        &compilation.types,
+        compilation.types.definitions[2]
+    );
+    CHECK(option != NULL);
+    CHECK(result != NULL);
+    if (option != NULL) {
+        CHECK(option->constructor == SOL_TYPE_CONSTRUCTOR_OPTION);
+        CHECK(option->argument_count == 1);
+        CHECK(option->arguments[0].kind == SOL_TYPE_INT64);
+    }
+    if (result != NULL) {
+        CHECK(result->constructor == SOL_TYPE_CONSTRUCTOR_RESULT);
+        CHECK(result->argument_count == 2);
+        CHECK(result->arguments[0].kind == SOL_TYPE_INT64);
+        CHECK(result->arguments[1].kind == SOL_TYPE_NOMINAL);
+        CHECK(result->arguments[1].definition == 0);
+    }
     free_compilation(&compilation);
 }
 
@@ -775,12 +798,12 @@ static void test_invalid_handlers(void) {
     free_compilation(&compilation);
 }
 
-static void test_contract_type_firewall(void) {
+static void test_contract_expression_types(void) {
     static const char text[] =
-        "module contract_type_firewall\n"
+        "module contract_expression_types\n"
         "function sample(value: Int64) -> Int64\n"
-        "requires { missing + true }\n"
-        "ensures { result == old(\"not an integer\") }\n"
+        "requires { value > 0 }\n"
+        "ensures { result == old(value) }\n"
         "{ return value }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
@@ -788,7 +811,7 @@ static void test_contract_type_firewall(void) {
     CHECK(compilation.syntax.contract_condition_count == 2);
     for (size_t index = 0; index < compilation.syntax.contract_condition_count; ++index) {
         SolExprId expression = compilation.syntax.contract_conditions[index].expression;
-        CHECK(compilation.types.expressions[expression].kind == SOL_TYPE_UNKNOWN);
+        CHECK(compilation.types.expressions[expression].kind == SOL_TYPE_BOOL);
         CHECK(compilation.types.expression_capability_origins[expression] == SOL_AST_NONE);
         CHECK(compilation.types.expression_operation_origins[expression] == SOL_AST_NONE);
     }
@@ -845,7 +868,7 @@ int main(void) {
     test_derived_capability_cycles();
     test_handler_types_and_metadata();
     test_invalid_handlers();
-    test_contract_type_firewall();
+    test_contract_expression_types();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;

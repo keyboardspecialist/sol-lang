@@ -17,7 +17,7 @@ typedef enum {
     SOL_TYPE_TEXT,
     SOL_TYPE_UNIT,
     SOL_TYPE_NOMINAL,
-    SOL_TYPE_OPAQUE,
+    SOL_TYPE_APPLICATION,
     SOL_TYPE_FUNCTION,
     SOL_TYPE_FUNCTION_SIGNATURE,
     SOL_TYPE_CAPABILITY_OPERATION,
@@ -29,6 +29,17 @@ typedef struct {
     SolTypeKind kind;
     SolDefId definition;
 } SolType;
+
+typedef enum {
+    SOL_TYPE_CONSTRUCTOR_OPTION,
+    SOL_TYPE_CONSTRUCTOR_RESULT,
+} SolTypeConstructor;
+
+typedef struct {
+    SolTypeConstructor constructor;
+    SolType arguments[2];
+    size_t argument_count;
+} SolTypeApplication;
 
 typedef struct {
     SolType *parameters;
@@ -63,6 +74,9 @@ typedef struct {
     size_t definition_count;
     SolType *declared_types;
     size_t declared_type_count;
+    SolTypeApplication *type_applications;
+    size_t type_application_count;
+    size_t type_application_capacity;
     SolFunctionType *function_types;
     size_t function_type_count;
     size_t function_type_capacity;
@@ -76,6 +90,10 @@ typedef struct {
 
 void sol_type_table_init(SolTypeTable *table);
 void sol_type_table_free(SolTypeTable *table);
+const SolTypeApplication *sol_type_application(
+    const SolTypeTable *table,
+    SolType type
+);
 bool sol_type_check(
     const SolSource *source,
     const SolSyntaxTree *syntax,

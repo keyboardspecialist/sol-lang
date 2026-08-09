@@ -1879,7 +1879,7 @@ static bool sol_effect_validate_provenance(
 }
 
 static bool sol_effect_type_has_identity(SolTypeKind kind) {
-    return kind == SOL_TYPE_NOMINAL || kind == SOL_TYPE_OPAQUE
+    return kind == SOL_TYPE_NOMINAL || kind == SOL_TYPE_APPLICATION
         || kind == SOL_TYPE_FUNCTION || kind == SOL_TYPE_FUNCTION_SIGNATURE
         || kind == SOL_TYPE_CAPABILITY_OPERATION || kind == SOL_TYPE_VARIANT;
 }
@@ -2103,6 +2103,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || types->local_count != hir->local_count
         || types->definition_count != hir->definition_count
         || types->declared_type_count != syntax->type_count
+        || types->type_application_count > types->type_application_capacity
         || types->function_type_count > types->function_type_capacity
         || types->function_coercion_count > types->function_coercion_capacity
         || types->handler_count != syntax->expression_count
@@ -2116,6 +2117,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (types->local_count != 0 && types->local_operation_origins == NULL)
         || (types->definition_count != 0 && types->definitions == NULL)
         || (types->declared_type_count != 0 && types->declared_types == NULL)
+        || (types->type_application_capacity != 0 && types->type_applications == NULL)
         || (types->function_type_capacity != 0 && types->function_types == NULL)
         || (types->function_coercion_capacity != 0
             && types->function_coercions == NULL)
@@ -2123,6 +2125,36 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         return false;
     }
     if (!sol_syntax_contracts_validate(source, syntax)) return false;
+    for (size_t index = 0; index < types->type_application_count; ++index) {
+        const SolTypeApplication *application = &types->type_applications[index];
+        size_t expected = application->constructor == SOL_TYPE_CONSTRUCTOR_OPTION
+            ? 1
+            : application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT ? 2 : 0;
+        if (application->argument_count != expected) return false;
+        for (size_t argument = 0; argument < application->argument_count; ++argument) {
+            SolType type = application->arguments[argument];
+            if ((int)type.kind < 0 || type.kind > SOL_TYPE_NEVER
+                || (type.kind == SOL_TYPE_APPLICATION && type.definition >= index)
+                || (type.kind == SOL_TYPE_FUNCTION_SIGNATURE
+                    && type.definition >= types->function_type_count)
+                || (!sol_effect_type_has_identity(type.kind) && type.definition != 0)) {
+                return false;
+            }
+        }
+        for (size_t previous = 0; previous < index; ++previous) {
+            const SolTypeApplication *other = &types->type_applications[previous];
+            bool equal = application->constructor == other->constructor
+                && application->argument_count == other->argument_count;
+            for (size_t argument = 0; equal && argument < application->argument_count;
+                ++argument) {
+                equal = sol_effect_semantic_type_equal(
+                    application->arguments[argument],
+                    other->arguments[argument]
+                );
+            }
+            if (equal) return false;
+        }
+    }
     for (size_t index = 0; index < types->function_type_count; ++index) {
         const SolFunctionType *function = &types->function_types[index];
         if ((function->parameter_count != 0 && function->parameters == NULL)
@@ -2130,6 +2162,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || (int)function->result.kind < 0 || function->result.kind > SOL_TYPE_NEVER
             || (function->result.kind == SOL_TYPE_FUNCTION_SIGNATURE
                 && function->result.definition >= index)
+            || (function->result.kind == SOL_TYPE_APPLICATION
+                && function->result.definition >= types->type_application_count)
             || (!sol_effect_type_has_identity(function->result.kind)
                 && function->result.definition != 0)) {
             return false;
@@ -2138,6 +2172,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             SolType type = function->parameters[parameter];
             if ((int)type.kind < 0 || type.kind > SOL_TYPE_NEVER
                 || (type.kind == SOL_TYPE_FUNCTION_SIGNATURE && type.definition >= index)
+                || (type.kind == SOL_TYPE_APPLICATION
+                    && type.definition >= types->type_application_count)
                 || (!sol_effect_type_has_identity(type.kind) && type.definition != 0)) {
                 return false;
             }
@@ -2213,6 +2249,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             if ((int)type.kind < 0 || type.kind > SOL_TYPE_NEVER
                 || (type.kind == SOL_TYPE_FUNCTION_SIGNATURE
                     && type.definition >= types->function_type_count)
+                || (type.kind == SOL_TYPE_APPLICATION
+                    && type.definition >= types->type_application_count)
                 || (!sol_effect_type_has_identity(type.kind) && type.definition != 0)) {
                 return false;
             }
@@ -2290,21 +2328,22 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
                 checker->parameter_owners[parameter] = owner;
                 parameter = syntax->parameters[parameter].next;
             }
-        } else if (item->kind == SOL_ITEM_CAPABILITY
-            && item->capability_source != SOL_AST_NONE) {
-            SolTypeId source_type = syntax->parameters[
-                item->capability_source
-            ].type_id;
-            if (source_type >= syntax->type_count
-                || syntax->types[source_type].kind != SOL_SYNTAX_TYPE_PATH
-                || !syntax->types[source_type].is_capability
-                || syntax->types[source_type].first_argument != SOL_AST_NONE) {
-                return false;
+        } else if (item->kind == SOL_ITEM_CAPABILITY) {
+            if (item->capability_source != SOL_AST_NONE) {
+                SolTypeId source_type = syntax->parameters[
+                    item->capability_source
+                ].type_id;
+                if (source_type >= syntax->type_count
+                    || syntax->types[source_type].kind != SOL_SYNTAX_TYPE_PATH
+                    || !syntax->types[source_type].is_capability
+                    || syntax->types[source_type].first_argument != SOL_AST_NONE) {
+                    return false;
+                }
+                if (checker->parameter_owners[item->capability_source] != SOL_AST_NONE) {
+                    return false;
+                }
+                checker->parameter_owners[item->capability_source] = owner;
             }
-            if (checker->parameter_owners[item->capability_source] != SOL_AST_NONE) {
-                return false;
-            }
-            checker->parameter_owners[item->capability_source] = owner;
             SolCapabilityMemberId member = item->first_member;
             size_t member_count = 0;
             while (member != SOL_AST_NONE) {
@@ -2335,8 +2374,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || !sol_effect_span_valid(source, local->name)
             || local->owner >= syntax->item_count
             || (syntax->items[local->owner].kind != SOL_ITEM_FUNCTION
-                && !(syntax->items[local->owner].kind == SOL_ITEM_CAPABILITY
-                    && syntax->items[local->owner].capability_source != SOL_AST_NONE))
+                && syntax->items[local->owner].kind != SOL_ITEM_CAPABILITY)
             || (local->kind == SOL_LOCAL_PARAMETER
                 && (local->syntax_id >= syntax->parameter_count
                     || local->name.start != syntax->parameters[local->syntax_id].name.start

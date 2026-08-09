@@ -203,12 +203,21 @@ ensures {
 }
 ```
 
-The bootstrap parser stores each `requires` and `ensures` clause and each
-newline- or comma-separated condition in deterministic arenas. Postconditions
-represent optional `success =>` and `failure =>` outcomes directly, and parse
-`old(expression)` and `result` as contextual expression forms. These contract
-expressions are deliberately not resolved, typed, effect-checked, lowered into
-obligations, or emitted as runtime checks yet.
+The bootstrap compiler stores each `requires` and `ensures` clause and each
+newline- or comma-separated condition in deterministic arenas, then lowers one
+public semantic obligation per condition after effect inference. Contract
+expressions resolve in a fresh declaration-signature scope, use ordinary
+expression typing, must produce `Bool`, and may call only finalized-pure
+functions, operations, or closed callbacks. Body locals and a derived
+capability wrapper's private source are not part of its interface scope.
+Postconditions expose an ordinary return through `result`; a `success =>`
+condition over `Result<T, E>` exposes `T`, while failure conditions have no
+result binding. Every `old(expression)` records a distinct typed entry-state
+snapshot. Nested `old` and `old(result)` are rejected. The deterministic public
+table records owner, clause kind, outcome, predicate and type, result binding,
+and snapshot metadata. It is a semantic template only: runtime checks,
+call-site substitution, proof discharge, and normalized solver IR are not yet
+implemented.
 
 Verification is progressive rather than all-or-nothing. A project may choose among:
 
@@ -380,7 +389,7 @@ The language server is expected to expose typed syntax, inferred effects, owners
 
 ## Bootstrap Compiler
 
-The bootstrap compiler is written in C17 and currently provides a lossless lexer, a recovering parser for core declarations, structured function contracts, and function-body expressions, an arena-backed syntax AST, deterministic definition IDs, lexical name resolution, structural `Option`/`Result` types, checked records and enums, exhaustive matching, semantic effect rows with local inference across statically known calls, capability-backed exact handlers, and structured human or JSON diagnostics through `sol check`.
+The bootstrap compiler is written in C17 and currently provides a lossless lexer, a recovering parser for core declarations, structured function contracts, and function-body expressions, an arena-backed syntax AST, deterministic definition IDs, lexical name resolution, exact interned `Option`/`Result` type applications, checked records and enums, exhaustive matching, semantic effect rows with local inference across statically known calls, capability-backed exact handlers, deterministic contract obligation templates, and structured human or JSON diagnostics through `sol check`.
 
 ```text
 cmake -S . -B build -G Ninja -DSOL_ENABLE_SANITIZERS=ON

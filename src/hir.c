@@ -690,18 +690,32 @@ static bool sol_resolver_add_binding(
         }
     }
 
-    if (resolver->module->local_count >= resolver->module->local_capacity
-        || resolver->binding_count >= resolver->binding_capacity) {
+    if (resolver->binding_count >= resolver->binding_capacity) {
         resolver->allocation_failed = true;
         return false;
     }
-    SolLocalId local = resolver->module->local_count++;
-    resolver->module->locals[local] = (SolHirLocal){
-        .kind = kind,
-        .name = name,
-        .owner = resolver->current_definition,
-        .syntax_id = syntax_id,
-    };
+    SolLocalId local = SOL_AST_NONE;
+    for (size_t index = 0; index < resolver->module->local_count; ++index) {
+        const SolHirLocal *candidate = &resolver->module->locals[index];
+        if (candidate->owner == resolver->current_definition
+            && candidate->kind == kind && candidate->syntax_id == syntax_id) {
+            local = index;
+            break;
+        }
+    }
+    if (local == SOL_AST_NONE) {
+        if (resolver->module->local_count >= resolver->module->local_capacity) {
+            resolver->allocation_failed = true;
+            return false;
+        }
+        local = resolver->module->local_count++;
+        resolver->module->locals[local] = (SolHirLocal){
+            .kind = kind,
+            .name = name,
+            .owner = resolver->current_definition,
+            .syntax_id = syntax_id,
+        };
+    }
     resolver->bindings[resolver->binding_count++] = (SolBinding){
         .name = name,
         .resolution = {.kind = SOL_RESOLUTION_LOCAL, .target = local},
@@ -893,8 +907,9 @@ static void sol_resolver_expression(SolResolver *resolver, SolExprId expression_
             sol_resolver_expression(resolver, expression->as.handle.body);
             break;
         case SOL_EXPR_RESULT:
+            break;
         case SOL_EXPR_OLD:
-            sol_resolver_malformed(resolver);
+            sol_resolver_expression(resolver, expression->as.old_expression);
             break;
         default:
             break;
@@ -930,13 +945,10 @@ static void sol_resolver_collect_definitions(SolResolver *resolver) {
     }
 }
 
-static void sol_resolver_function(SolResolver *resolver, SolDefId definition) {
-    const SolSyntaxItem *item = &resolver->syntax->items[definition];
-    resolver->current_definition = definition;
-    resolver->binding_count = 0;
-    resolver->scope_depth = 0;
-
-    SolParameterId parameter_id = item->first_parameter;
+static void sol_resolver_bind_parameters(
+    SolResolver *resolver,
+    SolParameterId parameter_id
+) {
     size_t traversed = 0;
     while (parameter_id != SOL_AST_NONE) {
         if (parameter_id >= resolver->syntax->parameter_count
@@ -953,6 +965,51 @@ static void sol_resolver_function(SolResolver *resolver, SolDefId definition) {
         );
         parameter_id = parameter->next;
     }
+}
+
+static void sol_resolver_contracts(
+    SolResolver *resolver,
+    SolContractClauseId clause_id,
+    SolParameterId first_parameter
+) {
+    size_t clause_count = 0;
+    while (clause_id != SOL_AST_NONE) {
+        if (clause_id >= resolver->syntax->contract_clause_count
+            || clause_count++ >= resolver->syntax->contract_clause_count) {
+            sol_resolver_malformed(resolver);
+            return;
+        }
+        const SolContractClause *clause
+            = &resolver->syntax->contract_clauses[clause_id];
+        SolContractConditionId condition_id = clause->first_condition;
+        size_t condition_count = 0;
+        while (condition_id != SOL_AST_NONE) {
+            if (condition_id >= resolver->syntax->contract_condition_count
+                || condition_count++ >= resolver->syntax->contract_condition_count) {
+                sol_resolver_malformed(resolver);
+                return;
+            }
+            resolver->binding_count = 0;
+            resolver->scope_depth = 0;
+            sol_resolver_bind_parameters(resolver, first_parameter);
+            sol_resolver_expression(
+                resolver,
+                resolver->syntax->contract_conditions[condition_id].expression
+            );
+            condition_id = resolver->syntax->contract_conditions[condition_id].next;
+        }
+        clause_id = clause->next;
+    }
+    resolver->binding_count = 0;
+}
+
+static void sol_resolver_function(SolResolver *resolver, SolDefId definition) {
+    const SolSyntaxItem *item = &resolver->syntax->items[definition];
+    resolver->current_definition = definition;
+    sol_resolver_contracts(resolver, item->first_contract, item->first_parameter);
+    resolver->binding_count = 0;
+    resolver->scope_depth = 0;
+    sol_resolver_bind_parameters(resolver, item->first_parameter);
     if (item->body != SOL_AST_NONE) {
         sol_resolver_expression(resolver, item->body);
     }
@@ -961,31 +1018,29 @@ static void sol_resolver_function(SolResolver *resolver, SolDefId definition) {
 
 static void sol_resolver_capability_members(SolResolver *resolver, SolDefId definition) {
     const SolSyntaxItem *item = &resolver->syntax->items[definition];
-    if (item->capability_source == SOL_AST_NONE) return;
     SolCapabilityMemberId member_id = item->first_member;
     while (member_id != SOL_AST_NONE) {
         const SolCapabilityMember *member = &resolver->syntax->capability_members[member_id];
         resolver->current_definition = definition;
+        sol_resolver_contracts(
+            resolver,
+            member->first_contract,
+            member->first_parameter
+        );
         resolver->binding_count = 0;
         resolver->scope_depth = 0;
-        sol_resolver_add_binding(
-            resolver,
-            resolver->syntax->parameters[item->capability_source].name,
-            SOL_LOCAL_PARAMETER,
-            item->capability_source
-        );
-        SolParameterId parameter_id = member->first_parameter;
-        while (parameter_id != SOL_AST_NONE) {
-            const SolParameter *parameter = &resolver->syntax->parameters[parameter_id];
+        if (item->capability_source != SOL_AST_NONE) {
             sol_resolver_add_binding(
                 resolver,
-                parameter->name,
+                resolver->syntax->parameters[item->capability_source].name,
                 SOL_LOCAL_PARAMETER,
-                parameter_id
+                item->capability_source
             );
-            parameter_id = parameter->next;
         }
-        sol_resolver_expression(resolver, member->body);
+        sol_resolver_bind_parameters(resolver, member->first_parameter);
+        if (member->body != SOL_AST_NONE) {
+            sol_resolver_expression(resolver, member->body);
+        }
         resolver->binding_count = 0;
         member_id = member->next;
     }

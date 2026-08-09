@@ -53,7 +53,7 @@ requires {
     user.name == user.name
 }
 ensures {
-    success => result == result
+    success => result == old(user.name)
     failure => user.name == old(user.name)
 } {
     return ok(user.name)

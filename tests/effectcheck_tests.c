@@ -987,7 +987,7 @@ static void test_contract_effect_firewall(void) {
     CHECK(compilation.effects.functions[1].count == 0);
     for (size_t index = 0; index < compilation.syntax.contract_condition_count; ++index) {
         SolExprId expression = compilation.syntax.contract_conditions[index].expression;
-        CHECK(compilation.types.expressions[expression].kind == SOL_TYPE_UNKNOWN);
+        CHECK(compilation.types.expressions[expression].kind == SOL_TYPE_BOOL);
     }
 
     SolContractClauseId owner_clause

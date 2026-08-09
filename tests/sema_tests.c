@@ -360,12 +360,13 @@ static void reset_hir_diagnostics(TestCompilation *compilation) {
     sol_diagnostics_init(&compilation->diagnostics);
 }
 
-static void test_contract_resolution_firewall_and_cycles(void) {
+static void test_contract_resolution_and_cycles(void) {
     static const char text[] =
-        "module contract_resolution_firewall\n"
+        "module contract_resolution\n"
+        "function same(value: Int64) -> Bool effects { pure } { return value == value }\n"
         "function sample(value: Int64) -> Int64\n"
-        "requires { missing_precondition(value) }\n"
-        "ensures { result == old(missing_postcondition(value)) }\n"
+        "requires { same(value) }\n"
+        "ensures { result == old(value) }\n"
         "{ return value }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
@@ -375,19 +376,18 @@ static void test_contract_resolution_firewall_and_cycles(void) {
     SolExprId old_expression = SOL_AST_NONE;
     for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
         const SolExpr *expression = &compilation.syntax.expressions[index];
-        if (expression->kind == SOL_EXPR_OLD) old_expression = index;
-        if (expression->kind == SOL_EXPR_OLD || expression->kind == SOL_EXPR_RESULT
-            || (expression->kind == SOL_EXPR_PATH
-                && (span_text_equal(
-                    &compilation.source,
-                    expression->as.name,
-                    "missing_precondition"
-                ) || span_text_equal(
-                    &compilation.source,
-                    expression->as.name,
-                    "missing_postcondition"
-                )))) {
+        if (expression->kind == SOL_EXPR_OLD) {
+            old_expression = index;
             CHECK(compilation.hir.resolutions[index].kind == SOL_RESOLUTION_NOT_APPLICABLE);
+        } else if (expression->kind == SOL_EXPR_RESULT) {
+            CHECK(compilation.hir.resolutions[index].kind == SOL_RESOLUTION_NOT_APPLICABLE);
+        } else if (expression->kind == SOL_EXPR_PATH
+            && span_text_equal(&compilation.source, expression->as.name, "same")) {
+            CHECK(compilation.hir.resolutions[index].kind == SOL_RESOLUTION_DEFINITION);
+            CHECK(compilation.hir.resolutions[index].target == 0);
+        } else if (expression->kind == SOL_EXPR_PATH
+            && span_text_equal(&compilation.source, expression->as.name, "value")) {
+            CHECK(compilation.hir.resolutions[index].kind == SOL_RESOLUTION_LOCAL);
         }
     }
     CHECK(!has_diagnostic(&compilation, "SOL-RESOLVE-002"));
@@ -436,7 +436,7 @@ int main(void) {
     test_malformed_arena_metadata_rejected();
     test_derived_capability_resolution_and_malformed_body();
     test_malformed_handler_ast_rejected();
-    test_contract_resolution_firewall_and_cycles();
+    test_contract_resolution_and_cycles();
     if (failures != 0) {
         fprintf(stderr, "%d semantic test failure(s)\n", failures);
         return 1;
