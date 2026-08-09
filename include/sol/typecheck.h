@@ -53,6 +53,20 @@ typedef struct {
     SolType expected;
 } SolFunctionCoercion;
 
+typedef size_t SolProvenanceId;
+
+#define SOL_PROVENANCE_NONE SIZE_MAX
+
+typedef struct {
+    size_t root_offset;
+    size_t root_count;
+} SolProvenanceSet;
+
+typedef struct {
+    const SolParameterId *roots;
+    size_t count;
+} SolProvenance;
+
 typedef struct {
     SolCapabilityMemberId source_member;
     SolCapabilityMemberId provider_member;
@@ -62,14 +76,14 @@ typedef struct {
 typedef struct {
     SolType *expressions;
     size_t expression_count;
-    /* Indexed by SolExprId; SOL_AST_NONE means no capability parameter origin. */
-    SolParameterId *expression_capability_origins;
-    SolParameterId *expression_operation_origins;
+    /* Indexed by SolExprId; SOL_PROVENANCE_NONE means no known provenance. */
+    SolProvenanceId *expression_capability_origins;
+    SolProvenanceId *expression_operation_origins;
     SolType *locals;
     size_t local_count;
-    /* Indexed by SolLocalId; SOL_AST_NONE means no capability parameter origin. */
-    SolParameterId *local_capability_origins;
-    SolParameterId *local_operation_origins;
+    /* Indexed by SolLocalId; SOL_PROVENANCE_NONE means no known provenance. */
+    SolProvenanceId *local_capability_origins;
+    SolProvenanceId *local_operation_origins;
     SolType *definitions;
     size_t definition_count;
     SolType *declared_types;
@@ -83,6 +97,13 @@ typedef struct {
     SolFunctionCoercion *function_coercions;
     size_t function_coercion_count;
     size_t function_coercion_capacity;
+    /* Interned normalized finite nonempty sets of lexical capability roots. */
+    SolProvenanceSet *provenances;
+    size_t provenance_count;
+    size_t provenance_capacity;
+    SolParameterId *provenance_roots;
+    size_t provenance_root_count;
+    size_t provenance_root_capacity;
     /* Indexed by SolExprId; non-handler entries contain SOL_AST_NONE fields. */
     SolHandler *handlers;
     size_t handler_count;
@@ -93,6 +114,11 @@ void sol_type_table_free(SolTypeTable *table);
 const SolTypeApplication *sol_type_application(
     const SolTypeTable *table,
     SolType type
+);
+bool sol_type_provenance(
+    const SolTypeTable *table,
+    SolProvenanceId id,
+    SolProvenance *provenance
 );
 bool sol_type_check(
     const SolSource *source,

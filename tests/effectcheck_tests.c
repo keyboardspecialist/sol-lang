@@ -134,6 +134,28 @@ static bool row_has_parameter_effect(
     return false;
 }
 
+static bool provenance_equals(
+    const SolTypeTable *types,
+    SolProvenanceId id,
+    const SolParameterId *roots,
+    size_t count
+) {
+    SolProvenance provenance;
+    return sol_type_provenance(types, id, &provenance)
+        && provenance.count == count
+        && memcmp(provenance.roots, roots, count * sizeof(*roots)) == 0;
+}
+
+static SolProvenanceId singleton_provenance(
+    const SolTypeTable *types,
+    SolParameterId root
+) {
+    for (SolProvenanceId id = 0; id < types->provenance_count; ++id) {
+        if (provenance_equals(types, id, &root, 1)) return id;
+    }
+    return SOL_PROVENANCE_NONE;
+}
+
 static void test_private_pure_inference(void) {
     static const char text[] =
         "module private_pure\n"
@@ -341,10 +363,25 @@ static void test_recursive_substitution_diagnostic_deduplication(void) {
         "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
-    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-003") == 1);
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
     CHECK(compilation.effects.functions[3].inferred);
-    CHECK(compilation.effects.functions[3].count == 1);
+    CHECK(compilation.effects.functions[3].count == 3);
     CHECK(row_has_effect(&compilation, &compilation.effects.functions[3], "service.read"));
+    SolParameterId parameter = compilation.syntax.items[3].first_parameter;
+    SolParameterId first = compilation.syntax.parameters[parameter].next;
+    SolParameterId second = compilation.syntax.parameters[first].next;
+    CHECK(row_has_parameter_effect(
+        &compilation,
+        &compilation.effects.functions[3],
+        "clock.read",
+        first
+    ));
+    CHECK(row_has_parameter_effect(
+        &compilation,
+        &compilation.effects.functions[3],
+        "clock.read",
+        second
+    ));
     free_compilation(&compilation);
 }
 
@@ -581,6 +618,69 @@ static void test_computed_effect_argument(void) {
     free_compilation(&compilation);
 }
 
+static void test_mixed_authority_effect_expansion(void) {
+    static const char text[] =
+        "module mixed_authority_effects\n"
+        "capability Restricted {\n"
+        "    function now() -> Int64 effects { clock.read<Self> }\n"
+        "}\n"
+        "capability Clock {\n"
+        "    function now() -> Int64 effects { clock.read<Self> }\n"
+        "    function restrict() -> capability Restricted\n"
+        "    authority { result derives_from Self } effects { pure }\n"
+        "}\n"
+        "function helper(clock: capability Clock) -> Int64\n"
+        "effects { clock.read<clock> clock.observe<clock> } { return clock.now() }\n"
+        "function pass(clock: capability Clock) -> capability Clock\n"
+        "authority { result derives_from clock } effects { pure } { return clock }\n"
+        "function inferred(\n"
+        "    flag: Bool, first: capability Clock, second: capability Clock,\n"
+        ") -> Int64 {\n"
+        "    let selected = if flag { first } else { second }\n"
+        "    let operation = match flag { true => first.now false => second.now }\n"
+        "    return helper(selected) + operation() + pass(selected).now()\n"
+        "}\n"
+        "function explicit(\n"
+        "    flag: Bool, first: capability Clock, second: capability Clock,\n"
+        ") -> Int64 effects {\n"
+        "    clock.read<first> clock.read<second>\n"
+        "    clock.observe<first> clock.observe<second>\n"
+        "} { return helper(if flag { first } else { second }) }\n"
+        "function omitted(\n"
+        "    flag: Bool, first: capability Clock, second: capability Clock,\n"
+        ") -> Int64 effects { clock.read<first> clock.observe<first> } {\n"
+        "    return helper(match flag { true => first false => second })\n"
+        "}\n"
+        "function wrapped(\n"
+        "    flag: Bool, first: capability Clock, second: capability Clock,\n"
+        ") -> Int64 {\n"
+        "    let restricted = (if flag { first } else { second }).restrict()\n"
+        "    return restricted.now()\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-002") == 2);
+    const SolEffectRow *inferred = &compilation.effects.functions[4];
+    SolParameterId parameter = compilation.syntax.items[4].first_parameter;
+    SolParameterId first = compilation.syntax.parameters[parameter].next;
+    SolParameterId second = compilation.syntax.parameters[first].next;
+    CHECK(inferred->inferred);
+    CHECK(inferred->count == 4);
+    CHECK(row_has_parameter_effect(&compilation, inferred, "clock.read", first));
+    CHECK(row_has_parameter_effect(&compilation, inferred, "clock.read", second));
+    CHECK(row_has_parameter_effect(&compilation, inferred, "clock.observe", first));
+    CHECK(row_has_parameter_effect(&compilation, inferred, "clock.observe", second));
+    const SolEffectRow *wrapped = &compilation.effects.functions[7];
+    parameter = compilation.syntax.items[7].first_parameter;
+    first = compilation.syntax.parameters[parameter].next;
+    second = compilation.syntax.parameters[first].next;
+    CHECK(wrapped->inferred);
+    CHECK(wrapped->count == 2);
+    CHECK(row_has_parameter_effect(&compilation, wrapped, "clock.read", first));
+    CHECK(row_has_parameter_effect(&compilation, wrapped, "clock.read", second));
+    free_compilation(&compilation);
+}
+
 static void test_missing_capability_operation_effects(void) {
     static const char text[] =
         "module missing_capability_effects\n"
@@ -660,7 +760,7 @@ static void test_malformed_capability_arena_rejected(void) {
         &compilation.diagnostics
     ));
     compilation.syntax.parameters = parameters;
-    SolParameterId *origins = compilation.types.local_capability_origins;
+    SolProvenanceId *origins = compilation.types.local_capability_origins;
     compilation.types.local_capability_origins = NULL;
     CHECK(!sol_effect_check(
         &compilation.source,
@@ -672,7 +772,7 @@ static void test_malformed_capability_arena_rejected(void) {
     ));
     compilation.types.local_capability_origins = origins;
     CHECK(origins != NULL);
-    SolParameterId *expression_capability_origins
+    SolProvenanceId *expression_capability_origins
         = compilation.types.expression_capability_origins;
     compilation.types.expression_capability_origins = NULL;
     CHECK(!sol_effect_check(
@@ -691,8 +791,8 @@ static void test_malformed_capability_arena_rejected(void) {
         }
         CHECK(binding != SOL_AST_NONE);
         if (binding != SOL_AST_NONE) {
-            SolParameterId origin = origins[binding];
-            origins[binding] = compilation.syntax.parameter_count;
+            SolProvenanceId origin = origins[binding];
+            origins[binding] = compilation.types.provenance_count;
             CHECK(!sol_effect_check(
                 &compilation.source,
                 &compilation.syntax,
@@ -704,7 +804,7 @@ static void test_malformed_capability_arena_rejected(void) {
             SolParameterId first = compilation.syntax.items[1].first_parameter;
             SolParameterId second = compilation.syntax.parameters[first].next;
             second = compilation.syntax.parameters[second].next;
-            origins[binding] = second;
+            origins[binding] = singleton_provenance(&compilation.types, second);
             CHECK(!sol_effect_check(
                 &compilation.source,
                 &compilation.syntax,
@@ -716,7 +816,7 @@ static void test_malformed_capability_arena_rejected(void) {
             origins[binding] = origin;
         }
     }
-    SolParameterId *expression_operation_origins
+    SolProvenanceId *expression_operation_origins
         = compilation.types.expression_operation_origins;
     compilation.types.expression_operation_origins = NULL;
     CHECK(!sol_effect_check(
@@ -728,7 +828,7 @@ static void test_malformed_capability_arena_rejected(void) {
         &compilation.diagnostics
     ));
     compilation.types.expression_operation_origins = expression_operation_origins;
-    SolParameterId *local_operation_origins = compilation.types.local_operation_origins;
+    SolProvenanceId *local_operation_origins = compilation.types.local_operation_origins;
     compilation.types.local_operation_origins = NULL;
     CHECK(!sol_effect_check(
         &compilation.source,
@@ -743,6 +843,14 @@ static void test_malformed_capability_arena_rejected(void) {
     SolParameterId first_capability = compilation.syntax.parameters[first_parameter].next;
     SolParameterId second_capability
         = compilation.syntax.parameters[first_capability].next;
+    SolProvenanceId first_provenance = singleton_provenance(
+        &compilation.types,
+        first_capability
+    );
+    SolProvenanceId second_provenance = singleton_provenance(
+        &compilation.types,
+        second_capability
+    );
     SolExprKind capability_kinds[] = {
         SOL_EXPR_PATH,
         SOL_EXPR_BLOCK,
@@ -753,14 +861,14 @@ static void test_malformed_capability_arena_rejected(void) {
         SolExprId target = SOL_AST_NONE;
         for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
             if (compilation.syntax.expressions[index].kind == capability_kinds[kind]
-                && expression_capability_origins[index] == first_capability) {
+                && expression_capability_origins[index] == first_provenance) {
                 target = index;
                 break;
             }
         }
         CHECK(target != SOL_AST_NONE);
         if (target != SOL_AST_NONE) {
-            expression_capability_origins[target] = second_capability;
+            expression_capability_origins[target] = second_provenance;
             CHECK(!sol_effect_check(
                 &compilation.source,
                 &compilation.syntax,
@@ -769,7 +877,7 @@ static void test_malformed_capability_arena_rejected(void) {
                 &compilation.effects,
                 &compilation.diagnostics
             ));
-            expression_capability_origins[target] = first_capability;
+            expression_capability_origins[target] = first_provenance;
         }
     }
     SolExprKind operation_kinds[] = {
@@ -783,14 +891,14 @@ static void test_malformed_capability_arena_rejected(void) {
         SolExprId target = SOL_AST_NONE;
         for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
             if (compilation.syntax.expressions[index].kind == operation_kinds[kind]
-                && expression_operation_origins[index] == first_capability) {
+                && expression_operation_origins[index] == first_provenance) {
                 target = index;
                 break;
             }
         }
         CHECK(target != SOL_AST_NONE);
         if (target != SOL_AST_NONE) {
-            expression_operation_origins[target] = second_capability;
+            expression_operation_origins[target] = second_provenance;
             CHECK(!sol_effect_check(
                 &compilation.source,
                 &compilation.syntax,
@@ -799,7 +907,7 @@ static void test_malformed_capability_arena_rejected(void) {
                 &compilation.effects,
                 &compilation.diagnostics
             ));
-            expression_operation_origins[target] = first_capability;
+            expression_operation_origins[target] = first_provenance;
         }
     }
     SolLocalId operation_local = SOL_AST_NONE;
@@ -810,11 +918,12 @@ static void test_malformed_capability_arena_rejected(void) {
     }
     CHECK(operation_local != SOL_AST_NONE);
     if (operation_local != SOL_AST_NONE) {
-        SolParameterId origin = local_operation_origins[operation_local];
+        SolProvenanceId origin = local_operation_origins[operation_local];
         SolParameterId first = compilation.syntax.items[1].first_parameter;
         SolParameterId second = compilation.syntax.parameters[first].next;
         second = compilation.syntax.parameters[second].next;
-        local_operation_origins[operation_local] = second;
+        local_operation_origins[operation_local]
+            = singleton_provenance(&compilation.types, second);
         CHECK(!sol_effect_check(
             &compilation.source,
             &compilation.syntax,
@@ -1011,6 +1120,38 @@ static void test_contract_effect_firewall(void) {
     free_compilation(&compilation);
 }
 
+static void test_contract_result_provenance(void) {
+    static const char text[] =
+        "module contract_result_provenance\n"
+        "capability Clock {}\n"
+        "function keep(clock: capability Clock) -> capability Clock\n"
+        "authority { result derives_from clock }\n"
+        "effects { pure }\n"
+        "ensures { result == clock }\n"
+        "{ return clock }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolParameterId root = compilation.syntax.items[1].first_parameter;
+    bool found = false;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        if (compilation.syntax.expressions[index].kind == SOL_EXPR_RESULT) {
+            CHECK(provenance_equals(
+                &compilation.types,
+                compilation.types.expression_capability_origins[index],
+                &root,
+                1
+            ));
+            found = true;
+        }
+    }
+    CHECK(found);
+    free_compilation(&compilation);
+}
+
 static void test_forged_self_local_provenance_rejected(void) {
     static const char text[] =
         "module forged_self_local\n"
@@ -1037,8 +1178,18 @@ static void test_forged_self_local_provenance_rejected(void) {
             = compilation.syntax.statements[statement].as.let_statement.value;
         SolResolution resolution = compilation.hir.resolutions[initializer];
         SolParameterId parameter = compilation.syntax.items[1].first_parameter;
-        CHECK(compilation.types.local_capability_origins[binding] == parameter);
-        CHECK(compilation.types.expression_capability_origins[initializer] == parameter);
+        CHECK(provenance_equals(
+            &compilation.types,
+            compilation.types.local_capability_origins[binding],
+            &parameter,
+            1
+        ));
+        CHECK(provenance_equals(
+            &compilation.types,
+            compilation.types.expression_capability_origins[initializer],
+            &parameter,
+            1
+        ));
         compilation.hir.resolutions[initializer] = (SolResolution){
             .kind = SOL_RESOLUTION_LOCAL,
             .target = binding,
@@ -1287,7 +1438,12 @@ static void test_restricted_capability_return_authority(void) {
         if (compilation.syntax.expressions[index].kind == SOL_EXPR_CALL
             && compilation.types.expressions[index].kind == SOL_TYPE_NOMINAL
             && compilation.types.expressions[index].definition == 0) {
-            if (compilation.types.expression_capability_origins[index] == root) {
+            if (provenance_equals(
+                &compilation.types,
+                compilation.types.expression_capability_origins[index],
+                &root,
+                1
+            )) {
                 found_restricted_call = true;
             }
         }
@@ -1324,7 +1480,12 @@ static void test_derived_capability_wrapper(void) {
         if (compilation.syntax.expressions[index].kind == SOL_EXPR_RECORD
             && compilation.types.expressions[index].kind == SOL_TYPE_NOMINAL
             && compilation.types.expressions[index].definition == 1) {
-            CHECK(compilation.types.expression_capability_origins[index] == root);
+            CHECK(provenance_equals(
+                &compilation.types,
+                compilation.types.expression_capability_origins[index],
+                &root,
+                1
+            ));
             found_wrapper = true;
         }
     }
@@ -1438,6 +1599,173 @@ static void test_exact_effect_handlers(void) {
     free_compilation(&compilation);
 }
 
+static void test_mixed_handler_boundary(void) {
+    static const char safe_text[] =
+        "module mixed_handler_boundary\n"
+        "capability Clock { function read() -> Int64 effects { clock.read<Self> } }\n"
+        "capability TestClock { function read() -> Int64 effects { pure } }\n"
+        "function safe_provider(\n"
+        "    flag: Bool, clock: capability Clock,\n"
+        "    first: capability TestClock, second: capability TestClock,\n"
+        ") -> Int64 {\n"
+        "    return handle clock.read<clock> with if flag { first } else { second } {\n"
+        "        clock.read()\n"
+        "    }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, safe_text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.effects.functions[2].inferred);
+    CHECK(compilation.effects.functions[2].count == 0);
+    free_compilation(&compilation);
+
+    static const char dynamic_text[] =
+        "module dynamic_handler_target\n"
+        "capability Clock { function read() -> Int64 effects { clock.read<Self> } }\n"
+        "capability TestClock { function read() -> Int64 effects { pure } }\n"
+        "function dynamic_target(\n"
+        "    flag: Bool, first: capability Clock, second: capability Clock,\n"
+        "    provider: capability TestClock,\n"
+        ") -> Int64 {\n"
+        "    return handle clock.read<if flag { first } else { second }> with provider { 1 }\n"
+        "}\n";
+    CHECK(!compile_source(&compilation, dynamic_text));
+    CHECK(diagnostic_count(&compilation, "SOL-HANDLER-001") == 1);
+    bool specific = false;
+    for (size_t index = 0; index < compilation.diagnostics.count; ++index) {
+        specific = specific || strstr(
+            compilation.diagnostics.items[index].message,
+            "dynamic authority matching is unsupported"
+        ) != NULL;
+    }
+    CHECK(specific);
+    free_compilation(&compilation);
+}
+
+static void test_malformed_provenance_sets_rejected(void) {
+    static const char text[] =
+        "module malformed_provenance_sets\n"
+        "capability Restricted { function now() -> Int64 effects { pure } }\n"
+        "capability Clock {\n"
+        "    function now() -> Int64 effects { pure }\n"
+        "    function restrict() -> capability Restricted\n"
+        "    authority { result derives_from Self } effects { pure }\n"
+        "}\n"
+        "capability Wrapped derives_from source: capability Clock {}\n"
+        "function mixed(flag: Bool, first: capability Clock, second: capability Clock)\n"
+        "-> Int64 effects { pure } {\n"
+        "    let selected = if flag { first } else { second }\n"
+        "    let restricted = selected.restrict()\n"
+        "    let wrapped = Wrapped { source = selected }\n"
+        "    return restricted.now()\n"
+        "}\n"
+        "function foreign(clock: capability Clock) -> Int64 effects { pure } { return 1 }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    sol_effect_table_free(&compilation.effects);
+    SolProvenanceId mixed = SOL_PROVENANCE_NONE;
+    for (SolProvenanceId id = 0; id < compilation.types.provenance_count; ++id) {
+        SolProvenance provenance;
+        if (sol_type_provenance(&compilation.types, id, &provenance)
+            && provenance.count == 2) mixed = id;
+    }
+    CHECK(mixed != SOL_PROVENANCE_NONE);
+    if (mixed != SOL_PROVENANCE_NONE) {
+        SolExprId join = SOL_AST_NONE;
+        for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+            if (compilation.syntax.expressions[index].kind == SOL_EXPR_IF) join = index;
+        }
+        CHECK(join != SOL_AST_NONE);
+        if (join != SOL_AST_NONE) {
+            SolExprId branch = compilation.syntax.expressions[
+                join
+            ].as.if_expr.then_branch;
+            SolType type = compilation.types.expressions[branch];
+            compilation.types.expressions[branch] = (SolType){.kind = SOL_TYPE_UNKNOWN};
+            CHECK(!sol_effect_check(
+                &compilation.source,
+                &compilation.syntax,
+                &compilation.hir,
+                &compilation.types,
+                &compilation.effects,
+                &compilation.diagnostics
+            ));
+            compilation.types.expressions[branch] = type;
+        }
+        SolProvenanceSet *set = &compilation.types.provenances[mixed];
+        SolParameterId *roots
+            = compilation.types.provenance_roots + set->root_offset;
+        SolParameterId first = roots[0];
+        SolParameterId second = roots[1];
+        SolProvenanceId singleton = singleton_provenance(&compilation.types, first);
+        for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+            SolExprKind kind = compilation.syntax.expressions[index].kind;
+            if ((kind != SOL_EXPR_CALL && kind != SOL_EXPR_RECORD)
+                || compilation.types.expression_capability_origins[index] != mixed) {
+                continue;
+            }
+            compilation.types.expression_capability_origins[index] = singleton;
+            CHECK(!sol_effect_check(
+                &compilation.source,
+                &compilation.syntax,
+                &compilation.hir,
+                &compilation.types,
+                &compilation.effects,
+                &compilation.diagnostics
+            ));
+            compilation.types.expression_capability_origins[index] = mixed;
+        }
+        roots[0] = second;
+        roots[1] = first;
+        CHECK(!sol_effect_check(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.diagnostics
+        ));
+        roots[0] = first;
+        roots[1] = first;
+        CHECK(!sol_effect_check(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.diagnostics
+        ));
+        roots[1] = compilation.syntax.items[4].first_parameter;
+        CHECK(!sol_effect_check(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.diagnostics
+        ));
+        roots[1] = second;
+        size_t count = set->root_count;
+        set->root_count = 0;
+        SolProvenance invalid;
+        CHECK(!sol_type_provenance(&compilation.types, mixed, &invalid));
+        CHECK(!sol_effect_check(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.diagnostics
+        ));
+        set->root_count = count;
+    }
+    free_compilation(&compilation);
+}
+
 static void test_handler_provider_constraints(void) {
     static const char text[] =
         "module handler_provider_constraints\n"
@@ -1510,12 +1838,14 @@ int main(void) {
     test_function_effect_parameter_substitution();
     test_exact_function_alias_effects();
     test_computed_effect_argument();
+    test_mixed_authority_effect_expansion();
     test_missing_capability_operation_effects();
     test_invalid_capability_effect_row();
     test_malformed_capability_arena_rejected();
     test_orphan_expression_children_rejected();
     test_expression_cycle_rejected();
     test_contract_effect_firewall();
+    test_contract_result_provenance();
     test_forged_self_local_provenance_rejected();
     test_nonempty_effect_table_rejected();
     test_function_type_effects_are_not_performed();
@@ -1528,8 +1858,10 @@ int main(void) {
     test_derived_capability_wrapper();
     test_derived_capability_body_effect_checked();
     test_exact_effect_handlers();
+    test_mixed_handler_boundary();
     test_handler_provider_constraints();
     test_forged_handler_metadata_rejected();
+    test_malformed_provenance_sets_rejected();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;

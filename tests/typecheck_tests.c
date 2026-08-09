@@ -94,6 +94,18 @@ static size_t diagnostic_count(const TestCompilation *compilation, const char *c
     return count;
 }
 
+static bool provenance_equals(
+    const SolTypeTable *types,
+    SolProvenanceId id,
+    const SolParameterId *roots,
+    size_t count
+) {
+    SolProvenance provenance;
+    return sol_type_provenance(types, id, &provenance)
+        && provenance.count == count
+        && memcmp(provenance.roots, roots, count * sizeof(*roots)) == 0;
+}
+
 static void test_valid_types(void) {
     static const char text[] =
         "module valid_types\n"
@@ -475,11 +487,21 @@ static void test_capability_operation_calls(void) {
     for (size_t index = 0; index < compilation.hir.local_count; ++index) {
         if (compilation.hir.locals[index].owner == 1) {
             if (compilation.types.local_capability_origins[index] != SOL_AST_NONE) {
-                CHECK(compilation.types.local_capability_origins[index] == origin);
+                CHECK(provenance_equals(
+                    &compilation.types,
+                    compilation.types.local_capability_origins[index],
+                    &origin,
+                    1
+                ));
                 ++capability_locals;
             }
             if (compilation.types.local_operation_origins[index] != SOL_AST_NONE) {
-                CHECK(compilation.types.local_operation_origins[index] == origin);
+                CHECK(provenance_equals(
+                    &compilation.types,
+                    compilation.types.local_operation_origins[index],
+                    &origin,
+                    1
+                ));
                 ++operation_locals;
             }
         }
@@ -561,8 +583,28 @@ static void test_mixed_computed_capability_provenance(void) {
         "-> Int64 { return (if flag { first } else { second }).offset(1) }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, capability_text));
-    CHECK(diagnostic_count(&compilation, "SOL-TYPE-015") == 1);
-    CHECK(compilation.diagnostics.count == 1);
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolParameterId first = compilation.syntax.parameters[
+        compilation.syntax.items[1].first_parameter
+    ].next;
+    SolParameterId roots[] = {
+        first,
+        compilation.syntax.parameters[first].next,
+    };
+    bool found_mixed = false;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        if (compilation.syntax.expressions[index].kind == SOL_EXPR_IF
+            && compilation.types.expressions[index].kind == SOL_TYPE_NOMINAL) {
+            CHECK(provenance_equals(
+                &compilation.types,
+                compilation.types.expression_capability_origins[index],
+                roots,
+                2
+            ));
+            found_mixed = true;
+        }
+    }
+    CHECK(found_mixed);
     free_compilation(&compilation);
 
     static const char operation_text[] =
@@ -571,8 +613,65 @@ static void test_mixed_computed_capability_provenance(void) {
         "function mixed(flag: Bool, first: capability Clock, second: capability Clock)\n"
         "-> Int64 { return (if flag { first.offset } else { second.offset })(1) }\n";
     CHECK(compile_source(&compilation, operation_text));
-    CHECK(diagnostic_count(&compilation, "SOL-TYPE-015") == 1);
-    CHECK(compilation.diagnostics.count == 1);
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    first = compilation.syntax.parameters[compilation.syntax.items[1].first_parameter].next;
+    roots[0] = first;
+    roots[1] = compilation.syntax.parameters[first].next;
+    found_mixed = false;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        if (compilation.syntax.expressions[index].kind == SOL_EXPR_IF
+            && compilation.types.expressions[index].kind
+                == SOL_TYPE_CAPABILITY_OPERATION) {
+            CHECK(provenance_equals(
+                &compilation.types,
+                compilation.types.expression_operation_origins[index],
+                roots,
+                2
+            ));
+            found_mixed = true;
+        }
+    }
+    CHECK(found_mixed);
+    free_compilation(&compilation);
+}
+
+static void test_mixed_match_alias_and_never_provenance(void) {
+    static const char text[] =
+        "module mixed_match_provenance\n"
+        "enum Empty {}\n"
+        "capability Clock { function now() -> Int64 effects { pure } }\n"
+        "function sample(\n"
+        "    flag: Bool, impossible: Empty,\n"
+        "    first: capability Clock, second: capability Clock,\n"
+        ") -> Int64 {\n"
+        "    let selected = match flag { true => first false => second }\n"
+        "    let operation = match flag { true => selected.now false => first.now }\n"
+        "    let reachable = if flag { match impossible {} } else { selected }\n"
+        "    return operation() + reachable.now()\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolParameterId parameter = compilation.syntax.items[2].first_parameter;
+    parameter = compilation.syntax.parameters[parameter].next;
+    SolParameterId roots[] = {
+        compilation.syntax.parameters[parameter].next,
+        compilation.syntax.parameters[
+            compilation.syntax.parameters[parameter].next
+        ].next,
+    };
+    size_t mixed = 0;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        SolProvenanceId id = compilation.types.expressions[index].kind
+                == SOL_TYPE_CAPABILITY_OPERATION
+            ? compilation.types.expression_operation_origins[index]
+            : compilation.types.expression_capability_origins[index];
+        if (provenance_equals(&compilation.types, id, roots, 2)) ++mixed;
+    }
+    CHECK(mixed >= 5);
     free_compilation(&compilation);
 }
 
@@ -684,6 +783,18 @@ static void test_invalid_return_authority_contract(void) {
     CHECK(compile_source(&compilation, text));
     CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
     free_compilation(&compilation);
+
+    static const char mixed_text[] =
+        "module mixed_return_authority\n"
+        "capability Root {}\n"
+        "function choose(\n"
+        "    flag: Bool, claimed: capability Root, other: capability Root,\n"
+        ") -> capability Root\n"
+        "authority { result derives_from claimed }\n"
+        "effects { pure } { return if flag { claimed } else { other } }\n";
+    CHECK(compile_source(&compilation, mixed_text));
+    CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
+    free_compilation(&compilation);
 }
 
 static void test_invalid_derived_capabilities(void) {
@@ -737,8 +848,9 @@ static void test_handler_types_and_metadata(void) {
         "capability TestClock { function read(delta: Int64) -> Int64 effects { pure } }\n"
         "function handled(\n"
         "    choose: Bool, clock: capability Clock, provider: capability TestClock,\n"
+        "    other_provider: capability TestClock,\n"
         ") -> Text {\n"
-        "    let selected = if choose { provider } else { provider }\n"
+        "    let selected = if choose { provider } else { other_provider }\n"
         "    return handle clock.read<clock> with selected { clock.read(1) \"handled\" }\n"
         "}\n";
     TestCompilation compilation;
@@ -790,11 +902,27 @@ static void test_invalid_handlers(void) {
         "}\n"
         "function impure(authority: capability Impure, provider: capability Impure) -> Int64 {\n"
         "    return handle service.read<authority> with provider { 1 }\n"
+        "}\n"
+        "function dynamic(\n"
+        "    flag: Bool, first: capability Impure, second: capability Impure,\n"
+        "    provider: capability Wrong,\n"
+        ") -> Int64 {\n"
+        "    return handle service.read<first> with provider {\n"
+        "        handle service.read<if flag { first } else { second }> with provider { 1 }\n"
+        "    }\n"
         "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
     CHECK(has_diagnostic(&compilation, "SOL-HANDLER-001"));
     CHECK(diagnostic_count(&compilation, "SOL-HANDLER-001") >= 5);
+    bool found_dynamic = false;
+    for (size_t index = 0; index < compilation.diagnostics.count; ++index) {
+        found_dynamic = found_dynamic || strstr(
+            compilation.diagnostics.items[index].message,
+            "dynamic authority matching is unsupported"
+        ) != NULL;
+    }
+    CHECK(found_dynamic);
     free_compilation(&compilation);
 }
 
@@ -860,6 +988,7 @@ int main(void) {
     test_invalid_capability_operations();
     test_computed_capability_provenance();
     test_mixed_computed_capability_provenance();
+    test_mixed_match_alias_and_never_provenance();
     test_invalid_capability_declarations();
     test_general_function_types();
     test_invalid_general_function_types();

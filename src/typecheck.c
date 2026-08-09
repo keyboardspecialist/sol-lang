@@ -506,6 +506,8 @@ void sol_type_table_free(SolTypeTable *table) {
     }
     free(table->function_types);
     free(table->function_coercions);
+    free(table->provenances);
+    free(table->provenance_roots);
     free(table->handlers);
     memset(table, 0, sizeof(*table));
 }
@@ -519,6 +521,176 @@ const SolTypeApplication *sol_type_application(
         return NULL;
     }
     return &table->type_applications[type.definition];
+}
+
+bool sol_type_provenance(
+    const SolTypeTable *table,
+    SolProvenanceId id,
+    SolProvenance *provenance
+) {
+    if (provenance != NULL) *provenance = (SolProvenance){0};
+    if (table == NULL || provenance == NULL
+        || table->provenance_count > table->provenance_capacity
+        || table->provenance_root_count > table->provenance_root_capacity
+        || table->provenance_root_count > SIZE_MAX / sizeof(*table->provenance_roots)
+        || id >= table->provenance_count || table->provenances == NULL
+        || table->provenance_roots == NULL) {
+        return false;
+    }
+    SolProvenanceSet set = table->provenances[id];
+    if (set.root_count == 0 || set.root_offset > table->provenance_root_count
+        || set.root_count > table->provenance_root_count - set.root_offset) {
+        return false;
+    }
+    provenance->roots = table->provenance_roots + set.root_offset;
+    provenance->count = set.root_count;
+    return true;
+}
+
+static SolProvenanceId sol_type_intern_provenance(
+    SolTypeChecker *checker,
+    const SolParameterId *roots,
+    size_t count
+) {
+    if (count == 0 || roots == NULL) return SOL_PROVENANCE_NONE;
+    for (size_t index = 0; index < checker->types->provenance_count; ++index) {
+        SolProvenance existing;
+        if (!sol_type_provenance(checker->types, index, &existing)) {
+            sol_type_malformed(checker);
+            return SOL_PROVENANCE_NONE;
+        }
+        if (existing.count == count
+            && memcmp(existing.roots, roots, count * sizeof(*roots)) == 0) {
+            return index;
+        }
+    }
+    SolTypeTable *table = checker->types;
+    if (table->provenance_count == table->provenance_capacity) {
+        size_t capacity = table->provenance_capacity == 0
+            ? 8
+            : table->provenance_capacity * 2;
+        if (capacity < table->provenance_capacity
+            || capacity > SIZE_MAX / sizeof(*table->provenances)) {
+            checker->allocation_failed = true;
+            return SOL_PROVENANCE_NONE;
+        }
+        SolProvenanceSet *grown = realloc(
+            table->provenances,
+            capacity * sizeof(*table->provenances)
+        );
+        if (grown == NULL) {
+            checker->allocation_failed = true;
+            return SOL_PROVENANCE_NONE;
+        }
+        table->provenances = grown;
+        table->provenance_capacity = capacity;
+    }
+    if (count > SIZE_MAX - table->provenance_root_count) {
+        checker->allocation_failed = true;
+        return SOL_PROVENANCE_NONE;
+    }
+    size_t required = table->provenance_root_count + count;
+    if (required > table->provenance_root_capacity) {
+        size_t capacity = table->provenance_root_capacity == 0
+            ? 8
+            : table->provenance_root_capacity;
+        while (capacity < required) {
+            if (capacity > SIZE_MAX / 2) {
+                checker->allocation_failed = true;
+                return SOL_PROVENANCE_NONE;
+            }
+            capacity *= 2;
+        }
+        if (capacity > SIZE_MAX / sizeof(*table->provenance_roots)) {
+            checker->allocation_failed = true;
+            return SOL_PROVENANCE_NONE;
+        }
+        SolParameterId *grown = realloc(
+            table->provenance_roots,
+            capacity * sizeof(*table->provenance_roots)
+        );
+        if (grown == NULL) {
+            checker->allocation_failed = true;
+            return SOL_PROVENANCE_NONE;
+        }
+        table->provenance_roots = grown;
+        table->provenance_root_capacity = capacity;
+    }
+    SolProvenanceId id = table->provenance_count++;
+    table->provenances[id] = (SolProvenanceSet){
+        .root_offset = table->provenance_root_count,
+        .root_count = count,
+    };
+    memcpy(
+        table->provenance_roots + table->provenance_root_count,
+        roots,
+        count * sizeof(*roots)
+    );
+    table->provenance_root_count = required;
+    return id;
+}
+
+static SolProvenanceId sol_type_singleton_provenance(
+    SolTypeChecker *checker,
+    SolParameterId root
+) {
+    return root == SOL_AST_NONE
+        ? SOL_PROVENANCE_NONE
+        : sol_type_intern_provenance(checker, &root, 1);
+}
+
+static bool sol_type_provenance_is_singleton(
+    const SolTypeTable *table,
+    SolProvenanceId id,
+    SolParameterId root
+) {
+    SolProvenance provenance;
+    return sol_type_provenance(table, id, &provenance)
+        && provenance.count == 1 && provenance.roots[0] == root;
+}
+
+static SolProvenanceId sol_type_union_provenance(
+    SolTypeChecker *checker,
+    SolProvenanceId left_id,
+    SolProvenanceId right_id
+) {
+    SolProvenance left;
+    SolProvenance right;
+    if (!sol_type_provenance(checker->types, left_id, &left)
+        || !sol_type_provenance(checker->types, right_id, &right)
+        || left.count > SIZE_MAX - right.count
+        || left.count + right.count > SIZE_MAX / sizeof(SolParameterId)) {
+        if (left_id != SOL_PROVENANCE_NONE && right_id != SOL_PROVENANCE_NONE) {
+            sol_type_malformed(checker);
+        }
+        return SOL_PROVENANCE_NONE;
+    }
+    size_t capacity = left.count + right.count;
+    SolParameterId *roots = malloc(capacity * sizeof(*roots));
+    if (roots == NULL) {
+        checker->allocation_failed = true;
+        return SOL_PROVENANCE_NONE;
+    }
+    size_t left_index = 0;
+    size_t right_index = 0;
+    size_t count = 0;
+    while (left_index < left.count || right_index < right.count) {
+        SolParameterId root;
+        if (right_index == right.count
+            || (left_index < left.count && left.roots[left_index] < right.roots[right_index])) {
+            root = left.roots[left_index++];
+        } else if (left_index == left.count
+            || right.roots[right_index] < left.roots[left_index]) {
+            root = right.roots[right_index++];
+        } else {
+            root = left.roots[left_index++];
+            ++right_index;
+        }
+        roots[count++] = root;
+    }
+    SolProvenanceId result = sol_type_intern_provenance(checker, roots, count);
+    free(roots);
+    return result;
 }
 
 static bool sol_type_span_equal(const SolSource *source, SolSpan span, const char *text) {
@@ -1215,8 +1387,8 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     checker->types->declared_type_count = checker->syntax->type_count;
     checker->types->handler_count = expression_count;
     for (size_t index = 0; index < expression_count; ++index) {
-        checker->types->expression_capability_origins[index] = SOL_AST_NONE;
-        checker->types->expression_operation_origins[index] = SOL_AST_NONE;
+        checker->types->expression_capability_origins[index] = SOL_PROVENANCE_NONE;
+        checker->types->expression_operation_origins[index] = SOL_PROVENANCE_NONE;
         checker->types->handlers[index] = (SolHandler){
             .source_member = SOL_AST_NONE,
             .provider_member = SOL_AST_NONE,
@@ -1224,8 +1396,8 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         };
     }
     for (size_t index = 0; index < local_count; ++index) {
-        checker->types->local_capability_origins[index] = SOL_AST_NONE;
-        checker->types->local_operation_origins[index] = SOL_AST_NONE;
+        checker->types->local_capability_origins[index] = SOL_PROVENANCE_NONE;
+        checker->types->local_operation_origins[index] = SOL_PROVENANCE_NONE;
     }
     return true;
 }
@@ -1275,36 +1447,36 @@ static bool sol_type_is_capability(SolTypeChecker *checker, SolType type) {
         && checker->syntax->items[type.definition].kind == SOL_ITEM_CAPABILITY;
 }
 
-static SolParameterId sol_type_path_origin(
+static SolProvenanceId sol_type_path_origin(
     SolTypeChecker *checker,
     SolExprId expression_id,
-    const SolParameterId *local_origins
+    const SolProvenanceId *local_origins
 ) {
     if (expression_id >= checker->syntax->expression_count) {
         sol_type_malformed(checker);
-        return SOL_AST_NONE;
+        return SOL_PROVENANCE_NONE;
     }
     const SolExpr *expression = &checker->syntax->expressions[expression_id];
     SolResolution resolution = checker->hir->resolutions[expression_id];
     if (expression->kind != SOL_EXPR_PATH
         || resolution.kind != SOL_RESOLUTION_LOCAL
         || resolution.target >= checker->hir->local_count) {
-        return SOL_AST_NONE;
+        return SOL_PROVENANCE_NONE;
     }
     const SolHirLocal *local = &checker->hir->locals[resolution.target];
     if (local->owner != checker->current_definition
         || resolution.target >= checker->types->local_count) {
-        return SOL_AST_NONE;
+        return SOL_PROVENANCE_NONE;
     }
     return local_origins[resolution.target];
 }
 
-static SolParameterId sol_type_block_origin(
+static SolProvenanceId sol_type_block_origin(
     SolTypeChecker *checker,
     const SolExpr *block,
-    const SolParameterId *expression_origins
+    const SolProvenanceId *expression_origins
 ) {
-    SolParameterId result = SOL_AST_NONE;
+    SolProvenanceId result = SOL_PROVENANCE_NONE;
     bool terminated = false;
     SolStatementId statement_id = block->as.block.first_statement;
     size_t traversed = 0;
@@ -1321,7 +1493,7 @@ static SolParameterId sol_type_block_origin(
                 && value.kind != SOL_TYPE_ERROR) {
                 result = expression_origins[value_id];
             } else {
-                result = SOL_AST_NONE;
+                result = SOL_PROVENANCE_NONE;
             }
             terminated = statement->kind == SOL_STATEMENT_RETURN
                 || value.kind == SOL_TYPE_NEVER;
@@ -1334,15 +1506,15 @@ static SolParameterId sol_type_block_origin(
 static bool sol_type_join_origin(
     SolTypeChecker *checker,
     SolExprId value_id,
-    const SolParameterId *expression_origins,
-    SolParameterId *origin,
+    const SolProvenanceId *expression_origins,
+    SolProvenanceId *origin,
     bool *have_value
 ) {
     SolType value = checker->types->expressions[value_id];
     if (value.kind == SOL_TYPE_NEVER) return true;
-    SolParameterId value_origin = expression_origins[value_id];
+    SolProvenanceId value_origin = expression_origins[value_id];
     if (value.kind == SOL_TYPE_UNKNOWN || value.kind == SOL_TYPE_ERROR
-        || value_origin == SOL_AST_NONE) {
+        || value_origin == SOL_PROVENANCE_NONE) {
         return false;
     }
     if (!*have_value) {
@@ -1350,15 +1522,16 @@ static bool sol_type_join_origin(
         *have_value = true;
         return true;
     }
-    return *origin == value_origin;
+    *origin = sol_type_union_provenance(checker, *origin, value_origin);
+    return *origin != SOL_PROVENANCE_NONE;
 }
 
-static SolParameterId sol_type_join_expression_origin(
+static SolProvenanceId sol_type_join_expression_origin(
     SolTypeChecker *checker,
     const SolExpr *expression,
-    const SolParameterId *expression_origins
+    const SolProvenanceId *expression_origins
 ) {
-    SolParameterId origin = SOL_AST_NONE;
+    SolProvenanceId origin = SOL_PROVENANCE_NONE;
     bool have_value = false;
     if (expression->kind == SOL_EXPR_IF) {
         if (!sol_type_join_origin(
@@ -1375,7 +1548,7 @@ static SolParameterId sol_type_join_expression_origin(
                 &origin,
                 &have_value
             )) {
-            return SOL_AST_NONE;
+            return SOL_PROVENANCE_NONE;
         }
     } else {
         SolMatchArmId arm_id = expression->as.match_expr.first_arm;
@@ -1389,12 +1562,12 @@ static SolParameterId sol_type_join_expression_origin(
                 &origin,
                 &have_value
             )) {
-                return SOL_AST_NONE;
+                return SOL_PROVENANCE_NONE;
             }
             arm_id = arm->next;
         }
     }
-    return have_value ? origin : SOL_AST_NONE;
+    return have_value ? origin : SOL_PROVENANCE_NONE;
 }
 
 static SolExprId sol_type_find_authority_actual(
@@ -1438,7 +1611,7 @@ static SolExprId sol_type_find_authority_actual(
     return SOL_AST_NONE;
 }
 
-static SolParameterId sol_type_expression_origin(
+static SolProvenanceId sol_type_expression_origin(
     SolTypeChecker *checker,
     SolExprId expression_id,
     SolType type,
@@ -1446,13 +1619,13 @@ static SolParameterId sol_type_expression_origin(
 ) {
     if (capability ? !sol_type_is_capability(checker, type)
                    : type.kind != SOL_TYPE_CAPABILITY_OPERATION) {
-        return SOL_AST_NONE;
+        return SOL_PROVENANCE_NONE;
     }
     const SolExpr *expression = &checker->syntax->expressions[expression_id];
-    const SolParameterId *expression_origins = capability
+    const SolProvenanceId *expression_origins = capability
         ? checker->types->expression_capability_origins
         : checker->types->expression_operation_origins;
-    const SolParameterId *local_origins = capability
+    const SolProvenanceId *local_origins = capability
         ? checker->types->local_capability_origins
         : checker->types->local_operation_origins;
     if (expression->kind == SOL_EXPR_OLD) {
@@ -1463,12 +1636,18 @@ static SolParameterId sol_type_expression_origin(
             const SolCapabilityMember *member
                 = &checker->syntax->capability_members[checker->current_member];
             return member->result_authority_from_self
-                ? checker->syntax->items[member->owner_item].capability_source
-                : SOL_AST_NONE;
+                ? sol_type_singleton_provenance(
+                    checker,
+                    checker->syntax->items[member->owner_item].capability_source
+                )
+                : SOL_PROVENANCE_NONE;
         }
-        return checker->syntax->items[
-            checker->current_definition
-        ].result_authority_parameter;
+        return sol_type_singleton_provenance(
+            checker,
+            checker->syntax->items[
+                checker->current_definition
+            ].result_authority_parameter
+        );
     }
     if (!capability && expression->kind == SOL_EXPR_FIELD) {
         return checker->types->expression_capability_origins[expression->as.field.base];
@@ -1526,7 +1705,7 @@ static SolParameterId sol_type_expression_origin(
         SolExprId body = expression->as.handle.body;
         return body < checker->types->expression_count
             ? expression_origins[body]
-            : SOL_AST_NONE;
+            : SOL_PROVENANCE_NONE;
     }
     if (expression->kind == SOL_EXPR_BLOCK) {
         return sol_type_block_origin(checker, expression, expression_origins);
@@ -1534,7 +1713,7 @@ static SolParameterId sol_type_expression_origin(
     if (expression->kind == SOL_EXPR_IF || expression->kind == SOL_EXPR_MATCH) {
         return sol_type_join_expression_origin(checker, expression, expression_origins);
     }
-    return SOL_AST_NONE;
+    return SOL_PROVENANCE_NONE;
 }
 
 static SolType sol_type_arguments(SolTypeChecker *checker, SolArgumentId argument_id) {
@@ -1600,9 +1779,13 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
                     ].result_authority_parameter;
                 }
                 if (expected_authority != SOL_AST_NONE
-                    && checker->types->expression_capability_origins[
-                        statement->as.expression
-                    ] != expected_authority) {
+                    && !sol_type_provenance_is_singleton(
+                        checker->types,
+                        checker->types->expression_capability_origins[
+                            statement->as.expression
+                        ],
+                        expected_authority
+                    )) {
                     sol_type_error(
                         checker,
                         "SOL-AUTHORITY-001",
@@ -1730,7 +1913,7 @@ static SolType sol_type_call(SolTypeChecker *checker, const SolExpr *call) {
         const SolExpr *callee = &checker->syntax->expressions[call->as.call.callee];
         bool known_authority = checker->types->expression_operation_origins[
             call->as.call.callee
-        ] != SOL_AST_NONE;
+        ] != SOL_PROVENANCE_NONE;
         if (!known_authority) {
             sol_type_error(
                 checker,
@@ -2077,14 +2260,26 @@ static SolType sol_type_handle(
     SolType authority = sol_type_expression(checker, expression->as.handle.authority);
     SolType provider = sol_type_expression(checker, expression->as.handle.provider);
     SolType body = sol_type_expression(checker, expression->as.handle.body);
-    SolParameterId authority_root = checker->types->expression_capability_origins[
+    SolProvenanceId authority_provenance = checker->types->expression_capability_origins[
         expression->as.handle.authority
     ];
-    SolParameterId provider_root = checker->types->expression_capability_origins[
+    SolProvenanceId provider_provenance = checker->types->expression_capability_origins[
         expression->as.handle.provider
     ];
+    SolProvenance authority_roots = {0};
+    SolProvenance provider_roots = {0};
+    bool known_authority = sol_type_provenance(
+        checker->types,
+        authority_provenance,
+        &authority_roots
+    );
+    bool known_provider = sol_type_provenance(
+        checker->types,
+        provider_provenance,
+        &provider_roots
+    );
     bool valid = true;
-    if (!sol_type_is_capability(checker, authority) || authority_root == SOL_AST_NONE) {
+    if (!sol_type_is_capability(checker, authority) || !known_authority) {
         sol_type_error(
             checker,
             "SOL-HANDLER-001",
@@ -2092,8 +2287,16 @@ static SolType sol_type_handle(
             "handled effect authority must be a capability value with a known root"
         );
         valid = false;
+    } else if (authority_roots.count != 1) {
+        sol_type_error(
+            checker,
+            "SOL-HANDLER-001",
+            checker->syntax->expressions[expression->as.handle.authority].span,
+            "handled effect authority has mixed roots; dynamic authority matching is unsupported"
+        );
+        valid = false;
     }
-    if (!sol_type_is_capability(checker, provider) || provider_root == SOL_AST_NONE) {
+    if (!sol_type_is_capability(checker, provider) || !known_provider) {
         sol_type_error(
             checker,
             "SOL-HANDLER-001",
@@ -2164,7 +2367,7 @@ static SolType sol_type_handle(
         checker->types->handlers[expression_id] = (SolHandler){
             .source_member = source_member,
             .provider_member = provider_member,
-            .root = authority_root,
+            .root = authority_roots.roots[0],
         };
     }
     return body;
@@ -2348,7 +2551,7 @@ static SolType sol_type_record(SolTypeChecker *checker, const SolExpr *record) {
                     valid = false;
                 }
                 if (checker->types->expression_capability_origins[field->value]
-                    == SOL_AST_NONE) {
+                    == SOL_PROVENANCE_NONE) {
                     sol_type_error(
                         checker,
                         "SOL-TYPE-015",
@@ -3071,13 +3274,17 @@ bool sol_type_check(
         || types->local_operation_origins != NULL || types->definitions != NULL
         || types->declared_types != NULL || types->function_types != NULL
         || types->type_applications != NULL || types->function_coercions != NULL
+        || types->provenances != NULL || types->provenance_roots != NULL
         || types->handlers != NULL
         || types->expression_count != 0 || types->local_count != 0
         || types->definition_count != 0 || types->declared_type_count != 0
         || types->type_application_count != 0 || types->type_application_capacity != 0
         || types->function_type_count != 0 || types->function_type_capacity != 0
         || types->function_coercion_count != 0
-        || types->function_coercion_capacity != 0 || types->handler_count != 0) {
+        || types->function_coercion_capacity != 0
+        || types->provenance_count != 0 || types->provenance_capacity != 0
+        || types->provenance_root_count != 0 || types->provenance_root_capacity != 0
+        || types->handler_count != 0) {
         sol_type_malformed(&checker);
         return false;
     }
@@ -3306,7 +3513,8 @@ bool sol_type_check(
             if (type.kind == SOL_TYPE_NOMINAL
                 && type.definition < syntax->item_count
                 && syntax->items[type.definition].kind == SOL_ITEM_CAPABILITY) {
-                checker.types->local_capability_origins[index] = local->syntax_id;
+                checker.types->local_capability_origins[index]
+                    = sol_type_singleton_provenance(&checker, local->syntax_id);
             }
         }
     }
@@ -3344,8 +3552,11 @@ bool sol_type_check(
         SolType body_type = sol_type_expression(&checker, item->body);
         if (item->result_authority_parameter != SOL_AST_NONE
             && body_type.kind != SOL_TYPE_NEVER
-            && checker.types->expression_capability_origins[item->body]
-                != item->result_authority_parameter) {
+            && !sol_type_provenance_is_singleton(
+                checker.types,
+                checker.types->expression_capability_origins[item->body],
+                item->result_authority_parameter
+            )) {
             sol_type_error(
                 &checker,
                 "SOL-AUTHORITY-001",
@@ -3383,8 +3594,11 @@ bool sol_type_check(
             ? syntax->items[member->owner_item].capability_source
             : SOL_AST_NONE;
         if (expected_authority != SOL_AST_NONE && body_type.kind != SOL_TYPE_NEVER
-            && checker.types->expression_capability_origins[member->body]
-                != expected_authority) {
+            && !sol_type_provenance_is_singleton(
+                checker.types,
+                checker.types->expression_capability_origins[member->body],
+                expected_authority
+            )) {
             sol_type_error(
                 &checker,
                 "SOL-AUTHORITY-001",
@@ -3419,7 +3633,8 @@ bool sol_type_check(
         }
         for (size_t index = 0; index < syntax->expression_count; ++index) {
             if (checker.types->expressions[index].kind != SOL_TYPE_CAPABILITY_OPERATION
-                || checker.types->expression_operation_origins[index] != SOL_AST_NONE
+                || checker.types->expression_operation_origins[index]
+                    != SOL_PROVENANCE_NONE
                 || call_callees[index]) {
                 continue;
             }
