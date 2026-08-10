@@ -15,6 +15,8 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 - [x] Reproducible Typst Design Specification v0.2 and generated official PDF.
 - [x] Bounded first-order generic records, enums, and free functions with exact
       invariant applications and argument-only call inference.
+- [x] Input-determined effect-row parameters on generic free functions with
+      callback-driven least-row inference and per-call instantiation metadata.
 
 ## Prioritized Work
 
@@ -22,7 +24,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | --- | ---: | --- | ---: | ---: | --- |
 | [x] | 1 | Decide and restrict `success` and `failure` on non-`Result` contracts | 4 | 2 | Contract templates |
 | [x] | 2 | Implement bounded first-order generic records/enums/functions and exact instantiation | 5 | 5 | Type interning |
-| [ ] | 3 | Integrate effect-row variables with generic function instantiation | 5 | 5 | Generics |
+| [x] | 3 | Integrate bounded effect-row variables with generic function instantiation | 5 | 5 | Generics |
 | [ ] | 4 | Add traits, implementations, constraints, and type-directed method resolution | 5 | 5 | Generics |
 | [ ] | 5 | Resolve modules and imports across multiple files and packages | 5 | 5 | Name resolution |
 | [ ] | 6 | Implement the canonical formatter and enforce idempotence | 4 | 3 | Parser and token stream |

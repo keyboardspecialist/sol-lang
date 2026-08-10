@@ -173,6 +173,86 @@ static void test_generic_type_namespace(void) {
     free_compilation(&compilation);
 }
 
+static void test_effect_row_resolution_identity(void) {
+    static const char text[] =
+        "module row_resolution\n"
+        "function apply<effects E>(callback: function() -> Int64 effects E) -> Int64\n"
+        "effects { E } { return callback() }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.syntax.effect_parameter_count == 1);
+    size_t row_references = 0;
+    for (SolEffectId effect = 0; effect < compilation.hir.effect_resolution_count; ++effect) {
+        SolEffectResolution resolution = compilation.hir.effect_resolutions[effect];
+        if (resolution.kind == SOL_EFFECT_RESOLUTION_PARAMETER) {
+            CHECK(resolution.target == 0);
+            ++row_references;
+        }
+    }
+    for (SolTypeId type = 0; type < compilation.hir.type_effect_resolution_count; ++type) {
+        SolEffectResolution resolution = compilation.hir.type_effect_resolutions[type];
+        if (resolution.kind == SOL_EFFECT_RESOLUTION_PARAMETER) {
+            CHECK(resolution.target == 0);
+            ++row_references;
+        }
+    }
+    CHECK(row_references == 2);
+    SolTypeId tail_type = SOL_AST_NONE;
+    for (SolTypeId type = 0; type < compilation.syntax.type_count; ++type) {
+        if (compilation.syntax.types[type].has_effect_tail) {
+            tail_type = type;
+            break;
+        }
+    }
+    CHECK(tail_type != SOL_AST_NONE);
+    if (tail_type != SOL_AST_NONE) {
+        compilation.syntax.types[tail_type].effect_tail.end
+            = compilation.syntax.types[tail_type].effect_tail.start - 1;
+        reset_hir_diagnostics(&compilation);
+        CHECK(!sol_hir_lower(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    }
+    free_compilation(&compilation);
+
+    static const char duplicate[] =
+        "module duplicate_row\n"
+        "function bad<E, effects E>(callback: function() -> Int64 effects E) -> Int64\n"
+        "effects { E } { return callback() }\n";
+    CHECK(compile_source(&compilation, duplicate));
+    CHECK(has_diagnostic(&compilation, "SOL-RESOLVE-005"));
+    free_compilation(&compilation);
+
+    static const char isolated[] =
+        "module isolated_rows\n"
+        "function first<effects E>(callback: function() -> Int64 effects E) -> Int64 effects { E } { return callback() }\n"
+        "function second<effects E>(callback: function() -> Int64 effects E) -> Int64 effects { E } { return callback() }\n";
+    CHECK(compile_source(&compilation, isolated));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.syntax.effect_parameter_count == 2);
+    for (SolTypeId type = 0; type < compilation.syntax.type_count; ++type) {
+        if (!compilation.syntax.types[type].has_effect_tail) continue;
+        SolEffectResolution resolution
+            = compilation.hir.type_effect_resolutions[type];
+        CHECK(resolution.kind == SOL_EFFECT_RESOLUTION_PARAMETER);
+        CHECK(compilation.syntax.effect_parameters[resolution.target].owner_item
+            == compilation.syntax.types[type].owner_item);
+    }
+    free_compilation(&compilation);
+
+    static const char out_of_scope[] =
+        "module out_of_scope_row\n"
+        "function bad(callback: function() -> Int64 effects E) -> Int64 effects { pure } { return 1 }\n";
+    CHECK(compile_source(&compilation, out_of_scope));
+    CHECK(has_diagnostic(&compilation, "SOL-RESOLVE-006"));
+    free_compilation(&compilation);
+}
+
 static void test_duplicate_and_malformed_generic_parameters(void) {
     static const char duplicate[] =
         "module duplicate_generic\nrecord Box<T, T> { value: T, }\n";
@@ -525,6 +605,7 @@ int main(void) {
     test_unresolved_name();
     test_duplicate_declaration();
     test_generic_type_namespace();
+    test_effect_row_resolution_identity();
     test_duplicate_and_malformed_generic_parameters();
     test_scope_rules();
     test_qualified_function_resolution();

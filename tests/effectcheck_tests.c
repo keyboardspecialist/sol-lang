@@ -149,6 +149,175 @@ static bool row_has_parameter_effect(
     return false;
 }
 
+static void test_effect_row_generic_instantiation(void) {
+    static const char text[] =
+        "module row_instantiation\n"
+        "function pure_value(value: Int64) -> Int64 effects { pure } { return value }\n"
+        "function read_value(value: Int64) -> Int64 effects { service.read } { return value }\n"
+        "function write_value(value: Int64) -> Int64 effects { service.write } { return value }\n"
+        "function apply<T, effects E>(value: T, callback: function(T) -> T effects E) -> T\n"
+        "effects { E } { return callback(value) }\n"
+        "function twice<effects E>(value: Int64, first: function(Int64) -> Int64 effects E, second: function(Int64) -> Int64 effects E) -> Int64\n"
+        "effects { E } { return first(value) + second(value) }\n"
+        "function pure_call() -> Int64 effects { pure } { return apply(1, pure_value) }\n"
+        "function read_call() -> Int64 effects { service.read } { return apply<Int64>(1, read_value) }\n"
+        "function union_call() -> Int64 effects { service.read service.write } { return twice(1, read_value, write_value) }\n"
+        "function nested<effects E>(value: Int64, callback: function(Int64) -> Int64 effects E) -> Int64\n"
+        "effects { E } { return apply(value, callback) }\n"
+        "function nested_call() -> Int64 effects { service.write } { return nested(1, write_value) }\n"
+        "function fixed_value(value: Int64) -> Int64 effects { service.fixed } { return value }\n"
+        "function ignore<effects E>(value: Int64, callback: function(Int64) -> Int64 effects { service.fixed E }) -> Int64\n"
+        "effects { E } { return value }\n"
+        "function fixed_call() -> Int64 effects { pure } { return ignore(1, fixed_value) }\n"
+        "function alias_call() -> Int64 effects { service.read } { let callback = read_value return apply(1, callback) }\n"
+        "function fixed_read_value(value: Int64) -> Int64 effects { service.fixed service.read } { return value }\n"
+        "function forward<effects E>(value: Int64, callback: function(Int64) -> Int64 effects { service.fixed E }) -> Int64\n"
+        "effects { service.fixed E } { return callback(value) }\n"
+        "function forward_call() -> Int64 effects { service.fixed service.read } { return forward(1, fixed_read_value) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    size_t pure_rows = 0;
+    size_t read_rows = 0;
+    size_t union_rows = 0;
+    size_t symbolic_rows = 0;
+    size_t fixed_rows = 0;
+    size_t prefixed_rows = 0;
+    for (SolExprId expression = 0;
+        expression < compilation.effects.call_instantiation_count;
+        ++expression) {
+        const SolEffectCallInstantiation *entry = sol_effect_call_instantiation(
+            &compilation.effects, expression
+        );
+        if (entry == NULL) continue;
+        pure_rows += entry->function == 3 && entry->row_count == 0
+            && entry->parameter == SOL_AST_NONE ? 1 : 0;
+        read_rows += entry->function == 3 && entry->row_count == 1
+            && entry->parameter == SOL_AST_NONE ? 1 : 0;
+        union_rows += entry->function == 4 && entry->row_count == 2 ? 1 : 0;
+        symbolic_rows += entry->function == 3 && entry->parameter != SOL_AST_NONE ? 1 : 0;
+        fixed_rows += entry->function == 11 && entry->row_count == 0
+            && entry->parameter == SOL_AST_NONE ? 1 : 0;
+        if (entry->function == 15 && entry->parameter == SOL_AST_NONE) {
+            const SolEffectAtom *arguments = NULL;
+            const SolEffectAtom *row = NULL;
+            size_t argument_count = 0;
+            size_t row_count = 0;
+            CHECK(sol_effect_call_arguments(
+                &compilation.effects, expression, &arguments, &argument_count
+            ));
+            CHECK(sol_effect_call_row(
+                &compilation.effects, expression, &row, &row_count
+            ));
+            SolEffectRow argument_view = {(SolEffectAtom *)arguments, argument_count, false,
+                SOL_AST_NONE};
+            SolEffectRow row_view = {(SolEffectAtom *)row, row_count, false, SOL_AST_NONE};
+            CHECK(argument_count == 1);
+            CHECK(row_has_effect(&compilation, &argument_view, "service.read"));
+            CHECK(row_count == 2);
+            CHECK(row_has_effect(&compilation, &row_view, "service.fixed"));
+            CHECK(row_has_effect(&compilation, &row_view, "service.read"));
+            ++prefixed_rows;
+        }
+    }
+    CHECK(pure_rows == 1);
+    CHECK(read_rows == 2);
+    CHECK(union_rows == 1);
+    CHECK(symbolic_rows == 1);
+    CHECK(fixed_rows == 1);
+    CHECK(prefixed_rows == 1);
+    free_compilation(&compilation);
+
+    static const char uninferred[] =
+        "module uninferred_row\n"
+        "function bad<effects E>() -> Int64 effects { E } { return 1 }\n";
+    CHECK(compile_source(&compilation, uninferred));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-008"));
+    free_compilation(&compilation);
+
+    static const char authority[] =
+        "module authority_row\n"
+        "capability Clock { function read(value: Int64) -> Int64 effects { clock.read<Self> } }\n"
+        "function apply<effects E>(value: Int64, callback: function(Int64) -> Int64 effects E) -> Int64 effects { E } { return callback(value) }\n"
+        "function bad(clock: capability Clock) -> Int64 effects { clock.read<clock> } { return apply(1, clock.read) }\n";
+    CHECK(compile_source(&compilation, authority));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-007"));
+    free_compilation(&compilation);
+
+    static const char missing_effect[] =
+        "module missing_row_effect\n"
+        "function read() -> Int64 effects { service.read } { return 1 }\n"
+        "function apply<effects E>(callback: function() -> Int64 effects E) -> Int64 effects { E } { return callback() }\n"
+        "function bad() -> Int64 effects { pure } { return apply(read) }\n";
+    CHECK(compile_source(&compilation, missing_effect));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-002"));
+    free_compilation(&compilation);
+
+    static const char open_handler[] =
+        "module open_row_handler\n"
+        "capability Clock { function read() -> Int64 effects { clock.read<Self> } }\n"
+        "capability TestClock { function read() -> Int64 effects { pure } }\n"
+        "function bad<effects E>(clock: capability Clock, provider: capability TestClock, callback: function() -> Int64 effects E) -> Int64\n"
+        "effects { E } { return handle clock.read<clock> with provider { callback() } }\n";
+    CHECK(compile_source(&compilation, open_handler));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-008"));
+    free_compilation(&compilation);
+
+    static const char nested_output[] =
+        "module nested_output_row\n"
+        "function bad<effects E>(callback: function() -> Int64 effects E) -> Option<function() -> Int64 effects E> effects { E } { return none }\n";
+    CHECK(compile_source(&compilation, nested_output));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-008"));
+    free_compilation(&compilation);
+
+    static const char missing_declared_tail[] =
+        "module missing_declared_tail\n"
+        "function inner<effects F>(callback: function() -> Int64 effects F) -> Int64 effects { F } { return callback() }\n"
+        "function outer<effects E>(callback: function() -> Int64 effects E) -> Int64 effects { pure } { return inner(callback) }\n";
+    CHECK(compile_source(&compilation, missing_declared_tail));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-008"));
+    CHECK(!has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+    free_compilation(&compilation);
+
+    static const char forged_resolution[] =
+        "module forged_row_resolution\n"
+        "function apply<effects E>(callback: function() -> Int64 effects { service.fixed E }) -> Int64 effects { E } { return 1 }\n";
+    CHECK(compile_source(&compilation, forged_resolution));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolEffectId fixed = SOL_AST_NONE;
+    for (SolEffectId effect = 0; effect < compilation.syntax.effect_count; ++effect) {
+        if (span_equals(&compilation.source, compilation.syntax.effects[effect].name,
+            "service.fixed")) {
+            fixed = effect;
+            break;
+        }
+    }
+    CHECK(fixed != SOL_AST_NONE);
+    if (fixed != SOL_AST_NONE) {
+        sol_effect_table_free(&compilation.effects);
+        sol_effect_table_init(&compilation.effects);
+        sol_diagnostics_free(&compilation.diagnostics);
+        sol_diagnostics_init(&compilation.diagnostics);
+        compilation.hir.effect_resolutions[fixed] = (SolEffectResolution){
+            SOL_EFFECT_RESOLUTION_PARAMETER,
+            0,
+        };
+        CHECK(!sol_effect_check(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+    }
+    free_compilation(&compilation);
+}
+
 static bool provenance_equals(
     const SolTypeTable *types,
     SolProvenanceId id,
@@ -2017,6 +2186,7 @@ static void test_forged_handler_metadata_rejected(void) {
 int main(void) {
     test_private_pure_inference();
     test_generic_closed_effect_rows();
+    test_effect_row_generic_instantiation();
     test_type_parameter_is_not_effect_authority();
     test_malformed_generic_instantiation_rejected();
     test_forged_generic_type_metadata_rejected();

@@ -30,6 +30,17 @@ typedef struct {
     size_t target;
 } SolTypeResolution;
 
+typedef enum {
+    SOL_EFFECT_RESOLUTION_ATOM,
+    SOL_EFFECT_RESOLUTION_PARAMETER,
+    SOL_EFFECT_RESOLUTION_ERROR,
+} SolEffectResolutionKind;
+
+typedef struct {
+    SolEffectResolutionKind kind;
+    size_t target;
+} SolEffectResolution;
+
 typedef struct {
     SolItemKind kind;
     SolSpan name;
@@ -82,6 +93,11 @@ typedef struct {
     /* Indexed by SolTypeId; path types have declaration-owned resolutions. */
     SolTypeResolution *type_resolutions;
     size_t type_resolution_count;
+    /* Indexed by SolEffectId and SolTypeId respectively. */
+    SolEffectResolution *effect_resolutions;
+    size_t effect_resolution_count;
+    SolEffectResolution *type_effect_resolutions;
+    size_t type_effect_resolution_count;
 } SolHirModule;
 
 void sol_hir_module_init(SolHirModule *module);

@@ -136,6 +136,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || syntax->type_count > syntax->type_capacity
         || syntax->type_argument_count > syntax->type_argument_capacity
         || syntax->type_parameter_count > syntax->type_parameter_capacity
+        || syntax->effect_parameter_count > syntax->effect_parameter_capacity
         || syntax->field_count > syntax->field_capacity
         || syntax->variant_count > syntax->variant_capacity
         || syntax->pattern_count > syntax->pattern_capacity
@@ -153,6 +154,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || (syntax->type_count != 0 && syntax->types == NULL)
         || (syntax->type_argument_count != 0 && syntax->type_arguments == NULL)
         || (syntax->type_parameter_count != 0 && syntax->type_parameters == NULL)
+        || (syntax->effect_parameter_count != 0 && syntax->effect_parameters == NULL)
         || (syntax->field_count != 0 && syntax->fields == NULL)
         || (syntax->variant_count != 0 && syntax->variants == NULL)
         || (syntax->pattern_count != 0 && syntax->patterns == NULL)
@@ -167,12 +169,17 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || hir->definition_count != syntax->item_count
         || hir->resolution_count != syntax->expression_count
         || hir->type_resolution_count != syntax->type_count
+        || hir->effect_resolution_count != syntax->effect_count
+        || hir->type_effect_resolution_count != syntax->type_count
         || hir->local_count > hir->local_capacity
         || syntax->parameter_count > SIZE_MAX - syntax->argument_count
         || (hir->definition_count != 0 && hir->definitions == NULL)
         || (hir->resolution_count != 0 && hir->resolutions == NULL)
         || (hir->resolution_count != 0 && hir->expression_owners == NULL)
         || (hir->type_resolution_count != 0 && hir->type_resolutions == NULL)
+        || (hir->effect_resolution_count != 0 && hir->effect_resolutions == NULL)
+        || (hir->type_effect_resolution_count != 0
+            && hir->type_effect_resolutions == NULL)
         || (hir->local_count != 0 && hir->locals == NULL)) {
         sol_type_malformed(checker);
         return false;
@@ -201,6 +208,8 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                 && item->capability_source >= syntax->parameter_count)
             || (item->first_type_parameter != SOL_AST_NONE
                 && item->first_type_parameter >= syntax->type_parameter_count)
+            || (item->first_effect_parameter != SOL_AST_NONE
+                && item->first_effect_parameter >= syntax->effect_parameter_count)
             || definition->syntax_item != index
             || definition->kind != item->kind
             || !sol_type_span_valid(checker->source, definition->name)) {
@@ -275,6 +284,13 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || !sol_type_span_valid(checker->source, type->span)
             || !sol_type_span_valid(checker->source, type->name)
             || type->owner_item >= syntax->item_count
+            || (type->has_effect_tail
+                && (type->kind != SOL_SYNTAX_TYPE_FUNCTION
+                    || !sol_type_span_valid(checker->source, type->effect_tail)
+                    || type->effect_tail.start == type->effect_tail.end
+                    || type->first_effect != SOL_AST_NONE))
+            || (!type->has_effect_tail
+                && (type->effect_tail.start != 0 || type->effect_tail.end != 0))
             || (type->first_argument != SOL_AST_NONE
                 && type->first_argument >= syntax->type_argument_count)
             || (type->kind == SOL_SYNTAX_TYPE_FUNCTION
@@ -297,6 +313,17 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || parameter->owner_item >= syntax->item_count
             || (parameter->next != SOL_AST_NONE
                 && parameter->next >= syntax->type_parameter_count)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->effect_parameter_count; ++index) {
+        const SolEffectParameter *parameter = &syntax->effect_parameters[index];
+        if (!sol_type_span_valid(checker->source, parameter->name)
+            || parameter->owner_item >= syntax->item_count
+            || syntax->items[parameter->owner_item].kind != SOL_ITEM_FUNCTION
+            || syntax->items[parameter->owner_item].first_effect_parameter != index
+            || parameter->next != SOL_AST_NONE) {
             sol_type_malformed(checker);
             return false;
         }
@@ -631,6 +658,59 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                 sol_type_malformed(checker);
                 return false;
             }
+        }
+    }
+    for (size_t index = 0; index < syntax->effect_count; ++index) {
+        const SolEffect *effect = &syntax->effects[index];
+        SolEffectResolution resolution = hir->effect_resolutions[index];
+        SolDefId owner = SOL_AST_NONE;
+        if (effect->owner_kind == SOL_EFFECT_OWNER_ITEM) {
+            owner = effect->owner;
+        } else if (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
+            && effect->owner < syntax->type_count) {
+            owner = syntax->types[effect->owner].owner_item;
+        }
+        SolEffectParameterId parameter = owner < syntax->item_count
+            ? syntax->items[owner].first_effect_parameter
+            : SOL_AST_NONE;
+        bool parameter_use = !effect->is_pure && parameter != SOL_AST_NONE
+            && sol_type_path_equal(
+                checker->source,
+                syntax->effect_parameters[parameter].name,
+                effect->name
+            );
+        if ((int)resolution.kind < 0 || resolution.kind > SOL_EFFECT_RESOLUTION_ERROR
+            || (parameter_use
+                && (resolution.kind != SOL_EFFECT_RESOLUTION_PARAMETER
+                    || resolution.target != parameter))
+            || (!parameter_use
+                && (resolution.kind != SOL_EFFECT_RESOLUTION_ATOM
+                    || resolution.target != SOL_AST_NONE))) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->type_count; ++index) {
+        const SolSyntaxType *type = &syntax->types[index];
+        SolEffectResolution resolution = hir->type_effect_resolutions[index];
+        SolEffectParameterId parameter = syntax->items[
+            type->owner_item
+        ].first_effect_parameter;
+        bool parameter_use = type->has_effect_tail && parameter != SOL_AST_NONE
+            && sol_type_path_equal(
+                checker->source,
+                syntax->effect_parameters[parameter].name,
+                type->effect_tail
+            );
+        if ((int)resolution.kind < 0 || resolution.kind > SOL_EFFECT_RESOLUTION_ERROR
+            || (parameter_use
+                && (resolution.kind != SOL_EFFECT_RESOLUTION_PARAMETER
+                    || resolution.target != parameter))
+            || (!parameter_use
+                && (resolution.kind != SOL_EFFECT_RESOLUTION_ERROR
+                    || resolution.target != SOL_AST_NONE))) {
+            sol_type_malformed(checker);
+            return false;
         }
     }
     for (size_t index = 0; index < hir->local_count; ++index) {
@@ -1468,7 +1548,8 @@ static bool sol_type_normalize_effects(
                     "pure cannot have an effect argument"
                 );
             }
-        } else {
+        } else if (checker->hir->effect_resolutions[effect_id].kind
+            != SOL_EFFECT_RESOLUTION_PARAMETER) {
             SolEffectAtom atom = {
                 .name = effect->name,
                 .argument = effect->argument,
@@ -1557,6 +1638,7 @@ static bool sol_type_function_equal(
     const SolFunctionType *right
 ) {
     if (left->parameter_count != right->parameter_count
+        || left->effect_parameter != right->effect_parameter
         || !sol_type_exact_equal(left->result, right->result)
         || !sol_type_effect_set_equal(checker, &left->effects, &right->effects)) {
         return false;
@@ -1786,7 +1868,30 @@ static SolType sol_type_from_id(SolTypeChecker *checker, SolTypeId type_id) {
             }
             argument_id = checker->syntax->type_arguments[argument_id].next;
         }
-        SolFunctionType candidate = {0};
+        SolFunctionType candidate = {.effect_parameter = SOL_AST_NONE};
+        if (syntax_type->has_effect_tail) {
+            SolEffectResolution resolution
+                = checker->hir->type_effect_resolutions[type_id];
+            if (resolution.kind != SOL_EFFECT_RESOLUTION_PARAMETER
+                || resolution.target >= checker->syntax->effect_parameter_count) {
+                sol_type_malformed(checker);
+            } else {
+                candidate.effect_parameter = resolution.target;
+            }
+        } else {
+            SolEffectId effect = syntax_type->first_effect;
+            while (effect != SOL_AST_NONE) {
+                SolEffectResolution resolution = checker->hir->effect_resolutions[effect];
+                if (resolution.kind == SOL_EFFECT_RESOLUTION_PARAMETER) {
+                    if (candidate.effect_parameter != SOL_AST_NONE
+                        && candidate.effect_parameter != resolution.target) {
+                        sol_type_malformed(checker);
+                    }
+                    candidate.effect_parameter = resolution.target;
+                }
+                effect = checker->syntax->effects[effect].next;
+            }
+        }
         if (parameter_count != 0) {
             if (parameter_count > SIZE_MAX / sizeof(*candidate.parameters)) {
                 checker->allocation_failed = true;
@@ -2058,6 +2163,7 @@ static SolType sol_type_substitute(
         SolFunctionType candidate = {
             .parameter_count = stored->parameter_count,
             .result = stored->result,
+            .effect_parameter = stored->effect_parameter,
         };
         SolType *original = NULL;
         if (stored->parameter_count != 0) {
@@ -2203,7 +2309,11 @@ static bool sol_type_infer_argument(
         const SolFunctionType *left = &checker->types->function_types[pattern.definition];
         const SolFunctionType *right = &checker->types->function_types[actual.definition];
         if (left->parameter_count != right->parameter_count
-            || !sol_type_effect_set_equal(checker, &left->effects, &right->effects)) {
+            || (left->effect_parameter == SOL_AST_NONE
+                && (right->effect_parameter != SOL_AST_NONE
+                    || !sol_type_effect_set_equal(
+                        checker, &left->effects, &right->effects
+                    )))) {
             *conflict = true;
             return false;
         }
@@ -2330,17 +2440,21 @@ static bool sol_type_assignable(
                 expected_function->parameters[index]
             )) return false;
         }
-        return sol_type_effect_subset(
-            checker,
-            &actual_function->effects,
-            &expected_function->effects
-        );
+        return expected_function->effect_parameter != SOL_AST_NONE
+            || (actual_function->effect_parameter == SOL_AST_NONE
+                && sol_type_effect_subset(
+                checker,
+                &actual_function->effects,
+                &expected_function->effects
+            ));
     }
     SolParameterId first_parameter = SOL_AST_NONE;
     SolType result = {.kind = SOL_TYPE_ERROR};
     if (actual.kind == SOL_TYPE_FUNCTION
         && actual.definition < checker->syntax->item_count) {
-        if (sol_type_parameter_count(checker, actual.definition) != 0) {
+        if (sol_type_parameter_count(checker, actual.definition) != 0
+            || checker->syntax->items[actual.definition].first_effect_parameter
+                != SOL_AST_NONE) {
             sol_type_error(
                 checker,
                 "SOL-TYPE-020",
@@ -5107,12 +5221,14 @@ bool sol_type_check(
             }
             for (SolDefId function = 0; function < syntax->item_count; ++function) {
                 if (calls[function * syntax->item_count + function]
-                    && sol_type_parameter_count(&checker, function) != 0) {
+                    && (sol_type_parameter_count(&checker, function) != 0
+                        || syntax->items[function].first_effect_parameter
+                            != SOL_AST_NONE)) {
                     sol_type_error(
                         &checker,
                         "SOL-TYPE-019",
                         syntax->items[function].name,
-                        "recursive generic function calls are unsupported"
+                        "recursive generic or effect-polymorphic function calls are unsupported"
                     );
                 }
             }

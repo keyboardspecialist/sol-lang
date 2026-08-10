@@ -61,6 +61,8 @@ typedef struct {
     size_t parameter_count;
     SolType result;
     SolEffectSet effects;
+    /* SOL_AST_NONE for a closed row; otherwise declaration-owned identity. */
+    SolEffectParameterId effect_parameter;
 } SolFunctionType;
 
 typedef struct {

@@ -15,6 +15,7 @@ typedef size_t SolParameterId;
 typedef size_t SolTypeId;
 typedef size_t SolTypeArgumentId;
 typedef size_t SolTypeParameterId;
+typedef size_t SolEffectParameterId;
 typedef size_t SolFieldId;
 typedef size_t SolVariantId;
 typedef size_t SolPatternId;
@@ -149,6 +150,9 @@ typedef struct {
     SolTypeArgumentId first_argument;
     SolTypeId return_type;
     SolEffectId first_effect;
+    /* Open callback-row tail spelling; resolved declaration-owned in HIR. */
+    SolSpan effect_tail;
+    bool has_effect_tail;
     bool is_capability;
     size_t owner_item;
 } SolSyntaxType;
@@ -169,6 +173,12 @@ typedef struct {
     SolTypeParameterId next;
     size_t owner_item;
 } SolTypeParameter;
+
+typedef struct {
+    SolSpan name;
+    SolEffectParameterId next;
+    size_t owner_item;
+} SolEffectParameter;
 
 typedef struct {
     SolSpan name;

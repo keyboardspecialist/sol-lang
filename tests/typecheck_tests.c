@@ -643,6 +643,57 @@ static void test_generic_function_signature_substitution_and_inference(void) {
     free_compilation(&compilation);
 }
 
+static void test_effect_row_type_boundaries(void) {
+    static const char open_to_closed[] =
+        "module open_to_closed\n"
+        "function closed(callback: function() -> Int64 effects { pure }) -> Int64 { return callback() }\n"
+        "function bad<effects E>(callback: function() -> Int64 effects E) -> Int64 effects { E } { return closed(callback) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, open_to_closed));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-005"));
+    free_compilation(&compilation);
+
+    static const char recursive[] =
+        "module recursive_row\n"
+        "function bad<effects E>(callback: function() -> Int64 effects E) -> Int64 effects { E } { return bad(callback) }\n";
+    CHECK(compile_source(&compilation, recursive));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-019"));
+    free_compilation(&compilation);
+
+    static const char forged[] =
+        "module forged_row_type\n"
+        "function apply<effects E>(callback: function() -> Int64 effects E) -> Int64 effects { E } { return callback() }\n";
+    CHECK(compile_source(&compilation, forged));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolTypeId tail = SOL_AST_NONE;
+    for (SolTypeId type = 0; type < compilation.syntax.type_count; ++type) {
+        if (compilation.syntax.types[type].has_effect_tail) {
+            tail = type;
+            break;
+        }
+    }
+    CHECK(tail != SOL_AST_NONE);
+    if (tail != SOL_AST_NONE) {
+        sol_type_table_free(&compilation.types);
+        sol_type_table_init(&compilation.types);
+        sol_diagnostics_free(&compilation.diagnostics);
+        sol_diagnostics_init(&compilation.diagnostics);
+        compilation.hir.type_effect_resolutions[tail] = (SolEffectResolution){
+            SOL_EFFECT_RESOLUTION_ERROR,
+            SOL_AST_NONE,
+        };
+        CHECK(!sol_type_check(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-003"));
+    }
+    free_compilation(&compilation);
+}
+
 static void test_invalid_capability_qualified_generic_types(void) {
     static const char text[] =
         "module generic_capabilities\n"
@@ -1368,6 +1419,7 @@ int main(void) {
     test_nested_generic_substitution_growth();
     test_generic_variant_constructor_identity();
     test_generic_function_signature_substitution_and_inference();
+    test_effect_row_type_boundaries();
     test_invalid_capability_qualified_generic_types();
     test_generic_recursion_through_nongeneric_helper();
     test_invalid_user_generics();

@@ -46,6 +46,23 @@ static void sol_contract_error(
     );
 }
 
+static bool sol_contract_span_valid(const SolSource *source, SolSpan span) {
+    return span.start <= span.end && span.end <= source->length;
+}
+
+static bool sol_contract_span_equal(
+    const SolSource *source,
+    SolSpan left,
+    SolSpan right
+) {
+    if (!sol_contract_span_valid(source, left)
+        || !sol_contract_span_valid(source, right)) return false;
+    size_t left_length = left.end - left.start;
+    size_t right_length = right.end - right.start;
+    return left_length == right_length
+        && memcmp(source->text + left.start, source->text + right.start, left_length) == 0;
+}
+
 static bool sol_contract_type_valid(
     const SolContractLowerer *lowerer,
     SolType type
@@ -87,6 +104,9 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || syntax->type_count > syntax->type_capacity
         || syntax->type_argument_count > syntax->type_argument_capacity
         || syntax->type_parameter_count > syntax->type_parameter_capacity
+        || syntax->effect_parameter_count > syntax->effect_parameter_capacity
+        || hir->effect_resolution_count != syntax->effect_count
+        || hir->type_effect_resolution_count != syntax->type_count
         || types->expression_count != syntax->expression_count
         || types->local_count != hir->local_count
         || types->definition_count != syntax->item_count
@@ -101,6 +121,10 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || types->variant_constructor_count > types->variant_constructor_capacity
         || effects->function_count != syntax->item_count
         || effects->capability_member_count != syntax->capability_member_count
+        || effects->call_instantiation_count != syntax->expression_count
+        || effects->call_instantiation_count > effects->call_instantiation_capacity
+        || effects->call_argument_count > effects->call_argument_capacity
+        || effects->call_row_count > effects->call_row_capacity
         || (hir->definition_count != 0 && hir->definitions == NULL)
         || (hir->resolution_count != 0 && hir->resolutions == NULL)
         || (hir->resolution_count != 0 && hir->expression_owners == NULL)
@@ -109,6 +133,10 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || (syntax->type_count != 0 && syntax->types == NULL)
         || (syntax->type_argument_count != 0 && syntax->type_arguments == NULL)
         || (syntax->type_parameter_count != 0 && syntax->type_parameters == NULL)
+        || (syntax->effect_parameter_count != 0 && syntax->effect_parameters == NULL)
+        || (hir->effect_resolution_count != 0 && hir->effect_resolutions == NULL)
+        || (hir->type_effect_resolution_count != 0
+            && hir->type_effect_resolutions == NULL)
         || (types->expression_count != 0 && types->expressions == NULL)
         || (types->local_count != 0 && types->locals == NULL)
         || (types->definition_count != 0 && types->definitions == NULL)
@@ -126,11 +154,68 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || (effects->function_count != 0 && effects->functions == NULL)
         || (effects->capability_member_count != 0
             && effects->capability_members == NULL)
+        || (effects->call_instantiation_count != 0
+            && effects->call_instantiations == NULL)
+        || (effects->call_argument_capacity != 0 && effects->call_arguments == NULL)
+        || (effects->call_row_capacity != 0 && effects->call_rows == NULL)
         || contracts->obligations != NULL || contracts->obligation_count != 0
         || contracts->snapshots != NULL || contracts->snapshot_count != 0
         || contracts->snapshot_capacity != 0 || contracts->expression_snapshots != NULL
         || contracts->expression_count != 0) {
         return false;
+    }
+    for (size_t index = 0; index < syntax->effect_parameter_count; ++index) {
+        const SolEffectParameter *parameter = &syntax->effect_parameters[index];
+        if (!sol_contract_span_valid(lowerer->source, parameter->name)
+            || parameter->owner_item >= syntax->item_count
+            || syntax->items[parameter->owner_item].kind != SOL_ITEM_FUNCTION
+            || syntax->items[parameter->owner_item].first_effect_parameter != index
+            || parameter->next != SOL_AST_NONE) return false;
+    }
+    for (size_t index = 0; index < syntax->effect_count; ++index) {
+        const SolEffect *effect = &syntax->effects[index];
+        SolEffectResolution resolution = hir->effect_resolutions[index];
+        SolDefId owner = SOL_AST_NONE;
+        if (effect->owner_kind == SOL_EFFECT_OWNER_ITEM) {
+            owner = effect->owner;
+        } else if (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
+            && effect->owner < syntax->type_count) {
+            owner = syntax->types[effect->owner].owner_item;
+        }
+        SolEffectParameterId parameter = owner < syntax->item_count
+            ? syntax->items[owner].first_effect_parameter
+            : SOL_AST_NONE;
+        bool parameter_use = !effect->is_pure && parameter != SOL_AST_NONE
+            && sol_contract_span_equal(
+                lowerer->source,
+                syntax->effect_parameters[parameter].name,
+                effect->name
+            );
+        if ((parameter_use
+                && (resolution.kind != SOL_EFFECT_RESOLUTION_PARAMETER
+                    || resolution.target != parameter))
+            || (!parameter_use
+                && (resolution.kind != SOL_EFFECT_RESOLUTION_ATOM
+                    || resolution.target != SOL_AST_NONE))) return false;
+    }
+    for (size_t index = 0; index < syntax->type_count; ++index) {
+        const SolSyntaxType *type = &syntax->types[index];
+        if (type->owner_item >= syntax->item_count) return false;
+        SolEffectResolution resolution = hir->type_effect_resolutions[index];
+        SolEffectParameterId parameter
+            = syntax->items[type->owner_item].first_effect_parameter;
+        bool parameter_use = type->has_effect_tail && parameter != SOL_AST_NONE
+            && sol_contract_span_equal(
+                lowerer->source,
+                syntax->effect_parameters[parameter].name,
+                type->effect_tail
+            );
+        if ((parameter_use
+                && (resolution.kind != SOL_EFFECT_RESOLUTION_PARAMETER
+                    || resolution.target != parameter))
+            || (!parameter_use
+                && (resolution.kind != SOL_EFFECT_RESOLUTION_ERROR
+                    || resolution.target != SOL_AST_NONE))) return false;
     }
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         if (!sol_contract_type_valid(lowerer, types->expressions[index])) return false;
@@ -306,6 +391,8 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         if ((function->parameter_count != 0 && function->parameters == NULL)
             || (function->effects.count != 0 && function->effects.atoms == NULL)
             || !sol_type_exact_reference_valid(syntax, types, function->result)
+            || (function->effect_parameter != SOL_AST_NONE
+                && function->effect_parameter >= syntax->effect_parameter_count)
             || (function->result.kind == SOL_TYPE_FUNCTION_SIGNATURE
                 && function->result.definition >= index)) return false;
         for (size_t parameter = 0; parameter < function->parameter_count; ++parameter) {
@@ -341,13 +428,92 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         }
     }
     for (size_t index = 0; index < effects->function_count; ++index) {
-        if (effects->functions[index].count != 0
-            && effects->functions[index].atoms == NULL) return false;
+        const SolEffectRow *row = &effects->functions[index];
+        SolEffectParameterId expected = syntax->items[index].kind == SOL_ITEM_FUNCTION
+            ? syntax->items[index].first_effect_parameter
+            : SOL_AST_NONE;
+        if ((row->count != 0 && row->atoms == NULL)
+            || row->effect_parameter != expected
+            || (syntax->items[index].kind != SOL_ITEM_FUNCTION && row->count != 0)) {
+            return false;
+        }
     }
     for (size_t index = 0; index < effects->capability_member_count; ++index) {
         if (effects->capability_members[index].count != 0
             && effects->capability_members[index].atoms == NULL) return false;
     }
+    size_t argument_total = 0;
+    size_t row_total = 0;
+    for (SolExprId expression = 0;
+        expression < effects->call_instantiation_count;
+        ++expression) {
+        const SolEffectCallInstantiation *entry
+            = &effects->call_instantiations[expression];
+        if (entry->call == SOL_AST_NONE) {
+            if (entry->function != SOL_AST_NONE || entry->parameter != SOL_AST_NONE
+                || entry->argument_offset != 0 || entry->argument_count != 0
+                || entry->row_offset != 0 || entry->row_count != 0) return false;
+            continue;
+        }
+        const SolEffectAtom *arguments = NULL;
+        const SolEffectAtom *row = NULL;
+        size_t argument_count = 0;
+        size_t row_count = 0;
+        SolExprId callee = syntax->expressions[expression].as.call.callee;
+        if (entry->call != expression
+            || syntax->expressions[expression].kind != SOL_EXPR_CALL
+            || entry->function >= syntax->item_count
+            || syntax->items[entry->function].kind != SOL_ITEM_FUNCTION
+            || syntax->items[entry->function].first_effect_parameter == SOL_AST_NONE
+            || callee >= types->expression_count
+            || types->expressions[callee].kind != SOL_TYPE_FUNCTION
+            || types->expressions[callee].definition != entry->function
+            || entry->argument_offset != argument_total
+            || entry->row_offset != row_total
+            || !sol_effect_call_arguments(
+                effects, expression, &arguments, &argument_count
+            )
+            || !sol_effect_call_row(effects, expression, &row, &row_count)
+            || argument_count != entry->argument_count
+            || row_count != entry->row_count
+            || (entry->parameter != SOL_AST_NONE
+                && (entry->parameter >= syntax->effect_parameter_count
+                    || syntax->effect_parameters[entry->parameter].owner_item
+                        != hir->expression_owners[expression]))
+            || !sol_effect_call_instantiation_valid(
+                lowerer->source,
+                syntax,
+                hir,
+                types,
+                effects,
+                expression
+            )) return false;
+        if (argument_total > SIZE_MAX - argument_count
+            || row_total > SIZE_MAX - row_count) return false;
+        argument_total += argument_count;
+        row_total += row_count;
+        for (size_t atom = 0; atom < argument_count; ++atom) {
+            if (arguments[atom].argument_kind != SOL_EFFECT_ATOM_NO_ARGUMENT
+                && arguments[atom].argument_kind != SOL_EFFECT_ATOM_STATIC_PATH) {
+                return false;
+            }
+        }
+        for (size_t atom = 0; atom < row_count; ++atom) {
+            if ((int)row[atom].argument_kind < 0
+                || row[atom].argument_kind > SOL_EFFECT_ATOM_SELF) return false;
+            for (size_t previous = 0; previous < atom; ++previous) {
+                bool same = row[previous].argument_kind == row[atom].argument_kind
+                    && row[previous].name.start == row[atom].name.start
+                    && row[previous].name.end == row[atom].name.end
+                    && row[previous].parameter == row[atom].parameter
+                    && row[previous].argument.start == row[atom].argument.start
+                    && row[previous].argument.end == row[atom].argument.end;
+                if (same) return false;
+            }
+        }
+    }
+    if (argument_total != effects->call_argument_count
+        || row_total != effects->call_row_count) return false;
     return true;
 }
 
@@ -422,6 +588,15 @@ static bool sol_contract_call_is_pure(
     SolType callee = lowerer->types->expressions[callee_id];
     if (callee.kind == SOL_TYPE_FUNCTION
         && callee.definition < lowerer->effects->function_count) {
+        if (lowerer->effects->functions[callee.definition].effect_parameter
+            != SOL_AST_NONE) {
+            const SolEffectCallInstantiation *entry = sol_effect_call_instantiation(
+                lowerer->effects,
+                (SolExprId)(call - lowerer->syntax->expressions)
+            );
+            return entry != NULL && entry->function == callee.definition
+                && entry->parameter == SOL_AST_NONE && entry->row_count == 0;
+        }
         return lowerer->effects->functions[callee.definition].count == 0;
     }
     if (callee.kind == SOL_TYPE_CAPABILITY_OPERATION
@@ -430,7 +605,9 @@ static bool sol_contract_call_is_pure(
     }
     if (callee.kind == SOL_TYPE_FUNCTION_SIGNATURE
         && callee.definition < lowerer->types->function_type_count) {
-        return lowerer->types->function_types[callee.definition].effects.count == 0;
+        return lowerer->types->function_types[callee.definition].effect_parameter
+                == SOL_AST_NONE
+            && lowerer->types->function_types[callee.definition].effects.count == 0;
     }
     if (callee.kind == SOL_TYPE_VARIANT) return true;
     SolResolution resolution = lowerer->hir->resolutions[callee_id];

@@ -37,6 +37,8 @@ void sol_hir_module_free(SolHirModule *module) {
     free(module->resolutions);
     free(module->expression_owners);
     free(module->type_resolutions);
+    free(module->effect_resolutions);
+    free(module->type_effect_resolutions);
     memset(module, 0, sizeof(*module));
 }
 
@@ -193,6 +195,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         || syntax->type_count > syntax->type_capacity
         || syntax->type_argument_count > syntax->type_argument_capacity
         || syntax->type_parameter_count > syntax->type_parameter_capacity
+        || syntax->effect_parameter_count > syntax->effect_parameter_capacity
         || syntax->field_count > syntax->field_capacity
         || syntax->variant_count > syntax->variant_capacity
         || syntax->pattern_count > syntax->pattern_capacity
@@ -210,6 +213,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         || (syntax->type_count != 0 && syntax->types == NULL)
         || (syntax->type_argument_count != 0 && syntax->type_arguments == NULL)
         || (syntax->type_parameter_count != 0 && syntax->type_parameters == NULL)
+        || (syntax->effect_parameter_count != 0 && syntax->effect_parameters == NULL)
         || (syntax->field_count != 0 && syntax->fields == NULL)
         || (syntax->variant_count != 0 && syntax->variants == NULL)
         || (syntax->pattern_count != 0 && syntax->patterns == NULL)
@@ -247,7 +251,9 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || (item->capability_source != SOL_AST_NONE
                 && item->capability_source >= syntax->parameter_count)
             || (item->first_type_parameter != SOL_AST_NONE
-                && item->first_type_parameter >= syntax->type_parameter_count)) {
+                && item->first_type_parameter >= syntax->type_parameter_count)
+            || (item->first_effect_parameter != SOL_AST_NONE
+                && item->first_effect_parameter >= syntax->effect_parameter_count)) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -329,6 +335,13 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || !sol_span_valid(resolver->source, type->span)
             || !sol_span_valid(resolver->source, type->name)
             || type->owner_item >= syntax->item_count
+            || (type->has_effect_tail
+                && (type->kind != SOL_SYNTAX_TYPE_FUNCTION
+                    || !sol_span_valid(resolver->source, type->effect_tail)
+                    || type->effect_tail.start == type->effect_tail.end
+                    || type->first_effect != SOL_AST_NONE))
+            || (!type->has_effect_tail
+                && (type->effect_tail.start != 0 || type->effect_tail.end != 0))
             || (type->first_argument != SOL_AST_NONE
                 && type->first_argument >= syntax->type_argument_count)
             || (type->kind == SOL_SYNTAX_TYPE_FUNCTION
@@ -351,6 +364,17 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || parameter->owner_item >= syntax->item_count
             || (parameter->next != SOL_AST_NONE
                 && parameter->next >= syntax->type_parameter_count)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->effect_parameter_count; ++index) {
+        const SolEffectParameter *parameter = &syntax->effect_parameters[index];
+        if (!sol_span_valid(resolver->source, parameter->name)
+            || parameter->owner_item >= syntax->item_count
+            || syntax->items[parameter->owner_item].kind != SOL_ITEM_FUNCTION
+            || syntax->items[parameter->owner_item].first_effect_parameter != index
+            || parameter->next != SOL_AST_NONE) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -697,6 +721,8 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
     resolver->module->definition_count = syntax->item_count;
     resolver->module->resolution_count = syntax->expression_count;
     resolver->module->type_resolution_count = syntax->type_count;
+    resolver->module->effect_resolution_count = syntax->effect_count;
+    resolver->module->type_effect_resolution_count = syntax->type_count;
     resolver->module->definitions = calloc(
         syntax->item_count,
         sizeof(*resolver->module->definitions)
@@ -712,15 +738,35 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
         syntax->type_count,
         sizeof(*resolver->module->type_resolutions)
     );
+    resolver->module->effect_resolutions = calloc(
+        syntax->effect_count,
+        sizeof(*resolver->module->effect_resolutions)
+    );
+    resolver->module->type_effect_resolutions = malloc(
+        syntax->type_count * sizeof(*resolver->module->type_effect_resolutions)
+    );
 
     if ((syntax->item_count != 0 && resolver->module->definitions == NULL)
         || (syntax->expression_count != 0 && resolver->module->resolutions == NULL)
         || (syntax->expression_count != 0 && resolver->module->expression_owners == NULL)
-        || (syntax->type_count != 0 && resolver->module->type_resolutions == NULL)) {
+        || (syntax->type_count != 0 && resolver->module->type_resolutions == NULL)
+        || (syntax->effect_count != 0 && resolver->module->effect_resolutions == NULL)
+        || (syntax->type_count != 0
+            && resolver->module->type_effect_resolutions == NULL)) {
         return false;
     }
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         resolver->module->expression_owners[index] = SOL_AST_NONE;
+    }
+    for (size_t index = 0; index < syntax->effect_count; ++index) {
+        resolver->module->effect_resolutions[index] = (SolEffectResolution){
+            SOL_EFFECT_RESOLUTION_ATOM, SOL_AST_NONE
+        };
+    }
+    for (size_t index = 0; index < syntax->type_count; ++index) {
+        resolver->module->type_effect_resolutions[index] = (SolEffectResolution){
+            SOL_EFFECT_RESOLUTION_ERROR, SOL_AST_NONE
+        };
     }
     resolver->expression_states = calloc(
         syntax->expression_count,
@@ -1157,6 +1203,30 @@ static void sol_resolver_resolve_types(SolResolver *resolver) {
             }
             parameter = resolver->syntax->type_parameters[parameter].next;
         }
+        SolEffectParameterId effect_parameter
+            = resolver->syntax->items[owner].first_effect_parameter;
+        if (effect_parameter != SOL_AST_NONE) {
+            const SolEffectParameter *effect
+                = &resolver->syntax->effect_parameters[effect_parameter];
+            parameter = resolver->syntax->items[owner].first_type_parameter;
+            while (parameter != SOL_AST_NONE) {
+                if (sol_span_equal(
+                    resolver->source,
+                    resolver->syntax->type_parameters[parameter].name,
+                    effect->name
+                )) {
+                    sol_diagnostics_add(
+                        resolver->diagnostics,
+                        "SOL-RESOLVE-005",
+                        SOL_SEVERITY_ERROR,
+                        effect->name,
+                        "duplicate type/effect generic parameter name"
+                    );
+                    break;
+                }
+                parameter = resolver->syntax->type_parameters[parameter].next;
+            }
+        }
     }
     for (size_t type_id = 0; type_id < resolver->syntax->type_count; ++type_id) {
         const SolSyntaxType *type = &resolver->syntax->types[type_id];
@@ -1203,6 +1273,53 @@ static void sol_resolver_resolve_types(SolResolver *resolver) {
             }
         }
         resolver->module->type_resolutions[type_id] = resolution;
+    }
+
+    for (SolEffectId effect_id = 0;
+        effect_id < resolver->syntax->effect_count;
+        ++effect_id) {
+        const SolEffect *effect = &resolver->syntax->effects[effect_id];
+        if (effect->is_pure) continue;
+        SolDefId owner = SOL_AST_NONE;
+        if (effect->owner_kind == SOL_EFFECT_OWNER_ITEM) owner = effect->owner;
+        else if (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
+            && effect->owner < resolver->syntax->type_count) {
+            owner = resolver->syntax->types[effect->owner].owner_item;
+        }
+        if (owner >= resolver->syntax->item_count) continue;
+        SolEffectParameterId parameter
+            = resolver->syntax->items[owner].first_effect_parameter;
+        if (parameter != SOL_AST_NONE && sol_span_equal(
+            resolver->source,
+            resolver->syntax->effect_parameters[parameter].name,
+            effect->name
+        )) {
+            resolver->module->effect_resolutions[effect_id]
+                = (SolEffectResolution){SOL_EFFECT_RESOLUTION_PARAMETER, parameter};
+        }
+    }
+    for (SolTypeId type_id = 0; type_id < resolver->syntax->type_count; ++type_id) {
+        const SolSyntaxType *type = &resolver->syntax->types[type_id];
+        if (!type->has_effect_tail) continue;
+        SolEffectParameterId parameter = resolver->syntax->items[
+            type->owner_item
+        ].first_effect_parameter;
+        if (parameter != SOL_AST_NONE && sol_span_equal(
+            resolver->source,
+            resolver->syntax->effect_parameters[parameter].name,
+            type->effect_tail
+        )) {
+            resolver->module->type_effect_resolutions[type_id]
+                = (SolEffectResolution){SOL_EFFECT_RESOLUTION_PARAMETER, parameter};
+        } else {
+            sol_diagnostics_add(
+                resolver->diagnostics,
+                "SOL-RESOLVE-006",
+                SOL_SEVERITY_ERROR,
+                type->effect_tail,
+                "callback effect row tail is not declared by the owning function"
+            );
+        }
     }
 }
 

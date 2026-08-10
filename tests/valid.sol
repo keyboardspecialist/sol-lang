@@ -25,6 +25,29 @@ function identity<T>(value: T) -> T effects { pure } {
     return value
 }
 
+function keep_text(value: Text) -> Text effects { pure } {
+    return value
+}
+
+function load_text(value: Text) -> Text effects { service.read } {
+    return value
+}
+
+function invoke<T, effects E>(
+    value: T,
+    callback: function(T) -> T effects E,
+) -> T effects { E } {
+    return callback(value)
+}
+
+function invoke_pure(value: Text) -> Text effects { pure } {
+    return invoke(value, keep_text)
+}
+
+function invoke_read(value: Text) -> Text effects { service.read } {
+    return invoke<Text>(value, load_text)
+}
+
 function boxed_name(user: User) -> Box<Text> effects { pure } {
     return Box<Text> { value = identity(user.name) }
 }

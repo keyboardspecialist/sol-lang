@@ -34,6 +34,7 @@ typedef struct {
     SolParameterId result_authority_parameter;
     SolParameterId capability_source;
     SolTypeParameterId first_type_parameter;
+    SolEffectParameterId first_effect_parameter;
 } SolSyntaxItem;
 
 typedef struct {
@@ -63,6 +64,9 @@ typedef struct {
     SolTypeParameter *type_parameters;
     size_t type_parameter_count;
     size_t type_parameter_capacity;
+    SolEffectParameter *effect_parameters;
+    size_t effect_parameter_count;
+    size_t effect_parameter_capacity;
     SolField *fields;
     size_t field_count;
     size_t field_capacity;

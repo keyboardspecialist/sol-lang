@@ -336,6 +336,66 @@ static void test_unsupported_generic_syntax(void) {
     sol_source_free(&source);
 }
 
+static void test_effect_row_generic_syntax(void) {
+    static const char text[] =
+        "module row_syntax\n"
+        "function identity<T>(value: T) -> T effects { pure } { return value }\n"
+        "function apply<T, effects E>(value: T, callback: function(T) -> T effects E) -> T\n"
+        "effects { E service.fixed } { return callback(value) }\n"
+        "function retain<effects E>(callback: function() -> Int64 effects E) -> Int64\n"
+        "effects { E } { return identity<function() -> Int64 effects E>(callback)() }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "row_syntax.sol", text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.effect_parameter_count == 2);
+    CHECK(tree.items[1].first_effect_parameter == 0);
+    CHECK(tree.effect_parameters[0].owner_item == 1);
+    CHECK(tree.items[2].first_effect_parameter == 1);
+    CHECK(tree.effect_parameters[1].owner_item == 2);
+    bool found_tail = false;
+    for (SolTypeId type = 0; type < tree.type_count; ++type) {
+        if (tree.types[type].has_effect_tail) {
+            found_tail = true;
+            CHECK(span_text_equal(&source, tree.types[type].effect_tail, "E"));
+        }
+    }
+    CHECK(found_tail);
+    check_ast_links(&tree);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+
+    static const char invalid[] =
+        "module invalid_rows\n"
+        "record Bad<effects E> {}\n"
+        "function order<effects E, T>(value: T) -> T { return value }\n"
+        "function many<effects E, effects F>() -> Int64 { return 1 }\n";
+    CHECK(sol_source_from_text(&source, "invalid_rows.sol", invalid));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    size_t unsupported = 0;
+    for (size_t index = 0; index < diagnostics.count; ++index) {
+        unsupported += strcmp(diagnostics.items[index].code, "SOL-PARSE-018") == 0;
+    }
+    CHECK(unsupported >= 3);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
 static void test_generic_lookahead_recovery_and_spans(void) {
     static const char valid_text[] =
         "module generic_lookahead\n"
@@ -1276,6 +1336,7 @@ int main(void) {
     test_valid_declarations();
     test_generic_syntax_and_comparison_disambiguation();
     test_unsupported_generic_syntax();
+    test_effect_row_generic_syntax();
     test_generic_lookahead_recovery_and_spans();
     test_missing_module();
     test_nested_and_unterminated_comments();

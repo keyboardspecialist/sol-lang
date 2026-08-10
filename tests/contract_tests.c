@@ -311,6 +311,76 @@ static void test_generic_contract_templates(void) {
     free_compilation(&compilation);
 }
 
+static void test_effect_row_call_contract_purity(void) {
+    static const char text[] =
+        "module row_contract\n"
+        "function identity(value: Int64) -> Int64 effects { pure } { return value }\n"
+        "function read(value: Int64) -> Int64 effects { service.read } { return value }\n"
+        "function apply<effects E>(value: Int64, callback: function(Int64) -> Int64 effects E) -> Int64 effects { E } { return callback(value) }\n"
+        "function sample(value: Int64) -> Int64 effects { pure }\n"
+        "requires { apply(value, identity) == value, apply(value, read) == value }\n"
+        "{ return value }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(diagnostic_count(&compilation, "SOL-CONTRACT-002") == 1);
+    CHECK(compilation.contracts.obligation_count == 2);
+    SolExprId impure_call = SOL_AST_NONE;
+    for (SolExprId expression = 0;
+        expression < compilation.effects.call_instantiation_count;
+        ++expression) {
+        const SolEffectCallInstantiation *entry = sol_effect_call_instantiation(
+            &compilation.effects, expression
+        );
+        if (entry != NULL && entry->row_count != 0) {
+            impure_call = expression;
+            break;
+        }
+    }
+    CHECK(impure_call != SOL_AST_NONE);
+    if (impure_call != SOL_AST_NONE) {
+        size_t row_count = compilation.effects.call_instantiations[
+            impure_call
+        ].row_count;
+        size_t row_total = compilation.effects.call_row_count;
+        compilation.effects.call_instantiations[impure_call].row_count = 0;
+        compilation.effects.call_row_count = 0;
+        sol_contract_table_free(&compilation.contracts);
+        sol_contract_table_init(&compilation.contracts);
+        sol_diagnostics_free(&compilation.diagnostics);
+        sol_diagnostics_init(&compilation.diagnostics);
+        CHECK(!sol_contract_lower(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.contracts,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-005"));
+        compilation.effects.call_instantiations[impure_call].row_count = row_count;
+        compilation.effects.call_row_count = row_total;
+
+        compilation.effects.functions[2].effect_parameter = SOL_AST_NONE;
+        sol_contract_table_free(&compilation.contracts);
+        sol_contract_table_init(&compilation.contracts);
+        sol_diagnostics_free(&compilation.diagnostics);
+        sol_diagnostics_init(&compilation.diagnostics);
+        CHECK(!sol_contract_lower(
+            &compilation.source,
+            &compilation.syntax,
+            &compilation.hir,
+            &compilation.types,
+            &compilation.effects,
+            &compilation.contracts,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-005"));
+        compilation.effects.functions[2].effect_parameter = 0;
+    }
+    free_compilation(&compilation);
+}
+
 static void test_signature_scope_boundaries(void) {
     static const char body_local[] =
         "module body_local\n"
@@ -602,6 +672,7 @@ int main(void) {
     test_obligations_result_and_snapshots();
     test_member_contract_ownership();
     test_generic_contract_templates();
+    test_effect_row_call_contract_purity();
     test_signature_scope_boundaries();
     test_contract_type_errors();
     test_purity_and_effect_firewall();
