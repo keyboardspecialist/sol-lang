@@ -1399,6 +1399,192 @@ static void test_contract_expression_types(void) {
     free_compilation(&compilation);
 }
 
+static void test_traits_bounds_and_method_metadata(void) {
+    static const char valid[] =
+        "module traits\n"
+        "trait Show { function show(self: Self) -> Text effects { pure } }\n"
+        "implementation Show for Int64 { function show(self: Self) -> Text effects { pure } { return \"ok\" } }\n"
+        "function render<T: Show>(value: T) -> Text effects { pure } { return value.show() }\n"
+        "function concrete(value: Int64) -> Text effects { pure } { return value.show() }\n"
+        "function instantiate(value: Int64) -> Text effects { pure } { return render(value) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, valid));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    size_t requirements = 0;
+    size_t implementations = 0;
+    for (SolExprId call = 0; call < compilation.types.method_resolution_count; ++call) {
+        const SolMethodResolution *method = sol_type_method_resolution(&compilation.types, call);
+        if (method == NULL) continue;
+        requirements += method->kind == SOL_METHOD_RESOLUTION_REQUIREMENT;
+        implementations += method->kind == SOL_METHOD_RESOLUTION_IMPLEMENTATION;
+    }
+    CHECK(requirements == 1);
+    CHECK(implementations == 1);
+    compilation.hir.bound_resolutions[0].target = compilation.syntax.item_count;
+    CHECK(!rerun_typecheck(&compilation));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-003"));
+    free_compilation(&compilation);
+
+    static const char bad_bound[] =
+        "module bad_bound\n"
+        "trait Show { function show(self: Self) -> Text effects { pure } }\n"
+        "function render<T: Show>(value: T) -> Text effects { pure } { return value.show() }\n"
+        "function bad(value: Bool) -> Text effects { pure } { return render(value) }\n";
+    CHECK(compile_source(&compilation, bad_bound));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-022"));
+    free_compilation(&compilation);
+
+    static const char mismatch[] =
+        "module mismatch\n"
+        "trait Show { function show(self: Self) -> Text effects { pure } }\n"
+        "implementation Show for Int64 { function show(self: Self) -> Int64 effects { pure } { return 1 } }\n";
+    CHECK(compile_source(&compilation, mismatch));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-023"));
+    free_compilation(&compilation);
+
+    static const char method_value[] =
+        "module method_value\n"
+        "trait Show { function show(self: Self) -> Text effects { pure } }\n"
+        "implementation Show for Int64 { function show(self: Self) -> Text effects { pure } { return \"ok\" } }\n"
+        "function bad(value: Int64) -> Int64 effects { pure } { let method = value.show return 1 }\n";
+    CHECK(compile_source(&compilation, method_value));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-021"));
+    free_compilation(&compilation);
+}
+
+static void test_nested_self_substitution_growth(void) {
+    static const char text[] =
+        "module nested_self\n"
+        "record Pair<A, B> { left: A, right: B }\n"
+        "trait Nested {\n"
+        " function nested(self: Self, value: Pair<Pair<Pair<Pair<Pair<Pair<Pair<Pair<Pair<Self, Self>, Self>, Self>, Self>, Self>, Self>, Self>, Self>, Self>) -> Self effects { pure }\n"
+        "}\n"
+        "implementation Nested for Int64 {\n"
+        " function nested(self: Self, value: Pair<Pair<Pair<Pair<Pair<Pair<Pair<Pair<Pair<Self, Self>, Self>, Self>, Self>, Self>, Self>, Self>, Self>, Self>) -> Self effects { pure } { return self }\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.types.type_application_count > 16);
+    CHECK(compilation.types.type_application_argument_count > 32);
+    free_compilation(&compilation);
+}
+
+static void test_malformed_trait_method_links(void) {
+    static const char text[] =
+        "module malformed_traits\n"
+        "trait First { function first(self: Self) -> Int64 effects { pure } }\n"
+        "trait Second { function second(self: Self) -> Int64 effects { pure } }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolTraitMethodId first = compilation.syntax.items[0].first_trait_method;
+    SolTraitMethodId second = compilation.syntax.items[1].first_trait_method;
+
+    compilation.syntax.trait_methods[first].next = first;
+    CHECK(!rerun_typecheck(&compilation));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-003"));
+    compilation.syntax.trait_methods[first].next = SOL_AST_NONE;
+
+    compilation.syntax.trait_methods[first].next = second;
+    CHECK(!rerun_typecheck(&compilation));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-003"));
+    compilation.syntax.trait_methods[first].next = SOL_AST_NONE;
+
+    compilation.syntax.items[1].first_trait_method = SOL_AST_NONE;
+    CHECK(!rerun_typecheck(&compilation));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-003"));
+    free_compilation(&compilation);
+}
+
+static void test_computed_enum_receiver_methods(void) {
+    static const char text[] =
+        "module enum_methods\n"
+        "enum Choice { left, right }\n"
+        "trait Tag { function tag(self: Self) -> Int64 effects { pure } }\n"
+        "implementation Tag for Choice { function tag(self: Self) -> Int64 effects { pure } { return 1 } }\n"
+        "function make() -> Choice effects { pure } { return Choice.left }\n"
+        "function from_call() -> Int64 effects { pure } { return make().tag() }\n"
+        "function from_if(flag: Bool) -> Int64 effects { pure } { return (if flag { Choice.left } else { Choice.right }).tag() }\n"
+        "function from_block() -> Int64 effects { pure } { return ({ Choice.left }).tag() }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    size_t methods = 0;
+    for (SolExprId expression = 0; expression < compilation.syntax.expression_count;
+        ++expression) {
+        methods += sol_type_method_resolution(&compilation.types, expression) != NULL;
+    }
+    CHECK(methods == 3);
+    free_compilation(&compilation);
+}
+
+static void test_bound_evidence_forwarding(void) {
+    static const char valid[] =
+        "module bound_forwarding\n"
+        "trait Show { function show(self: Self) -> Text effects { pure } }\n"
+        "function inner<U: Show>(value: U) -> Text effects { pure } { return value.show() }\n"
+        "function inferred<T: Show>(value: T) -> Text effects { pure } { return inner(value) }\n"
+        "function explicit<T: Show>(value: T) -> Text effects { pure } { return inner<T>(value) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, valid));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+
+    static const char different[] =
+        "module different_bound\n"
+        "trait Show { function show(self: Self) -> Text effects { pure } }\n"
+        "trait Other { function other(self: Self) -> Text effects { pure } }\n"
+        "function inner<U: Show>(value: U) -> Text effects { pure } { return value.show() }\n"
+        "function outer<T: Other>(value: T) -> Text effects { pure } { return inner(value) }\n";
+    CHECK(compile_source(&compilation, different));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-022"));
+    free_compilation(&compilation);
+
+    static const char unbounded[] =
+        "module no_bound\n"
+        "trait Show { function show(self: Self) -> Text effects { pure } }\n"
+        "function inner<U: Show>(value: U) -> Text effects { pure } { return value.show() }\n"
+        "function outer<T>(value: T) -> Text effects { pure } { return inner<T>(value) }\n";
+    CHECK(compile_source(&compilation, unbounded));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-022"));
+    free_compilation(&compilation);
+}
+
+static void test_method_named_arguments(void) {
+    static const char valid[] =
+        "module method_names\n"
+        "trait Mix { function mix(self: Self, left: Int64, right: Bool) -> Int64 effects { pure } }\n"
+        "implementation Mix for Int64 { function mix(self: Self, left: Int64, right: Bool) -> Int64 effects { pure } { return left } }\n"
+        "function call(value: Int64) -> Int64 effects { pure } { return value.mix(right = true, left = 2) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, valid));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+
+    static const char *invalid[] = {
+        "module unknown\ntrait Mix { function mix(self: Self, left: Int64, right: Bool) -> Int64 effects { pure } }\nimplementation Mix for Int64 { function mix(self: Self, left: Int64, right: Bool) -> Int64 effects { pure } { return left } }\nfunction bad(value: Int64) -> Int64 effects { pure } { return value.mix(missing = 1, right = true) }\n",
+        "module duplicate\ntrait Mix { function mix(self: Self, left: Int64, right: Bool) -> Int64 effects { pure } }\nimplementation Mix for Int64 { function mix(self: Self, left: Int64, right: Bool) -> Int64 effects { pure } { return left } }\nfunction bad(value: Int64) -> Int64 effects { pure } { return value.mix(left = 1, left = 2) }\n",
+        "module missing\ntrait Mix { function mix(self: Self, left: Int64, right: Bool) -> Int64 effects { pure } }\nimplementation Mix for Int64 { function mix(self: Self, left: Int64, right: Bool) -> Int64 effects { pure } { return left } }\nfunction bad(value: Int64) -> Int64 effects { pure } { return value.mix(left = 1) }\n",
+        "module positional_after\ntrait Mix { function mix(self: Self, left: Int64, right: Bool) -> Int64 effects { pure } }\nimplementation Mix for Int64 { function mix(self: Self, left: Int64, right: Bool) -> Int64 effects { pure } { return left } }\nfunction bad(value: Int64) -> Int64 effects { pure } { return value.mix(left = 1, true) }\n",
+    };
+    for (size_t index = 0; index < sizeof(invalid) / sizeof(invalid[0]); ++index) {
+        CHECK(compile_source(&compilation, invalid[index]));
+        CHECK(has_diagnostic(&compilation,
+            index == 2 ? "SOL-TYPE-006" : "SOL-TYPE-012"));
+        free_compilation(&compilation);
+    }
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -1443,6 +1629,12 @@ int main(void) {
     test_handler_types_and_metadata();
     test_invalid_handlers();
     test_contract_expression_types();
+    test_traits_bounds_and_method_metadata();
+    test_nested_self_substitution_growth();
+    test_malformed_trait_method_links();
+    test_computed_enum_receiver_methods();
+    test_bound_evidence_forwarding();
+    test_method_named_arguments();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;

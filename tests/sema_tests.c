@@ -600,6 +600,48 @@ static void test_contract_resolution_and_cycles(void) {
     free_compilation(&compilation);
 }
 
+static void test_trait_resolution_and_malformed_metadata(void) {
+    static const char text[] =
+        "module traits\n"
+        "trait Show { function show(self: Self) -> Text effects { pure } }\n"
+        "implementation Show for Int64 { function show(self: Self) -> Text effects { pure } { return \"ok\" } }\n"
+        "function render<T: Show>(value: T) -> Text effects { pure } { return value.show() }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.hir.trait_resolutions[1].kind == SOL_RESOLUTION_DEFINITION);
+    CHECK(compilation.hir.trait_resolutions[1].target == 0);
+    CHECK(compilation.hir.bound_resolutions[0].target == 0);
+    SolTraitMethodId first = compilation.syntax.items[0].first_trait_method;
+    compilation.syntax.trait_methods[first].next = first;
+    reset_hir_diagnostics(&compilation);
+    CHECK(!sol_hir_lower(&compilation.source, &compilation.syntax,
+        &compilation.hir, &compilation.diagnostics));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    free_compilation(&compilation);
+}
+
+static void test_malformed_implementation_trait_span(void) {
+    static const char text[] =
+        "module malformed_trait_span\n"
+        "trait Show { function show(self: Self) -> Text effects { pure } }\n"
+        "implementation Show for Int64 { function show(self: Self) -> Text effects { pure } { return \"ok\" } }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    compilation.syntax.items[1].trait_name = (SolSpan){
+        .start = compilation.source.length + 1,
+        .end = compilation.source.length + 5,
+    };
+    reset_hir_diagnostics(&compilation);
+    CHECK(!sol_hir_lower(
+        &compilation.source, &compilation.syntax, &compilation.hir,
+        &compilation.diagnostics
+    ));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_successful_resolution();
     test_unresolved_name();
@@ -616,6 +658,8 @@ int main(void) {
     test_derived_capability_resolution_and_malformed_body();
     test_malformed_handler_ast_rejected();
     test_contract_resolution_and_cycles();
+    test_trait_resolution_and_malformed_metadata();
+    test_malformed_implementation_trait_span();
     if (failures != 0) {
         fprintf(stderr, "%d semantic test failure(s)\n", failures);
         return 1;

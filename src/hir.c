@@ -39,6 +39,8 @@ void sol_hir_module_free(SolHirModule *module) {
     free(module->type_resolutions);
     free(module->effect_resolutions);
     free(module->type_effect_resolutions);
+    free(module->trait_resolutions);
+    free(module->bound_resolutions);
     memset(module, 0, sizeof(*module));
 }
 
@@ -142,6 +144,10 @@ static SolEffectId sol_resolver_effect_root(
             return effect->owner < syntax->capability_member_count
                 ? syntax->capability_members[effect->owner].first_effect
                 : SOL_AST_NONE;
+        case SOL_EFFECT_OWNER_TRAIT_METHOD:
+            return effect->owner < syntax->trait_method_count
+                ? syntax->trait_methods[effect->owner].first_effect
+                : SOL_AST_NONE;
         case SOL_EFFECT_OWNER_TYPE:
             return effect->owner < syntax->type_count
                 ? syntax->types[effect->owner].first_effect
@@ -203,6 +209,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         || syntax->match_arm_count > syntax->match_arm_capacity
         || syntax->effect_count > syntax->effect_capacity
         || syntax->capability_member_count > syntax->capability_member_capacity
+        || syntax->trait_method_count > syntax->trait_method_capacity
         || syntax->contract_clause_count > syntax->contract_clause_capacity
         || syntax->contract_condition_count > syntax->contract_condition_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
@@ -222,6 +229,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         || (syntax->effect_count != 0 && syntax->effects == NULL)
         || (syntax->capability_member_count != 0
             && syntax->capability_members == NULL)
+        || (syntax->trait_method_count != 0 && syntax->trait_methods == NULL)
         || (syntax->contract_clause_count != 0 && syntax->contract_clauses == NULL)
         || (syntax->contract_condition_count != 0
             && syntax->contract_conditions == NULL)) {
@@ -230,10 +238,11 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     }
     for (size_t index = 0; index < syntax->item_count; ++index) {
         const SolSyntaxItem *item = &syntax->items[index];
-        if ((int)item->kind < 0 || item->kind > SOL_ITEM_FUNCTION
+        if ((int)item->kind < 0 || item->kind > SOL_ITEM_IMPLEMENTATION
             || !sol_span_valid(resolver->source, item->name)
             || !sol_span_valid(resolver->source, item->span)
             || !sol_span_valid(resolver->source, item->return_type)
+            || !sol_span_valid(resolver->source, item->trait_name)
             || (item->body != SOL_AST_NONE && item->body >= syntax->expression_count)
             || (item->first_parameter != SOL_AST_NONE
                 && item->first_parameter >= syntax->parameter_count)
@@ -257,6 +266,14 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             sol_resolver_malformed(resolver);
             return false;
         }
+        bool implementation = item->kind == SOL_ITEM_IMPLEMENTATION;
+        if ((implementation
+                && item->trait_name.start == item->trait_name.end)
+            || (!implementation
+                && (item->trait_name.start != 0 || item->trait_name.end != 0))) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
         if (item->first_effect != SOL_AST_NONE
             && (syntax->effects[item->first_effect].owner_kind != SOL_EFFECT_OWNER_ITEM
                 || syntax->effects[item->first_effect].owner != index)) {
@@ -266,6 +283,26 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         if (item->kind != SOL_ITEM_CAPABILITY && item->first_member != SOL_AST_NONE) {
             sol_resolver_malformed(resolver);
             return false;
+        }
+        if ((item->kind != SOL_ITEM_TRAIT && item->kind != SOL_ITEM_IMPLEMENTATION
+                && item->first_trait_method != SOL_AST_NONE)
+            || (item->kind == SOL_ITEM_IMPLEMENTATION
+                && item->implementation_type >= syntax->type_count)
+            || (item->kind != SOL_ITEM_IMPLEMENTATION
+                && item->implementation_type != SOL_AST_NONE)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+        SolTraitMethodId trait_method = item->first_trait_method;
+        size_t trait_method_count = 0;
+        while (trait_method != SOL_AST_NONE) {
+            if (trait_method >= syntax->trait_method_count
+                || trait_method_count++ >= syntax->trait_method_count
+                || syntax->trait_methods[trait_method].owner_item != index) {
+                sol_resolver_malformed(resolver);
+                return false;
+            }
+            trait_method = syntax->trait_methods[trait_method].next;
         }
         if ((item->capability_source != SOL_AST_NONE
                 && item->kind != SOL_ITEM_CAPABILITY)
@@ -361,6 +398,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     for (size_t index = 0; index < syntax->type_parameter_count; ++index) {
         const SolTypeParameter *parameter = &syntax->type_parameters[index];
         if (!sol_span_valid(resolver->source, parameter->name)
+            || !sol_span_valid(resolver->source, parameter->bound)
             || parameter->owner_item >= syntax->item_count
             || (parameter->next != SOL_AST_NONE
                 && parameter->next >= syntax->type_parameter_count)) {
@@ -531,6 +569,8 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                     || syntax->items[effect->owner].kind != SOL_ITEM_FUNCTION))
             || (effect->owner_kind == SOL_EFFECT_OWNER_CAPABILITY_MEMBER
                 && effect->owner >= syntax->capability_member_count)
+            || (effect->owner_kind == SOL_EFFECT_OWNER_TRAIT_METHOD
+                && effect->owner >= syntax->trait_method_count)
             || (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
                 && (effect->owner >= syntax->type_count
                     || syntax->types[effect->owner].kind != SOL_SYNTAX_TYPE_FUNCTION))) {
@@ -591,6 +631,29 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             && (syntax->effects[member->first_effect].owner_kind
                     != SOL_EFFECT_OWNER_CAPABILITY_MEMBER
                 || syntax->effects[member->first_effect].owner != index)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->trait_method_count; ++index) {
+        const SolTraitMethod *method = &syntax->trait_methods[index];
+        if (!sol_span_valid(resolver->source, method->name)
+            || !sol_span_valid(resolver->source, method->span)
+            || !sol_span_valid(resolver->source, method->return_type)
+            || method->owner_item >= syntax->item_count
+            || (syntax->items[method->owner_item].kind != SOL_ITEM_TRAIT
+                && syntax->items[method->owner_item].kind != SOL_ITEM_IMPLEMENTATION)
+            || method->return_type_id >= syntax->type_count
+            || (method->first_parameter != SOL_AST_NONE
+                && method->first_parameter >= syntax->parameter_count)
+            || (method->first_effect != SOL_AST_NONE
+                && method->first_effect >= syntax->effect_count)
+            || (method->body != SOL_AST_NONE
+                && method->body >= syntax->expression_count)
+            || (method->next != SOL_AST_NONE
+                && method->next >= syntax->trait_method_count)
+            || (method->body != SOL_AST_NONE)
+                != (syntax->items[method->owner_item].kind == SOL_ITEM_IMPLEMENTATION)) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -723,6 +786,8 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
     resolver->module->type_resolution_count = syntax->type_count;
     resolver->module->effect_resolution_count = syntax->effect_count;
     resolver->module->type_effect_resolution_count = syntax->type_count;
+    resolver->module->trait_resolution_count = syntax->item_count;
+    resolver->module->bound_resolution_count = syntax->type_parameter_count;
     resolver->module->definitions = calloc(
         syntax->item_count,
         sizeof(*resolver->module->definitions)
@@ -745,6 +810,12 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
     resolver->module->type_effect_resolutions = malloc(
         syntax->type_count * sizeof(*resolver->module->type_effect_resolutions)
     );
+    resolver->module->trait_resolutions = calloc(
+        syntax->item_count, sizeof(*resolver->module->trait_resolutions)
+    );
+    resolver->module->bound_resolutions = calloc(
+        syntax->type_parameter_count, sizeof(*resolver->module->bound_resolutions)
+    );
 
     if ((syntax->item_count != 0 && resolver->module->definitions == NULL)
         || (syntax->expression_count != 0 && resolver->module->resolutions == NULL)
@@ -752,11 +823,26 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
         || (syntax->type_count != 0 && resolver->module->type_resolutions == NULL)
         || (syntax->effect_count != 0 && resolver->module->effect_resolutions == NULL)
         || (syntax->type_count != 0
-            && resolver->module->type_effect_resolutions == NULL)) {
+            && resolver->module->type_effect_resolutions == NULL)
+        || (syntax->item_count != 0 && resolver->module->trait_resolutions == NULL)
+        || (syntax->type_parameter_count != 0
+            && resolver->module->bound_resolutions == NULL)) {
         return false;
     }
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         resolver->module->expression_owners[index] = SOL_AST_NONE;
+    }
+    for (size_t index = 0; index < syntax->item_count; ++index) {
+        resolver->module->trait_resolutions[index] = (SolResolution){
+            .kind = SOL_RESOLUTION_NOT_APPLICABLE,
+            .target = SOL_AST_NONE,
+        };
+    }
+    for (size_t index = 0; index < syntax->type_parameter_count; ++index) {
+        resolver->module->bound_resolutions[index] = (SolResolution){
+            .kind = SOL_RESOLUTION_NOT_APPLICABLE,
+            .target = SOL_AST_NONE,
+        };
     }
     for (size_t index = 0; index < syntax->effect_count; ++index) {
         resolver->module->effect_resolutions[index] = (SolEffectResolution){
@@ -1228,9 +1314,71 @@ static void sol_resolver_resolve_types(SolResolver *resolver) {
             }
         }
     }
+    for (size_t item = 0; item < resolver->syntax->item_count; ++item) {
+        const SolSyntaxItem *entry = &resolver->syntax->items[item];
+        if (entry->kind == SOL_ITEM_IMPLEMENTATION) {
+            SolResolution resolution = {SOL_RESOLUTION_ERROR, SOL_AST_NONE};
+            for (size_t definition = 0;
+                definition < resolver->module->definition_count;
+                ++definition) {
+                if (resolver->module->definitions[definition].kind == SOL_ITEM_TRAIT
+                    && sol_path_span_equal(
+                        resolver->source,
+                        resolver->module->definitions[definition].name,
+                        entry->trait_name
+                    )) {
+                    resolution = (SolResolution){SOL_RESOLUTION_DEFINITION, definition};
+                    break;
+                }
+            }
+            resolver->module->trait_resolutions[item] = resolution;
+            if (resolution.kind == SOL_RESOLUTION_ERROR) {
+                sol_diagnostics_add(
+                    resolver->diagnostics, "SOL-RESOLVE-007", SOL_SEVERITY_ERROR,
+                    entry->trait_name, "unresolved trait in implementation"
+                );
+            }
+        }
+    }
+    for (size_t parameter = 0;
+        parameter < resolver->syntax->type_parameter_count;
+        ++parameter) {
+        SolSpan bound = resolver->syntax->type_parameters[parameter].bound;
+        if (bound.start == bound.end) continue;
+        SolResolution resolution = {SOL_RESOLUTION_ERROR, SOL_AST_NONE};
+        for (size_t definition = 0;
+            definition < resolver->module->definition_count;
+            ++definition) {
+            if (resolver->module->definitions[definition].kind == SOL_ITEM_TRAIT
+                && sol_path_span_equal(
+                    resolver->source,
+                    resolver->module->definitions[definition].name,
+                    bound
+                )) {
+                resolution = (SolResolution){SOL_RESOLUTION_DEFINITION, definition};
+                break;
+            }
+        }
+        resolver->module->bound_resolutions[parameter] = resolution;
+        if (resolution.kind == SOL_RESOLUTION_ERROR) {
+            sol_diagnostics_add(
+                resolver->diagnostics, "SOL-RESOLVE-007", SOL_SEVERITY_ERROR,
+                bound, "unresolved trait bound"
+            );
+        }
+    }
     for (size_t type_id = 0; type_id < resolver->syntax->type_count; ++type_id) {
         const SolSyntaxType *type = &resolver->syntax->types[type_id];
         if (type->kind != SOL_SYNTAX_TYPE_PATH) continue;
+        if ((resolver->syntax->items[type->owner_item].kind == SOL_ITEM_TRAIT
+                || resolver->syntax->items[type->owner_item].kind
+                    == SOL_ITEM_IMPLEMENTATION)
+            && sol_span_text_equal(resolver->source, type->name, "Self")) {
+            resolver->module->type_resolutions[type_id] = (SolTypeResolution){
+                SOL_TYPE_RESOLUTION_SELF, type->owner_item
+            };
+            continue;
+        }
         SolTypeParameterId parameter
             = resolver->syntax->items[type->owner_item].first_type_parameter;
         size_t traversed = 0;
@@ -1258,7 +1406,9 @@ static void sol_resolver_resolve_types(SolResolver *resolver) {
             for (size_t definition = 0;
                 definition < resolver->module->definition_count;
                 ++definition) {
-                if (resolver->module->definitions[definition].kind != SOL_ITEM_FUNCTION
+                SolItemKind kind = resolver->module->definitions[definition].kind;
+                if ((kind == SOL_ITEM_RECORD || kind == SOL_ITEM_ENUM
+                        || kind == SOL_ITEM_CAPABILITY)
                     && sol_path_span_equal(
                         resolver->source,
                         resolver->module->definitions[definition].name,
@@ -1424,6 +1574,20 @@ static void sol_resolver_capability_members(SolResolver *resolver, SolDefId defi
     }
 }
 
+static void sol_resolver_trait_methods(SolResolver *resolver, SolDefId definition) {
+    SolTraitMethodId method_id = resolver->syntax->items[definition].first_trait_method;
+    while (method_id != SOL_AST_NONE) {
+        const SolTraitMethod *method = &resolver->syntax->trait_methods[method_id];
+        resolver->current_definition = definition;
+        resolver->binding_count = 0;
+        resolver->scope_depth = 0;
+        sol_resolver_bind_parameters(resolver, method->first_parameter);
+        if (method->body != SOL_AST_NONE) sol_resolver_expression(resolver, method->body);
+        resolver->binding_count = 0;
+        method_id = method->next;
+    }
+}
+
 bool sol_hir_lower(
     const SolSource *source,
     const SolSyntaxTree *syntax,
@@ -1459,6 +1623,9 @@ bool sol_hir_lower(
             sol_resolver_function(&resolver, index);
         } else if (syntax->items[index].kind == SOL_ITEM_CAPABILITY) {
             sol_resolver_capability_members(&resolver, index);
+        } else if (syntax->items[index].kind == SOL_ITEM_TRAIT
+            || syntax->items[index].kind == SOL_ITEM_IMPLEMENTATION) {
+            sol_resolver_trait_methods(&resolver, index);
         }
     }
 

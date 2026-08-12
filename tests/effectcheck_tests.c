@@ -2183,6 +2183,92 @@ static void test_forged_handler_metadata_rejected(void) {
     free_compilation(&compilation);
 }
 
+static void test_trait_method_effects_and_metadata(void) {
+    static const char valid[] =
+        "module trait_effects\n"
+        "trait Load { function load(self: Self) -> Text effects { io.read } }\n"
+        "implementation Load for Int64 { function load(self: Self) -> Text effects { io.read } { return \"ok\" } }\n"
+        "function load(value: Int64) -> Text effects { io.read } { return value.load() }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, valid));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.effects.trait_method_count == 2);
+    SolExprId method_call = SOL_AST_NONE;
+    for (SolExprId expression = 0; expression < compilation.syntax.expression_count; ++expression) {
+        if (sol_type_method_resolution(&compilation.types, expression) != NULL) {
+            method_call = expression;
+            break;
+        }
+    }
+    CHECK(method_call != SOL_AST_NONE);
+    if (method_call != SOL_AST_NONE) {
+        SolTraitMethodId saved = compilation.types.method_resolutions[method_call].method;
+        compilation.types.method_resolutions[method_call].method
+            = compilation.syntax.trait_method_count;
+        CHECK(!rerun_effectcheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+        compilation.types.method_resolutions[method_call].method = saved;
+    }
+    free_compilation(&compilation);
+
+    static const char forged_selection[] =
+        "module forged_selection\n"
+        "trait Load {\n"
+        " function load(self: Self) -> Text effects { io.read }\n"
+        " function cached(self: Self) -> Text effects { pure }\n"
+        "}\n"
+        "implementation Load for Int64 {\n"
+        " function load(self: Self) -> Text effects { io.read } { return \"loaded\" }\n"
+        " function cached(self: Self) -> Text effects { pure } { return \"cached\" }\n"
+        "}\n"
+        "function call(value: Int64) -> Text effects { io.read } { return value.load() }\n";
+    CHECK(compile_source(&compilation, forged_selection));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    method_call = SOL_AST_NONE;
+    for (SolExprId expression = 0; expression < compilation.syntax.expression_count;
+        ++expression) {
+        if (sol_type_method_resolution(&compilation.types, expression) != NULL) {
+            method_call = expression;
+            break;
+        }
+    }
+    CHECK(method_call != SOL_AST_NONE);
+    if (method_call != SOL_AST_NONE) {
+        SolTraitMethodId pure = compilation.syntax.items[1].first_trait_method;
+        pure = compilation.syntax.trait_methods[pure].next;
+        CHECK(pure != SOL_AST_NONE);
+        compilation.types.method_resolutions[method_call].method = pure;
+        CHECK(!rerun_effectcheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+    }
+    free_compilation(&compilation);
+
+    static const char mismatch[] =
+        "module mismatch\n"
+        "trait Load { function load(self: Self) -> Text effects { io.read } }\n"
+        "implementation Load for Int64 { function load(self: Self) -> Text effects { pure } { return \"ok\" } }\n";
+    CHECK(compile_source(&compilation, mismatch));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-009"));
+    free_compilation(&compilation);
+
+    static const char missing[] =
+        "module missing\n"
+        "trait Load { function load(self: Self) -> Text effects { io.read } }\n"
+        "implementation Load for Int64 { function load(self: Self) -> Text effects { io.read } { return \"ok\" } }\n"
+        "function bad(value: Int64) -> Text effects { pure } { return value.load() }\n";
+    CHECK(compile_source(&compilation, missing));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-002"));
+    free_compilation(&compilation);
+
+    static const char dependent[] =
+        "module dependent\n"
+        "trait Load { function load(self: Self) -> Text effects { io.read<Self> } }\n"
+        "implementation Load for Int64 { function load(self: Self) -> Text effects { io.read<Self> } { return \"ok\" } }\n";
+    CHECK(compile_source(&compilation, dependent));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-009"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_private_pure_inference();
     test_generic_closed_effect_rows();
@@ -2234,6 +2320,7 @@ int main(void) {
     test_handler_provider_constraints();
     test_forged_handler_metadata_rejected();
     test_malformed_provenance_sets_rejected();
+    test_trait_method_effects_and_metadata();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;

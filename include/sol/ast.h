@@ -23,6 +23,7 @@ typedef size_t SolPatternBindingId;
 typedef size_t SolMatchArmId;
 typedef size_t SolEffectId;
 typedef size_t SolCapabilityMemberId;
+typedef size_t SolTraitMethodId;
 typedef size_t SolContractClauseId;
 typedef size_t SolContractConditionId;
 
@@ -160,6 +161,7 @@ typedef struct {
 typedef enum {
     SOL_EFFECT_OWNER_ITEM,
     SOL_EFFECT_OWNER_CAPABILITY_MEMBER,
+    SOL_EFFECT_OWNER_TRAIT_METHOD,
     SOL_EFFECT_OWNER_TYPE,
 } SolEffectOwnerKind;
 
@@ -170,6 +172,7 @@ typedef struct {
 
 typedef struct {
     SolSpan name;
+    SolSpan bound;
     SolTypeParameterId next;
     size_t owner_item;
 } SolTypeParameter;
@@ -279,5 +282,18 @@ typedef struct {
     bool has_effect_clause;
     bool result_authority_from_self;
 } SolCapabilityMember;
+
+typedef struct {
+    SolSpan name;
+    SolSpan span;
+    SolParameterId first_parameter;
+    SolSpan return_type;
+    SolTypeId return_type_id;
+    SolEffectId first_effect;
+    SolExprId body;
+    SolTraitMethodId next;
+    size_t owner_item;
+    bool has_effect_clause;
+} SolTraitMethod;
 
 #endif

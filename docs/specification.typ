@@ -424,7 +424,7 @@ The target uses a layered static type system. A decidable base provides nominal 
 
 #callout([USABILITY DECISION], [Routine syntax does not expose unrestricted full-spectrum dependent typing. Value-dependent constraints are admitted where obligations and tooling remain clear; advanced propositions stay in the proof sublanguage.])
 
-#status("IMPLEMENTED", [The bootstrap implements first-order type parameters on records, enums, and free functions plus one trailing effect-row parameter on free functions. Parameters are rigid declaration-owned identities while templates are checked. Built-in and user applications are invariant and canonically interned by constructor identity plus ordered exact arguments; `Option<T>` and `Result<T, E>` retain their exact one- and two-argument identities. Type positions require complete explicit application. Function calls use either all explicit type arguments or argument-only recursive structural inference; callback arguments infer the bounded effect parameter. Bounds, defaults, variance, higher-kinded/lifetime/const parameters, general effect constraints, generic capabilities/members, polymorphic recursion, cross-module instantiation, and execution/monomorphization are future work.])
+#status("IMPLEMENTED", [The bootstrap implements first-order type parameters on records, enums, and free functions plus one trailing effect-row parameter on free functions. Parameters are rigid declaration-owned identities while templates are checked. Built-in and user applications are invariant and canonically interned by constructor identity plus ordered exact arguments; `Option<T>` and `Result<T, E>` retain their exact one- and two-argument identities. Type positions require complete explicit application. Function calls use either all explicit type arguments or argument-only recursive structural inference; callback arguments infer the bounded effect parameter. Free-function type parameters may carry one inline trait bound, checked after inference and forwarded symbolically through bounded generic calls. Defaults, variance, higher-kinded/lifetime/const parameters, multiple bounds, general effect constraints, generic capabilities/members, polymorphic recursion, cross-module instantiation, and execution/monomorphization are future work.])
 
 == Primitive Types
 
@@ -491,17 +491,24 @@ match nickname {
 Generics are reified in the semantic graph and normally monomorphized natively. Backends MAY use dictionaries or shared instantiations for ABI/code-size policy. Conformance is explicit and coherent: a package implements a trait for a type only if it owns the trait or type.
 
 #listing([Trait-bounded generic function.], ```sol
-trait Ordered {
-    function compare(self, other: Self) -> Ordering
+trait Display {
+    function display(self: Self) -> Text
     effects { pure }
 }
-public function maximum<T: Ordered>(values: NonEmpty<View<T>>) -> T
+implementation Display for Int64 {
+    function display(self: Self) -> Text effects { pure } {
+        return "number"
+    }
+}
+public function render<T: Display>(value: T) -> Text
 effects { pure } {
-    ...
+    return value.display()
 }
 ```)
 
-Traits may declare associated types, constants, and effects. Trait objects require explicit `dynamic Trait` and define an ABI-stable dispatch boundary. Arbitrary overlapping specialization is absent. The bounded unconstrained generic subset described above is implemented; traits, constraints, and all richer parameter forms remain target design.
+Traits may declare associated types, constants, and effects in the target language. Trait objects require explicit `dynamic Trait` and define an ABI-stable dispatch boundary. Arbitrary overlapping specialization is absent.
+
+#status("IMPLEMENTED", [The bounded bootstrap supports nongeneric traits, exact closed implementations, one inline bound per free-function type parameter, and immediate type-directed dot calls. Requirements and implementation methods use `self: Self`, explicit canonical parameter/result types, and exactly matching closed authority-independent effect rows. One coherent implementation provides every required method exactly once. Concrete calls select an exact implementation; symbolic calls on rigid parameters select their declared requirement, and checked metadata carries that choice into effect and contract purity validation. Generic traits and methods, defaults, method contracts or authority clauses, generic/blanket/conditional implementations, associated items, inheritance, multiple bounds, method values, trait objects, specialization, imported extension lookup, and dependent method effects remain future work.])
 
 == Units, Dimensions, and Currency
 
@@ -1333,7 +1340,7 @@ The target front end provides:
 - Constraint-based type/effect/region inference bounded for predictable diagnostics.
 - Exhaustiveness and protocol-state checking before proof generation.
 
-The bootstrap implements lossless tokens, recovering core parsing, arena-backed syntax, deterministic definition IDs, lexical single-module and declaration-owned type resolution, typed HIR foundations, generic and nongeneric records/enums/functions, exact invariant applications, matches, closed effects/capabilities/handlers, and generic contract templates. It does not yet implement incremental parsing, imports, ownership/regions, traits or constrained/row-polymorphic generics, protocols, or formatter.
+The bootstrap implements lossless tokens, recovering core parsing, arena-backed syntax, deterministic definition IDs, lexical single-module and declaration-owned type resolution, typed HIR foundations, generic and nongeneric records/enums/functions, bounded coherent traits and constrained calls, exact invariant applications, matches, closed effects/capabilities/handlers, and generic contract templates. It does not yet implement incremental parsing, imports, ownership/regions, richer trait or row-polymorphic generics, protocols, or formatter.
 
 == Verification Engine
 
@@ -1491,6 +1498,7 @@ The current C17 bootstrap provides:
 
 - Lossless lexing, recovering parsing for core declarations/contracts/body expressions, arena syntax, deterministic definition IDs, lexical single-module HIR resolution, and human/JSON diagnostics.
 - Primitive types; exact variable-arity interned built-in/user applications; bounded generic records, enums, and free functions; constructors; exhaustive user-enum and `Bool` matching; expression/call/return checking.
+- Nongeneric coherent traits; exact closed implementations; one inline free-function bound; symbolic bound forwarding; immediate type-directed method calls; checked method-resolution metadata and exact closed method effects.
 - Closed structural function types and bounded declaration-owned callback row parameters; exact function and bound-operation effects; callback subset checking; local and per-call row inference.
 - Least-fixed-point recursive inference over call-graph SCCs, including parameter and `Self` substitution.
 - Capability parameters, immutable authority aliases, normalized finite may-origin sets for computed `if`/`match`, and conservative root expansion.
@@ -1498,7 +1506,7 @@ The current C17 bootstrap provides:
 - Exact capability-backed handlers with syntax, source/provider matching, scoped root-sensitive subtraction, residual/provider effects, runtime metadata, and singleton target limitation.
 - Structured contracts resolved in fresh signature scopes; generic template typing; `Bool` typing; finalized purity; `Result` outcome-specific `result`; distinct `old` snapshots; deterministic obligation templates.
 
-It does not execute programs and is not a production compiler. In particular, general row constraints and explicit/multiple/recursive effect parameters, traits and constrained or higher-order generics, ownership/regions, general algebraic handlers, runtime dynamic handler matching, runtime contract checks, call-site contract use, logical normalization, SMT/proof discharge, concurrency, packages, formatter, stable public IDs, public IR, semantic patches, and code generation are not implemented.
+It does not execute programs and is not a production compiler. In particular, general row constraints and explicit/multiple/recursive effect parameters, richer traits and constrained or higher-order generics, ownership/regions, general algebraic handlers, runtime dynamic handler matching, runtime contract checks, call-site contract use, logical normalization, SMT/proof discharge, concurrency, packages, formatter, stable public IDs, public IR, semantic patches, and code generation are not implemented.
 
 == Phased Roadmap
 
@@ -1740,7 +1748,8 @@ module_decl := "module" module_path NEWLINE
 edition_decl := "edition" INTEGER NEWLINE
 use_decl := "use" use_path NEWLINE
 declaration := visibility? annotation* (
-    record_decl | enum_decl | type_decl | trait_decl | capability_decl
+    record_decl | enum_decl | type_decl | trait_decl | implementation_decl
+    | capability_decl
     | function_decl | protocol_decl | transaction_decl | workflow_decl
     | intent_decl | spec_decl | test_decl
 )
@@ -1750,7 +1759,8 @@ function_decl := "function" qualified_name function_generic_params?
     cost_clause? resource_clause? block
 effect_clause := "effects" "{" effect_entry* "}"
 type_generic_params := "<" TYPE_NAME ("," TYPE_NAME)* ">"
-function_generic_params := "<" TYPE_NAME ("," TYPE_NAME)*
+function_generic_params := "<" TYPE_NAME (":" TYPE_NAME)?
+    ("," TYPE_NAME (":" TYPE_NAME)?)*
     ("," "effects" TYPE_NAME)? ">" | "<" "effects" TYPE_NAME ">"
 authority_clause := "authority" "{" "result" "derives_from"
     (IDENTIFIER | "Self") "}"
@@ -1760,6 +1770,13 @@ contract_condition := outcome? expression
 outcome := ("success" | "failure") "=>"
 record_decl := "record" TYPE_NAME type_generic_params? version_clause? "{" field_decl* "}"
 enum_decl := "open"? "enum" TYPE_NAME type_generic_params? "{" variant_decl* "}"
+trait_decl := "trait" TYPE_NAME "{" trait_method* "}"
+implementation_decl := "implementation" TYPE_NAME "for" type
+    "{" implementation_method* "}"
+trait_method := "function" IDENTIFIER "(" parameter_list? ")" "->" type
+    effect_clause
+implementation_method := "function" IDENTIFIER
+    "(" parameter_list? ")" "->" type effect_clause block
 capability_decl := "capability" TYPE_NAME
     ("derives_from" IDENTIFIER ":" "capability" TYPE_NAME)?
     "{" capability_member* "}"
@@ -1782,7 +1799,7 @@ function_type := "function" "(" type_list? ")" "->" type
     (effect_clause | "effects" TYPE_NAME)
 ```)
 
-In canonical bootstrap source, `authority` precedes `effects`, followed by `requires` and `ensures`; each clause occurs at most once. Newlines or commas separate contract conditions. `success` and `failure` are valid only in `ensures` on declarations returning `Result<T, E>`; `result` and `old` are contextual contract forms, and `old` is valid only in postconditions. A free-function authority source names a direct capability parameter, while a capability member uses `Self`. The bounded bootstrap permits one trailing `effects E` generic parameter on free functions; callback types use `effects E`, while the declaration row names `E` inside braces. Exact handlers always have an explicitly parameterized target and cannot transform an unresolved row. In expressions, a balanced `<...>` is recognized as type arguments only on a path/field-like head when it closes before `(`, `.`, or `{`; ordinary comparisons remain binary expressions.
+In canonical bootstrap source, `authority` precedes `effects`, followed by `requires` and `ensures`; each clause occurs at most once. Newlines or commas separate contract conditions. `success` and `failure` are valid only in `ensures` on declarations returning `Result<T, E>`; `result` and `old` are contextual contract forms, and `old` is valid only in postconditions. A free-function authority source names a direct capability parameter, while a capability member uses `Self`. The bounded bootstrap permits one inline trait bound per free-function type parameter and one trailing `effects E` parameter; callback types use `effects E`, while the declaration row names `E` inside braces. Trait and implementation methods begin with `self: Self`, require explicit closed effects, and do not admit authority or contract clauses. Exact handlers always have an explicitly parameterized target and cannot transform an unresolved row. In expressions, a balanced `<...>` is recognized as type arguments only on a path/field-like head when it closes before `(`, `.`, or `{`; ordinary comparisons remain binary expressions.
 
 #heading(level: 1, numbering: none)[Appendix B. Standard Effect Taxonomy]
 

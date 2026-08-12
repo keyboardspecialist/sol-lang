@@ -24,6 +24,8 @@ typedef enum {
     SOL_TYPE_VARIANT,
     SOL_TYPE_NEVER,
     SOL_TYPE_PARAMETER,
+    SOL_TYPE_SELF,
+    SOL_TYPE_TRAIT_METHOD,
 } SolTypeKind;
 
 typedef struct {
@@ -90,6 +92,21 @@ typedef struct {
     SolParameterId root;
 } SolHandler;
 
+typedef enum {
+    SOL_METHOD_RESOLUTION_NONE,
+    SOL_METHOD_RESOLUTION_REQUIREMENT,
+    SOL_METHOD_RESOLUTION_IMPLEMENTATION,
+} SolMethodResolutionKind;
+
+typedef struct {
+    SolMethodResolutionKind kind;
+    SolExprId call;
+    SolDefId trait;
+    SolTraitMethodId requirement;
+    SolDefId implementation;
+    SolTraitMethodId method;
+} SolMethodResolution;
+
 typedef struct {
     SolType *expressions;
     size_t expression_count;
@@ -136,7 +153,18 @@ typedef struct {
     SolVariantConstructor *variant_constructors;
     size_t variant_constructor_count;
     size_t variant_constructor_capacity;
+    /* Indexed by SolExprId; non-method calls use SOL_METHOD_RESOLUTION_NONE. */
+    SolMethodResolution *method_resolutions;
+    size_t method_resolution_count;
+    /* Indexed by SolDefId; only implementation entries are meaningful. */
+    SolType *implementation_targets;
+    size_t implementation_target_count;
 } SolTypeTable;
+
+const SolMethodResolution *sol_type_method_resolution(
+    const SolTypeTable *table,
+    SolExprId call
+);
 
 void sol_type_table_init(SolTypeTable *table);
 void sol_type_table_free(SolTypeTable *table);

@@ -15,6 +15,7 @@ typedef enum {
     SOL_TYPE_RESOLUTION_BUILTIN,
     SOL_TYPE_RESOLUTION_DEFINITION,
     SOL_TYPE_RESOLUTION_PARAMETER,
+    SOL_TYPE_RESOLUTION_SELF,
 } SolTypeResolutionKind;
 
 typedef enum {
@@ -98,6 +99,11 @@ typedef struct {
     size_t effect_resolution_count;
     SolEffectResolution *type_effect_resolutions;
     size_t type_effect_resolution_count;
+    /* Implementation trait heads and free-function inline bounds. */
+    SolResolution *trait_resolutions;
+    size_t trait_resolution_count;
+    SolResolution *bound_resolutions;
+    size_t bound_resolution_count;
 } SolHirModule;
 
 void sol_hir_module_init(SolHirModule *module);

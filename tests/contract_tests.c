@@ -668,6 +668,89 @@ static void test_table_determinism_and_malformed_input(void) {
     free_compilation(&second);
 }
 
+static void test_trait_method_contract_purity(void) {
+    static const char pure[] =
+        "module pure_method\n"
+        "trait Show { function show(self: Self) -> Text effects { pure } }\n"
+        "implementation Show for Int64 { function show(self: Self) -> Text effects { pure } { return \"ok\" } }\n"
+        "function checked(value: Int64) -> Text effects { pure } requires { value.show() == value.show() } { return value.show() }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, pure));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolExprId method_call = SOL_AST_NONE;
+    for (SolExprId expression = 0; expression < compilation.syntax.expression_count; ++expression) {
+        if (sol_type_method_resolution(&compilation.types, expression) != NULL) {
+            method_call = expression;
+            break;
+        }
+    }
+    CHECK(method_call != SOL_AST_NONE);
+    if (method_call != SOL_AST_NONE) {
+        sol_contract_table_free(&compilation.contracts);
+        sol_contract_table_init(&compilation.contracts);
+        sol_diagnostics_free(&compilation.diagnostics);
+        sol_diagnostics_init(&compilation.diagnostics);
+        compilation.types.method_resolutions[method_call].requirement
+            = compilation.syntax.trait_method_count;
+        CHECK(!sol_contract_lower(
+            &compilation.source, &compilation.syntax, &compilation.hir,
+            &compilation.types, &compilation.effects, &compilation.contracts,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-005"));
+    }
+    free_compilation(&compilation);
+
+    static const char forged_selection[] =
+        "module forged_contract_method\n"
+        "trait Load {\n"
+        " function load(self: Self) -> Text effects { io.read }\n"
+        " function cached(self: Self) -> Text effects { pure }\n"
+        "}\n"
+        "implementation Load for Int64 {\n"
+        " function load(self: Self) -> Text effects { io.read } { return \"loaded\" }\n"
+        " function cached(self: Self) -> Text effects { pure } { return \"cached\" }\n"
+        "}\n"
+        "function checked(value: Int64) -> Text effects { io.read } requires { true } { return value.load() }\n";
+    CHECK(compile_source(&compilation, forged_selection));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    method_call = SOL_AST_NONE;
+    for (SolExprId expression = 0; expression < compilation.syntax.expression_count;
+        ++expression) {
+        if (sol_type_method_resolution(&compilation.types, expression) != NULL) {
+            method_call = expression;
+            break;
+        }
+    }
+    CHECK(method_call != SOL_AST_NONE);
+    if (method_call != SOL_AST_NONE) {
+        SolTraitMethodId pure = compilation.syntax.items[1].first_trait_method;
+        pure = compilation.syntax.trait_methods[pure].next;
+        CHECK(pure != SOL_AST_NONE);
+        compilation.types.method_resolutions[method_call].method = pure;
+        sol_contract_table_free(&compilation.contracts);
+        sol_contract_table_init(&compilation.contracts);
+        sol_diagnostics_free(&compilation.diagnostics);
+        sol_diagnostics_init(&compilation.diagnostics);
+        CHECK(!sol_contract_lower(
+            &compilation.source, &compilation.syntax, &compilation.hir,
+            &compilation.types, &compilation.effects, &compilation.contracts,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-005"));
+    }
+    free_compilation(&compilation);
+
+    static const char effectful[] =
+        "module effectful_method\n"
+        "trait Load { function load(self: Self) -> Text effects { io.read } }\n"
+        "implementation Load for Int64 { function load(self: Self) -> Text effects { io.read } { return \"ok\" } }\n"
+        "function checked(value: Int64) -> Text effects { io.read } requires { value.load() == value.load() } { return value.load() }\n";
+    CHECK(compile_source(&compilation, effectful));
+    CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-002"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_obligations_result_and_snapshots();
     test_member_contract_ownership();
@@ -677,6 +760,7 @@ int main(void) {
     test_contract_type_errors();
     test_purity_and_effect_firewall();
     test_table_determinism_and_malformed_input();
+    test_trait_method_contract_purity();
     if (failures != 0) {
         fprintf(stderr, "%d contract test failure(s)\n", failures);
         return 1;

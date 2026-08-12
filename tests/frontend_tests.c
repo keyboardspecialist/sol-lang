@@ -172,6 +172,8 @@ static void check_ast_links(const SolSyntaxTree *tree) {
                 && effect->owner < tree->item_count)
             || (effect->owner_kind == SOL_EFFECT_OWNER_CAPABILITY_MEMBER
                 && effect->owner < tree->capability_member_count)
+            || (effect->owner_kind == SOL_EFFECT_OWNER_TRAIT_METHOD
+                && effect->owner < tree->trait_method_count)
             || (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
                 && effect->owner < tree->type_count));
     }
@@ -188,6 +190,12 @@ static void check_ast_links(const SolSyntaxTree *tree) {
         CHECK(tree->capability_members[index].first_contract == SOL_AST_NONE
             || tree->capability_members[index].first_contract
                 < tree->contract_clause_count);
+    }
+    for (size_t index = 0; index < tree->trait_method_count; ++index) {
+        CHECK(tree->trait_methods[index].return_type_id < tree->type_count);
+        CHECK(tree->trait_methods[index].next == SOL_AST_NONE
+            || tree->trait_methods[index].next < tree->trait_method_count);
+        CHECK(tree->trait_methods[index].owner_item < tree->item_count);
     }
     for (size_t index = 0; index < tree->contract_clause_count; ++index) {
         CHECK(tree->contract_clauses[index].first_condition == SOL_AST_NONE
@@ -1332,6 +1340,115 @@ static void test_malformed_handle_expressions(void) {
     }
 }
 
+static void test_trait_and_implementation_syntax(void) {
+    static const char text[] =
+        "module traits\n"
+        "trait Show { function show(self: Self) -> Text effects { pure } }\n"
+        "implementation Show for Int64 {\n"
+        " function show(self: Self) -> Text effects { pure } { return \"ok\" }\n"
+        "}\n"
+        "function bounded<T: Show>(value: T) -> Text effects { pure } { return value.show() }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "traits.sol", text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.item_count == 3);
+    CHECK(tree.trait_method_count == 2);
+    CHECK(tree.items[0].kind == SOL_ITEM_TRAIT);
+    CHECK(tree.items[1].kind == SOL_ITEM_IMPLEMENTATION);
+    CHECK(tree.type_parameters[0].bound.start != tree.type_parameters[0].bound.end);
+    check_ast_links(&tree);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_malformed_trait_method_recovery(void) {
+    static const char text[] =
+        "module trait_recovery\n"
+        "trait Recover {\n"
+        " function broken(self: Self) -> effects { pure }\n"
+        " function good(self: Self) -> Text effects { pure }\n"
+        "}\n"
+        "function after() -> Int64 { return 1 }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "trait_recovery.sol", text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.item_count == 2);
+    CHECK(tree.items[0].kind == SOL_ITEM_TRAIT);
+    CHECK(tree.items[1].kind == SOL_ITEM_FUNCTION);
+    CHECK(tree.trait_method_count == 1);
+    CHECK(span_text_equal(&source, tree.trait_methods[0].name, "good"));
+    CHECK(tree.parameter_count == 1);
+    CHECK(tree.type_count == 3);
+    CHECK(tree.effect_count == 1);
+    CHECK(tree.expression_count == 2);
+    CHECK(tree.statement_count == 1);
+    check_ast_links(&tree);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_trait_method_authority_rejected(void) {
+    static const char text[] =
+        "module trait_authority\n"
+        "trait Authority {\n"
+        " function bad(self: Self) -> Text authority { result derives_from Self } effects { pure }\n"
+        " function good(self: Self) -> Text effects { pure }\n"
+        "}\n"
+        "implementation Authority for Int64 {\n"
+        " function bad(self: Self) -> Text authority { result derives_from Self } effects { pure } { return \"bad\" }\n"
+        " function good(self: Self) -> Text effects { pure } { return \"good\" }\n"
+        "}\n"
+        "function after() -> Int64 { return 1 }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "trait_authority.sol", text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    size_t authority_errors = 0;
+    for (size_t index = 0; index < diagnostics.count; ++index) {
+        authority_errors += strcmp(diagnostics.items[index].code, "SOL-PARSE-019") == 0;
+    }
+    CHECK(authority_errors == 2);
+    CHECK(tree.item_count == 3);
+    CHECK(tree.trait_method_count == 4);
+    CHECK(tree.items[0].kind == SOL_ITEM_TRAIT);
+    CHECK(tree.items[1].kind == SOL_ITEM_IMPLEMENTATION);
+    CHECK(tree.items[2].kind == SOL_ITEM_FUNCTION);
+    CHECK(tree.parameter_count == 4);
+    CHECK(tree.effect_count == 4);
+    check_ast_links(&tree);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
 int main(void) {
     test_valid_declarations();
     test_generic_syntax_and_comparison_disambiguation();
@@ -1363,6 +1480,9 @@ int main(void) {
     test_function_type_recovery_skips_nested_function();
     test_handle_expression_syntax();
     test_malformed_handle_expressions();
+    test_trait_and_implementation_syntax();
+    test_malformed_trait_method_recovery();
+    test_trait_method_authority_rejected();
     if (failures != 0) {
         fprintf(stderr, "%d frontend test failure(s)\n", failures);
         return 1;

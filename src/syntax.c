@@ -324,6 +324,7 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
     if (source == NULL || source->text == NULL || tree == NULL
         || tree->item_count > tree->item_capacity
         || tree->capability_member_count > tree->capability_member_capacity
+        || tree->trait_method_count > tree->trait_method_capacity
         || tree->expression_count > tree->expression_capacity
         || tree->argument_count > tree->argument_capacity
         || tree->statement_count > tree->statement_capacity
@@ -332,6 +333,7 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
         || tree->contract_condition_count > tree->contract_condition_capacity
         || (tree->item_count != 0 && tree->items == NULL)
         || (tree->capability_member_count != 0 && tree->capability_members == NULL)
+        || (tree->trait_method_count != 0 && tree->trait_methods == NULL)
         || (tree->expression_count != 0 && tree->expressions == NULL)
         || (tree->argument_count != 0 && tree->arguments == NULL)
         || (tree->statement_count != 0 && tree->statements == NULL)
@@ -390,6 +392,12 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
             )) {
             valid = false;
         }
+    }
+    for (size_t index = 0; valid && index < tree->trait_method_count; ++index) {
+        const SolTraitMethod *method = &tree->trait_methods[index];
+        if (method->body != SOL_AST_NONE && !sol_structure_expression(
+            &validator, method->body, SOL_EXPRESSION_CONTEXT_BODY, 0
+        )) valid = false;
     }
     valid = valid
         && sol_structure_all_marked(validator.expressions, tree->expression_count)

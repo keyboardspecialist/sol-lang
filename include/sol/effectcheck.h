@@ -35,6 +35,8 @@ typedef struct {
     size_t function_count;
     SolEffectRow *capability_members;
     size_t capability_member_count;
+    SolEffectRow *trait_methods;
+    size_t trait_method_count;
     SolEffectCallInstantiation *call_instantiations;
     size_t call_instantiation_count;
     size_t call_instantiation_capacity;

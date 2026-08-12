@@ -48,6 +48,24 @@ function invoke_read(value: Text) -> Text effects { service.read } {
     return invoke<Text>(value, load_text)
 }
 
+trait Display {
+    function display(self: Self) -> Text effects { pure }
+}
+
+implementation Display for Int64 {
+    function display(self: Self) -> Text effects { pure } {
+        return "number"
+    }
+}
+
+function display_value<T: Display>(value: T) -> Text effects { pure } {
+    return value.display()
+}
+
+function display_count(value: Int64) -> Text effects { pure } {
+    return display_value(value)
+}
+
 function boxed_name(user: User) -> Box<Text> effects { pure } {
     return Box<Text> { value = identity(user.name) }
 }

@@ -53,6 +53,7 @@ typedef struct {
     size_t handled_count;
     SolDefId current_function;
     SolCapabilityMemberId current_member;
+    SolTraitMethodId current_trait_method;
     SolEffectWalkMode mode;
     size_t depth;
     bool depth_reported;
@@ -71,8 +72,12 @@ void sol_effect_table_free(SolEffectTable *table) {
     for (size_t index = 0; index < table->capability_member_count; ++index) {
         free(table->capability_members[index].atoms);
     }
+    for (size_t index = 0; index < table->trait_method_count; ++index) {
+        free(table->trait_methods[index].atoms);
+    }
     free(table->functions);
     free(table->capability_members);
+    free(table->trait_methods);
     free(table->call_instantiations);
     free(table->call_arguments);
     free(table->call_rows);
@@ -633,6 +638,7 @@ typedef enum {
     SOL_EFFECT_CALL_FUNCTION,
     SOL_EFFECT_CALL_SIGNATURE,
     SOL_EFFECT_CALL_MEMBER,
+    SOL_EFFECT_CALL_TRAIT_METHOD,
 } SolEffectCallKind;
 
 typedef struct {
@@ -700,6 +706,20 @@ static SolEffectCall sol_effect_resolve_call(
                     break;
                 }
             }
+        }
+    } else if (callee_type.kind == SOL_TYPE_TRAIT_METHOD) {
+        SolExprId call_id = (SolExprId)(call - checker->syntax->expressions);
+        const SolMethodResolution *method = sol_type_method_resolution(
+            checker->types, call_id
+        );
+        if (method == NULL || method->method >= checker->syntax->trait_method_count) {
+            checker->malformed = true;
+        } else {
+            result.kind = SOL_EFFECT_CALL_TRAIT_METHOD;
+            result.target = method->kind == SOL_METHOD_RESOLUTION_REQUIREMENT
+                ? method->requirement : method->method;
+            result.first_parameter
+                = checker->syntax->trait_methods[result.target].first_parameter;
         }
     }
     return result;
@@ -1050,6 +1070,7 @@ bool sol_effect_call_instantiation_valid(
         .effects = mutable_effects,
         .current_function = hir->expression_owners[call_id],
         .current_member = SOL_AST_NONE,
+        .current_trait_method = SOL_AST_NONE,
         .mode = SOL_EFFECT_WALK_VALIDATE,
     };
     SolEffectRow arguments = {.effect_parameter = SOL_AST_NONE};
@@ -1126,13 +1147,18 @@ static void sol_effect_process_call(SolEffectChecker *checker, const SolExpr *ca
     } else if (resolved.kind == SOL_EFFECT_CALL_SIGNATURE) {
         required_atoms = checker->types->function_types[resolved.target].effects.atoms;
         required_count = checker->types->function_types[resolved.target].effects.count;
-    } else {
+    } else if (resolved.kind == SOL_EFFECT_CALL_MEMBER) {
         required_atoms = checker->effects->capability_members[resolved.target].atoms;
         required_count = checker->effects->capability_members[resolved.target].count;
+    } else {
+        required_atoms = checker->effects->trait_methods[resolved.target].atoms;
+        required_count = checker->effects->trait_methods[resolved.target].count;
     }
-    SolEffectRow *caller = checker->current_member == SOL_AST_NONE
-        ? &checker->effects->functions[checker->current_function]
-        : &checker->effects->capability_members[checker->current_member];
+    SolEffectRow *caller = checker->current_trait_method != SOL_AST_NONE
+        ? &checker->effects->trait_methods[checker->current_trait_method]
+        : checker->current_member == SOL_AST_NONE
+            ? &checker->effects->functions[checker->current_function]
+            : &checker->effects->capability_members[checker->current_member];
     SolEffectParameterId required_tail = polymorphic
         ? instantiated_row.effect_parameter
         : resolved.kind == SOL_EFFECT_CALL_SIGNATURE
@@ -1365,6 +1391,7 @@ static void sol_effect_walk_function(
     );
     checker->current_function = function;
     checker->current_member = SOL_AST_NONE;
+    checker->current_trait_method = SOL_AST_NONE;
     checker->mode = mode;
     checker->depth = 0;
     checker->handled_count = 0;
@@ -1384,10 +1411,28 @@ static void sol_effect_walk_member(
     );
     checker->current_function = member->owner_item;
     checker->current_member = member_id;
+    checker->current_trait_method = SOL_AST_NONE;
     checker->mode = SOL_EFFECT_WALK_VALIDATE;
     checker->depth = 0;
     checker->handled_count = 0;
     sol_effect_expression(checker, member->body);
+}
+
+static void sol_effect_walk_trait_method(
+    SolEffectChecker *checker,
+    SolTraitMethodId method_id
+) {
+    const SolTraitMethod *method = &checker->syntax->trait_methods[method_id];
+    if (method->body == SOL_AST_NONE) return;
+    memset(checker->visited, 0,
+        checker->syntax->expression_count * sizeof(*checker->visited));
+    checker->current_function = method->owner_item;
+    checker->current_member = SOL_AST_NONE;
+    checker->current_trait_method = method_id;
+    checker->mode = SOL_EFFECT_WALK_VALIDATE;
+    checker->depth = 0;
+    checker->handled_count = 0;
+    sol_effect_expression(checker, method->body);
 }
 
 static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
@@ -1538,7 +1583,9 @@ static bool sol_effect_hir_matches_source(SolEffectChecker *checker) {
         && rebuilt.type_resolution_count == checker->hir->type_resolution_count
         && rebuilt.effect_resolution_count == checker->hir->effect_resolution_count
         && rebuilt.type_effect_resolution_count
-            == checker->hir->type_effect_resolution_count;
+            == checker->hir->type_effect_resolution_count
+        && rebuilt.trait_resolution_count == checker->hir->trait_resolution_count
+        && rebuilt.bound_resolution_count == checker->hir->bound_resolution_count;
     for (size_t index = 0; matches && index < rebuilt.definition_count; ++index) {
         const SolHirDefinition *left = &rebuilt.definitions[index];
         const SolHirDefinition *right = &checker->hir->definitions[index];
@@ -1580,6 +1627,18 @@ static bool sol_effect_hir_matches_source(SolEffectChecker *checker) {
                 == checker->hir->type_effect_resolutions[index].kind
             && rebuilt.type_effect_resolutions[index].target
                 == checker->hir->type_effect_resolutions[index].target;
+    }
+    for (size_t index = 0; matches && index < rebuilt.trait_resolution_count; ++index) {
+        matches = rebuilt.trait_resolutions[index].kind
+                == checker->hir->trait_resolutions[index].kind
+            && rebuilt.trait_resolutions[index].target
+                == checker->hir->trait_resolutions[index].target;
+    }
+    for (size_t index = 0; matches && index < rebuilt.bound_resolution_count; ++index) {
+        matches = rebuilt.bound_resolutions[index].kind
+                == checker->hir->bound_resolutions[index].kind
+            && rebuilt.bound_resolutions[index].target
+                == checker->hir->bound_resolutions[index].target;
     }
     if (!completed && !sol_diagnostics_has_errors(&diagnostics)) {
         checker->allocation_failed = true;
@@ -1640,6 +1699,8 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
     size_t count = checker->syntax->expression_count;
     if (checker->syntax->item_count
             > SIZE_MAX - checker->syntax->capability_member_count
+        || checker->syntax->item_count + checker->syntax->capability_member_count
+            > SIZE_MAX - checker->syntax->trait_method_count
         || count > SIZE_MAX / sizeof(*checker->expression_owners)
         || count > SIZE_MAX / 2
         || count * 2 > SIZE_MAX / sizeof(SolEffectExpressionEntry)
@@ -1649,7 +1710,8 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
         return false;
     }
     size_t declared_roots = checker->syntax->item_count
-        + checker->syntax->capability_member_count;
+        + checker->syntax->capability_member_count
+        + checker->syntax->trait_method_count;
     if (declared_roots > SIZE_MAX - checker->syntax->contract_condition_count) {
         return false;
     }
@@ -1710,11 +1772,22 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
             if (member->body == SOL_AST_NONE) continue;
             owner = member->owner_item;
             root_expression = member->body;
+        } else if (root < checker->syntax->item_count
+            + checker->syntax->capability_member_count
+            + checker->syntax->trait_method_count) {
+            const SolTraitMethod *method = &checker->syntax->trait_methods[
+                root - checker->syntax->item_count
+                    - checker->syntax->capability_member_count
+            ];
+            if (method->body == SOL_AST_NONE) continue;
+            owner = method->owner_item;
+            root_expression = method->body;
         } else if (root < declared_roots) {
             const SolContractCondition *condition
                 = &checker->syntax->contract_conditions[
                     root - checker->syntax->item_count
                         - checker->syntax->capability_member_count
+                        - checker->syntax->trait_method_count
                 ];
             const SolContractClause *clause
                 = &checker->syntax->contract_clauses[condition->owner_clause];
@@ -2577,12 +2650,120 @@ static bool sol_effect_type_has_identity(SolTypeKind kind) {
     return kind == SOL_TYPE_NOMINAL || kind == SOL_TYPE_APPLICATION
         || kind == SOL_TYPE_FUNCTION || kind == SOL_TYPE_FUNCTION_SIGNATURE
         || kind == SOL_TYPE_CAPABILITY_OPERATION || kind == SOL_TYPE_VARIANT
-        || kind == SOL_TYPE_PARAMETER;
+        || kind == SOL_TYPE_PARAMETER || kind == SOL_TYPE_SELF
+        || kind == SOL_TYPE_TRAIT_METHOD;
 }
 
 static bool sol_effect_semantic_type_equal(SolType left, SolType right) {
     return left.kind == right.kind
         && (!sol_effect_type_has_identity(left.kind) || left.definition == right.definition);
+}
+
+static bool sol_effect_closed_implementation_target(
+    const SolEffectChecker *checker,
+    SolType type,
+    size_t depth
+) {
+    if (depth >= 256) return false;
+    if (type.kind == SOL_TYPE_INT64 || type.kind == SOL_TYPE_BOOL
+        || type.kind == SOL_TYPE_TEXT || type.kind == SOL_TYPE_UNIT) return true;
+    if (type.kind == SOL_TYPE_NOMINAL) {
+        if (type.definition >= checker->syntax->item_count
+            || (checker->syntax->items[type.definition].kind != SOL_ITEM_RECORD
+                && checker->syntax->items[type.definition].kind != SOL_ITEM_ENUM)) return false;
+        return checker->syntax->items[type.definition].first_type_parameter == SOL_AST_NONE
+            && (checker->syntax->items[type.definition].kind == SOL_ITEM_RECORD
+                || checker->syntax->items[type.definition].kind == SOL_ITEM_ENUM);
+    }
+    if (type.kind != SOL_TYPE_APPLICATION) return false;
+    const SolTypeApplication *application = sol_type_application(checker->types, type);
+    const SolType *arguments = NULL;
+    size_t count = 0;
+    if (application == NULL || application->constructor != SOL_TYPE_CONSTRUCTOR_USER
+        || !sol_type_application_arguments(checker->types, type, &arguments, &count)) {
+        return false;
+    }
+    for (size_t index = 0; index < count; ++index) {
+        if (!sol_effect_closed_implementation_target(
+            checker, arguments[index], depth + 1
+        )) return false;
+    }
+    return true;
+}
+
+static bool sol_effect_trait_method_reachable(
+    const SolEffectChecker *checker,
+    SolDefId owner,
+    SolTraitMethodId target
+) {
+    if (owner >= checker->syntax->item_count) return false;
+    SolTraitMethodId method = checker->syntax->items[owner].first_trait_method;
+    size_t traversed = 0;
+    while (method != SOL_AST_NONE) {
+        if (method >= checker->syntax->trait_method_count
+            || traversed++ >= checker->syntax->trait_method_count) return false;
+        if (method == target) return true;
+        method = checker->syntax->trait_methods[method].next;
+    }
+    return false;
+}
+
+static bool sol_effect_method_resolution_valid(
+    const SolEffectChecker *checker,
+    SolExprId expression,
+    const SolMethodResolution *resolution
+) {
+    const SolSyntaxTree *syntax = checker->syntax;
+    const SolTypeTable *types = checker->types;
+    if (resolution->call != expression || expression >= syntax->expression_count
+        || syntax->expressions[expression].kind != SOL_EXPR_CALL) return false;
+    SolExprId callee_id = syntax->expressions[expression].as.call.callee;
+    if (callee_id >= syntax->expression_count
+        || syntax->expressions[callee_id].kind != SOL_EXPR_FIELD
+        || callee_id >= types->expression_count
+        || types->expressions[callee_id].kind != SOL_TYPE_TRAIT_METHOD
+        || types->expressions[callee_id].definition != resolution->method
+        || resolution->trait >= syntax->item_count
+        || syntax->items[resolution->trait].kind != SOL_ITEM_TRAIT
+        || resolution->requirement >= syntax->trait_method_count
+        || resolution->method >= syntax->trait_method_count
+        || !sol_effect_trait_method_reachable(
+            checker, resolution->trait, resolution->requirement
+        )) return false;
+    SolSpan field_name = syntax->expressions[callee_id].as.field.name;
+    const SolTraitMethod *requirement
+        = &syntax->trait_methods[resolution->requirement];
+    const SolTraitMethod *method = &syntax->trait_methods[resolution->method];
+    if (!sol_effect_span_equal(checker->source, requirement->name, field_name)
+        || !sol_effect_span_equal(checker->source, method->name, field_name)
+        || !sol_effect_span_equal(checker->source, requirement->name, method->name)) {
+        return false;
+    }
+    SolExprId receiver_id = syntax->expressions[callee_id].as.field.base;
+    if (receiver_id >= types->expression_count) return false;
+    SolType receiver = types->expressions[receiver_id];
+    if (resolution->kind == SOL_METHOD_RESOLUTION_REQUIREMENT) {
+        if (resolution->implementation != SOL_AST_NONE
+            || resolution->method != resolution->requirement
+            || receiver.kind != SOL_TYPE_PARAMETER
+            || receiver.definition >= checker->hir->bound_resolution_count) return false;
+        SolResolution bound = checker->hir->bound_resolutions[receiver.definition];
+        return bound.kind == SOL_RESOLUTION_DEFINITION
+            && bound.target == resolution->trait;
+    }
+    if (resolution->kind != SOL_METHOD_RESOLUTION_IMPLEMENTATION
+        || resolution->implementation >= syntax->item_count
+        || syntax->items[resolution->implementation].kind != SOL_ITEM_IMPLEMENTATION
+        || !sol_effect_trait_method_reachable(
+            checker, resolution->implementation, resolution->method
+        ) || resolution->implementation >= checker->hir->trait_resolution_count
+        || checker->hir->trait_resolutions[resolution->implementation].kind
+            != SOL_RESOLUTION_DEFINITION
+        || checker->hir->trait_resolutions[resolution->implementation].target
+            != resolution->trait
+        || resolution->implementation >= types->implementation_target_count) return false;
+    SolType target = types->implementation_targets[resolution->implementation];
+    return target.kind == receiver.kind && target.definition == receiver.definition;
 }
 
 static bool sol_effect_member_is_family(
@@ -2780,6 +2961,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || syntax->match_arm_count > syntax->match_arm_capacity
         || syntax->effect_count > syntax->effect_capacity
         || syntax->capability_member_count > syntax->capability_member_capacity
+        || syntax->trait_method_count > syntax->trait_method_capacity
         || syntax->contract_clause_count > syntax->contract_clause_capacity
         || syntax->contract_condition_count > syntax->contract_condition_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
@@ -2794,6 +2976,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (syntax->match_arm_count != 0 && syntax->match_arms == NULL)
         || (syntax->effect_count != 0 && syntax->effects == NULL)
         || (syntax->capability_member_count != 0 && syntax->capability_members == NULL)
+        || (syntax->trait_method_count != 0 && syntax->trait_methods == NULL)
         || (syntax->contract_clause_count != 0 && syntax->contract_clauses == NULL)
         || (syntax->contract_condition_count != 0
             && syntax->contract_conditions == NULL)
@@ -2802,6 +2985,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || hir->type_resolution_count != syntax->type_count
         || hir->effect_resolution_count != syntax->effect_count
         || hir->type_effect_resolution_count != syntax->type_count
+        || hir->trait_resolution_count != syntax->item_count
+        || hir->bound_resolution_count != syntax->type_parameter_count
         || hir->local_count > hir->local_capacity
         || (hir->definition_count != 0 && hir->definitions == NULL)
         || (hir->resolution_count != 0 && hir->resolutions == NULL)
@@ -2810,6 +2995,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (hir->effect_resolution_count != 0 && hir->effect_resolutions == NULL)
         || (hir->type_effect_resolution_count != 0
             && hir->type_effect_resolutions == NULL)
+        || (hir->trait_resolution_count != 0 && hir->trait_resolutions == NULL)
+        || (hir->bound_resolution_count != 0 && hir->bound_resolutions == NULL)
         || (hir->local_count != 0 && hir->locals == NULL)
         || types->expression_count != syntax->expression_count
         || types->local_count != hir->local_count
@@ -2831,6 +3018,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || types->call_instantiation_argument_count
             > types->call_instantiation_argument_capacity
         || types->variant_constructor_count > types->variant_constructor_capacity
+        || types->method_resolution_count != syntax->expression_count
+        || types->implementation_target_count != syntax->item_count
         || ((types->function_coercion_count == 0)
             != (types->function_coercion_capacity == 0))
         || (types->expression_count != 0 && types->expressions == NULL)
@@ -2855,7 +3044,10 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (types->call_instantiation_argument_capacity != 0
             && types->call_instantiation_arguments == NULL)
         || (types->variant_constructor_capacity != 0
-            && types->variant_constructors == NULL)) {
+            && types->variant_constructors == NULL)
+        || (types->method_resolution_count != 0 && types->method_resolutions == NULL)
+        || (types->implementation_target_count != 0
+            && types->implementation_targets == NULL)) {
         return false;
     }
     if (!sol_syntax_contracts_validate(source, syntax)) return false;
@@ -3161,9 +3353,29 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         }
         if (!sol_effect_coercion_shape_matches(checker, coercion, actual)) return false;
     }
+    for (SolExprId expression = 0; expression < types->method_resolution_count; ++expression) {
+        const SolMethodResolution *method = &types->method_resolutions[expression];
+        if (method->kind == SOL_METHOD_RESOLUTION_NONE) {
+            if (method->call != SOL_AST_NONE || method->trait != SOL_AST_NONE
+                || method->requirement != SOL_AST_NONE
+                || method->implementation != SOL_AST_NONE
+                || method->method != SOL_AST_NONE) return false;
+            continue;
+        }
+        if (!sol_effect_method_resolution_valid(checker, expression, method)) return false;
+    }
+    for (SolDefId item = 0; item < types->implementation_target_count; ++item) {
+        SolType target = types->implementation_targets[item];
+        if (syntax->items[item].kind == SOL_ITEM_IMPLEMENTATION) {
+            if (!sol_type_exact_reference_valid(syntax, types, target)
+                || !sol_effect_closed_implementation_target(checker, target, 0)) return false;
+        } else if (target.kind != SOL_TYPE_UNKNOWN || target.definition != 0) {
+            return false;
+        }
+    }
     for (size_t index = 0; index < syntax->item_count; ++index) {
         const SolSyntaxItem *item = &syntax->items[index];
-        if ((int)item->kind < 0 || item->kind > SOL_ITEM_FUNCTION
+        if ((int)item->kind < 0 || item->kind > SOL_ITEM_IMPLEMENTATION
             || (item->body != SOL_AST_NONE && item->body >= syntax->expression_count)
             || (item->first_effect != SOL_AST_NONE
                 && item->first_effect >= syntax->effect_count)
@@ -3176,7 +3388,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || (item->capability_source != SOL_AST_NONE
                 && item->capability_source >= syntax->parameter_count)
             || (item->result_authority_parameter != SOL_AST_NONE
-                && item->result_authority_parameter >= syntax->parameter_count)) {
+                && item->result_authority_parameter >= syntax->parameter_count)
+            || (item->first_trait_method != SOL_AST_NONE
+                && item->first_trait_method >= syntax->trait_method_count)) {
             return false;
         }
     }
@@ -3251,6 +3465,24 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
                 }
                 member = syntax->capability_members[member].next;
             }
+        } else if (item->kind == SOL_ITEM_TRAIT
+            || item->kind == SOL_ITEM_IMPLEMENTATION) {
+            SolTraitMethodId method = item->first_trait_method;
+            size_t method_count = 0;
+            while (method != SOL_AST_NONE) {
+                if (method >= syntax->trait_method_count
+                    || method_count++ >= syntax->trait_method_count) return false;
+                SolParameterId parameter = syntax->trait_methods[method].first_parameter;
+                size_t parameter_count = 0;
+                while (parameter != SOL_AST_NONE) {
+                    if (parameter >= syntax->parameter_count
+                        || parameter_count++ >= syntax->parameter_count
+                        || checker->parameter_owners[parameter] != SOL_AST_NONE) return false;
+                    checker->parameter_owners[parameter] = owner;
+                    parameter = syntax->parameters[parameter].next;
+                }
+                method = syntax->trait_methods[method].next;
+            }
         }
     }
     for (size_t index = 0; index < types->provenance_count; ++index) {
@@ -3271,7 +3503,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || !sol_effect_span_valid(source, local->name)
             || local->owner >= syntax->item_count
             || (syntax->items[local->owner].kind != SOL_ITEM_FUNCTION
-                && syntax->items[local->owner].kind != SOL_ITEM_CAPABILITY)
+                && syntax->items[local->owner].kind != SOL_ITEM_CAPABILITY
+                && syntax->items[local->owner].kind != SOL_ITEM_TRAIT
+                && syntax->items[local->owner].kind != SOL_ITEM_IMPLEMENTATION)
             || (local->kind == SOL_LOCAL_PARAMETER
                 && (local->syntax_id >= syntax->parameter_count
                     || local->name.start != syntax->parameters[local->syntax_id].name.start
@@ -3318,6 +3552,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
                 && effect->owner >= syntax->item_count)
             || (effect->owner_kind == SOL_EFFECT_OWNER_CAPABILITY_MEMBER
                 && effect->owner >= syntax->capability_member_count)
+            || (effect->owner_kind == SOL_EFFECT_OWNER_TRAIT_METHOD
+                && effect->owner >= syntax->trait_method_count)
             || (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
                 && effect->owner >= syntax->type_count)
             || (int)resolution.kind < 0
@@ -3374,12 +3610,16 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
 static bool sol_effect_allocate_table(SolEffectChecker *checker) {
     size_t function_count = checker->syntax->item_count;
     size_t member_count = checker->syntax->capability_member_count;
+    size_t trait_method_count = checker->syntax->trait_method_count;
     SolEffectRow *functions = calloc(function_count, sizeof(*functions));
     SolEffectRow *members = calloc(member_count, sizeof(*members));
+    SolEffectRow *trait_methods = calloc(trait_method_count, sizeof(*trait_methods));
     if ((function_count != 0 && functions == NULL)
-        || (member_count != 0 && members == NULL)) {
+        || (member_count != 0 && members == NULL)
+        || (trait_method_count != 0 && trait_methods == NULL)) {
         free(functions);
         free(members);
+        free(trait_methods);
         checker->allocation_failed = true;
         return false;
     }
@@ -3387,11 +3627,16 @@ static bool sol_effect_allocate_table(SolEffectChecker *checker) {
     checker->effects->function_count = function_count;
     checker->effects->capability_members = members;
     checker->effects->capability_member_count = member_count;
+    checker->effects->trait_methods = trait_methods;
+    checker->effects->trait_method_count = trait_method_count;
     for (size_t index = 0; index < function_count; ++index) {
         functions[index].effect_parameter = SOL_AST_NONE;
     }
     for (size_t index = 0; index < member_count; ++index) {
         members[index].effect_parameter = SOL_AST_NONE;
+    }
+    for (size_t index = 0; index < trait_method_count; ++index) {
+        trait_methods[index].effect_parameter = SOL_AST_NONE;
     }
     checker->effects->call_instantiations = calloc(
         checker->syntax->expression_count,
@@ -3681,9 +3926,11 @@ bool sol_effect_check(
         .effects = effects,
         .diagnostics = diagnostics,
         .current_member = SOL_AST_NONE,
+        .current_trait_method = SOL_AST_NONE,
     };
     bool valid_inputs = effects->functions == NULL && effects->function_count == 0
         && effects->capability_members == NULL && effects->capability_member_count == 0
+        && effects->trait_methods == NULL && effects->trait_method_count == 0
         && effects->call_instantiations == NULL
         && effects->call_instantiation_count == 0
         && effects->call_instantiation_capacity == 0
@@ -3805,6 +4052,76 @@ bool sol_effect_check(
                 );
             }
         }
+        for (size_t index = 0; index < syntax->trait_method_count; ++index) {
+            const SolTraitMethod *method = &syntax->trait_methods[index];
+            SolEffectRow *row = &effects->trait_methods[index];
+            sol_effect_validate_and_normalize_row(
+                &checker,
+                method->first_effect,
+                method->span,
+                SOL_EFFECT_OWNER_TRAIT_METHOD,
+                index,
+                method->first_parameter,
+                false,
+                row
+            );
+            if (!method->has_effect_clause) {
+                sol_effect_error(&checker, "SOL-EFFECT-005", method->span,
+                    "trait and implementation methods require explicit effects");
+            }
+            SolEffectId syntax_effect = method->first_effect;
+            while (syntax_effect != SOL_AST_NONE) {
+                const SolEffect *entry = &syntax->effects[syntax_effect];
+                bool dependent = entry->has_argument
+                    && sol_effect_span_text_equal(source, entry->argument, "Self");
+                SolParameterId parameter = method->first_parameter;
+                while (!dependent && parameter != SOL_AST_NONE) {
+                    dependent = entry->has_argument && sol_effect_span_equal(
+                        source, entry->argument, syntax->parameters[parameter].name
+                    );
+                    parameter = syntax->parameters[parameter].next;
+                }
+                if (dependent) {
+                    sol_effect_error(&checker, "SOL-EFFECT-009", entry->span,
+                        "trait method effects cannot depend on parameters or Self");
+                }
+                syntax_effect = entry->next;
+            }
+            for (size_t atom = 0; atom < row->count; ++atom) {
+                if (row->atoms[atom].argument_kind == SOL_EFFECT_ATOM_PARAMETER
+                    || row->atoms[atom].argument_kind == SOL_EFFECT_ATOM_SELF) {
+                    sol_effect_error(&checker, "SOL-EFFECT-009", row->atoms[atom].span,
+                        "trait method effects cannot depend on parameters or Self");
+                }
+            }
+        }
+        for (SolDefId item = 0; item < syntax->item_count; ++item) {
+            if (syntax->items[item].kind != SOL_ITEM_IMPLEMENTATION
+                || hir->trait_resolutions[item].kind != SOL_RESOLUTION_DEFINITION) continue;
+            SolDefId trait = hir->trait_resolutions[item].target;
+            SolTraitMethodId method = syntax->items[item].first_trait_method;
+            while (method != SOL_AST_NONE) {
+                SolTraitMethodId requirement = syntax->items[trait].first_trait_method;
+                while (requirement != SOL_AST_NONE && !sol_effect_span_equal(
+                    source, syntax->trait_methods[requirement].name,
+                    syntax->trait_methods[method].name
+                )) requirement = syntax->trait_methods[requirement].next;
+                if (requirement != SOL_AST_NONE) {
+                    const SolEffectRow *actual = &effects->trait_methods[method];
+                    const SolEffectRow *expected = &effects->trait_methods[requirement];
+                    bool equal = actual->count == expected->count;
+                    for (size_t atom = 0; equal && atom < actual->count; ++atom) {
+                        equal = sol_effect_row_contains(&checker, expected, &actual->atoms[atom]);
+                    }
+                    if (!equal) {
+                        sol_effect_error(&checker, "SOL-EFFECT-009",
+                            syntax->trait_methods[method].span,
+                            "implementation method effects must exactly match the trait requirement");
+                    }
+                }
+                method = syntax->trait_methods[method].next;
+            }
+        }
     }
 
     if (!checker.malformed && !checker.allocation_failed
@@ -3828,6 +4145,7 @@ bool sol_effect_check(
                     }
                     checker.current_function = owner;
                     checker.current_member = SOL_AST_NONE;
+                    checker.current_trait_method = SOL_AST_NONE;
                     checker.mode = SOL_EFFECT_WALK_RECORD;
                     checker.handled_count = 0;
                     sol_effect_process_call(&checker, &syntax->expressions[expression]);
@@ -3845,6 +4163,11 @@ bool sol_effect_check(
             for (size_t index = 0; index < syntax->capability_member_count; ++index) {
                 if (syntax->capability_members[index].body != SOL_AST_NONE) {
                     sol_effect_walk_member(&checker, index);
+                }
+            }
+            for (size_t index = 0; index < syntax->trait_method_count; ++index) {
+                if (syntax->trait_methods[index].body != SOL_AST_NONE) {
+                    sol_effect_walk_trait_method(&checker, index);
                 }
             }
         }

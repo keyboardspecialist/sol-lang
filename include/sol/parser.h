@@ -13,6 +13,8 @@ typedef enum {
     SOL_ITEM_ENUM,
     SOL_ITEM_CAPABILITY,
     SOL_ITEM_FUNCTION,
+    SOL_ITEM_TRAIT,
+    SOL_ITEM_IMPLEMENTATION,
 } SolItemKind;
 
 typedef struct {
@@ -35,6 +37,9 @@ typedef struct {
     SolParameterId capability_source;
     SolTypeParameterId first_type_parameter;
     SolEffectParameterId first_effect_parameter;
+    SolSpan trait_name;
+    SolTypeId implementation_type;
+    SolTraitMethodId first_trait_method;
 } SolSyntaxItem;
 
 typedef struct {
@@ -88,6 +93,9 @@ typedef struct {
     SolCapabilityMember *capability_members;
     size_t capability_member_count;
     size_t capability_member_capacity;
+    SolTraitMethod *trait_methods;
+    size_t trait_method_count;
+    size_t trait_method_capacity;
     SolContractClause *contract_clauses;
     size_t contract_clause_count;
     size_t contract_clause_capacity;
