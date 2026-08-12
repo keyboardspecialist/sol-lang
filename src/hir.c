@@ -22,6 +22,11 @@ typedef struct {
     size_t scope_depth;
     size_t traversal_depth;
     SolDefId current_definition;
+    const SolHirFileScope *scopes;
+    size_t scope_count;
+    SolDefId *import_targets;
+    SolSpan *import_names;
+    bool package_aware;
     bool allocation_failed;
     bool malformed;
     bool traversal_limit_reported;
@@ -41,6 +46,8 @@ void sol_hir_module_free(SolHirModule *module) {
     free(module->type_effect_resolutions);
     free(module->trait_resolutions);
     free(module->bound_resolutions);
+    free(module->file_scopes);
+    free(module->item_files);
     memset(module, 0, sizeof(*module));
 }
 
@@ -106,6 +113,56 @@ static bool sol_path_span_equal(const SolSource *source, SolSpan left, SolSpan r
             return true;
         }
     }
+}
+
+static bool sol_path_join_equal(
+    const SolSource *source,
+    SolSpan module_name,
+    SolSpan declaration,
+    SolSpan path
+) {
+    size_t module_cursor = module_name.start;
+    size_t declaration_cursor = declaration.start;
+    size_t path_cursor = path.start;
+    int byte;
+    while ((byte = sol_path_next_byte(source, module_name, &module_cursor)) >= 0) {
+        if (byte != sol_path_next_byte(source, path, &path_cursor)) return false;
+    }
+    if (sol_path_next_byte(source, path, &path_cursor) != '.') return false;
+    while ((byte = sol_path_next_byte(source, declaration, &declaration_cursor)) >= 0) {
+        if (byte != sol_path_next_byte(source, path, &path_cursor)) return false;
+    }
+    return sol_path_next_byte(source, path, &path_cursor) < 0;
+}
+
+static bool sol_path_module_equal(
+    const SolSource *source,
+    SolSpan module_name,
+    SolSpan path
+) {
+    size_t module_cursor = module_name.start;
+    size_t path_cursor = path.start;
+    int byte;
+    while ((byte = sol_path_next_byte(source, module_name, &module_cursor)) >= 0) {
+        if (byte != sol_path_next_byte(source, path, &path_cursor)) return false;
+    }
+    if (sol_path_next_byte(source, path, &path_cursor) != '.') return false;
+    bool has_symbol = false;
+    while ((byte = sol_path_next_byte(source, path, &path_cursor)) >= 0) {
+        if (byte == '.') return false;
+        has_symbol = true;
+    }
+    return has_symbol;
+}
+
+static SolSpan sol_path_final_component(const SolSource *source, SolSpan path) {
+    size_t cursor = path.start;
+    size_t component = path.start;
+    int byte;
+    while ((byte = sol_path_next_byte(source, path, &cursor)) >= 0) {
+        if (byte == '.') component = cursor;
+    }
+    return (SolSpan){component, path.end};
 }
 
 static bool sol_span_text_equal(const SolSource *source, SolSpan span, const char *text) {
@@ -773,6 +830,52 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     return true;
 }
 
+static bool sol_resolver_validate_scopes(SolResolver *resolver) {
+    const SolSyntaxTree *syntax = resolver->syntax;
+    if (resolver->scope_count == 0 || resolver->scopes == NULL) {
+        sol_resolver_malformed(resolver);
+        return false;
+    }
+    size_t next_item = 0;
+    size_t next_import = 0;
+    for (size_t index = 0; index < resolver->scope_count; ++index) {
+        const SolHirFileScope *scope = &resolver->scopes[index];
+        if (!sol_span_valid(resolver->source, scope->module_name)
+            || scope->module_name.start == scope->module_name.end
+            || scope->item_start != next_item
+            || scope->item_start > syntax->item_count
+            || scope->item_count > syntax->item_count - scope->item_start
+            || scope->import_start != next_import
+            || scope->import_start > syntax->import_count
+            || scope->import_count > syntax->import_count - scope->import_start) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+        next_item += scope->item_count;
+        next_import += scope->import_count;
+    }
+    size_t expected_imports = resolver->package_aware ? syntax->import_count : 0;
+    if (next_item != syntax->item_count || next_import != expected_imports) {
+        sol_resolver_malformed(resolver);
+        return false;
+    }
+    if (resolver->package_aware && (syntax->import_count > syntax->import_capacity
+        || (syntax->import_count != 0 && syntax->imports == NULL))) {
+        sol_resolver_malformed(resolver);
+        return false;
+    }
+    for (size_t index = 0;
+        resolver->package_aware && index < syntax->import_count;
+        ++index) {
+        if (!sol_span_valid(resolver->source, syntax->imports[index].path)
+            || syntax->imports[index].path.start == syntax->imports[index].path.end) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool sol_resolver_allocate(SolResolver *resolver) {
     const SolSyntaxTree *syntax = resolver->syntax;
     if (syntax->item_count > SIZE_MAX / sizeof(*resolver->module->definitions)
@@ -788,6 +891,7 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
     resolver->module->type_effect_resolution_count = syntax->type_count;
     resolver->module->trait_resolution_count = syntax->item_count;
     resolver->module->bound_resolution_count = syntax->type_parameter_count;
+    resolver->module->file_scope_count = resolver->scope_count;
     resolver->module->definitions = calloc(
         syntax->item_count,
         sizeof(*resolver->module->definitions)
@@ -816,6 +920,15 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
     resolver->module->bound_resolutions = calloc(
         syntax->type_parameter_count, sizeof(*resolver->module->bound_resolutions)
     );
+    resolver->module->file_scopes = malloc(
+        resolver->scope_count * sizeof(*resolver->module->file_scopes)
+    );
+    resolver->module->item_files = malloc(
+        syntax->item_count * sizeof(*resolver->module->item_files)
+    );
+    size_t import_count = resolver->package_aware ? syntax->import_count : 0;
+    resolver->import_targets = malloc(import_count * sizeof(*resolver->import_targets));
+    resolver->import_names = malloc(import_count * sizeof(*resolver->import_names));
 
     if ((syntax->item_count != 0 && resolver->module->definitions == NULL)
         || (syntax->expression_count != 0 && resolver->module->resolutions == NULL)
@@ -826,8 +939,31 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
             && resolver->module->type_effect_resolutions == NULL)
         || (syntax->item_count != 0 && resolver->module->trait_resolutions == NULL)
         || (syntax->type_parameter_count != 0
-            && resolver->module->bound_resolutions == NULL)) {
+            && resolver->module->bound_resolutions == NULL)
+        || resolver->module->file_scopes == NULL
+        || (syntax->item_count != 0 && resolver->module->item_files == NULL)
+        || (import_count != 0
+            && (resolver->import_targets == NULL || resolver->import_names == NULL))) {
         return false;
+    }
+    memcpy(
+        resolver->module->file_scopes,
+        resolver->scopes,
+        resolver->scope_count * sizeof(*resolver->scopes)
+    );
+    for (size_t file = 0; file < resolver->scope_count; ++file) {
+        const SolHirFileScope *scope = &resolver->scopes[file];
+        for (size_t item = scope->item_start;
+            item < scope->item_start + scope->item_count;
+            ++item) {
+            resolver->module->item_files[item] = file;
+        }
+    }
+    for (size_t index = 0; index < import_count; ++index) {
+        resolver->import_targets[index] = SOL_AST_NONE;
+        resolver->import_names[index] = sol_path_final_component(
+            resolver->source, syntax->imports[index].path
+        );
     }
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         resolver->module->expression_owners[index] = SOL_AST_NONE;
@@ -901,6 +1037,60 @@ static SolResolution sol_resolver_builtin(const SolSource *source, SolSpan name)
     return (SolResolution){.kind = SOL_RESOLUTION_ERROR};
 }
 
+static size_t sol_resolver_owner_file(const SolResolver *resolver, SolDefId owner) {
+    return owner < resolver->syntax->item_count
+        ? resolver->module->item_files[owner]
+        : SOL_AST_NONE;
+}
+
+static bool sol_resolver_same_module(
+    const SolResolver *resolver,
+    size_t left_file,
+    size_t right_file
+) {
+    return left_file < resolver->scope_count && right_file < resolver->scope_count
+        && sol_path_span_equal(
+            resolver->source,
+            resolver->scopes[left_file].module_name,
+            resolver->scopes[right_file].module_name
+        );
+}
+
+static SolResolution sol_resolver_visible_definition(
+    SolResolver *resolver,
+    SolDefId owner,
+    SolSpan name
+) {
+    size_t file = sol_resolver_owner_file(resolver, owner);
+    if (file == SOL_AST_NONE) return (SolResolution){SOL_RESOLUTION_ERROR, SOL_AST_NONE};
+    for (size_t definition = 0;
+        definition < resolver->module->definition_count;
+        ++definition) {
+        if (sol_resolver_same_module(
+                resolver, file, resolver->module->item_files[definition]
+            ) && sol_path_span_equal(
+                resolver->source,
+                resolver->module->definitions[definition].name,
+                name
+            )) {
+            return (SolResolution){SOL_RESOLUTION_DEFINITION, definition};
+        }
+    }
+    const SolHirFileScope *scope = &resolver->scopes[file];
+    for (size_t offset = 0; offset < scope->import_count; ++offset) {
+        size_t import = scope->import_start + offset;
+        if (resolver->import_targets[import] != SOL_AST_NONE
+            && sol_path_span_equal(
+                resolver->source, resolver->import_names[import], name
+            )) {
+            return (SolResolution){
+                SOL_RESOLUTION_DEFINITION, resolver->import_targets[import]
+            };
+        }
+    }
+    return (SolResolution){SOL_RESOLUTION_ERROR, SOL_AST_NONE};
+}
+
 static SolResolution sol_resolver_lookup(SolResolver *resolver, SolSpan name) {
     for (size_t index = resolver->binding_count; index > 0; --index) {
         SolBinding *binding = &resolver->bindings[index - 1];
@@ -908,35 +1098,17 @@ static SolResolution sol_resolver_lookup(SolResolver *resolver, SolSpan name) {
             return binding->resolution;
         }
     }
-    for (size_t index = 0; index < resolver->module->definition_count; ++index) {
-        if (sol_path_span_equal(
-            resolver->source,
-            resolver->module->definitions[index].name,
-            name
-        )) {
-            return (SolResolution){
-                .kind = SOL_RESOLUTION_DEFINITION,
-                .target = index,
-            };
-        }
-    }
+    SolResolution definition = sol_resolver_visible_definition(
+        resolver, resolver->current_definition, name
+    );
+    if (definition.kind == SOL_RESOLUTION_DEFINITION) return definition;
     return sol_resolver_builtin(resolver->source, name);
 }
 
 static SolResolution sol_resolver_lookup_definition(SolResolver *resolver, SolSpan name) {
-    for (size_t index = 0; index < resolver->module->definition_count; ++index) {
-        if (sol_path_span_equal(
-            resolver->source,
-            resolver->module->definitions[index].name,
-            name
-        )) {
-            return (SolResolution){
-                .kind = SOL_RESOLUTION_DEFINITION,
-                .target = index,
-            };
-        }
-    }
-    return (SolResolution){.kind = SOL_RESOLUTION_ERROR};
+    return sol_resolver_visible_definition(
+        resolver, resolver->current_definition, name
+    );
 }
 
 static SolExprId sol_resolver_field_root(SolResolver *resolver, SolExprId expression_id) {
@@ -1213,7 +1385,11 @@ static void sol_resolver_collect_definitions(SolResolver *resolver) {
     for (size_t index = 0; index < resolver->syntax->item_count; ++index) {
         const SolSyntaxItem *item = &resolver->syntax->items[index];
         for (size_t previous = 0; previous < index; ++previous) {
-            if (sol_path_span_equal(
+            if (sol_resolver_same_module(
+                    resolver,
+                    resolver->module->item_files[previous],
+                    resolver->module->item_files[index]
+                ) && sol_path_span_equal(
                 resolver->source,
                 resolver->module->definitions[previous].name,
                 item->name
@@ -1233,6 +1409,96 @@ static void sol_resolver_collect_definitions(SolResolver *resolver) {
             .name = item->name,
             .syntax_item = index,
         };
+    }
+}
+
+static void sol_resolver_resolve_imports(SolResolver *resolver) {
+    for (size_t file = 0; file < resolver->scope_count; ++file) {
+        const SolHirFileScope *scope = &resolver->scopes[file];
+        for (size_t offset = 0; offset < scope->import_count; ++offset) {
+            size_t import = scope->import_start + offset;
+            SolSpan path = resolver->syntax->imports[import].path;
+            size_t target = SOL_AST_NONE;
+            size_t public_count = 0;
+            bool module_found = false;
+            bool private_found = false;
+            for (size_t target_file = 0;
+                target_file < resolver->scope_count;
+                ++target_file) {
+                if (sol_path_module_equal(
+                    resolver->source, resolver->scopes[target_file].module_name, path
+                )) module_found = true;
+            }
+            for (size_t definition = 0;
+                definition < resolver->module->definition_count;
+                ++definition) {
+                size_t target_file = resolver->module->item_files[definition];
+                if (!sol_path_join_equal(
+                        resolver->source,
+                        resolver->scopes[target_file].module_name,
+                        resolver->module->definitions[definition].name,
+                        path
+                    )) continue;
+                if (!resolver->syntax->items[definition].is_public) {
+                    private_found = true;
+                    continue;
+                }
+                ++public_count;
+                target = definition;
+            }
+            const char *code = NULL;
+            const char *message = NULL;
+            if (!module_found) {
+                code = "SOL-RESOLVE-008";
+                message = "import refers to an unknown module";
+            } else if (public_count == 0 && private_found) {
+                code = "SOL-RESOLVE-010";
+                message = "imported declaration is private";
+            } else if (public_count != 1) {
+                code = "SOL-RESOLVE-009";
+                message = "import refers to an unknown or ambiguous symbol";
+            }
+            if (code != NULL) {
+                sol_diagnostics_add(
+                    resolver->diagnostics, code, SOL_SEVERITY_ERROR, path, "%s", message
+                );
+                continue;
+            }
+            resolver->import_targets[import] = target;
+            SolSpan spelling = resolver->import_names[import];
+            for (size_t previous = 0; previous < offset; ++previous) {
+                size_t other = scope->import_start + previous;
+                if (resolver->import_targets[other] != SOL_AST_NONE
+                    && sol_path_span_equal(
+                        resolver->source, resolver->import_names[other], spelling
+                    )) {
+                    sol_diagnostics_add(
+                        resolver->diagnostics, "SOL-RESOLVE-011", SOL_SEVERITY_ERROR,
+                        spelling, "duplicate or ambiguous imported spelling"
+                    );
+                    resolver->import_targets[import] = SOL_AST_NONE;
+                    resolver->import_targets[other] = SOL_AST_NONE;
+                }
+            }
+            for (size_t definition = 0;
+                definition < resolver->module->definition_count;
+                ++definition) {
+                if (sol_resolver_same_module(
+                        resolver, file, resolver->module->item_files[definition]
+                    ) && sol_path_span_equal(
+                        resolver->source,
+                        resolver->module->definitions[definition].name,
+                        spelling
+                    )) {
+                    sol_diagnostics_add(
+                        resolver->diagnostics, "SOL-RESOLVE-012", SOL_SEVERITY_ERROR,
+                        spelling, "imported spelling collides with a module declaration"
+                    );
+                    resolver->import_targets[import] = SOL_AST_NONE;
+                    break;
+                }
+            }
+        }
     }
 }
 
@@ -1317,19 +1583,13 @@ static void sol_resolver_resolve_types(SolResolver *resolver) {
     for (size_t item = 0; item < resolver->syntax->item_count; ++item) {
         const SolSyntaxItem *entry = &resolver->syntax->items[item];
         if (entry->kind == SOL_ITEM_IMPLEMENTATION) {
-            SolResolution resolution = {SOL_RESOLUTION_ERROR, SOL_AST_NONE};
-            for (size_t definition = 0;
-                definition < resolver->module->definition_count;
-                ++definition) {
-                if (resolver->module->definitions[definition].kind == SOL_ITEM_TRAIT
-                    && sol_path_span_equal(
-                        resolver->source,
-                        resolver->module->definitions[definition].name,
-                        entry->trait_name
-                    )) {
-                    resolution = (SolResolution){SOL_RESOLUTION_DEFINITION, definition};
-                    break;
-                }
+            SolResolution resolution = sol_resolver_visible_definition(
+                resolver, item, entry->trait_name
+            );
+            if (resolution.kind == SOL_RESOLUTION_DEFINITION
+                && resolver->module->definitions[resolution.target].kind
+                    != SOL_ITEM_TRAIT) {
+                resolution = (SolResolution){SOL_RESOLUTION_ERROR, SOL_AST_NONE};
             }
             resolver->module->trait_resolutions[item] = resolution;
             if (resolution.kind == SOL_RESOLUTION_ERROR) {
@@ -1345,19 +1605,13 @@ static void sol_resolver_resolve_types(SolResolver *resolver) {
         ++parameter) {
         SolSpan bound = resolver->syntax->type_parameters[parameter].bound;
         if (bound.start == bound.end) continue;
-        SolResolution resolution = {SOL_RESOLUTION_ERROR, SOL_AST_NONE};
-        for (size_t definition = 0;
-            definition < resolver->module->definition_count;
-            ++definition) {
-            if (resolver->module->definitions[definition].kind == SOL_ITEM_TRAIT
-                && sol_path_span_equal(
-                    resolver->source,
-                    resolver->module->definitions[definition].name,
-                    bound
-                )) {
-                resolution = (SolResolution){SOL_RESOLUTION_DEFINITION, definition};
-                break;
-            }
+        SolDefId owner = resolver->syntax->type_parameters[parameter].owner_item;
+        SolResolution resolution = sol_resolver_visible_definition(
+            resolver, owner, bound
+        );
+        if (resolution.kind == SOL_RESOLUTION_DEFINITION
+            && resolver->module->definitions[resolution.target].kind != SOL_ITEM_TRAIT) {
+            resolution = (SolResolution){SOL_RESOLUTION_ERROR, SOL_AST_NONE};
         }
         resolver->module->bound_resolutions[parameter] = resolution;
         if (resolution.kind == SOL_RESOLUTION_ERROR) {
@@ -1401,24 +1655,20 @@ static void sol_resolver_resolve_types(SolResolver *resolver) {
             parameter = resolver->syntax->type_parameters[parameter].next;
         }
         if (parameter != SOL_AST_NONE) continue;
-        SolTypeResolution resolution = sol_resolver_builtin_type(resolver->source, type->name);
+        SolTypeResolution resolution = sol_resolver_builtin_type(
+            resolver->source, type->name
+        );
         if (resolution.kind == SOL_TYPE_RESOLUTION_ERROR) {
-            for (size_t definition = 0;
-                definition < resolver->module->definition_count;
-                ++definition) {
-                SolItemKind kind = resolver->module->definitions[definition].kind;
-                if ((kind == SOL_ITEM_RECORD || kind == SOL_ITEM_ENUM
-                        || kind == SOL_ITEM_CAPABILITY)
-                    && sol_path_span_equal(
-                        resolver->source,
-                        resolver->module->definitions[definition].name,
-                        type->name
-                    )) {
+            SolResolution definition = sol_resolver_visible_definition(
+                resolver, type->owner_item, type->name
+            );
+            if (definition.kind == SOL_RESOLUTION_DEFINITION) {
+                SolItemKind kind = resolver->module->definitions[definition.target].kind;
+                if (kind == SOL_ITEM_RECORD || kind == SOL_ITEM_ENUM
+                    || kind == SOL_ITEM_CAPABILITY) {
                     resolution = (SolTypeResolution){
-                        SOL_TYPE_RESOLUTION_DEFINITION,
-                        definition,
+                        SOL_TYPE_RESOLUTION_DEFINITION, definition.target
                     };
-                    break;
                 }
             }
         }
@@ -1588,9 +1838,12 @@ static void sol_resolver_trait_methods(SolResolver *resolver, SolDefId definitio
     }
 }
 
-bool sol_hir_lower(
+static bool sol_hir_lower_impl(
     const SolSource *source,
     const SolSyntaxTree *syntax,
+    const SolHirFileScope *scopes,
+    size_t scope_count,
+    bool package_aware,
     SolHirModule *module,
     SolDiagnostics *diagnostics
 ) {
@@ -1599,8 +1852,12 @@ bool sol_hir_lower(
         .syntax = syntax,
         .module = module,
         .diagnostics = diagnostics,
+        .scopes = scopes,
+        .scope_count = scope_count,
+        .package_aware = package_aware,
     };
-    if (!sol_resolver_validate(&resolver)) {
+    if (!sol_resolver_validate(&resolver)
+        || !sol_resolver_validate_scopes(&resolver)) {
         return false;
     }
     if (!sol_resolver_allocate(&resolver)) {
@@ -1613,10 +1870,13 @@ bool sol_hir_lower(
         );
         free(resolver.bindings);
         free(resolver.expression_states);
+        free(resolver.import_targets);
+        free(resolver.import_names);
         return false;
     }
 
     sol_resolver_collect_definitions(&resolver);
+    if (package_aware) sol_resolver_resolve_imports(&resolver);
     sol_resolver_resolve_types(&resolver);
     for (size_t index = 0; index < syntax->item_count; ++index) {
         if (syntax->items[index].kind == SOL_ITEM_FUNCTION) {
@@ -1631,7 +1891,48 @@ bool sol_hir_lower(
 
     free(resolver.bindings);
     free(resolver.expression_states);
+    free(resolver.import_targets);
+    free(resolver.import_names);
+    if (!package_aware) {
+        free(module->file_scopes);
+        free(module->item_files);
+        module->file_scopes = NULL;
+        module->file_scope_count = 0;
+        module->item_files = NULL;
+    }
     return !resolver.allocation_failed
         && !resolver.malformed
         && !diagnostics->allocation_failed;
+}
+
+bool sol_hir_lower_scoped(
+    const SolSource *source,
+    const SolSyntaxTree *syntax,
+    const SolHirFileScope *scopes,
+    size_t scope_count,
+    SolHirModule *module,
+    SolDiagnostics *diagnostics
+) {
+    return sol_hir_lower_impl(
+        source, syntax, scopes, scope_count, true, module, diagnostics
+    );
+}
+
+bool sol_hir_lower(
+    const SolSource *source,
+    const SolSyntaxTree *syntax,
+    SolHirModule *module,
+    SolDiagnostics *diagnostics
+) {
+    if (syntax == NULL) return false;
+    SolHirFileScope scope = {
+        .module_name = syntax->module_name,
+        .import_start = 0,
+        .import_count = 0,
+        .item_start = 0,
+        .item_count = syntax->item_count,
+    };
+    return sol_hir_lower_impl(
+        source, syntax, &scope, 1, false, module, diagnostics
+    );
 }

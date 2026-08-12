@@ -82,6 +82,14 @@ typedef struct {
 } SolResolution;
 
 typedef struct {
+    SolSpan module_name;
+    size_t import_start;
+    size_t import_count;
+    size_t item_start;
+    size_t item_count;
+} SolHirFileScope;
+
+typedef struct {
     SolHirDefinition *definitions;
     size_t definition_count;
     SolHirLocal *locals;
@@ -104,6 +112,10 @@ typedef struct {
     size_t trait_resolution_count;
     SolResolution *bound_resolutions;
     size_t bound_resolution_count;
+    /* Owned package scope metadata; item_files is indexed by syntax item. */
+    SolHirFileScope *file_scopes;
+    size_t file_scope_count;
+    size_t *item_files;
 } SolHirModule;
 
 void sol_hir_module_init(SolHirModule *module);
@@ -111,6 +123,14 @@ void sol_hir_module_free(SolHirModule *module);
 bool sol_hir_lower(
     const SolSource *source,
     const SolSyntaxTree *syntax,
+    SolHirModule *module,
+    SolDiagnostics *diagnostics
+);
+bool sol_hir_lower_scoped(
+    const SolSource *source,
+    const SolSyntaxTree *syntax,
+    const SolHirFileScope *scopes,
+    size_t scope_count,
     SolHirModule *module,
     SolDiagnostics *diagnostics
 );

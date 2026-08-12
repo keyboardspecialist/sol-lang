@@ -167,7 +167,7 @@ Sol uses a two-tier correctness model. The base language provides fast, predicta
 
 The compiler is intended to expose a canonical typed semantic graph, stable declaration identities, machine-readable diagnostics, constrained repair actions, proof caches, and behavior-change reports. These interfaces let tools patch declarations and obligations rather than brittle line numbers. Humans retain authority over intent, architecture, accepted effects, and proof policy.
 
-#status("IMPLEMENTED", [The C17 bootstrap is an experimental edition-2027 front end, not an executor. It currently lexes and parses a core language, resolves lexical and declaration-owned type/effect names, checks built-in, nominal, and bounded first-order generic types/functions, exhaustive matches, closed normalized effects plus callback-driven rank-1 row parameters, capabilities and exact handlers, and lowers deterministic contract templates. Ownership, traits and general constrained or recursive row polymorphism, runtime checks, SMT discharge, code generation, stable public semantic IDs, and semantic patches remain future work.])
+#status("IMPLEMENTED", [The C17 bootstrap is an experimental edition-2027 front end, not an executor. It currently lexes and parses a core language, resolves lexical, multi-file module, explicit import, and declaration-owned type/effect names, checks built-in, nominal, bounded first-order generic, and bounded trait semantics, exhaustive matches, closed normalized effects plus callback-driven rank-1 row parameters, capabilities and exact handlers, and lowers deterministic contract templates. Ownership, richer traits and general constrained or recursive row polymorphism, runtime checks, SMT discharge, code generation, stable public semantic IDs, and semantic patches remain future work.])
 
 #heading(level: 2, numbering: none)[Key Decisions]
 
@@ -414,7 +414,9 @@ let total = subtotal.add(tax)
 
 A module is a semantic namespace and compilation unit, not necessarily one file. Packages define a public module tree. Visibility is private, module, package, or public. Friend access is absent; cross-package internal access requires an explicit capability or separately versioned package.
 
-Imports never globally change method lookup. Wildcards are rejected in library source and permitted only in REPL/test scopes. External names in public signatures carry canonical fully qualified identities in the semantic graph even when source uses imports. Multi-file module and import resolution is future work.
+Imports never globally change method lookup. Wildcards are rejected in library source and permitted only in REPL/test scopes. External names in public signatures carry canonical fully qualified identities in the semantic graph even when source uses imports.
+
+#status("IMPLEMENTED", [For directory `sol check`, the bootstrap recursively discovers regular `.sol` files in deterministic bytewise path order as one dependency-free package. Each file declares its module, multiple files may contribute to one module, and private declarations are visible throughout that module. File-scoped `use module.path.Symbol` imports resolve one public declaration and feed package-wide type, generic-bound, trait, effect, and contract checking. Import cycles are allowed because the subset has no top-level initialization. Direct file checking retains the earlier ignored-import compatibility behavior. Manifests, external dependencies, aliases, grouped/wildcard/relative imports, re-exports, separate private/module/package visibility, imported extension-method search, and stable cross-build identities are future work.])
 
 = Type System and Data Modeling
 
@@ -424,7 +426,7 @@ The target uses a layered static type system. A decidable base provides nominal 
 
 #callout([USABILITY DECISION], [Routine syntax does not expose unrestricted full-spectrum dependent typing. Value-dependent constraints are admitted where obligations and tooling remain clear; advanced propositions stay in the proof sublanguage.])
 
-#status("IMPLEMENTED", [The bootstrap implements first-order type parameters on records, enums, and free functions plus one trailing effect-row parameter on free functions. Parameters are rigid declaration-owned identities while templates are checked. Built-in and user applications are invariant and canonically interned by constructor identity plus ordered exact arguments; `Option<T>` and `Result<T, E>` retain their exact one- and two-argument identities. Type positions require complete explicit application. Function calls use either all explicit type arguments or argument-only recursive structural inference; callback arguments infer the bounded effect parameter. Free-function type parameters may carry one inline trait bound, checked after inference and forwarded symbolically through bounded generic calls. Defaults, variance, higher-kinded/lifetime/const parameters, multiple bounds, general effect constraints, generic capabilities/members, polymorphic recursion, cross-module instantiation, and execution/monomorphization are future work.])
+#status("IMPLEMENTED", [The bootstrap implements first-order type parameters on records, enums, and free functions plus one trailing effect-row parameter on free functions. Parameters are rigid declaration-owned identities while templates are checked. Built-in and user applications are invariant and canonically interned by constructor identity plus ordered exact arguments; `Option<T>` and `Result<T, E>` retain their exact one- and two-argument identities. Type positions require complete explicit application. Function calls use either all explicit type arguments or argument-only recursive structural inference; callback arguments infer the bounded effect parameter. Free-function type parameters may carry one inline trait bound, checked after inference and forwarded symbolically through bounded generic calls, including across modules in one checked directory package. Defaults, variance, higher-kinded/lifetime/const parameters, multiple bounds, general effect constraints, generic capabilities/members, polymorphic recursion, separately compiled dependency instantiation, and execution/monomorphization are future work.])
 
 == Primitive Types
 
@@ -1163,7 +1165,7 @@ WebAssembly components provide interface-driven composition and capability-orien
 
 Internal layout is unstable by default. `@repr(C)`, `@repr(transparent)`, and versioned stable ABI annotations opt into guarantees. Public native ABI packages freeze layout, calling convention, panic policy, and allocator ownership; the compiler emits an ABI manifest.
 
-#status("FUTURE WORK", [Cross-file packages, stable IDs, schema tooling, compatibility reports, FFI, WebAssembly, runtime profiles, executable IR, and ABI generation are not implemented in the bootstrap.])
+#status("FUTURE WORK", [Package manifests and dependencies, stable cross-build IDs, schema tooling, compatibility reports, FFI, WebAssembly, runtime profiles, executable IR, and ABI generation are not implemented in the bootstrap.])
 
 = AI-Native Development and Semantic Editing
 
@@ -1340,7 +1342,7 @@ The target front end provides:
 - Constraint-based type/effect/region inference bounded for predictable diagnostics.
 - Exhaustiveness and protocol-state checking before proof generation.
 
-The bootstrap implements lossless tokens, recovering core parsing, arena-backed syntax, deterministic definition IDs, lexical single-module and declaration-owned type resolution, typed HIR foundations, generic and nongeneric records/enums/functions, bounded coherent traits and constrained calls, exact invariant applications, matches, closed effects/capabilities/handlers, and generic contract templates. It does not yet implement incremental parsing, imports, ownership/regions, richer trait or row-polymorphic generics, protocols, or formatter.
+The bootstrap implements lossless tokens, recovering core parsing, arena-backed syntax, deterministic package-session definition IDs, lexical and explicit multi-file module/import resolution, declaration-owned type resolution, typed HIR foundations, generic and nongeneric records/enums/functions, bounded coherent traits and constrained calls, exact invariant applications, matches, closed effects/capabilities/handlers, and generic contract templates. It does not yet implement incremental parsing, dependency packages or manifests, ownership/regions, richer trait or row-polymorphic generics, protocols, or formatter.
 
 == Verification Engine
 
@@ -1496,7 +1498,7 @@ Begin with a deliberately small core proving interactions among canonical syntax
 
 The current C17 bootstrap provides:
 
-- Lossless lexing, recovering parsing for core declarations/contracts/body expressions, arena syntax, deterministic definition IDs, lexical single-module HIR resolution, and human/JSON diagnostics.
+- Lossless lexing, recovering parsing for core declarations/contracts/body expressions, arena syntax, deterministic package-session definition IDs, lexical and explicit multi-file module/import HIR resolution, and source-aware human/JSON diagnostics.
 - Primitive types; exact variable-arity interned built-in/user applications; bounded generic records, enums, and free functions; constructors; exhaustive user-enum and `Bool` matching; expression/call/return checking.
 - Nongeneric coherent traits; exact closed implementations; one inline free-function bound; symbolic bound forwarding; immediate type-directed method calls; checked method-resolution metadata and exact closed method effects.
 - Closed structural function types and bounded declaration-owned callback row parameters; exact function and bound-operation effects; callback subset checking; local and per-call row inference.
@@ -1506,7 +1508,7 @@ The current C17 bootstrap provides:
 - Exact capability-backed handlers with syntax, source/provider matching, scoped root-sensitive subtraction, residual/provider effects, runtime metadata, and singleton target limitation.
 - Structured contracts resolved in fresh signature scopes; generic template typing; `Bool` typing; finalized purity; `Result` outcome-specific `result`; distinct `old` snapshots; deterministic obligation templates.
 
-It does not execute programs and is not a production compiler. In particular, general row constraints and explicit/multiple/recursive effect parameters, richer traits and constrained or higher-order generics, ownership/regions, general algebraic handlers, runtime dynamic handler matching, runtime contract checks, call-site contract use, logical normalization, SMT/proof discharge, concurrency, packages, formatter, stable public IDs, public IR, semantic patches, and code generation are not implemented.
+It does not execute programs and is not a production compiler. In particular, general row constraints and explicit/multiple/recursive effect parameters, richer traits and constrained or higher-order generics, ownership/regions, general algebraic handlers, runtime dynamic handler matching, runtime contract checks, call-site contract use, logical normalization, SMT/proof discharge, concurrency, package manifests/dependencies, formatter, stable public IDs, public IR, semantic patches, and code generation are not implemented.
 
 == Phased Roadmap
 

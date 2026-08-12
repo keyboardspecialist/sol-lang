@@ -322,6 +322,7 @@ static bool sol_structure_all_marked(const unsigned char *items, size_t count) {
 
 bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree *tree) {
     if (source == NULL || source->text == NULL || tree == NULL
+        || tree->import_count > tree->import_capacity
         || tree->item_count > tree->item_capacity
         || tree->capability_member_count > tree->capability_member_capacity
         || tree->trait_method_count > tree->trait_method_capacity
@@ -331,6 +332,7 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
         || tree->match_arm_count > tree->match_arm_capacity
         || tree->contract_clause_count > tree->contract_clause_capacity
         || tree->contract_condition_count > tree->contract_condition_capacity
+        || (tree->import_count != 0 && tree->imports == NULL)
         || (tree->item_count != 0 && tree->items == NULL)
         || (tree->capability_member_count != 0 && tree->capability_members == NULL)
         || (tree->trait_method_count != 0 && tree->trait_methods == NULL)
@@ -356,6 +358,9 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
         && (tree->contract_clause_count == 0 || validator.clauses != NULL)
         && (tree->contract_condition_count == 0 || validator.conditions != NULL);
     bool valid = allocated;
+    for (size_t index = 0; valid && index < tree->import_count; ++index) {
+        valid = sol_structure_span_valid(&validator, tree->imports[index].path);
+    }
     for (size_t index = 0; valid && index < tree->item_count; ++index) {
         const SolSyntaxItem *item = &tree->items[index];
         if ((item->kind != SOL_ITEM_FUNCTION && item->first_contract != SOL_AST_NONE)

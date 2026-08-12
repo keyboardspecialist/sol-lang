@@ -1,8 +1,10 @@
 #include "sol/diagnostic.h"
+#include "sol/effectcheck.h"
 #include "sol/hir.h"
 #include "sol/lexer.h"
 #include "sol/parser.h"
 #include "sol/source.h"
+#include "sol/typecheck.h"
 
 #include <stdbool.h>
 #include <stdio.h>
@@ -80,6 +82,16 @@ static bool span_text_equal(const SolSource *source, SolSpan span, const char *t
     size_t length = span.end - span.start;
     return strlen(text) == length
         && memcmp(source->text + span.start, text, length) == 0;
+}
+
+static SolSpan text_span(const SolSource *source, const char *text) {
+    const char *start = strstr(source->text, text);
+    CHECK(start != NULL);
+    if (start == NULL) return (SolSpan){0};
+    return (SolSpan){
+        .start = (size_t)(start - source->text),
+        .end = (size_t)(start - source->text) + strlen(text),
+    };
 }
 
 static void test_successful_resolution(void) {
@@ -456,6 +468,203 @@ static void test_malformed_arena_metadata_rejected(void) {
     sol_source_free(&source);
 }
 
+static void test_scoped_package_resolution(void) {
+    static const char text[] =
+        "module alpha\n"
+        "use beta.External\n"
+        "public function External() -> Int64 { return 1 }\n"
+        "function call() -> Int64 { return External() }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.syntax.item_count == 2);
+    CHECK(compilation.syntax.import_count == 1);
+
+    SolSpan import_path = compilation.syntax.imports[0].path;
+    SolHirFileScope scopes[] = {
+        {
+            .module_name = (SolSpan){import_path.start, import_path.start + 4},
+            .import_start = 0,
+            .import_count = 0,
+            .item_start = 0,
+            .item_count = 1,
+        },
+        {
+            .module_name = text_span(&compilation.source, "alpha"),
+            .import_start = 0,
+            .import_count = 1,
+            .item_start = 1,
+            .item_count = 1,
+        },
+    };
+    reset_hir_diagnostics(&compilation);
+    CHECK(sol_hir_lower_scoped(
+        &compilation.source, &compilation.syntax, scopes, 2,
+        &compilation.hir, &compilation.diagnostics
+    ));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.hir.file_scope_count == 2);
+    CHECK(compilation.hir.item_files[0] == 0);
+    CHECK(compilation.hir.item_files[1] == 1);
+    bool imported = false;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        if (compilation.syntax.expressions[index].kind == SOL_EXPR_PATH
+            && span_text_equal(
+                &compilation.source,
+                compilation.syntax.expressions[index].as.name,
+                "External"
+            ) && compilation.hir.resolutions[index].kind
+                == SOL_RESOLUTION_DEFINITION) {
+            CHECK(compilation.hir.resolutions[index].target == 0);
+            imported = true;
+        }
+    }
+    CHECK(imported);
+
+    scopes[1].item_count = 2;
+    reset_hir_diagnostics(&compilation);
+    CHECK(!sol_hir_lower_scoped(
+        &compilation.source, &compilation.syntax, scopes, 2,
+        &compilation.hir, &compilation.diagnostics
+    ));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    free_compilation(&compilation);
+}
+
+static void test_scoped_import_requires_exact_module(void) {
+    static const char text[] =
+        "module consumer\n"
+        "use alpha.beta.Missing\n"
+        "public function Present() -> Int64 { return 1 }\n"
+        "function call() -> Int64 { return 1 }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolSpan path = compilation.syntax.imports[0].path;
+    SolHirFileScope scopes[] = {
+        {
+            .module_name = (SolSpan){path.start, path.start + 5},
+            .item_start = 0,
+            .item_count = 1,
+        },
+        {
+            .module_name = text_span(&compilation.source, "consumer"),
+            .import_start = 0,
+            .import_count = 1,
+            .item_start = 1,
+            .item_count = 1,
+        },
+    };
+    reset_hir_diagnostics(&compilation);
+    CHECK(sol_hir_lower_scoped(
+        &compilation.source, &compilation.syntax, scopes, 2,
+        &compilation.hir, &compilation.diagnostics
+    ));
+    CHECK(has_diagnostic(&compilation, "SOL-RESOLVE-008"));
+    CHECK(!has_diagnostic(&compilation, "SOL-RESOLVE-009"));
+    free_compilation(&compilation);
+}
+
+static void test_scoped_builtin_type_precedence(void) {
+    static const char text[] =
+        "module consumer\n"
+        "use types.Text\n"
+        "public record Text {}\n"
+        "record Int64 {}\n"
+        "function builtin(value: Text) -> Int64 { return 1 }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolSpan path = compilation.syntax.imports[0].path;
+    SolHirFileScope scopes[] = {
+        {
+            .module_name = (SolSpan){path.start, path.start + 5},
+            .item_start = 0,
+            .item_count = 1,
+        },
+        {
+            .module_name = text_span(&compilation.source, "consumer"),
+            .import_start = 0,
+            .import_count = 1,
+            .item_start = 1,
+            .item_count = 2,
+        },
+    };
+    reset_hir_diagnostics(&compilation);
+    CHECK(sol_hir_lower_scoped(
+        &compilation.source, &compilation.syntax, scopes, 2,
+        &compilation.hir, &compilation.diagnostics
+    ));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    for (size_t type = 0; type < compilation.syntax.type_count; ++type) {
+        SolSpan name = compilation.syntax.types[type].name;
+        if (span_text_equal(&compilation.source, name, "Text")) {
+            CHECK(compilation.hir.type_resolutions[type].kind
+                == SOL_TYPE_RESOLUTION_BUILTIN);
+            CHECK(compilation.hir.type_resolutions[type].target
+                == SOL_TYPE_BUILTIN_TEXT);
+        } else if (span_text_equal(&compilation.source, name, "Int64")) {
+            CHECK(compilation.hir.type_resolutions[type].kind
+                == SOL_TYPE_RESOLUTION_BUILTIN);
+            CHECK(compilation.hir.type_resolutions[type].target
+                == SOL_TYPE_BUILTIN_INT64);
+        }
+    }
+    free_compilation(&compilation);
+}
+
+static void test_effectcheck_rejects_forged_scoped_metadata(void) {
+    static const char text[] =
+        "module scoped_effect\n"
+        "function value() -> Int64 effects { pure } { return 1 }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolHirFileScope scope = {
+        .module_name = compilation.syntax.module_name,
+        .item_start = 0,
+        .item_count = compilation.syntax.item_count,
+    };
+    reset_hir_diagnostics(&compilation);
+    CHECK(sol_hir_lower_scoped(
+        &compilation.source, &compilation.syntax, &scope, 1,
+        &compilation.hir, &compilation.diagnostics
+    ));
+    SolTypeTable types;
+    SolEffectTable effects;
+    sol_type_table_init(&types);
+    sol_effect_table_init(&effects);
+    CHECK(sol_type_check(
+        &compilation.source, &compilation.syntax, &compilation.hir,
+        &types, &compilation.diagnostics
+    ));
+
+    SolHirFileScope *file_scopes = compilation.hir.file_scopes;
+    compilation.hir.file_scopes = NULL;
+    sol_diagnostics_free(&compilation.diagnostics);
+    sol_diagnostics_init(&compilation.diagnostics);
+    CHECK(!sol_effect_check(
+        &compilation.source, &compilation.syntax, &compilation.hir,
+        &types, &effects, &compilation.diagnostics
+    ));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+    compilation.hir.file_scopes = file_scopes;
+
+    compilation.hir.item_files[0] = 1;
+    sol_diagnostics_free(&compilation.diagnostics);
+    sol_diagnostics_init(&compilation.diagnostics);
+    CHECK(!sol_effect_check(
+        &compilation.source, &compilation.syntax, &compilation.hir,
+        &types, &effects, &compilation.diagnostics
+    ));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+    compilation.hir.item_files[0] = 0;
+
+    sol_effect_table_free(&effects);
+    sol_type_table_free(&types);
+    free_compilation(&compilation);
+}
+
 static void test_derived_capability_resolution_and_malformed_body(void) {
     static const char text[] =
         "module derived_resolution\n"
@@ -655,6 +864,10 @@ int main(void) {
     test_semantic_depth_limit();
     test_malformed_ast_rejected();
     test_malformed_arena_metadata_rejected();
+    test_scoped_package_resolution();
+    test_scoped_import_requires_exact_module();
+    test_scoped_builtin_type_precedence();
+    test_effectcheck_rejects_forged_scoped_metadata();
     test_derived_capability_resolution_and_malformed_body();
     test_malformed_handler_ast_rejected();
     test_contract_resolution_and_cycles();

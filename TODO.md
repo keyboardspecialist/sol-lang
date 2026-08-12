@@ -19,6 +19,8 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
       callback-driven least-row inference and per-call instantiation metadata.
 - [x] Bounded coherent traits, exact closed implementations, one inline generic
       bound, and deterministic type-directed immediate method calls.
+- [x] Deterministic directory packages, multi-file modules, explicit public imports,
+      source-aware diagnostics, and package-wide semantic checking.
 
 ## Prioritized Work
 
@@ -28,7 +30,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [x] | 2 | Implement bounded first-order generic records/enums/functions and exact instantiation | 5 | 5 | Type interning |
 | [x] | 3 | Integrate bounded effect-row variables with generic function instantiation | 5 | 5 | Generics |
 | [x] | 4 | Add traits, implementations, constraints, and type-directed method resolution | 5 | 5 | Generics |
-| [ ] | 5 | Resolve modules and imports across multiple files and packages | 5 | 5 | Name resolution |
+| [x] | 5 | Resolve modules and imports across multiple files and packages | 5 | 5 | Name resolution |
 | [ ] | 6 | Implement the canonical formatter and enforce idempotence | 4 | 3 | Parser and token stream |
 | [ ] | 7 | Close authority gaps for static and unparameterized effects | 5 | 4 | Capability model |
 | [ ] | 8 | Add distinct and refined types with checked predicates | 4 | 4 | Generics and contracts |

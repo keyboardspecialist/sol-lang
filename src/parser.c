@@ -28,6 +28,7 @@ void sol_syntax_tree_init(SolSyntaxTree *tree) {
 }
 
 void sol_syntax_tree_free(SolSyntaxTree *tree) {
+    free(tree->imports);
     free(tree->items);
     free(tree->expressions);
     free(tree->statements);
@@ -187,6 +188,21 @@ static void *sol_parser_grow(
     }
     *capacity = new_capacity;
     return grown;
+}
+
+static bool sol_parser_add_import(SolParser *parser, SolImport import) {
+    if (parser->tree->import_count == parser->tree->import_capacity) {
+        SolImport *imports = sol_parser_grow(
+            parser,
+            parser->tree->imports,
+            &parser->tree->import_capacity,
+            sizeof(*parser->tree->imports)
+        );
+        if (imports == NULL) return false;
+        parser->tree->imports = imports;
+    }
+    parser->tree->imports[parser->tree->import_count++] = import;
+    return true;
 }
 
 static SolExprId sol_parser_add_expression(SolParser *parser, SolExpr expression) {
@@ -524,20 +540,38 @@ static SolContractConditionId sol_parser_add_contract_condition(
     return id;
 }
 
-static bool sol_parser_path(SolParser *parser, SolSpan *span, const char *description) {
+static bool sol_parser_path_components(
+    SolParser *parser,
+    SolSpan *span,
+    const char *description,
+    size_t *component_count,
+    bool *complete
+) {
     SolToken first = sol_parser_current(parser);
     if (!sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER, description)) {
+        if (component_count != NULL) *component_count = 0;
+        if (complete != NULL) *complete = false;
         return false;
     }
+    size_t components = 1;
+    bool valid = true;
     SolToken last = first;
     while (sol_parser_match(parser, SOL_TOKEN_DOT)) {
         last = sol_parser_current(parser);
         if (!sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER, "expected a path component after '.'")) {
+            valid = false;
             break;
         }
+        ++components;
     }
     *span = (SolSpan){.start = first.span.start, .end = last.span.end};
+    if (component_count != NULL) *component_count = components;
+    if (complete != NULL) *complete = valid;
     return true;
+}
+
+static bool sol_parser_path(SolParser *parser, SolSpan *span, const char *description) {
+    return sol_parser_path_components(parser, span, description, NULL, NULL);
 }
 
 static bool sol_parser_type(SolParser *parser, SolSpan *span, SolTypeId *type_id);
@@ -3115,8 +3149,27 @@ static void sol_parser_header(SolParser *parser) {
     }
 
     while (sol_parser_match(parser, SOL_TOKEN_USE)) {
-        SolSpan ignored;
-        sol_parser_path(parser, &ignored, "expected an import path");
+        SolToken first = sol_parser_current(parser);
+        SolSpan path;
+        size_t component_count;
+        bool complete;
+        bool parsed = sol_parser_path_components(
+            parser,
+            &path,
+            "expected an import path",
+            &component_count,
+            &complete
+        );
+        if (parsed && complete && component_count < 2) {
+            sol_parser_error(
+                parser,
+                "SOL-PARSE-001",
+                first,
+                "an import path must include a module and symbol"
+            );
+        } else if (parsed && complete) {
+            sol_parser_add_import(parser, (SolImport){.path = path});
+        }
     }
 }
 

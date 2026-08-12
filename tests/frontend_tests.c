@@ -243,6 +243,10 @@ static void test_valid_declarations(void) {
     CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
     CHECK(!sol_diagnostics_has_errors(&diagnostics));
     CHECK(tree.edition == 2027);
+    CHECK(tree.import_count == 1);
+    if (tree.import_count == 1) {
+        CHECK(span_text_equal(&source, tree.imports[0].path, "core.Text"));
+    }
     CHECK(tree.item_count == 4);
     CHECK(tree.capability_member_count == 1);
     CHECK(tree.items[2].first_member == 0);
@@ -261,6 +265,65 @@ static void test_valid_declarations(void) {
     }
     CHECK(covered == source.length);
 
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_retained_imports(void) {
+    static const char source_text[] =
+        "module imports\n"
+        "use core.Text\n"
+        "use application.models.User\n"
+        "function value() -> Int64 { return 1 }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "imports.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.import_count == 2);
+    if (tree.import_count == 2) {
+        CHECK(span_text_equal(&source, tree.imports[0].path, "core.Text"));
+        CHECK(span_text_equal(&source, tree.imports[1].path, "application.models.User"));
+    }
+    CHECK(tree.item_count == 1);
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_malformed_imports(void) {
+    static const char source_text[] =
+        "module malformed_imports\n"
+        "use Symbol\n"
+        "use core.\n"
+        "function recovered() -> Int64 { return 1 }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "malformed_imports.sol", source_text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.import_count == 0);
+    CHECK(tree.item_count == 1);
+    if (tree.item_count == 1) {
+        CHECK(span_text_equal(&source, tree.items[0].name, "recovered"));
+    }
+    CHECK(diagnostics.count == 2);
     sol_syntax_tree_free(&tree);
     sol_diagnostics_free(&diagnostics);
     sol_tokens_free(&tokens);
@@ -1451,6 +1514,8 @@ static void test_trait_method_authority_rejected(void) {
 
 int main(void) {
     test_valid_declarations();
+    test_retained_imports();
+    test_malformed_imports();
     test_generic_syntax_and_comparison_disambiguation();
     test_unsupported_generic_syntax();
     test_effect_row_generic_syntax();

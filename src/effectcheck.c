@@ -1569,12 +1569,18 @@ static bool sol_effect_hir_matches_source(SolEffectChecker *checker) {
     SolDiagnostics diagnostics;
     sol_hir_module_init(&rebuilt);
     sol_diagnostics_init(&diagnostics);
-    bool completed = sol_hir_lower(
-        checker->source,
-        checker->syntax,
-        &rebuilt,
-        &diagnostics
-    );
+    bool completed = checker->hir->file_scope_count != 0
+        ? sol_hir_lower_scoped(
+            checker->source,
+            checker->syntax,
+            checker->hir->file_scopes,
+            checker->hir->file_scope_count,
+            &rebuilt,
+            &diagnostics
+        )
+        : sol_hir_lower(
+            checker->source, checker->syntax, &rebuilt, &diagnostics
+        );
     bool matches = completed
         && !sol_diagnostics_has_errors(&diagnostics)
         && rebuilt.definition_count == checker->hir->definition_count
@@ -1585,7 +1591,23 @@ static bool sol_effect_hir_matches_source(SolEffectChecker *checker) {
         && rebuilt.type_effect_resolution_count
             == checker->hir->type_effect_resolution_count
         && rebuilt.trait_resolution_count == checker->hir->trait_resolution_count
-        && rebuilt.bound_resolution_count == checker->hir->bound_resolution_count;
+        && rebuilt.bound_resolution_count == checker->hir->bound_resolution_count
+        && rebuilt.file_scope_count == checker->hir->file_scope_count;
+    for (size_t index = 0; matches && index < rebuilt.file_scope_count; ++index) {
+        const SolHirFileScope *left = &rebuilt.file_scopes[index];
+        const SolHirFileScope *right = &checker->hir->file_scopes[index];
+        matches = left->module_name.start == right->module_name.start
+            && left->module_name.end == right->module_name.end
+            && left->import_start == right->import_start
+            && left->import_count == right->import_count
+            && left->item_start == right->item_start
+            && left->item_count == right->item_count;
+    }
+    for (size_t index = 0;
+        matches && rebuilt.file_scope_count != 0 && index < rebuilt.definition_count;
+        ++index) {
+        matches = rebuilt.item_files[index] == checker->hir->item_files[index];
+    }
     for (size_t index = 0; matches && index < rebuilt.definition_count; ++index) {
         const SolHirDefinition *left = &rebuilt.definitions[index];
         const SolHirDefinition *right = &checker->hir->definitions[index];
@@ -2988,6 +3010,11 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || hir->trait_resolution_count != syntax->item_count
         || hir->bound_resolution_count != syntax->type_parameter_count
         || hir->local_count > hir->local_capacity
+        || hir->file_scope_count > SIZE_MAX / sizeof(*hir->file_scopes)
+        || ((hir->file_scope_count == 0) != (hir->file_scopes == NULL))
+        || (hir->file_scope_count == 0 && hir->item_files != NULL)
+        || (hir->file_scope_count != 0 && hir->definition_count != 0
+            && hir->item_files == NULL)
         || (hir->definition_count != 0 && hir->definitions == NULL)
         || (hir->resolution_count != 0 && hir->resolutions == NULL)
         || (hir->resolution_count != 0 && hir->expression_owners == NULL)

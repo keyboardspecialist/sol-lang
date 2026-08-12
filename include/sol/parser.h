@@ -43,8 +43,15 @@ typedef struct {
 } SolSyntaxItem;
 
 typedef struct {
+    SolSpan path;
+} SolImport;
+
+typedef struct {
     SolSpan module_name;
     unsigned int edition;
+    SolImport *imports;
+    size_t import_count;
+    size_t import_capacity;
     SolSyntaxItem *items;
     size_t item_count;
     size_t item_capacity;
