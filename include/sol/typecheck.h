@@ -167,6 +167,16 @@ typedef struct {
     /* Indexed by SolExprId; non-method calls use SOL_METHOD_RESOLUTION_NONE. */
     SolMethodResolution *method_resolutions;
     size_t method_resolution_count;
+    /* Indexed by SolExprId; resolved record fields/enum heads use SOL_AST_NONE otherwise. */
+    SolFieldId *field_resolutions;
+    SolVariantId *variant_resolutions;
+    size_t member_resolution_count;
+    /* Indexed by SolPatternId; non-variant patterns use SOL_AST_NONE. */
+    SolVariantId *pattern_variant_resolutions;
+    size_t pattern_resolution_count;
+    /* Indexed by SolArgumentId; record literal fields use SOL_AST_NONE otherwise. */
+    SolFieldId *argument_field_resolutions;
+    size_t argument_resolution_count;
     /* Indexed by SolDefId; only implementation entries are meaningful. */
     SolType *implementation_targets;
     size_t implementation_target_count;
@@ -232,6 +242,10 @@ bool sol_type_provenance(
     const SolTypeTable *table,
     SolProvenanceId id,
     SolProvenance *provenance
+);
+bool sol_type_resolution_metadata_valid(
+    const SolSyntaxTree *syntax,
+    const SolTypeTable *table
 );
 bool sol_type_check(
     const SolSource *source,

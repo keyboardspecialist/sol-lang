@@ -4,6 +4,8 @@
 
 > **Project status:** Sol is currently a language-design and compiler-research project. A bootstrap compiler front end is under development, but no production-ready compiler or stable toolchain exists yet.
 
+The bootstrap now lowers successful package compilation into an owning, deterministic canonical typed IR intended as the sole input to the planned conformance interpreter. Its independent type, declaration, callable/member, local, field, variant, expression, statement-list, match-arm-list, dispatch-evidence, effect, source-file, and contract arenas preserve stable top-level semantic IDs, decoded literals, formal-ordered operands, payloadless variants, classified calls and constructors, exact propagation and handler behavior, concrete evidence for trait requirement dispatch, and IR-native obligations/snapshots after all frontend objects are freed. Compile-time type/member heads are retained only when consumed by a supported executable chain. Generic inference is bounded and left-to-right: contextual builtins are supported after earlier arguments establish the full substitution, while earlier ambiguous builtins are diagnosed without backtracking. The representation is explicitly unstable and is not a serialized format or public ABI; stable schemas remain separate roadmap work.
+
 Sol is designed for software written and maintained collaboratively by humans and AI systems. It treats effects, authority, contracts, resource behavior, semantic identity, and change consequences as first-class parts of the program rather than context that must be reconstructed from conventions, comments, and repository archaeology.
 
 ## Design Specification
@@ -502,7 +504,7 @@ A compiler that implements ownership but omits explicit effects, executable cont
 
 ### Phase 0 — Executable language model
 
-Define the grammar, core calculus, effect-row behavior, ownership rules, contract semantics, and serialized diagnostic/IR schemas. Build small interpreters and model checkers before committing to production compiler architecture.
+Define the grammar, core calculus, effect-row behavior, ownership rules, contract semantics, and serialized diagnostic/IR schemas. The bootstrap's internal typed IR is intentionally distinct from those future stable schemas. Build small interpreters and model checkers before committing to production compiler architecture.
 
 ### Phase 1 — Front end and interpreter
 

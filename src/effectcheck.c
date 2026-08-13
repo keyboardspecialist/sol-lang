@@ -3160,6 +3160,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             > types->call_instantiation_argument_capacity
         || types->variant_constructor_count > types->variant_constructor_capacity
         || types->method_resolution_count != syntax->expression_count
+        || types->member_resolution_count != syntax->expression_count
+        || types->pattern_resolution_count != syntax->pattern_count
+        || types->argument_resolution_count != syntax->argument_count
         || types->implementation_target_count != syntax->item_count
         || types->representation_count != syntax->item_count
         || types->construction_count != syntax->expression_count
@@ -3189,13 +3192,20 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (types->variant_constructor_capacity != 0
             && types->variant_constructors == NULL)
         || (types->method_resolution_count != 0 && types->method_resolutions == NULL)
+        || (types->member_resolution_count != 0
+            && (types->field_resolutions == NULL || types->variant_resolutions == NULL))
+        || (types->pattern_resolution_count != 0
+            && types->pattern_variant_resolutions == NULL)
+        || (types->argument_resolution_count != 0
+            && types->argument_field_resolutions == NULL)
         || (types->implementation_target_count != 0
             && types->implementation_targets == NULL)
         || (types->representation_count != 0 && types->representations == NULL)
         || (types->construction_count != 0 && types->constructions == NULL)) {
         return false;
     }
-    if (!sol_syntax_contracts_validate(source, syntax)) return false;
+    if (!sol_syntax_contracts_validate(source, syntax)
+        || !sol_type_resolution_metadata_valid(syntax, types)) return false;
     size_t provenance_root_offset = 0;
     for (size_t index = 0; index < types->provenance_count; ++index) {
         SolProvenance provenance;

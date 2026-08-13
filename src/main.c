@@ -5,6 +5,7 @@
 #include "sol/effectcheck.h"
 #include "sol/formatter.h"
 #include "sol/hir.h"
+#include "sol/ir.h"
 #include "sol/lexer.h"
 #include "sol/package.h"
 #include "sol/parser.h"
@@ -531,10 +532,12 @@ static int sol_check_path(const char *path, bool json) {
     SolTypeTable types;
     SolEffectTable effects;
     SolContractTable contracts;
+    SolIr ir;
     sol_hir_module_init(&hir);
     sol_type_table_init(&types);
     sol_effect_table_init(&effects);
     sol_contract_table_init(&contracts);
+    sol_ir_init(&ir);
 
     bool completed = true;
     if (completed && !sol_diagnostics_has_errors(&diagnostics)) {
@@ -603,6 +606,20 @@ static int sol_check_path(const char *path, bool json) {
             &diagnostics
         );
     }
+    if (completed && !sol_diagnostics_has_errors(&diagnostics)) {
+        completed = sol_ir_lower_scoped(
+            &package.source,
+            &package.syntax,
+            &hir,
+            &types,
+            &effects,
+            &contracts,
+            package.is_directory ? package.files : NULL,
+            package.is_directory ? package.file_count : 0,
+            &ir,
+            &diagnostics
+        );
+    }
     bool failed = !completed || sol_diagnostics_has_errors(&diagnostics);
 
     if (json) {
@@ -631,6 +648,7 @@ static int sol_check_path(const char *path, bool json) {
         }
     }
 
+    sol_ir_free(&ir);
     sol_contract_table_free(&contracts);
     sol_effect_table_free(&effects);
     sol_type_table_free(&types);

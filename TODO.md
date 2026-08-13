@@ -29,6 +29,8 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
       pure, deterministic obligation templates.
 - [x] Versioned stable top-level semantic identities, explicit rename/move tokens,
       collision validation, and resolved semantic occurrence records.
+- [x] Owning deterministic compiler-internal typed IR with exact executable types,
+      resolved dispatch/member metadata, normalized effects, and contract templates.
 
 ## Prioritized Work
 
@@ -43,7 +45,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [x] | 7 | Close authority gaps for static and unparameterized effects | 5 | 4 | Capability model |
 | [x] | 8 | Add distinct and refined types with checked predicates | 4 | 4 | Generics and contracts |
 | [x] | 9 | Define stable semantic IDs, references, and rename identity | 5 | 5 | Modules and packages |
-| [ ] | 10 | Define a canonical typed Sol IR | 5 | 5 | Types, traits, and IDs |
+| [x] | 10 | Define a canonical typed Sol IR | 5 | 5 | Types, traits, and IDs |
 | [ ] | 11 | Implement an interpreter for language conformance tests | 5 | 4 | Typed IR |
 | [ ] | 12 | Add `sol test` for examples, unit tests, and properties | 4 | 3 | Interpreter |
 | [ ] | 13 | Add `sol effects` authority and call-graph inspection | 3 | 2 | Effect tables |

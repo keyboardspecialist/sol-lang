@@ -276,6 +276,9 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
             > types->call_instantiation_argument_capacity
         || types->variant_constructor_count > types->variant_constructor_capacity
         || types->method_resolution_count != syntax->expression_count
+        || types->member_resolution_count != syntax->expression_count
+        || types->pattern_resolution_count != syntax->pattern_count
+        || types->argument_resolution_count != syntax->argument_count
         || types->implementation_target_count != syntax->item_count
         || types->representation_count != syntax->item_count
         || types->construction_count != syntax->expression_count
@@ -315,6 +318,12 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || (types->variant_constructor_capacity != 0
             && types->variant_constructors == NULL)
         || (types->method_resolution_count != 0 && types->method_resolutions == NULL)
+        || (types->member_resolution_count != 0
+            && (types->field_resolutions == NULL || types->variant_resolutions == NULL))
+        || (types->pattern_resolution_count != 0
+            && types->pattern_variant_resolutions == NULL)
+        || (types->argument_resolution_count != 0
+            && types->argument_field_resolutions == NULL)
         || (types->implementation_target_count != 0
             && types->implementation_targets == NULL)
         || (types->representation_count != 0 && types->representations == NULL)
@@ -333,6 +342,7 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || contracts->expression_count != 0) {
         return false;
     }
+    if (!sol_type_resolution_metadata_valid(syntax, types)) return false;
     for (size_t index = 0; index < syntax->effect_parameter_count; ++index) {
         const SolEffectParameter *parameter = &syntax->effect_parameters[index];
         if (!sol_contract_span_valid(lowerer->source, parameter->name)

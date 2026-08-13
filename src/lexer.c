@@ -125,6 +125,17 @@ static bool sol_lex_string(
             break;
         }
         if (current == '\\' && *cursor + 1 < source->length) {
+            char escaped = source->text[*cursor + 1];
+            if (escaped != 'n' && escaped != 'r' && escaped != 't'
+                && escaped != '\\' && escaped != '"') {
+                sol_diagnostics_add(
+                    diagnostics,
+                    "SOL-LEX-003",
+                    SOL_SEVERITY_ERROR,
+                    (SolSpan){.start = *cursor, .end = *cursor + 2},
+                    "unsupported string escape"
+                );
+            }
             *cursor += 2;
         } else {
             ++*cursor;

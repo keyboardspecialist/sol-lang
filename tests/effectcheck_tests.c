@@ -298,7 +298,7 @@ static void test_effect_row_generic_instantiation(void) {
 
     static const char nested_output[] =
         "module nested_output_row\n"
-        "function bad<effects E>(callback: function() -> Int64 effects E) -> Option<function() -> Int64 effects E> effects { E } { return none }\n";
+        "function bad<effects E>(callback: function() -> Int64 effects E) -> Option<function() -> Int64 effects E> effects { E } { return none() }\n";
     CHECK(compile_source(&compilation, nested_output));
     CHECK(has_diagnostic(&compilation, "SOL-EFFECT-008"));
     free_compilation(&compilation);
