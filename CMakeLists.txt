@@ -202,6 +202,14 @@ if(BUILD_TESTING)
             -DEXPECTED_CODE=SOL-EFFECT-002
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
+    add_test(
+        NAME cli_authority_error
+        COMMAND ${CMAKE_COMMAND}
+            -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
+            -DSOL_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_authority.sol
+            -DEXPECTED_CODE=SOL-EFFECT-010
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
+    )
 
     foreach(formatter_cli_case stdout check rewrite malformed_directory symlink exclusive_options)
         add_test(

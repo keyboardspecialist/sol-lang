@@ -315,7 +315,7 @@ static void test_effect_row_call_contract_purity(void) {
     static const char text[] =
         "module row_contract\n"
         "function identity(value: Int64) -> Int64 effects { pure } { return value }\n"
-        "function read(value: Int64) -> Int64 effects { service.read } { return value }\n"
+        "function read(value: Int64) -> Int64 effects { panic } { return value }\n"
         "function apply<effects E>(value: Int64, callback: function(Int64) -> Int64 effects E) -> Int64 effects { E } { return callback(value) }\n"
         "function sample(value: Int64) -> Int64 effects { pure }\n"
         "requires { apply(value, identity) == value, apply(value, read) == value }\n"
@@ -704,14 +704,14 @@ static void test_trait_method_contract_purity(void) {
     static const char forged_selection[] =
         "module forged_contract_method\n"
         "trait Load {\n"
-        " function load(self: Self) -> Text effects { io.read }\n"
+        " function load(self: Self) -> Text effects { panic }\n"
         " function cached(self: Self) -> Text effects { pure }\n"
         "}\n"
         "implementation Load for Int64 {\n"
-        " function load(self: Self) -> Text effects { io.read } { return \"loaded\" }\n"
+        " function load(self: Self) -> Text effects { panic } { return \"loaded\" }\n"
         " function cached(self: Self) -> Text effects { pure } { return \"cached\" }\n"
         "}\n"
-        "function checked(value: Int64) -> Text effects { io.read } requires { true } { return value.load() }\n";
+        "function checked(value: Int64) -> Text effects { panic } requires { true } { return value.load() }\n";
     CHECK(compile_source(&compilation, forged_selection));
     CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
     method_call = SOL_AST_NONE;
@@ -743,9 +743,9 @@ static void test_trait_method_contract_purity(void) {
 
     static const char effectful[] =
         "module effectful_method\n"
-        "trait Load { function load(self: Self) -> Text effects { io.read } }\n"
-        "implementation Load for Int64 { function load(self: Self) -> Text effects { io.read } { return \"ok\" } }\n"
-        "function checked(value: Int64) -> Text effects { io.read } requires { value.load() == value.load() } { return value.load() }\n";
+        "trait Load { function load(self: Self) -> Text effects { panic } }\n"
+        "implementation Load for Int64 { function load(self: Self) -> Text effects { panic } { return \"ok\" } }\n"
+        "function checked(value: Int64) -> Text effects { panic } requires { value.load() == value.load() } { return value.load() }\n";
     CHECK(compile_source(&compilation, effectful));
     CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-002"));
     free_compilation(&compilation);

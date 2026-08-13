@@ -29,7 +29,7 @@ function keep_text(value: Text) -> Text effects { pure } {
     return value
 }
 
-function load_text(value: Text) -> Text effects { service.read } {
+function load_text(value: Text) -> Text effects { panic } {
     return value
 }
 
@@ -44,7 +44,7 @@ function invoke_pure(value: Text) -> Text effects { pure } {
     return invoke(value, keep_text)
 }
 
-function invoke_read(value: Text) -> Text effects { service.read } {
+function invoke_read(value: Text) -> Text effects { panic } {
     return invoke<Text>(value, load_text)
 }
 

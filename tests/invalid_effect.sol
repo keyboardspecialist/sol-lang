@@ -1,6 +1,6 @@
 module invalid_effect
 
-function read_clock() -> Int64 effects { clock.read } {
+function read_clock() -> Int64 effects { panic } {
     return 1
 }
 

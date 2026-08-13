@@ -20,8 +20,6 @@ static int failures = 0;
 
 typedef struct {
     const char *relative_path;
-    size_t aggregate_start;
-    size_t aggregate_end;
     const char *module_name;
     size_t import_start;
     size_t import_count;
@@ -30,13 +28,13 @@ typedef struct {
 } ExpectedFile;
 
 static const ExpectedFile expected_files[] = {
-    {"/interfaces/display.sol", 0, 110, "example.interfaces", 0, 0, 0, 1},
-    {"/main.sol", 111, 476, "example.main", 0, 5, 1, 1},
-    {"/models/core.sol", 477, 624, "example.models", 5, 0, 2, 2},
-    {"/models/create.sol", 625, 799, "example.models", 5, 0, 4, 1},
-    {"/models/display.sol", 800, 1087, "example.models", 5, 1, 5, 2},
-    {"/rules/numbers.sol", 1088, 1203, "example.rules", 6, 0, 7, 1},
-    {"/services/read.sol", 1204, 1325, "example.services", 6, 0, 8, 1},
+    {"/interfaces/display.sol", "example.interfaces", 0, 0, 0, 1},
+    {"/main.sol", "example.main", 0, 6, 1, 1},
+    {"/models/core.sol", "example.models", 6, 0, 2, 2},
+    {"/models/create.sol", "example.models", 6, 0, 4, 1},
+    {"/models/display.sol", "example.models", 6, 1, 5, 2},
+    {"/rules/numbers.sol", "example.rules", 7, 0, 7, 1},
+    {"/services/read.sol", "example.services", 7, 0, 8, 2},
 };
 
 static bool span_text_equal(const SolSource *source, SolSpan span, const char *text) {
@@ -50,12 +48,12 @@ static void check_valid_package(const SolPackage *package) {
     CHECK(package->is_directory);
     CHECK(strcmp(package->path, VALID_DIRECTORY) == 0);
     CHECK(package->file_count == sizeof(expected_files) / sizeof(expected_files[0]));
-    CHECK(package->source.length == 1325);
-    CHECK(package->syntax.import_count == 6);
-    CHECK(package->syntax.item_count == 9);
+    CHECK(package->syntax.import_count == 7);
+    CHECK(package->syntax.item_count == 10);
     CHECK(sol_syntax_contracts_validate(&package->source, &package->syntax));
 
     if (package->file_count != sizeof(expected_files) / sizeof(expected_files[0])) return;
+    size_t aggregate_offset = 0;
     for (size_t index = 0; index < package->file_count; ++index) {
         const SolPackageFile *file = &package->files[index];
         const ExpectedFile *expected = &expected_files[index];
@@ -63,15 +61,17 @@ static void check_valid_package(const SolPackage *package) {
         int written = snprintf(path, sizeof(path), "%s%s", VALID_DIRECTORY, expected->relative_path);
         CHECK(written >= 0 && (size_t)written < sizeof(path));
         CHECK(strcmp(file->path, path) == 0);
-        CHECK(file->aggregate_start == expected->aggregate_start);
-        CHECK(file->aggregate_end == expected->aggregate_end);
-        CHECK(file->source.length == expected->aggregate_end - expected->aggregate_start);
+        CHECK(file->aggregate_start == aggregate_offset);
+        CHECK(file->aggregate_end == aggregate_offset + file->source.length);
+        aggregate_offset = file->aggregate_end;
+        if (index + 1 < package->file_count) ++aggregate_offset;
         CHECK(span_text_equal(&package->source, file->module_name, expected->module_name));
         CHECK(file->import_start == expected->import_start);
         CHECK(file->import_count == expected->import_count);
         CHECK(file->item_start == expected->item_start);
         CHECK(file->item_count == expected->item_count);
     }
+    CHECK(package->source.length == aggregate_offset);
 
     CHECK(span_text_equal(&package->source, package->syntax.module_name, "example.interfaces"));
     CHECK(expected_files[2].item_start + expected_files[2].item_count

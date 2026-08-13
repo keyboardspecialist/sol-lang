@@ -694,6 +694,36 @@ static void test_effect_row_type_boundaries(void) {
     free_compilation(&compilation);
 }
 
+static void test_bounded_callback_effect_authority(void) {
+    static const char invalid[] =
+        "module invalid_callback_authority\n"
+        "function unparameterized(\n"
+        "    callback: function() -> Int64 effects { service.read },\n"
+        ") -> Int64 { return 1 }\n"
+        "function static_path(\n"
+        "    callback: function() -> Int64 effects { database.read<Primary> },\n"
+        ") -> Int64 { return 1 }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, invalid));
+    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-010") == 2);
+    free_compilation(&compilation);
+
+    static const char valid[] =
+        "module authority_free_callbacks\n"
+        "function keep_panic(\n"
+        "    callback: function() -> Int64 effects { panic },\n"
+        ") -> function() -> Int64 effects { panic } { return callback }\n"
+        "function keep_diverge(\n"
+        "    callback: function() -> Int64 effects { diverge },\n"
+        ") -> function() -> Int64 effects { diverge } { return callback }\n";
+    CHECK(compile_source(&compilation, valid));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+}
+
 static void test_invalid_capability_qualified_generic_types(void) {
     static const char text[] =
         "module generic_capabilities\n"
@@ -757,7 +787,7 @@ static void test_invalid_user_generics(void) {
     CHECK(has_diagnostic(&compilation, "SOL-TYPE-018"));
     CHECK(has_diagnostic(&compilation, "SOL-TYPE-019"));
     CHECK(has_diagnostic(&compilation, "SOL-TYPE-020"));
-    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-006"));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-010"));
     CHECK(has_diagnostic(&compilation, "SOL-TYPE-013"));
     CHECK(has_diagnostic(&compilation, "SOL-TYPE-014"));
     CHECK(has_diagnostic(&compilation, "SOL-TYPE-009"));
@@ -1131,17 +1161,17 @@ static void test_general_function_types(void) {
         "module general_function_types\n"
         "capability Registry {\n"
         "    function keep(\n"
-        "        callback: function(Int64) -> Bool effects { clock.read },\n"
-        "    ) -> function(Int64) -> Bool effects { clock.read } effects { pure }\n"
+        "        callback: function(Int64) -> Bool effects { panic },\n"
+        "    ) -> function(Int64) -> Bool effects { panic } effects { pure }\n"
         "}\n"
         "function keep(\n"
         "    callback: function(Int64) -> Bool effects {\n"
-        "        clock.read\n"
-        "        network.call<Primary>\n"
+        "        panic\n"
+        "        diverge\n"
         "    },\n"
         ") -> function(Int64) -> Bool effects {\n"
-        "    network.call<Primary>\n"
-        "    clock.read\n"
+        "    diverge\n"
+        "    panic\n"
         "} { return callback }\n"
         "function keep_pure(\n"
         "    callback: function() -> Int64 effects { pure },\n"
@@ -1155,7 +1185,7 @@ static void test_general_function_types(void) {
         ") -> Bool { return callback(value) }\n"
         "function widen(\n"
         "    callback: function() -> Int64 effects { pure },\n"
-        ") -> function() -> Int64 effects { clock.read } { return callback }\n";
+        ") -> function() -> Int64 effects { panic } { return callback }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
     if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
@@ -1175,11 +1205,11 @@ static void test_invalid_general_function_types(void) {
     static const char text[] =
         "module invalid_general_function_types\n"
         "function wrong_effect(\n"
-        "    callback: function(Int64) -> Bool effects { clock.read },\n"
-        ") -> function(Int64) -> Bool effects { network.call } { return callback }\n"
+        "    callback: function(Int64) -> Bool effects { panic },\n"
+        ") -> function(Int64) -> Bool effects { diverge } { return callback }\n"
         "function invalid_rows(\n"
-        "    duplicate: function() -> Int64 effects { clock.read clock.read },\n"
-        "    mixed: function() -> Int64 effects { pure clock.read },\n"
+        "    duplicate: function() -> Int64 effects { panic panic },\n"
+        "    mixed: function() -> Int64 effects { pure panic },\n"
         ") -> Int64 { return 1 }\n"
         "function invoke(\n"
         "    callback: function(Int64) -> Bool effects { pure },\n"
@@ -1606,6 +1636,7 @@ int main(void) {
     test_generic_variant_constructor_identity();
     test_generic_function_signature_substitution_and_inference();
     test_effect_row_type_boundaries();
+    test_bounded_callback_effect_authority();
     test_invalid_capability_qualified_generic_types();
     test_generic_recursion_through_nongeneric_helper();
     test_invalid_user_generics();

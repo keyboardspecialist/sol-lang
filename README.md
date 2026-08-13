@@ -431,6 +431,8 @@ The bounded trait subset uses nongeneric `trait` declarations, `implementation T
 
 Mixed capability and bound-operation provenance is exposed by the type table as checked, interned root sets. Effect checking defensively recomputes propagation and validates canonical sets before expanding every dependent atom across all possible roots.
 
+Effect rows disclose behavior but never grant authority. In executable bootstrap source, `panic` and `diverge` are the only compiler-defined authority-free atoms. Every other non-pure atom requires a lexical capability parameter, or `Self` on a capability member; unresolved static authorities such as `network.call<Production>` and unparameterized resource effects are rejected with `SOL-EFFECT-010`. Imports add names but no authority. Closed structural callback rows may contain only `panic`, `diverge`, and the bounded row parameter because callback types cannot capture lexical capability roots. Static/unparameterized handlers, package-global authority, manifests, host wiring, unsafe gates, FFI, and a broader intrinsic-effect registry remain future work.
+
 Concrete remaining bootstrap work is tracked in [TODO.md](TODO.md).
 
 ## Compiler Architecture

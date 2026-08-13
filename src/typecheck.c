@@ -37,6 +37,15 @@ static void sol_type_error(
 );
 static bool sol_type_span_equal(const SolSource *source, SolSpan span, const char *text);
 
+static bool sol_type_authority_free_effect(
+    const SolTypeChecker *checker,
+    const SolEffect *effect
+) {
+    return !effect->has_argument
+        && (sol_type_span_equal(checker->source, effect->name, "panic")
+            || sol_type_span_equal(checker->source, effect->name, "diverge"));
+}
+
 static void sol_type_malformed(SolTypeChecker *checker) {
     if (!checker->malformed) {
         sol_type_error(
@@ -44,6 +53,18 @@ static void sol_type_malformed(SolTypeChecker *checker) {
             "SOL-INTERNAL-003",
             (SolSpan){0},
             "malformed syntax or HIR passed to type checking"
+        );
+    }
+    checker->malformed = true;
+}
+
+static void sol_type_malformed_effect(SolTypeChecker *checker, SolSpan span) {
+    if (!checker->malformed) {
+        sol_type_error(
+            checker,
+            "SOL-INTERNAL-004",
+            span,
+            "malformed effect metadata passed to type checking"
         );
     }
     checker->malformed = true;
@@ -462,6 +483,20 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
                 && effect->owner >= syntax->type_count)) {
             sol_type_malformed(checker);
+            return false;
+        }
+        bool zero_argument = effect->argument.start == 0 && effect->argument.end == 0;
+        bool pure_spelling = sol_type_span_equal(checker->source, effect->name, "pure");
+        if (effect->name.start == effect->name.end
+            || effect->span.start != effect->name.start
+            || (effect->has_argument
+                ? (effect->argument.start == effect->argument.end
+                    || effect->name.end >= effect->argument.start
+                    || effect->argument.end >= effect->span.end)
+                : (!zero_argument || effect->span.end != effect->name.end))
+            || effect->is_pure != pure_spelling
+            ) {
+            sol_type_malformed_effect(checker, effect->span);
             return false;
         }
         SolEffectId linked = sol_type_effect_root(syntax, effect);
@@ -1690,34 +1725,20 @@ static bool sol_type_normalize_effects(
                     : SOL_EFFECT_ATOM_NO_ARGUMENT,
                 .parameter = SOL_AST_NONE,
             };
-            if (effect->has_argument
-                && owner < checker->syntax->type_count) {
-                SolDefId declaration = checker->syntax->types[owner].owner_item;
-                SolTypeParameterId parameter = checker->syntax->items[
-                    declaration
-                ].first_type_parameter;
-                size_t traversed = 0;
-                while (parameter != SOL_AST_NONE) {
-                    if (parameter >= checker->syntax->type_parameter_count
-                        || traversed++ >= checker->syntax->type_parameter_count) {
-                        sol_type_malformed(checker);
-                        break;
-                    }
-                    if (sol_type_name_equal(
-                        checker->source,
-                        checker->syntax->type_parameters[parameter].name,
-                        effect->argument
-                    )) {
-                        sol_type_error(
-                            checker,
-                            "SOL-EFFECT-006",
-                            effect->argument,
-                            "a type parameter cannot be used as effect authority"
-                        );
-                        break;
-                    }
-                    parameter = checker->syntax->type_parameters[parameter].next;
-                }
+            if (effect->has_argument) {
+                sol_type_error(
+                    checker,
+                    "SOL-EFFECT-010",
+                    effect->argument,
+                    "static authority is unavailable in callback function types"
+                );
+            } else if (!sol_type_authority_free_effect(checker, effect)) {
+                sol_type_error(
+                    checker,
+                    "SOL-EFFECT-010",
+                    effect->span,
+                    "callback effects require an explicit lexical capability authority"
+                );
             }
             bool duplicate = false;
             for (size_t index = 0; index < set->count; ++index) {

@@ -207,6 +207,82 @@ static bool sol_effect_span_text_equal(
         && memcmp(source->text + span.start, text, length) == 0;
 }
 
+static bool sol_effect_authority_free_atom(
+    const SolEffectChecker *checker,
+    const SolEffect *effect
+) {
+    return !effect->has_argument
+        && (sol_effect_span_text_equal(checker->source, effect->name, "panic")
+            || sol_effect_span_text_equal(checker->source, effect->name, "diverge"));
+}
+
+static bool sol_effect_authority_free_semantic_atom(
+    const SolEffectChecker *checker,
+    const SolEffectAtom *atom
+) {
+    return atom->argument_kind == SOL_EFFECT_ATOM_NO_ARGUMENT
+        && (sol_effect_span_text_equal(checker->source, atom->name, "panic")
+            || sol_effect_span_text_equal(checker->source, atom->name, "diverge"));
+}
+
+static bool sol_effect_function_atom_matches_syntax(
+    const SolEffectChecker *checker,
+    const SolEffectAtom *atom
+) {
+    for (size_t index = 0; index < checker->syntax->effect_count; ++index) {
+        const SolEffect *effect = &checker->syntax->effects[index];
+        if (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
+            && !effect->is_pure && !effect->has_argument
+            && effect->name.start == atom->name.start
+            && effect->name.end == atom->name.end
+            && effect->span.start == atom->span.start
+            && effect->span.end == atom->span.end) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool sol_effect_function_type_matches_syntax(
+    const SolEffectChecker *checker,
+    SolTypeId type_id
+) {
+    const SolSyntaxType *syntax_type = &checker->syntax->types[type_id];
+    if (syntax_type->kind != SOL_SYNTAX_TYPE_FUNCTION) return true;
+    SolType semantic = checker->types->declared_types[type_id];
+    if (semantic.kind != SOL_TYPE_FUNCTION_SIGNATURE
+        || semantic.definition >= checker->types->function_type_count) return false;
+    const SolFunctionType *function = &checker->types->function_types[semantic.definition];
+    size_t expected_count = 0;
+    SolEffectId effect_id = syntax_type->first_effect;
+    while (effect_id != SOL_AST_NONE) {
+        if (effect_id >= checker->syntax->effect_count) return false;
+        const SolEffect *effect = &checker->syntax->effects[effect_id];
+        if (effect->owner_kind != SOL_EFFECT_OWNER_TYPE || effect->owner != type_id) {
+            return false;
+        }
+        if (!effect->is_pure
+            && checker->hir->effect_resolutions[effect_id].kind
+                != SOL_EFFECT_RESOLUTION_PARAMETER) {
+            ++expected_count;
+            bool found = false;
+            for (size_t atom = 0; atom < function->effects.count; ++atom) {
+                const SolEffectAtom *candidate = &function->effects.atoms[atom];
+                if (candidate->argument_kind == SOL_EFFECT_ATOM_NO_ARGUMENT
+                    && sol_effect_span_equal(
+                        checker->source, candidate->name, effect->name
+                    )) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) return false;
+        }
+        effect_id = effect->next;
+    }
+    return function->effects.count == expected_count;
+}
+
 static void sol_effect_error(
     SolEffectChecker *checker,
     const char *code,
@@ -353,39 +429,6 @@ static SolEffectAtom sol_effect_normalize_atom(
         atom.parameter = parameter;
     } else {
         atom.argument_kind = SOL_EFFECT_ATOM_STATIC_PATH;
-        SolDefId owner = SOL_AST_NONE;
-        if (effect->owner_kind == SOL_EFFECT_OWNER_ITEM) {
-            owner = effect->owner;
-        } else if (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
-            && effect->owner < checker->syntax->type_count) {
-            owner = checker->syntax->types[effect->owner].owner_item;
-        }
-        if (owner < checker->syntax->item_count) {
-            SolTypeParameterId type_parameter
-                = checker->syntax->items[owner].first_type_parameter;
-            size_t traversed = 0;
-            while (type_parameter != SOL_AST_NONE) {
-                if (type_parameter >= checker->syntax->type_parameter_count
-                    || traversed++ >= checker->syntax->type_parameter_count) {
-                    checker->malformed = true;
-                    break;
-                }
-                if (sol_effect_span_equal(
-                    checker->source,
-                    checker->syntax->type_parameters[type_parameter].name,
-                    effect->argument
-                )) {
-                    sol_effect_error(
-                        checker,
-                        "SOL-EFFECT-006",
-                        effect->argument,
-                        "a type parameter cannot be used as effect authority"
-                    );
-                    break;
-                }
-                type_parameter = checker->syntax->type_parameters[type_parameter].next;
-            }
-        }
     }
     return atom;
 }
@@ -484,6 +527,21 @@ static void sol_effect_validate_and_normalize_row(
                 first_parameter,
                 member
             );
+            if (!effect->has_argument && !sol_effect_authority_free_atom(checker, effect)) {
+                sol_effect_error(
+                    checker,
+                    "SOL-EFFECT-010",
+                    effect->span,
+                    "effect requires an explicit lexical capability authority"
+                );
+            } else if (atom.argument_kind == SOL_EFFECT_ATOM_STATIC_PATH) {
+                sol_effect_error(
+                    checker,
+                    "SOL-EFFECT-010",
+                    effect->argument,
+                    "static authority is unavailable; use a lexical capability parameter"
+                );
+            }
             sol_effect_row_append(checker, row, atom);
         }
         effect_id = effect->next;
@@ -3298,6 +3356,10 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
                     && effect->argument.start == effect->argument.end)) {
                 return false;
             }
+            if (!sol_effect_authority_free_semantic_atom(checker, effect)
+                || !sol_effect_function_atom_matches_syntax(checker, effect)) {
+                return false;
+            }
             for (size_t previous = 0; previous < atom; ++previous) {
                 if (sol_effect_atom_equal(
                     checker,
@@ -3337,6 +3399,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             }
             if (equal) return false;
         }
+    }
+    for (SolTypeId type_id = 0; type_id < syntax->type_count; ++type_id) {
+        if (!sol_effect_function_type_matches_syntax(checker, type_id)) return false;
     }
     const SolType *type_arenas[] = {
         types->expressions,
@@ -3597,6 +3662,17 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
                 && resolution.target != SOL_AST_NONE)) {
             return false;
         }
+        bool zero_argument = effect->argument.start == 0 && effect->argument.end == 0;
+        bool pure_spelling = sol_effect_span_text_equal(source, effect->name, "pure");
+        if (effect->name.start == effect->name.end
+            || effect->span.start != effect->name.start
+            || (effect->has_argument
+                ? (effect->argument.start == effect->argument.end
+                    || effect->name.end >= effect->argument.start
+                    || effect->argument.end >= effect->span.end)
+                : (!zero_argument || effect->span.end != effect->name.end))
+            || effect->is_pure != pure_spelling
+            ) return false;
     }
     for (size_t index = 0; index < syntax->type_count; ++index) {
         SolEffectResolution resolution = hir->type_effect_resolutions[index];
