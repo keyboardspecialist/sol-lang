@@ -313,6 +313,45 @@ static bool sol_structure_clause_list(
     return true;
 }
 
+static bool sol_structure_type_declaration(
+    SolStructureValidator *validator,
+    const SolSyntaxItem *item,
+    size_t owner
+) {
+    if (item->representation_type >= validator->tree->type_count
+        || item->body != SOL_AST_NONE || item->first_parameter != SOL_AST_NONE
+        || item->return_type_id != SOL_AST_NONE || item->first_field != SOL_AST_NONE
+        || item->first_variant != SOL_AST_NONE || item->is_open
+        || item->first_effect != SOL_AST_NONE || item->has_effect_clause
+        || item->first_member != SOL_AST_NONE
+        || item->result_authority_parameter != SOL_AST_NONE
+        || item->capability_source != SOL_AST_NONE
+        || item->first_effect_parameter != SOL_AST_NONE
+        || item->implementation_type != SOL_AST_NONE
+        || item->first_trait_method != SOL_AST_NONE) {
+        return false;
+    }
+    if (item->flavor == SOL_TYPE_DECLARATION_DISTINCT) {
+        return item->first_contract == SOL_AST_NONE;
+    }
+    if (item->flavor != SOL_TYPE_DECLARATION_REFINED
+        || item->first_contract >= validator->tree->contract_clause_count) {
+        return false;
+    }
+    const SolContractClause *clause
+        = &validator->tree->contract_clauses[item->first_contract];
+    if (clause->kind != SOL_CONTRACT_REQUIRES
+        || clause->owner_kind != SOL_CONTRACT_OWNER_TYPE || clause->owner != owner
+        || clause->next != SOL_AST_NONE
+        || clause->first_condition >= validator->tree->contract_condition_count) {
+        return false;
+    }
+    const SolContractCondition *condition
+        = &validator->tree->contract_conditions[clause->first_condition];
+    return condition->outcome == SOL_CONTRACT_OUTCOME_ALWAYS
+        && condition->next == SOL_AST_NONE;
+}
+
 static bool sol_structure_all_marked(const unsigned char *items, size_t count) {
     for (size_t index = 0; index < count; ++index) {
         if (items[index] == 0) return false;
@@ -363,7 +402,13 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
     }
     for (size_t index = 0; valid && index < tree->item_count; ++index) {
         const SolSyntaxItem *item = &tree->items[index];
-        if ((item->kind != SOL_ITEM_FUNCTION && item->first_contract != SOL_AST_NONE)
+        if ((item->kind == SOL_ITEM_TYPE
+                && !sol_structure_type_declaration(&validator, item, index))
+            || (item->kind != SOL_ITEM_TYPE
+                && (item->flavor != SOL_TYPE_DECLARATION_NONE
+                    || item->representation_type != SOL_AST_NONE))
+            || (item->kind != SOL_ITEM_FUNCTION && item->kind != SOL_ITEM_TYPE
+                && item->first_contract != SOL_AST_NONE)
             || (item->body != SOL_AST_NONE
                 && !sol_structure_expression(
                     &validator,
@@ -374,7 +419,9 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
             || !sol_structure_clause_list(
                 &validator,
                 item->first_contract,
-                SOL_CONTRACT_OWNER_ITEM,
+                item->kind == SOL_ITEM_TYPE
+                    ? SOL_CONTRACT_OWNER_TYPE
+                    : SOL_CONTRACT_OWNER_ITEM,
                 index
             )) {
             valid = false;

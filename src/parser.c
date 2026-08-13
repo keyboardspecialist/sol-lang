@@ -2458,6 +2458,116 @@ static bool sol_parser_function(
     return true;
 }
 
+static bool sol_parser_type_declaration(
+    SolParser *parser,
+    SolSpan *name,
+    SolSpan *whole,
+    SolTypeDeclarationFlavor *flavor,
+    SolTypeId *representation_type,
+    SolContractClauseId *first_contract,
+    SolTypeParameterId *first_type_parameter
+) {
+    SolEffectParameterId unsupported_effect;
+    SolToken opening = sol_parser_advance(parser);
+    SolToken name_token = sol_parser_current(parser);
+    if (!sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER, "expected a type name")) return false;
+    *name = name_token.span;
+    if (!sol_parser_generic_parameters(
+        parser, true, false, first_type_parameter, &unsupported_effect
+    )) return false;
+    if (!sol_parser_expect(parser, SOL_TOKEN_EQUAL, "expected '=' after the type name")) {
+        return false;
+    }
+    SolToken flavor_token = sol_parser_current(parser);
+    if (sol_parser_match(parser, SOL_TOKEN_DISTINCT)) {
+        *flavor = SOL_TYPE_DECLARATION_DISTINCT;
+    } else if (sol_parser_match(parser, SOL_TOKEN_REFINED)) {
+        *flavor = SOL_TYPE_DECLARATION_REFINED;
+    } else {
+        sol_parser_error(
+            parser,
+            "SOL-PARSE-001",
+            flavor_token,
+            "expected 'distinct' or 'refined' after '='"
+        );
+        return false;
+    }
+    if (!sol_parser_type(parser, NULL, representation_type)) return false;
+
+    size_t end = parser->tree->types[*representation_type].span.end;
+    *first_contract = SOL_AST_NONE;
+    if (*flavor == SOL_TYPE_DECLARATION_REFINED) {
+        SolToken where_token = sol_parser_current(parser);
+        if (!sol_parser_expect(
+            parser, SOL_TOKEN_WHERE, "expected 'where' after the refined representation"
+        )) return false;
+        if (sol_parser_is_declaration_start(sol_parser_kind(parser))) {
+            sol_parser_error(
+                parser,
+                "SOL-PARSE-011",
+                sol_parser_current(parser),
+                "expected a refinement predicate"
+            );
+            return false;
+        }
+        SolParserContractContext previous_context = parser->contract_context;
+        parser->contract_context = SOL_PARSER_CONTRACT_REQUIRES;
+        SolExprId predicate = sol_parser_expression(parser, 1);
+        parser->contract_context = previous_context;
+        if (predicate == SOL_AST_NONE
+            || parser->tree->expressions[predicate].kind == SOL_EXPR_ERROR) {
+            return false;
+        }
+        end = parser->tree->expressions[predicate].span.end;
+        SolContractClauseId clause = sol_parser_add_contract_clause(
+            parser,
+            (SolContractClause){
+                .kind = SOL_CONTRACT_REQUIRES,
+                .span = {.start = where_token.span.start, .end = end},
+                .first_condition = SOL_AST_NONE,
+                .next = SOL_AST_NONE,
+                .owner_kind = SOL_CONTRACT_OWNER_TYPE,
+                .owner = parser->tree->item_count,
+            }
+        );
+        if (clause == SOL_AST_NONE) return false;
+        SolContractConditionId condition = sol_parser_add_contract_condition(
+            parser,
+            (SolContractCondition){
+                .outcome = SOL_CONTRACT_OUTCOME_ALWAYS,
+                .span = parser->tree->expressions[predicate].span,
+                .expression = predicate,
+                .next = SOL_AST_NONE,
+                .owner_clause = clause,
+            }
+        );
+        if (condition == SOL_AST_NONE) return false;
+        parser->tree->contract_clauses[clause].first_condition = condition;
+        *first_contract = clause;
+    } else if (sol_parser_kind(parser) == SOL_TOKEN_WHERE) {
+        sol_parser_error(
+            parser,
+            "SOL-PARSE-001",
+            sol_parser_current(parser),
+            "distinct type declarations cannot have refinement predicates"
+        );
+        return false;
+    }
+    SolToken trailing = sol_parser_current(parser);
+    if (trailing.kind == SOL_TOKEN_IDENTIFIER
+        && sol_token_text_equal(parser->source, trailing, "using")) {
+        sol_parser_error(
+            parser,
+            "SOL-PARSE-001",
+            trailing,
+            "type declarations do not support 'using' clauses"
+        );
+        return false;
+    }
+    *whole = (SolSpan){.start = opening.span.start, .end = end};
+    return true;
+}
+
 static bool sol_parser_record(
     SolParser *parser,
     SolSpan *name,
@@ -2916,7 +3026,8 @@ static void sol_parser_annotation(SolParser *parser) {
 
 static bool sol_parser_is_declaration_start(SolTokenKind kind) {
     return kind == SOL_TOKEN_AT || kind == SOL_TOKEN_PUBLIC || kind == SOL_TOKEN_PRIVATE
-        || kind == SOL_TOKEN_RECORD || kind == SOL_TOKEN_ENUM || kind == SOL_TOKEN_OPEN
+        || kind == SOL_TOKEN_RECORD || kind == SOL_TOKEN_ENUM || kind == SOL_TOKEN_TYPE
+        || kind == SOL_TOKEN_OPEN
         || kind == SOL_TOKEN_CAPABILITY || kind == SOL_TOKEN_TRAIT
         || kind == SOL_TOKEN_IMPLEMENTATION || kind == SOL_TOKEN_FUNCTION;
 }
@@ -2964,6 +3075,7 @@ static void sol_parser_declaration(SolParser *parser) {
     }
 
     SolItemKind item_kind;
+    SolTypeDeclarationFlavor flavor = SOL_TYPE_DECLARATION_NONE;
     SolSpan name = {0};
     SolSpan whole = {0};
     SolExprId body = SOL_AST_NONE;
@@ -2976,6 +3088,7 @@ static void sol_parser_declaration(SolParser *parser) {
     SolEffectId first_effect = SOL_AST_NONE;
     bool has_effect_clause = false;
     SolContractClauseId first_contract = SOL_AST_NONE;
+    SolTypeId representation_type = SOL_AST_NONE;
     bool result_authority_from_self = false;
     SolParameterId result_authority_parameter = SOL_AST_NONE;
     SolCapabilityMemberId first_member = SOL_AST_NONE;
@@ -2987,7 +3100,18 @@ static void sol_parser_declaration(SolParser *parser) {
     SolTraitMethodId first_trait_method = SOL_AST_NONE;
     bool parsed = false;
     SolTokenKind kind = sol_parser_kind(parser);
-    if (kind == SOL_TOKEN_RECORD) {
+    if (kind == SOL_TOKEN_TYPE) {
+        item_kind = SOL_ITEM_TYPE;
+        parsed = sol_parser_type_declaration(
+            parser,
+            &name,
+            &whole,
+            &flavor,
+            &representation_type,
+            &first_contract,
+            &first_type_parameter
+        );
+    } else if (kind == SOL_TOKEN_RECORD) {
         item_kind = SOL_ITEM_RECORD;
         parsed = sol_parser_record(
             parser,
@@ -3075,6 +3199,7 @@ static void sol_parser_declaration(SolParser *parser) {
         whole.start = start;
         sol_parser_add_item(parser, (SolSyntaxItem){
             .kind = item_kind,
+            .flavor = flavor,
             .name = name,
             .span = whole,
             .is_public = is_public,
@@ -3088,6 +3213,7 @@ static void sol_parser_declaration(SolParser *parser) {
             .first_effect = first_effect,
             .has_effect_clause = has_effect_clause,
             .first_contract = first_contract,
+            .representation_type = representation_type,
             .first_member = first_member,
             .result_authority_parameter = result_authority_parameter,
             .capability_source = capability_source,

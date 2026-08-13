@@ -185,6 +185,118 @@ static void test_generic_type_namespace(void) {
     free_compilation(&compilation);
 }
 
+static void test_type_declaration_hir(void) {
+    static const char text[] =
+        "module type_hir\n"
+        "public type UserId = distinct Int64\n"
+        "type Positive = refined Int64 where self > 0\n"
+        "type Negative = refined Int64 where self < 0\n"
+        "function consume(value: UserId) -> Int64 { return self }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-RESOLVE-002"));
+    size_t refinement_self_count = 0;
+    bool outside_self_unresolved = false;
+    bool declared_type_resolved = false;
+    for (SolExprId expression = 0;
+        expression < compilation.syntax.expression_count;
+        ++expression) {
+        if (compilation.syntax.expressions[expression].kind != SOL_EXPR_PATH
+            || !span_text_equal(
+                &compilation.source,
+                compilation.syntax.expressions[expression].as.name,
+                "self"
+            )) continue;
+        SolResolution resolution = compilation.hir.resolutions[expression];
+        if (resolution.kind == SOL_RESOLUTION_REFINEMENT_SELF) {
+            CHECK(resolution.target == 1 || resolution.target == 2);
+            CHECK(compilation.hir.expression_owners[expression] == resolution.target);
+            ++refinement_self_count;
+        } else {
+            CHECK(resolution.kind == SOL_RESOLUTION_ERROR);
+            outside_self_unresolved = true;
+        }
+    }
+    for (SolTypeId type = 0; type < compilation.syntax.type_count; ++type) {
+        if (span_text_equal(&compilation.source, compilation.syntax.types[type].name,
+                "UserId")) {
+            CHECK(compilation.hir.type_resolutions[type].kind
+                == SOL_TYPE_RESOLUTION_DEFINITION);
+            CHECK(compilation.hir.type_resolutions[type].target == 0);
+            declared_type_resolved = true;
+        }
+    }
+    CHECK(refinement_self_count == 2);
+    CHECK(outside_self_unresolved);
+    CHECK(declared_type_resolved);
+
+    compilation.syntax.items[0].flavor = SOL_TYPE_DECLARATION_NONE;
+    reset_hir_diagnostics(&compilation);
+    CHECK(!sol_hir_lower(&compilation.source, &compilation.syntax,
+        &compilation.hir, &compilation.diagnostics));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    compilation.syntax.items[0].flavor = SOL_TYPE_DECLARATION_DISTINCT;
+
+    compilation.syntax.items[0].representation_type = SOL_AST_NONE;
+    reset_hir_diagnostics(&compilation);
+    CHECK(!sol_hir_lower(&compilation.source, &compilation.syntax,
+        &compilation.hir, &compilation.diagnostics));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    compilation.syntax.items[0].representation_type = 0;
+
+    SolContractClauseId clause = compilation.syntax.items[1].first_contract;
+    compilation.syntax.contract_clauses[clause].owner_kind
+        = SOL_CONTRACT_OWNER_CAPABILITY_MEMBER;
+    reset_hir_diagnostics(&compilation);
+    CHECK(!sol_hir_lower(&compilation.source, &compilation.syntax,
+        &compilation.hir, &compilation.diagnostics));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    free_compilation(&compilation);
+}
+
+static void test_imported_public_type_resolution(void) {
+    static const char text[] =
+        "module consumer\n"
+        "use types.Identifier\n"
+        "public type Identifier = distinct Int64\n"
+        "function consume(value: Identifier) -> Int64 { return 1 }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolSpan import_path = compilation.syntax.imports[0].path;
+    SolHirFileScope scopes[] = {
+        {
+            .module_name = (SolSpan){import_path.start, import_path.start + 5},
+            .item_start = 0,
+            .item_count = 1,
+        },
+        {
+            .module_name = text_span(&compilation.source, "consumer"),
+            .import_start = 0,
+            .import_count = 1,
+            .item_start = 1,
+            .item_count = 1,
+        },
+    };
+    reset_hir_diagnostics(&compilation);
+    CHECK(sol_hir_lower_scoped(&compilation.source, &compilation.syntax,
+        scopes, 2, &compilation.hir, &compilation.diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    bool imported = false;
+    for (SolTypeId type = 0; type < compilation.syntax.type_count; ++type) {
+        if (compilation.syntax.types[type].owner_item == 1
+            && span_text_equal(&compilation.source,
+                compilation.syntax.types[type].name, "Identifier")) {
+            CHECK(compilation.hir.type_resolutions[type].kind
+                == SOL_TYPE_RESOLUTION_DEFINITION);
+            CHECK(compilation.hir.type_resolutions[type].target == 0);
+            imported = true;
+        }
+    }
+    CHECK(imported);
+    free_compilation(&compilation);
+}
+
 static void test_effect_row_resolution_identity(void) {
     static const char text[] =
         "module row_resolution\n"
@@ -856,6 +968,8 @@ int main(void) {
     test_unresolved_name();
     test_duplicate_declaration();
     test_generic_type_namespace();
+    test_type_declaration_hir();
+    test_imported_public_type_resolution();
     test_effect_row_resolution_identity();
     test_duplicate_and_malformed_generic_parameters();
     test_scope_rules();

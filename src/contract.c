@@ -63,6 +63,16 @@ static bool sol_contract_span_equal(
         && memcmp(source->text + left.start, source->text + right.start, left_length) == 0;
 }
 
+static bool sol_contract_span_text_equal(
+    const SolSource *source,
+    SolSpan span,
+    const char *text
+) {
+    size_t length = span.end - span.start;
+    return sol_contract_span_valid(source, span) && strlen(text) == length
+        && memcmp(source->text + span.start, text, length) == 0;
+}
+
 static bool sol_contract_trait_method_reachable(
     const SolContractLowerer *lowerer,
     SolDefId owner,
@@ -148,6 +158,7 @@ static bool sol_contract_type_valid(
             return type.definition < lowerer->syntax->item_count
                 && (lowerer->syntax->items[type.definition].kind == SOL_ITEM_RECORD
                     || lowerer->syntax->items[type.definition].kind == SOL_ITEM_ENUM
+                    || lowerer->syntax->items[type.definition].kind == SOL_ITEM_TYPE
                     || lowerer->syntax->items[type.definition].kind
                         == SOL_ITEM_CAPABILITY);
         case SOL_TYPE_FUNCTION:
@@ -170,6 +181,67 @@ static bool sol_contract_type_valid(
         default:
             return type.definition == 0;
     }
+}
+
+static bool sol_contract_coercion_shape_matches(
+    const SolContractLowerer *lowerer,
+    const SolFunctionCoercion *coercion,
+    SolType actual
+) {
+    if (coercion->expected.kind != SOL_TYPE_FUNCTION_SIGNATURE
+        || coercion->expected.definition >= lowerer->types->function_type_count) return false;
+    const SolFunctionType *expected
+        = &lowerer->types->function_types[coercion->expected.definition];
+    SolParameterId parameter;
+    SolType result;
+    if (actual.kind == SOL_TYPE_FUNCTION && actual.definition < lowerer->syntax->item_count
+        && lowerer->syntax->items[actual.definition].kind == SOL_ITEM_FUNCTION) {
+        parameter = lowerer->syntax->items[actual.definition].first_parameter;
+        result = lowerer->types->definitions[actual.definition];
+    } else if (actual.kind == SOL_TYPE_CAPABILITY_OPERATION
+        && actual.definition < lowerer->syntax->capability_member_count) {
+        const SolCapabilityMember *member
+            = &lowerer->syntax->capability_members[actual.definition];
+        if (member->return_type_id >= lowerer->types->declared_type_count) return false;
+        parameter = member->first_parameter;
+        result = lowerer->types->declared_types[member->return_type_id];
+    } else {
+        return false;
+    }
+    size_t index = 0;
+    while (parameter != SOL_AST_NONE && index < expected->parameter_count) {
+        if (parameter >= lowerer->syntax->parameter_count
+            || lowerer->syntax->parameters[parameter].type_id
+                >= lowerer->types->declared_type_count) return false;
+        SolType actual_parameter = lowerer->types->declared_types[
+            lowerer->syntax->parameters[parameter].type_id
+        ];
+        if (actual_parameter.kind != expected->parameters[index].kind
+            || actual_parameter.definition != expected->parameters[index].definition) return false;
+        parameter = lowerer->syntax->parameters[parameter].next;
+        ++index;
+    }
+    return parameter == SOL_AST_NONE && index == expected->parameter_count
+        && result.kind == expected->result.kind
+        && result.definition == expected->result.definition;
+}
+
+static bool sol_contract_construction_argument_matches(
+    const SolContractLowerer *lowerer,
+    SolExprId expression,
+    SolType expected
+) {
+    SolType actual = lowerer->types->expressions[expression];
+    if (actual.kind == expected.kind && actual.definition == expected.definition) return true;
+    for (size_t index = 0; index < lowerer->types->function_coercion_count; ++index) {
+        const SolFunctionCoercion *coercion
+            = &lowerer->types->function_coercions[index];
+        if (coercion->expression == expression
+            && coercion->expected.kind == expected.kind
+            && coercion->expected.definition == expected.definition
+            && sol_contract_coercion_shape_matches(lowerer, coercion, actual)) return true;
+    }
+    return false;
 }
 
 static bool sol_contract_validate(SolContractLowerer *lowerer) {
@@ -205,6 +277,8 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || types->variant_constructor_count > types->variant_constructor_capacity
         || types->method_resolution_count != syntax->expression_count
         || types->implementation_target_count != syntax->item_count
+        || types->representation_count != syntax->item_count
+        || types->construction_count != syntax->expression_count
         || effects->function_count != syntax->item_count
         || effects->capability_member_count != syntax->capability_member_count
         || effects->trait_method_count != syntax->trait_method_count
@@ -243,6 +317,8 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || (types->method_resolution_count != 0 && types->method_resolutions == NULL)
         || (types->implementation_target_count != 0
             && types->implementation_targets == NULL)
+        || (types->representation_count != 0 && types->representations == NULL)
+        || (types->construction_count != 0 && types->constructions == NULL)
         || (effects->function_count != 0 && effects->functions == NULL)
         || (effects->capability_member_count != 0
             && effects->capability_members == NULL)
@@ -313,13 +389,24 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         if (!sol_contract_type_valid(lowerer, types->expressions[index])) return false;
         SolResolution resolution = hir->resolutions[index];
-        if ((int)resolution.kind < 0 || resolution.kind > SOL_RESOLUTION_BUILTIN
+        if ((int)resolution.kind < 0
+            || resolution.kind > SOL_RESOLUTION_REFINEMENT_SELF
             || (resolution.kind == SOL_RESOLUTION_DEFINITION
                 && resolution.target >= hir->definition_count)
             || (resolution.kind == SOL_RESOLUTION_LOCAL
                 && resolution.target >= hir->local_count)
             || (resolution.kind == SOL_RESOLUTION_BUILTIN
-                && resolution.target > SOL_BUILTIN_NONE)) {
+                && resolution.target > SOL_BUILTIN_NONE)
+            || (resolution.kind == SOL_RESOLUTION_REFINEMENT_SELF
+                && (syntax->expressions[index].kind != SOL_EXPR_PATH
+                    || !sol_contract_span_text_equal(
+                        lowerer->source, syntax->expressions[index].as.name, "self"
+                    )
+                    || resolution.target >= syntax->item_count
+                    || syntax->items[resolution.target].kind != SOL_ITEM_TYPE
+                    || syntax->items[resolution.target].flavor
+                        != SOL_TYPE_DECLARATION_REFINED
+                    || hir->expression_owners[index] != resolution.target))) {
             return false;
         }
     }
@@ -355,7 +442,8 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
             || (application->constructor == SOL_TYPE_CONSTRUCTOR_USER
                 && (application->definition >= syntax->item_count
                     || (syntax->items[application->definition].kind != SOL_ITEM_RECORD
-                        && syntax->items[application->definition].kind != SOL_ITEM_ENUM)))) {
+                        && syntax->items[application->definition].kind != SOL_ITEM_ENUM
+                        && syntax->items[application->definition].kind != SOL_ITEM_TYPE)))) {
             return false;
         }
         for (size_t argument = 0; argument < expected; ++argument) {
@@ -388,6 +476,62 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         application_argument_offset += expected;
     }
     if (application_argument_offset != types->type_application_argument_count) return false;
+    for (SolDefId definition = 0; definition < types->representation_count; ++definition) {
+        const SolSyntaxItem *item = &syntax->items[definition];
+        const SolTypeRepresentation *representation = &types->representations[definition];
+        if (item->kind == SOL_ITEM_TYPE) {
+            if (item->representation_type >= types->declared_type_count
+                || representation->flavor != item->flavor
+                || representation->representation.kind
+                    != types->declared_types[item->representation_type].kind
+                || representation->representation.definition
+                    != types->declared_types[item->representation_type].definition
+                || !sol_type_exact_reference_valid(
+                    syntax, types, representation->representation
+                )) return false;
+        } else if (representation->flavor != SOL_TYPE_DECLARATION_NONE
+            || representation->representation.kind != SOL_TYPE_UNKNOWN
+            || representation->representation.definition != 0) return false;
+    }
+    for (SolExprId expression = 0; expression < types->construction_count; ++expression) {
+        const SolTypeConstruction *construction = &types->constructions[expression];
+        if (construction->definition == SOL_AST_NONE) {
+            if (construction->representation.kind != SOL_TYPE_UNKNOWN
+                || construction->representation.definition != 0
+                || construction->result.kind != SOL_TYPE_UNKNOWN
+                || construction->result.definition != 0) return false;
+            continue;
+        }
+        if (construction->definition >= syntax->item_count
+            || syntax->items[construction->definition].kind != SOL_ITEM_TYPE
+            || syntax->items[construction->definition].flavor
+                != SOL_TYPE_DECLARATION_DISTINCT
+            || syntax->expressions[expression].kind != SOL_EXPR_CALL
+            || !sol_type_exact_reference_valid(syntax, types, construction->representation)
+            || !sol_type_exact_reference_valid(syntax, types, construction->result)
+            || construction->result.kind != types->expressions[expression].kind
+            || construction->result.definition != types->expressions[expression].definition
+            || sol_type_construction(types, expression) == NULL) return false;
+        SolArgumentId argument = syntax->expressions[expression].as.call.first_argument;
+        if (argument >= syntax->argument_count || syntax->arguments[argument].is_named
+            || syntax->arguments[argument].next != SOL_AST_NONE
+            || !sol_contract_construction_argument_matches(
+                lowerer,
+                syntax->arguments[argument].value,
+                construction->representation
+            )) return false;
+        SolExprId callee = syntax->expressions[expression].as.call.callee;
+        SolType callee_type = types->expressions[callee];
+        const SolTypeApplication *callee_application
+            = sol_type_application(types, callee_type);
+        SolDefId callee_definition = callee_type.kind == SOL_TYPE_NOMINAL
+            ? callee_type.definition
+            : callee_application != NULL
+                    && callee_application->constructor == SOL_TYPE_CONSTRUCTOR_USER
+                ? callee_application->definition
+                : SOL_AST_NONE;
+        if (callee_definition != construction->definition) return false;
+    }
     size_t call_argument_total = 0;
     for (size_t expression = 0; expression < types->call_instantiation_count; ++expression) {
         const SolCallInstantiation *instantiation
@@ -704,6 +848,8 @@ static bool sol_contract_call_is_pure(
     const SolExpr *call
 ) {
     SolExprId callee_id = call->as.call.callee;
+    SolExprId call_id = (SolExprId)(call - lowerer->syntax->expressions);
+    if (sol_type_construction(lowerer->types, call_id) != NULL) return true;
     SolType callee = lowerer->types->expressions[callee_id];
     if (callee.kind == SOL_TYPE_FUNCTION
         && callee.definition < lowerer->effects->function_count) {
@@ -878,7 +1024,14 @@ static void sol_contract_expression(
             sol_contract_expression(lowerer, expression->as.handle.body, in_old);
             break;
         case SOL_EXPR_RESULT:
-            if (in_old) {
+            if (lowerer->obligation->owner_kind == SOL_CONTRACT_OWNER_TYPE) {
+                sol_contract_error(
+                    lowerer,
+                    "SOL-CONTRACT-003",
+                    expression->span,
+                    "result is unavailable in a refinement predicate"
+                );
+            } else if (in_old) {
                 sol_contract_error(
                     lowerer,
                     "SOL-CONTRACT-003",
@@ -888,6 +1041,16 @@ static void sol_contract_expression(
             }
             break;
         case SOL_EXPR_OLD:
+            if (lowerer->obligation->owner_kind == SOL_CONTRACT_OWNER_TYPE) {
+                sol_contract_error(
+                    lowerer,
+                    "SOL-CONTRACT-003",
+                    expression->span,
+                    "old is unavailable in a refinement predicate"
+                );
+                sol_contract_expression(lowerer, expression->as.old_expression, true);
+                break;
+            }
             if (in_old) {
                 sol_contract_error(
                     lowerer,
@@ -916,6 +1079,9 @@ static SolType sol_contract_owner_result(
     if (clause->owner_kind == SOL_CONTRACT_OWNER_ITEM) {
         return lowerer->types->definitions[clause->owner];
     }
+    if (clause->owner_kind == SOL_CONTRACT_OWNER_TYPE) {
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
     const SolCapabilityMember *member
         = &lowerer->syntax->capability_members[clause->owner];
     return lowerer->types->declared_types[member->return_type_id];
@@ -927,7 +1093,8 @@ static SolResultBinding sol_contract_result_binding(
     const SolContractCondition *condition
 ) {
     SolResultBinding binding = {0};
-    if (clause->kind != SOL_CONTRACT_ENSURES
+    if (clause->owner_kind == SOL_CONTRACT_OWNER_TYPE
+        || clause->kind != SOL_CONTRACT_ENSURES
         || condition->outcome == SOL_CONTRACT_OUTCOME_FAILURE) {
         return binding;
     }

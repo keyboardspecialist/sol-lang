@@ -282,6 +282,8 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                 && item->first_effect_parameter >= syntax->effect_parameter_count)
             || (item->first_trait_method != SOL_AST_NONE
                 && item->first_trait_method >= syntax->trait_method_count)
+            || (item->kind == SOL_ITEM_TYPE
+                && item->representation_type >= syntax->type_count)
             || (item->kind == SOL_ITEM_IMPLEMENTATION
                 && item->implementation_type >= syntax->type_count)
             || definition->syntax_item != index
@@ -665,13 +667,18 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         SolResolution resolution = hir->resolutions[index];
         valid = valid
             && (int)resolution.kind >= 0
-            && resolution.kind <= SOL_RESOLUTION_BUILTIN;
+            && resolution.kind <= SOL_RESOLUTION_REFINEMENT_SELF;
         if (resolution.kind == SOL_RESOLUTION_DEFINITION) {
             valid = valid && resolution.target < hir->definition_count;
         } else if (resolution.kind == SOL_RESOLUTION_LOCAL) {
             valid = valid && resolution.target < hir->local_count;
         } else if (resolution.kind == SOL_RESOLUTION_BUILTIN) {
             valid = valid && resolution.target <= SOL_BUILTIN_NONE;
+        } else if (resolution.kind == SOL_RESOLUTION_REFINEMENT_SELF) {
+            valid = valid && resolution.target < syntax->item_count
+                && syntax->items[resolution.target].kind == SOL_ITEM_TYPE
+                && syntax->items[resolution.target].flavor == SOL_TYPE_DECLARATION_REFINED
+                && hir->expression_owners[index] == resolution.target;
         }
         if (!valid) {
             sol_type_malformed(checker);
@@ -717,8 +724,9 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             }
         } else if (resolution.kind == SOL_TYPE_RESOLUTION_DEFINITION) {
             const SolHirDefinition *definition = &hir->definitions[resolution.target];
-            if ((definition->kind != SOL_ITEM_RECORD
+                if ((definition->kind != SOL_ITEM_RECORD
                     && definition->kind != SOL_ITEM_ENUM
+                    && definition->kind != SOL_ITEM_TYPE
                     && definition->kind != SOL_ITEM_CAPABILITY)
                 || !sol_type_path_equal(checker->source, definition->name, type->name)) {
                 sol_type_malformed(checker);
@@ -765,6 +773,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                 ++definition) {
                 SolItemKind kind = hir->definitions[definition].kind;
                 resolvable = (kind == SOL_ITEM_RECORD || kind == SOL_ITEM_ENUM
+                        || kind == SOL_ITEM_TYPE
                         || kind == SOL_ITEM_CAPABILITY)
                     && sol_type_path_equal(
                         checker->source,
@@ -909,6 +918,8 @@ void sol_type_table_free(SolTypeTable *table) {
     free(table->variant_constructors);
     free(table->method_resolutions);
     free(table->implementation_targets);
+    free(table->representations);
+    free(table->constructions);
     memset(table, 0, sizeof(*table));
 }
 
@@ -987,6 +998,64 @@ const SolVariantConstructor *sol_type_variant_constructor(
     return &table->variant_constructors[type.definition];
 }
 
+const SolTypeRepresentation *sol_type_representation(
+    const SolTypeTable *table,
+    SolDefId definition
+) {
+    if (table == NULL || table->representation_count != table->definition_count
+        || definition >= table->representation_count || table->representations == NULL) {
+        return NULL;
+    }
+    const SolTypeRepresentation *representation = &table->representations[definition];
+    if ((representation->flavor != SOL_TYPE_DECLARATION_DISTINCT
+            && representation->flavor != SOL_TYPE_DECLARATION_REFINED)
+        || (int)representation->representation.kind < 0
+        || representation->representation.kind > SOL_TYPE_TRAIT_METHOD
+        || representation->representation.kind == SOL_TYPE_UNKNOWN
+        || representation->representation.kind == SOL_TYPE_ERROR
+        || representation->representation.kind == SOL_TYPE_NEVER) return NULL;
+    return representation;
+}
+
+const SolTypeConstruction *sol_type_construction(
+    const SolTypeTable *table,
+    SolExprId expression
+) {
+    if (table == NULL || table->construction_count != table->expression_count
+        || expression >= table->construction_count || table->constructions == NULL) {
+        return NULL;
+    }
+    const SolTypeConstruction *construction = &table->constructions[expression];
+    const SolTypeRepresentation *representation = construction->definition == SOL_AST_NONE
+        ? NULL
+        : sol_type_representation(table, construction->definition);
+    if (construction->definition == SOL_AST_NONE
+        || construction->definition >= table->representation_count
+        || representation == NULL
+        || representation->flavor != SOL_TYPE_DECLARATION_DISTINCT
+        || (construction->result.kind != SOL_TYPE_NOMINAL
+            && construction->result.kind != SOL_TYPE_APPLICATION)
+        || (int)construction->representation.kind < 0
+        || construction->representation.kind > SOL_TYPE_TRAIT_METHOD
+        || construction->representation.kind == SOL_TYPE_UNKNOWN
+        || construction->representation.kind == SOL_TYPE_ERROR
+        || construction->representation.kind == SOL_TYPE_NEVER) return NULL;
+    SolDefId result_definition = construction->result.kind == SOL_TYPE_NOMINAL
+        ? construction->result.definition
+        : SOL_AST_NONE;
+    if (construction->result.kind == SOL_TYPE_APPLICATION) {
+        const SolTypeApplication *application = sol_type_application(
+            table, construction->result
+        );
+        if (application == NULL || application->constructor != SOL_TYPE_CONSTRUCTOR_USER) {
+            return NULL;
+        }
+        result_definition = application->definition;
+    }
+    if (result_definition != construction->definition) return NULL;
+    return construction;
+}
+
 bool sol_type_exact_reference_valid(
     const SolSyntaxTree *syntax,
     const SolTypeTable *table,
@@ -1001,6 +1070,7 @@ bool sol_type_exact_reference_valid(
                 && syntax->items != NULL
                 && (syntax->items[type.definition].kind == SOL_ITEM_RECORD
                     || syntax->items[type.definition].kind == SOL_ITEM_ENUM
+                    || syntax->items[type.definition].kind == SOL_ITEM_TYPE
                     || syntax->items[type.definition].kind == SOL_ITEM_CAPABILITY);
         case SOL_TYPE_APPLICATION:
             return type.definition < table->type_application_count;
@@ -2649,10 +2719,12 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         || expression_count > SIZE_MAX / sizeof(*checker->types->handlers)
         || expression_count > SIZE_MAX / sizeof(*checker->types->call_instantiations)
         || expression_count > SIZE_MAX / sizeof(*checker->types->method_resolutions)
+        || expression_count > SIZE_MAX / sizeof(*checker->types->constructions)
         || local_count > SIZE_MAX / sizeof(*checker->types->locals)
         || local_count > SIZE_MAX / sizeof(*checker->types->local_capability_origins)
         || local_count > SIZE_MAX / sizeof(*checker->types->local_operation_origins)
         || definition_count > SIZE_MAX / sizeof(*checker->types->definitions)
+        || definition_count > SIZE_MAX / sizeof(*checker->types->representations)
         || checker->syntax->type_count > SIZE_MAX / sizeof(*checker->types->declared_types)) {
         return false;
     }
@@ -2691,6 +2763,14 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         definition_count,
         sizeof(*checker->types->implementation_targets)
     );
+    checker->types->representations = calloc(
+        definition_count,
+        sizeof(*checker->types->representations)
+    );
+    checker->types->constructions = calloc(
+        expression_count,
+        sizeof(*checker->types->constructions)
+    );
     checker->states = calloc(expression_count, sizeof(*checker->states));
     checker->declared_states = calloc(
         checker->syntax->type_count,
@@ -2703,13 +2783,15 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
                 || checker->types->handlers == NULL
                 || checker->types->call_instantiations == NULL
                 || checker->types->method_resolutions == NULL
+                || checker->types->constructions == NULL
                 || checker->states == NULL))
         || (local_count != 0
             && (checker->types->locals == NULL
                 || checker->types->local_capability_origins == NULL
                 || checker->types->local_operation_origins == NULL))
         || (definition_count != 0 && (checker->types->definitions == NULL
-                || checker->types->implementation_targets == NULL))) {
+                || checker->types->implementation_targets == NULL
+                || checker->types->representations == NULL))) {
         return false;
     }
     if (checker->syntax->type_count != 0
@@ -2724,6 +2806,8 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     checker->types->call_instantiation_count = expression_count;
     checker->types->method_resolution_count = expression_count;
     checker->types->implementation_target_count = definition_count;
+    checker->types->representation_count = definition_count;
+    checker->types->construction_count = expression_count;
     for (size_t index = 0; index < expression_count; ++index) {
         checker->types->expression_capability_origins[index] = SOL_PROVENANCE_NONE;
         checker->types->expression_operation_origins[index] = SOL_PROVENANCE_NONE;
@@ -2733,6 +2817,7 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
             .root = SOL_AST_NONE,
         };
         checker->types->call_instantiations[index].function = SOL_AST_NONE;
+        checker->types->constructions[index].definition = SOL_AST_NONE;
         checker->types->method_resolutions[index] = (SolMethodResolution){
             .kind = SOL_METHOD_RESOLUTION_NONE,
             .call = SOL_AST_NONE,
@@ -2866,6 +2951,249 @@ static SolType sol_type_member_template(
     return result;
 }
 
+static bool sol_type_representation_has_capability(
+    SolTypeChecker *checker,
+    SolType type,
+    size_t depth,
+    SolType *expanded
+) {
+    if (depth >= 256) return true;
+    if (type.kind == SOL_TYPE_PARAMETER) return false;
+    SolDefId definition = sol_type_nominal_definition(checker, type);
+    const SolTypeApplication *application = NULL;
+    const SolType *arguments = NULL;
+    size_t count = 0;
+    if (type.kind == SOL_TYPE_APPLICATION) {
+        application = sol_type_application(checker->types, type);
+        if (application == NULL || !sol_type_application_arguments(
+            checker->types, type, &arguments, &count
+        )) return true;
+        if (application->constructor != SOL_TYPE_CONSTRUCTOR_USER) {
+            for (size_t index = 0; index < count; ++index) {
+                if (sol_type_representation_has_capability(
+                    checker, arguments[index], depth + 1, expanded
+                )) return true;
+            }
+        }
+    }
+    if (definition != SOL_AST_NONE) {
+        if (definition >= checker->syntax->item_count) return true;
+        SolItemKind kind = checker->syntax->items[definition].kind;
+        if (kind == SOL_ITEM_CAPABILITY) return true;
+        if (kind != SOL_ITEM_TYPE && kind != SOL_ITEM_RECORD && kind != SOL_ITEM_ENUM) {
+            return false;
+        }
+        for (size_t index = 0; index < depth; ++index) {
+            if (sol_type_exact_equal(expanded[index], type)) return false;
+        }
+        expanded[depth] = type;
+        if (kind == SOL_ITEM_TYPE) {
+            const SolTypeRepresentation *representation = sol_type_representation(
+                checker->types, definition
+            );
+            if (representation == NULL) return true;
+            SolType next = type.kind == SOL_TYPE_APPLICATION
+                ? sol_type_member_template(checker, type, representation->representation)
+                : representation->representation;
+            bool result = sol_type_representation_has_capability(
+                checker, next, depth + 1, expanded
+            );
+            return result;
+        }
+        if (kind == SOL_ITEM_RECORD) {
+            SolFieldId field = checker->syntax->items[definition].first_field;
+            while (field != SOL_AST_NONE) {
+                if (field >= checker->syntax->field_count) {
+                    sol_type_malformed(checker);
+                    return true;
+                }
+                SolType field_type = sol_type_member_template(
+                    checker,
+                    type,
+                    sol_type_from_id(checker, checker->syntax->fields[field].type)
+                );
+                if (sol_type_representation_has_capability(
+                    checker, field_type, depth + 1, expanded
+                )) return true;
+                field = checker->syntax->fields[field].next;
+            }
+        } else {
+            SolVariantId variant = checker->syntax->items[definition].first_variant;
+            while (variant != SOL_AST_NONE) {
+                if (variant >= checker->syntax->variant_count) {
+                    sol_type_malformed(checker);
+                    return true;
+                }
+                SolFieldId field = checker->syntax->variants[variant].first_field;
+                while (field != SOL_AST_NONE) {
+                    if (field >= checker->syntax->field_count) {
+                        sol_type_malformed(checker);
+                        return true;
+                    }
+                    SolType field_type = sol_type_member_template(
+                        checker,
+                        type,
+                        sol_type_from_id(checker, checker->syntax->fields[field].type)
+                    );
+                    if (sol_type_representation_has_capability(
+                        checker, field_type, depth + 1, expanded
+                    )) return true;
+                    field = checker->syntax->fields[field].next;
+                }
+                variant = checker->syntax->variants[variant].next;
+            }
+        }
+    } else if (type.kind == SOL_TYPE_FUNCTION_SIGNATURE) {
+        if (type.definition >= checker->types->function_type_count) return true;
+        const SolFunctionType *function = &checker->types->function_types[type.definition];
+        if (sol_type_representation_has_capability(
+            checker, function->result, depth + 1, expanded
+        )) {
+            return true;
+        }
+        for (size_t index = 0; index < function->parameter_count; ++index) {
+            if (sol_type_representation_has_capability(
+                checker, function->parameters[index], depth + 1, expanded
+            )) return true;
+        }
+    }
+    return false;
+}
+
+static bool sol_type_representation_reaches(
+    SolTypeChecker *checker,
+    SolType type,
+    SolDefId target,
+    size_t depth,
+    unsigned char *expanded
+) {
+    if (depth >= 256) return true;
+    SolDefId definition = sol_type_nominal_definition(checker, type);
+    if (definition == target) return true;
+    const SolType *arguments = NULL;
+    size_t count = 0;
+    if (type.kind == SOL_TYPE_APPLICATION) {
+        if (!sol_type_application_arguments(checker->types, type, &arguments, &count)) {
+            return true;
+        }
+        const SolTypeApplication *application = sol_type_application(checker->types, type);
+        if (application == NULL) return true;
+        if (application->constructor != SOL_TYPE_CONSTRUCTOR_USER) {
+            for (size_t index = 0; index < count; ++index) {
+                if (sol_type_representation_reaches(
+                    checker, arguments[index], target, depth + 1, expanded
+                )) return true;
+            }
+        }
+    }
+    if (definition != SOL_AST_NONE) {
+        if (definition >= checker->syntax->item_count) return true;
+        SolItemKind kind = checker->syntax->items[definition].kind;
+        if (kind != SOL_ITEM_TYPE && kind != SOL_ITEM_RECORD && kind != SOL_ITEM_ENUM) {
+            return false;
+        }
+        if (expanded[definition] != 0) return false;
+        expanded[definition] = 1;
+        if (kind == SOL_ITEM_TYPE) {
+            const SolTypeRepresentation *representation = sol_type_representation(
+                checker->types, definition
+            );
+            if (representation == NULL) return true;
+            SolType next = type.kind == SOL_TYPE_APPLICATION
+                ? sol_type_member_template(checker, type, representation->representation)
+                : representation->representation;
+            bool result = sol_type_representation_reaches(
+                checker, next, target, depth + 1, expanded
+            );
+            expanded[definition] = 0;
+            return result;
+        }
+        if (kind == SOL_ITEM_RECORD) {
+            SolFieldId field = checker->syntax->items[definition].first_field;
+            while (field != SOL_AST_NONE) {
+                if (field >= checker->syntax->field_count) return true;
+                SolType field_type = sol_type_member_template(
+                    checker, type,
+                    sol_type_from_id(checker, checker->syntax->fields[field].type)
+                );
+                if (sol_type_representation_reaches(
+                    checker, field_type, target, depth + 1, expanded
+                )) return true;
+                field = checker->syntax->fields[field].next;
+            }
+        } else {
+            SolVariantId variant = checker->syntax->items[definition].first_variant;
+            while (variant != SOL_AST_NONE) {
+                if (variant >= checker->syntax->variant_count) return true;
+                SolFieldId field = checker->syntax->variants[variant].first_field;
+                while (field != SOL_AST_NONE) {
+                    if (field >= checker->syntax->field_count) return true;
+                    SolType field_type = sol_type_member_template(
+                        checker, type,
+                        sol_type_from_id(checker, checker->syntax->fields[field].type)
+                    );
+                    if (sol_type_representation_reaches(
+                        checker, field_type, target, depth + 1, expanded
+                    )) return true;
+                    field = checker->syntax->fields[field].next;
+                }
+                variant = checker->syntax->variants[variant].next;
+            }
+        }
+        expanded[definition] = 0;
+    }
+    return false;
+}
+
+static bool sol_type_concrete_representation_has_capability(
+    SolTypeChecker *checker,
+    SolType type
+) {
+    SolType *expanded = calloc(256, sizeof(*expanded));
+    if (expanded == NULL) {
+        checker->allocation_failed = true;
+        return true;
+    }
+    bool result = sol_type_representation_has_capability(checker, type, 0, expanded);
+    free(expanded);
+    return result;
+}
+
+static bool sol_type_application_has_unsafe_declared_representation(
+    SolTypeChecker *checker,
+    SolType type,
+    size_t depth
+) {
+    if (depth >= 256) return true;
+    const SolTypeApplication *application = sol_type_application(checker->types, type);
+    if (application == NULL) return false;
+    SolDefId definition = application->definition;
+    SolTypeConstructor constructor = application->constructor;
+    if (constructor == SOL_TYPE_CONSTRUCTOR_USER
+        && definition < checker->syntax->item_count
+        && checker->syntax->items[definition].kind == SOL_ITEM_TYPE) {
+        SolType substituted = sol_type_member_template(
+            checker,
+            type,
+            checker->types->representations[definition].representation
+        );
+        if (sol_type_concrete_representation_has_capability(checker, substituted)) {
+            return true;
+        }
+    }
+    const SolType *arguments = NULL;
+    size_t count = 0;
+    if (!sol_type_application_arguments(checker->types, type, &arguments, &count)) {
+        return true;
+    }
+    for (size_t index = 0; index < count; ++index) {
+        if (sol_type_application_has_unsafe_declared_representation(
+            checker, arguments[index], depth + 1
+        )) return true;
+    }
+    return false;
+}
+
 static SolType sol_type_replace_self(SolTypeChecker *checker, SolType type, SolType target) {
     if (type.kind == SOL_TYPE_SELF) return target;
     if (type.kind == SOL_TYPE_FUNCTION_SIGNATURE) {
@@ -2945,7 +3273,8 @@ static bool sol_type_closed_target(SolTypeChecker *checker, SolType type, size_t
     if (type.kind == SOL_TYPE_NOMINAL) {
         return type.definition < checker->syntax->item_count
             && (checker->syntax->items[type.definition].kind == SOL_ITEM_RECORD
-                || checker->syntax->items[type.definition].kind == SOL_ITEM_ENUM)
+                || checker->syntax->items[type.definition].kind == SOL_ITEM_ENUM
+                || checker->syntax->items[type.definition].kind == SOL_ITEM_TYPE)
             && sol_type_parameter_count(checker, type.definition) == 0;
     }
     if (type.kind != SOL_TYPE_APPLICATION) return false;
@@ -3106,13 +3435,24 @@ static SolType sol_type_expression_application(
         free(arguments);
         return (SolType){.kind = SOL_TYPE_ERROR};
     }
-    return sol_type_intern_application(
+    SolType result = sol_type_intern_application(
         checker,
         SOL_TYPE_CONSTRUCTOR_USER,
         definition,
         arguments,
         count
     );
+    if (result.kind == SOL_TYPE_APPLICATION
+        && sol_type_application_has_unsafe_declared_representation(checker, result, 0)) {
+        sol_type_error(
+            checker,
+            "SOL-TYPE-024",
+            expression->span,
+            "constructed type representation cannot contain capabilities"
+        );
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    return result;
 }
 
 static SolLocalId sol_type_find_local(
@@ -3733,6 +4073,75 @@ static SolType sol_type_method_call(
     );
 }
 
+static SolType sol_type_declared_constructor_call(
+    SolTypeChecker *checker,
+    SolExprId call_id,
+    const SolExpr *call,
+    SolType result,
+    SolDefId definition
+) {
+    const SolTypeRepresentation *metadata = sol_type_representation(
+        checker->types, definition
+    );
+    if (metadata == NULL) {
+        sol_type_malformed(checker);
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    SolArgumentId argument = call->as.call.first_argument;
+    size_t count = 0;
+    SolType actual = {.kind = SOL_TYPE_ERROR};
+    SolExprId value = SOL_AST_NONE;
+    bool positional = true;
+    while (argument != SOL_AST_NONE) {
+        if (argument >= checker->syntax->argument_count
+            || count++ >= checker->syntax->argument_count) {
+            sol_type_malformed(checker);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        const SolArgument *entry = &checker->syntax->arguments[argument];
+        actual = sol_type_expression(checker, entry->value);
+        value = entry->value;
+        positional = positional && !entry->is_named;
+        argument = entry->next;
+    }
+    if (count != 1 || !positional) {
+        sol_type_error(
+            checker,
+            "SOL-TYPE-024",
+            call->span,
+            "type construction requires exactly one positional argument"
+        );
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    if (metadata->flavor == SOL_TYPE_DECLARATION_REFINED) {
+        sol_type_error(
+            checker,
+            "SOL-TYPE-024",
+            call->span,
+            "refined type construction is unsupported by this bootstrap"
+        );
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    SolType representation = result.kind == SOL_TYPE_APPLICATION
+        ? sol_type_member_template(checker, result, metadata->representation)
+        : metadata->representation;
+    if (!sol_type_assignable(checker, representation, actual, value)) {
+        sol_type_error(
+            checker,
+            "SOL-TYPE-024",
+            checker->syntax->expressions[value].span,
+            "type constructor argument does not match its representation"
+        );
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    checker->types->constructions[call_id] = (SolTypeConstruction){
+        .definition = definition,
+        .representation = representation,
+        .result = result,
+    };
+    return result;
+}
+
 static SolType sol_type_call(
     SolTypeChecker *checker,
     SolExprId call_id,
@@ -3743,6 +4152,29 @@ static SolType sol_type_call(
         return sol_type_method_call(checker, call_id, call, callee_type.definition);
     }
     SolResolution resolution = sol_type_callee_resolution(checker, call->as.call.callee);
+    SolDefId declared_type = sol_type_nominal_definition(checker, callee_type);
+    if (resolution.kind == SOL_RESOLUTION_DEFINITION
+        && resolution.target == declared_type
+        && declared_type < checker->syntax->item_count
+        && checker->syntax->items[declared_type].kind == SOL_ITEM_TYPE) {
+        bool generic = sol_type_parameter_count(checker, declared_type) != 0;
+        bool explicit_arguments = checker->syntax->expressions[
+            call->as.call.callee
+        ].kind == SOL_EXPR_TYPE_APPLICATION;
+        if (generic && !explicit_arguments) {
+            sol_type_arguments(checker, call->as.call.first_argument);
+            sol_type_error(
+                checker,
+                "SOL-TYPE-024",
+                checker->syntax->expressions[call->as.call.callee].span,
+                "generic type construction requires explicit type arguments"
+            );
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        return sol_type_declared_constructor_call(
+            checker, call_id, call, callee_type, declared_type
+        );
+    }
     SolDefId target = SOL_AST_NONE;
     SolCapabilityMemberId operation = SOL_AST_NONE;
     bool invalid_operation_origin = false;
@@ -4079,6 +4511,18 @@ static SolType sol_type_call(
                 generic_arguments,
                 generic_count
             );
+            if (result.kind == SOL_TYPE_APPLICATION
+                && sol_type_application_has_unsafe_declared_representation(
+                    checker, result, 0
+                )) {
+                sol_type_error(
+                    checker,
+                    "SOL-TYPE-024",
+                    call->span,
+                    "constructed type representation cannot contain capabilities"
+                );
+                result = (SolType){.kind = SOL_TYPE_ERROR};
+            }
             sol_type_record_call_instantiation(
                 checker,
                 call_id,
@@ -4982,7 +5426,23 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
             break;
         case SOL_EXPR_PATH: {
             SolResolution resolution = checker->hir->resolutions[expression_id];
-            if (resolution.kind == SOL_RESOLUTION_LOCAL
+            if (resolution.kind == SOL_RESOLUTION_REFINEMENT_SELF) {
+                if (resolution.target >= checker->types->representation_count
+                    || checker->syntax->items[resolution.target].kind != SOL_ITEM_TYPE) {
+                    sol_type_malformed(checker);
+                    type = (SolType){.kind = SOL_TYPE_ERROR};
+                } else {
+                    const SolTypeRepresentation *representation = sol_type_representation(
+                        checker->types, resolution.target
+                    );
+                    if (representation == NULL) {
+                        sol_type_malformed(checker);
+                        type = (SolType){.kind = SOL_TYPE_ERROR};
+                    } else {
+                        type = representation->representation;
+                    }
+                }
+            } else if (resolution.kind == SOL_RESOLUTION_LOCAL
                 && resolution.target < checker->types->local_count) {
                 type = checker->types->locals[resolution.target];
             } else if (resolution.kind == SOL_RESOLUTION_DEFINITION
@@ -5339,7 +5799,15 @@ static void sol_type_contracts(
                 0,
                 checker->syntax->expression_count * sizeof(*checker->states)
             );
-            sol_type_expression(checker, condition->expression);
+            SolType predicate = sol_type_expression(checker, condition->expression);
+            if (predicate.kind != SOL_TYPE_BOOL && predicate.kind != SOL_TYPE_ERROR) {
+                sol_type_error(
+                    checker,
+                    "SOL-CONTRACT-001",
+                    condition->span,
+                    "contract predicate must have type Bool"
+                );
+            }
             checker->in_contract = false;
             condition_id = condition->next;
         }
@@ -5502,6 +5970,7 @@ bool sol_type_check(
         || types->call_instantiation_arguments != NULL
         || types->variant_constructors != NULL
         || types->method_resolutions != NULL || types->implementation_targets != NULL
+        || types->representations != NULL || types->constructions != NULL
         || types->expression_count != 0 || types->local_count != 0
         || types->definition_count != 0 || types->declared_type_count != 0
         || types->type_application_count != 0 || types->type_application_capacity != 0
@@ -5518,7 +5987,8 @@ bool sol_type_check(
         || types->variant_constructor_count != 0
         || types->variant_constructor_capacity != 0
         || types->method_resolution_count != 0
-        || types->implementation_target_count != 0) {
+        || types->implementation_target_count != 0
+        || types->representation_count != 0 || types->construction_count != 0) {
         sol_type_malformed(&checker);
         return false;
     }
@@ -5537,9 +6007,16 @@ bool sol_type_check(
         checker.types->definitions[index] = item->kind == SOL_ITEM_FUNCTION
             ? sol_type_from_id(&checker, item->return_type_id)
             : (item->kind == SOL_ITEM_RECORD || item->kind == SOL_ITEM_ENUM
+                    || item->kind == SOL_ITEM_TYPE
                     || item->kind == SOL_ITEM_CAPABILITY)
                 ? (SolType){.kind = SOL_TYPE_NOMINAL, .definition = index}
                 : (SolType){.kind = SOL_TYPE_UNIT};
+        if (item->kind == SOL_ITEM_TYPE) {
+            checker.types->representations[index] = (SolTypeRepresentation){
+                .flavor = item->flavor,
+                .representation = sol_type_from_id(&checker, item->representation_type),
+            };
+        }
         if (item->kind == SOL_ITEM_IMPLEMENTATION) {
             SolType target = sol_type_from_id(&checker, item->implementation_type);
             checker.types->implementation_targets[index] = target;
@@ -5721,6 +6198,50 @@ bool sol_type_check(
             }
         }
     }
+    for (SolDefId item = 0; item < syntax->item_count; ++item) {
+        if (syntax->items[item].kind != SOL_ITEM_TYPE) continue;
+        SolType representation = checker.types->representations[item].representation;
+        unsigned char *expanded = calloc(syntax->item_count, 1);
+        if (syntax->item_count != 0 && expanded == NULL) {
+            checker.allocation_failed = true;
+            break;
+        }
+        bool reaches = sol_type_representation_reaches(
+            &checker, representation, item, 0, expanded
+        );
+        free(expanded);
+        if (reaches) {
+            sol_type_error(
+                &checker,
+                "SOL-TYPE-024",
+                syntax->items[item].name,
+                "type representation cycle"
+            );
+        } else if (sol_type_concrete_representation_has_capability(
+            &checker, representation
+        )) {
+            sol_type_error(
+                &checker,
+                "SOL-TYPE-024",
+                syntax->types[syntax->items[item].representation_type].span,
+                "type representations cannot contain capabilities"
+            );
+        }
+    }
+    for (SolTypeId type_id = 0; type_id < syntax->type_count; ++type_id) {
+        SolType type = checker.types->declared_types[type_id];
+        if (type.kind == SOL_TYPE_APPLICATION
+            && sol_type_application_has_unsafe_declared_representation(
+                &checker, type, 0
+            )) {
+            sol_type_error(
+                &checker,
+                "SOL-TYPE-024",
+                syntax->types[type_id].span,
+                "constructed type representation cannot contain capabilities"
+            );
+        }
+    }
     sol_type_validate_traits(&checker);
     for (size_t start = 0; start < syntax->item_count; ++start) {
         if (syntax->items[start].kind != SOL_ITEM_CAPABILITY
@@ -5783,6 +6304,19 @@ bool sol_type_check(
                 checker.types->definitions[index]
             );
         }
+    }
+    for (size_t index = 0; index < syntax->item_count; ++index) {
+        const SolSyntaxItem *item = &syntax->items[index];
+        if (item->kind != SOL_ITEM_TYPE || item->flavor != SOL_TYPE_DECLARATION_REFINED) {
+            continue;
+        }
+        checker.current_definition = index;
+        checker.current_member = SOL_AST_NONE;
+        sol_type_contracts(
+            &checker,
+            item->first_contract,
+            checker.types->representations[index].representation
+        );
     }
     for (size_t member_id = 0; member_id < syntax->capability_member_count; ++member_id) {
         const SolCapabilityMember *member = &syntax->capability_members[member_id];
@@ -5990,7 +6524,8 @@ bool sol_type_check(
             if (type.kind != SOL_TYPE_NOMINAL || applied_heads[index]
                 || type.definition >= syntax->item_count
                 || (syntax->items[type.definition].kind != SOL_ITEM_RECORD
-                    && syntax->items[type.definition].kind != SOL_ITEM_ENUM)
+                    && syntax->items[type.definition].kind != SOL_ITEM_ENUM
+                    && syntax->items[type.definition].kind != SOL_ITEM_TYPE)
                 || sol_type_parameter_count(&checker, type.definition) == 0) continue;
             sol_type_error(
                 &checker,

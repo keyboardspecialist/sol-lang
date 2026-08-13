@@ -476,7 +476,9 @@ type EmailAddress = refined Text using email.is_valid
 type NonEmpty<T> = refined List<T> where self.length > 0
 ```)
 
-Widely instantiated predicates must be solver-friendly and effect-free. Refinements do not alter representation unless a validation tag or witness is retained. Distinct and refined types are not implemented in the bootstrap.
+Widely instantiated predicates must be solver-friendly and effect-free. Refinements do not alter representation unless a validation tag or witness is retained.
+
+#status("IMPLEMENTED", [The bounded bootstrap supports generic and nongeneric `type Name = distinct Representation` declarations as fresh nominal identities with explicit one-argument construction and no implicit representation conversion. `type Name = refined Representation where predicate` binds contextual `self` at the representation type, requires `Bool`, applies finalized contract-purity rules, and lowers one deterministic type-owned obligation template. Generic declarations are checked once under rigid parameters and generic distinct construction requires explicit arguments. Public declarations import across package modules, and exact closed declared types may be trait implementation targets. Capability-containing or cyclic representations are rejected. Because no runtime validator, interpreter, logical IR, or proof engine exists, refined construction, predicate assumptions, runtime validation, proof discharge, `using` predicates, inline refinements, projection/destructuring, and refinement-aware exhaustiveness remain future work.])
 
 == Optionality and Absence
 
@@ -1344,7 +1346,7 @@ The target front end provides:
 - Constraint-based type/effect/region inference bounded for predictable diagnostics.
 - Exhaustiveness and protocol-state checking before proof generation.
 
-The bootstrap implements lossless tokens, recovering core parsing, token-preserving idempotent formatting, arena-backed syntax, deterministic package-session definition IDs, lexical and explicit multi-file module/import resolution, declaration-owned type resolution, typed HIR foundations, generic and nongeneric records/enums/functions, bounded coherent traits and constrained calls, exact invariant applications, matches, closed effects/capabilities/handlers, and generic contract templates. It does not yet implement incremental parsing, dependency packages or manifests, ownership/regions, richer trait or row-polymorphic generics, protocols, or width/reordering formatter policies.
+The bootstrap implements lossless tokens, recovering core parsing, token-preserving idempotent formatting, arena-backed syntax, deterministic package-session definition IDs, lexical and explicit multi-file module/import resolution, declaration-owned type resolution, typed HIR foundations, generic and nongeneric records/enums/functions/distinct/refined declarations, bounded coherent traits and constrained calls, exact invariant applications, matches, closed effects/capabilities/handlers, and generic contract/refinement templates. It does not yet implement incremental parsing, dependency packages or manifests, ownership/regions, refined construction or proof/runtime validation, richer trait or row-polymorphic generics, protocols, or width/reordering formatter policies.
 
 == Verification Engine
 
@@ -1503,6 +1505,7 @@ The current C17 bootstrap provides:
 - Lossless lexing, recovering parsing for core declarations/contracts/body expressions, arena syntax, deterministic package-session definition IDs, lexical and explicit multi-file module/import HIR resolution, and source-aware human/JSON diagnostics.
 - Token-preserving syntax formatting with canonical whitespace, checked parse/token preservation, byte idempotence, and transactional package rewrites.
 - Primitive types; exact variable-arity interned built-in/user applications; bounded generic records, enums, and free functions; constructors; exhaustive user-enum and `Bool` matching; expression/call/return checking.
+- Nominal generic distinct declarations and explicit construction; refined declarations with representation-typed `self`, `Bool`/purity checking, and deterministic unresolved predicate templates.
 - Nongeneric coherent traits; exact closed implementations; one inline free-function bound; symbolic bound forwarding; immediate type-directed method calls; checked method-resolution metadata and exact closed method effects.
 - Closed structural function types and bounded declaration-owned callback row parameters; exact function and bound-operation effects; callback subset checking; local and per-call row inference.
 - Least-fixed-point recursive inference over call-graph SCCs, including parameter and `Self` substitution.
@@ -1512,7 +1515,7 @@ The current C17 bootstrap provides:
 - Exact capability-backed handlers with syntax, source/provider matching, scoped root-sensitive subtraction, residual/provider effects, runtime metadata, and singleton target limitation.
 - Structured contracts resolved in fresh signature scopes; generic template typing; `Bool` typing; finalized purity; `Result` outcome-specific `result`; distinct `old` snapshots; deterministic obligation templates.
 
-It does not execute programs and is not a production compiler. In particular, general row constraints and explicit/multiple/recursive or authority-capturing effect parameters, richer traits and constrained or higher-order generics, ownership/regions, unsafe/FFI authority gates, general algebraic handlers, static/unparameterized or runtime-dynamic handler matching, runtime contract checks, call-site contract use, logical normalization, SMT/proof discharge, concurrency, package manifests/host wiring/dependencies, width-based and declaration-reordering formatting, stable public IDs, public IR, semantic patches, and code generation are not implemented.
+It does not execute programs and is not a production compiler. In particular, general row constraints and explicit/multiple/recursive or authority-capturing effect parameters, refined construction/validation/assumptions, richer traits and constrained or higher-order generics, ownership/regions, unsafe/FFI authority gates, general algebraic handlers, static/unparameterized or runtime-dynamic handler matching, runtime contract checks, call-site contract/refinement use, logical normalization, SMT/proof discharge, concurrency, package manifests/host wiring/dependencies, width-based and declaration-reordering formatting, stable public IDs, public IR, semantic patches, and code generation are not implemented.
 
 == Phased Roadmap
 

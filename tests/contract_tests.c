@@ -507,9 +507,11 @@ static void test_purity_and_effect_firewall(void) {
 
     static const char forbidden[] =
         "module forbidden\n"
-        "function sample() -> Bool effects { pure }\n"
-        "requires { { return true }, ok(true)? }\n"
-        "{ return true }\n";
+        "enum Failure { invalid }\n"
+        "function fallible() -> Result<Bool, Failure> effects { pure } { return ok(true) }\n"
+        "function sample() -> Result<Bool, Failure> effects { pure }\n"
+        "requires { if true { true } else { return ok(true) }, fallible()? == true }\n"
+        "{ return ok(true) }\n";
     CHECK(compile_source(&compilation, forbidden));
     if (diagnostic_count(&compilation, "SOL-CONTRACT-002") != 2) {
         sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
@@ -751,6 +753,125 @@ static void test_trait_method_contract_purity(void) {
     free_compilation(&compilation);
 }
 
+static void test_refinement_contracts_and_distinct_construction(void) {
+    static const char valid[] =
+        "module refined_contract\n"
+        "type Positive = refined Int64 where self > 0\n"
+        "type Identity<T> = refined T where self == self\n"
+        "type Meter = distinct Int64\n"
+        "function retain(value: Identity<Int64>) -> Identity<Int64> { return value }\n"
+        "function same(value: Int64) -> Bool effects { pure }\n"
+        "requires { Meter(value) == Meter(value) } { return true }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, valid));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    /* Generic refinement predicates remain declaration templates, not call-site obligations. */
+    CHECK(compilation.contracts.obligation_count == 3);
+    CHECK(compilation.contracts.obligations[0].owner_kind == SOL_CONTRACT_OWNER_TYPE);
+    CHECK(compilation.contracts.obligations[0].owner == 0);
+    CHECK(compilation.contracts.obligations[0].predicate_type.kind == SOL_TYPE_BOOL);
+    CHECK(!compilation.contracts.obligations[0].result.available);
+    CHECK(compilation.contracts.obligations[0].snapshot_count == 0);
+    size_t constructions = 0;
+    for (SolExprId expression = 0;
+        expression < compilation.types.construction_count;
+        ++expression) {
+        if (sol_type_construction(&compilation.types, expression) != NULL) ++constructions;
+    }
+    CHECK(constructions == 2);
+
+    SolContractOwnerKind owner_kind = compilation.syntax.contract_clauses[0].owner_kind;
+    compilation.syntax.contract_clauses[0].owner_kind = SOL_CONTRACT_OWNER_ITEM;
+    sol_contract_table_free(&compilation.contracts);
+    sol_contract_table_init(&compilation.contracts);
+    sol_diagnostics_free(&compilation.diagnostics);
+    sol_diagnostics_init(&compilation.diagnostics);
+    CHECK(!sol_contract_lower(
+        &compilation.source, &compilation.syntax, &compilation.hir,
+        &compilation.types, &compilation.effects, &compilation.contracts,
+        &compilation.diagnostics
+    ));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-005"));
+    compilation.syntax.contract_clauses[0].owner_kind = owner_kind;
+
+    SolExprId construction = SOL_AST_NONE;
+    for (SolExprId expression = 0;
+        expression < compilation.types.construction_count;
+        ++expression) {
+        if (sol_type_construction(&compilation.types, expression) != NULL) {
+            construction = expression;
+            break;
+        }
+    }
+    CHECK(construction != SOL_AST_NONE);
+    if (construction != SOL_AST_NONE) {
+        SolDefId definition = compilation.types.constructions[construction].definition;
+        compilation.types.constructions[construction].definition = 0;
+        sol_contract_table_free(&compilation.contracts);
+        sol_contract_table_init(&compilation.contracts);
+        sol_diagnostics_free(&compilation.diagnostics);
+        sol_diagnostics_init(&compilation.diagnostics);
+        CHECK(!sol_contract_lower(
+            &compilation.source, &compilation.syntax, &compilation.hir,
+            &compilation.types, &compilation.effects, &compilation.contracts,
+            &compilation.diagnostics
+        ));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-005"));
+        compilation.types.constructions[construction].definition = definition;
+    }
+    free_compilation(&compilation);
+
+    static const char non_bool[] =
+        "module refined_non_bool\n"
+        "type Invalid = refined Int64 where self\n";
+    CHECK(compile_source(&compilation, non_bool));
+    CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-001"));
+    free_compilation(&compilation);
+
+    static const char effectful[] =
+        "module refined_effectful\n"
+        "function read() -> Int64 effects { panic } { return 1 }\n"
+        "type Invalid = refined Int64 where read() > 0\n";
+    CHECK(compile_source(&compilation, effectful));
+    CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-002"));
+    free_compilation(&compilation);
+
+    static const char old_unavailable[] =
+        "module refined_old\n"
+        "type Invalid = refined Int64 where old(self) == self\n";
+    CHECK(compile_source(&compilation, old_unavailable));
+    CHECK(has_diagnostic(&compilation, "SOL-PARSE-017"));
+    free_compilation(&compilation);
+
+    static const char result_unavailable[] =
+        "module refined_result\n"
+        "type Invalid = refined Int64 where self == result\n";
+    CHECK(compile_source(&compilation, result_unavailable));
+    CHECK(has_diagnostic(&compilation, "SOL-PARSE-017"));
+    free_compilation(&compilation);
+}
+
+static void test_function_valued_distinct_construction(void) {
+    static const char text[] =
+        "module function_distinct_contract\n"
+        "type Callback = distinct function(Int64) -> Int64 effects { pure }\n"
+        "function source(value: Int64) -> Int64 effects { pure } { return value }\n"
+        "function make() -> Callback effects { pure }\n"
+        "requires { source(1) == 1 } { return Callback(source) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.types.function_coercion_count == 1);
+    CHECK(compilation.contracts.obligation_count == 1);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_obligations_result_and_snapshots();
     test_member_contract_ownership();
@@ -761,6 +882,8 @@ int main(void) {
     test_purity_and_effect_firewall();
     test_table_determinism_and_malformed_input();
     test_trait_method_contract_purity();
+    test_refinement_contracts_and_distinct_construction();
+    test_function_valued_distinct_construction();
     if (failures != 0) {
         fprintf(stderr, "%d contract test failure(s)\n", failures);
         return 1;

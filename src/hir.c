@@ -22,6 +22,7 @@ typedef struct {
     size_t scope_depth;
     size_t traversal_depth;
     SolDefId current_definition;
+    SolDefId refinement_self_definition;
     const SolHirFileScope *scopes;
     size_t scope_count;
     SolDefId *import_targets;
@@ -296,6 +297,8 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     for (size_t index = 0; index < syntax->item_count; ++index) {
         const SolSyntaxItem *item = &syntax->items[index];
         if ((int)item->kind < 0 || item->kind > SOL_ITEM_IMPLEMENTATION
+            || (int)item->flavor < 0
+            || item->flavor > SOL_TYPE_DECLARATION_REFINED
             || !sol_span_valid(resolver->source, item->name)
             || !sol_span_valid(resolver->source, item->span)
             || !sol_span_valid(resolver->source, item->return_type)
@@ -305,6 +308,8 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                 && item->first_parameter >= syntax->parameter_count)
             || (item->return_type_id != SOL_AST_NONE
                 && item->return_type_id >= syntax->type_count)
+            || (item->representation_type != SOL_AST_NONE
+                && item->representation_type >= syntax->type_count)
             || (item->first_field != SOL_AST_NONE && item->first_field >= syntax->field_count)
             || (item->first_variant != SOL_AST_NONE
                 && item->first_variant >= syntax->variant_count)
@@ -320,6 +325,15 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                 && item->first_type_parameter >= syntax->type_parameter_count)
             || (item->first_effect_parameter != SOL_AST_NONE
                 && item->first_effect_parameter >= syntax->effect_parameter_count)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+        if ((item->kind == SOL_ITEM_TYPE
+                && (item->flavor == SOL_TYPE_DECLARATION_NONE
+                    || item->representation_type == SOL_AST_NONE))
+            || (item->kind != SOL_ITEM_TYPE
+                && (item->flavor != SOL_TYPE_DECLARATION_NONE
+                    || item->representation_type != SOL_AST_NONE))) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -649,6 +663,21 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             linked = syntax->effects[linked].next;
         }
         if (!found) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < syntax->contract_clause_count; ++index) {
+        const SolContractClause *clause = &syntax->contract_clauses[index];
+        if ((int)clause->owner_kind < 0
+            || clause->owner_kind > SOL_CONTRACT_OWNER_TYPE
+            || (clause->owner_kind == SOL_CONTRACT_OWNER_ITEM
+                && clause->owner >= syntax->item_count)
+            || (clause->owner_kind == SOL_CONTRACT_OWNER_CAPABILITY_MEMBER
+                && clause->owner >= syntax->capability_member_count)
+            || (clause->owner_kind == SOL_CONTRACT_OWNER_TYPE
+                && (clause->owner >= syntax->item_count
+                    || syntax->items[clause->owner].kind != SOL_ITEM_TYPE))) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -1295,7 +1324,16 @@ static void sol_resolver_expression(SolResolver *resolver, SolExprId expression_
     const SolExpr *expression = &resolver->syntax->expressions[expression_id];
     switch (expression->kind) {
         case SOL_EXPR_PATH: {
-            SolResolution resolution = sol_resolver_lookup(resolver, expression->as.name);
+            SolResolution resolution;
+            if (resolver->refinement_self_definition != SOL_AST_NONE
+                && sol_span_text_equal(resolver->source, expression->as.name, "self")) {
+                resolution = (SolResolution){
+                    SOL_RESOLUTION_REFINEMENT_SELF,
+                    resolver->refinement_self_definition,
+                };
+            } else {
+                resolution = sol_resolver_lookup(resolver, expression->as.name);
+            }
             resolver->module->resolutions[expression_id] = resolution;
             if (resolution.kind == SOL_RESOLUTION_ERROR) {
                 sol_diagnostics_add(
@@ -1665,6 +1703,7 @@ static void sol_resolver_resolve_types(SolResolver *resolver) {
             if (definition.kind == SOL_RESOLUTION_DEFINITION) {
                 SolItemKind kind = resolver->module->definitions[definition.target].kind;
                 if (kind == SOL_ITEM_RECORD || kind == SOL_ITEM_ENUM
+                    || kind == SOL_ITEM_TYPE
                     || kind == SOL_ITEM_CAPABILITY) {
                     resolution = (SolTypeResolution){
                         SOL_TYPE_RESOLUTION_DEFINITION, definition.target
@@ -1794,6 +1833,33 @@ static void sol_resolver_function(SolResolver *resolver, SolDefId definition) {
     resolver->binding_count = 0;
 }
 
+static void sol_resolver_type_declaration(
+    SolResolver *resolver,
+    SolDefId definition
+) {
+    const SolSyntaxItem *item = &resolver->syntax->items[definition];
+    if (item->flavor != SOL_TYPE_DECLARATION_REFINED) return;
+    resolver->current_definition = definition;
+    SolContractClauseId clause_id = item->first_contract;
+    while (clause_id != SOL_AST_NONE) {
+        const SolContractClause *clause = &resolver->syntax->contract_clauses[clause_id];
+        SolContractConditionId condition_id = clause->first_condition;
+        while (condition_id != SOL_AST_NONE) {
+            resolver->binding_count = 0;
+            resolver->scope_depth = 0;
+            resolver->refinement_self_definition = definition;
+            sol_resolver_expression(
+                resolver,
+                resolver->syntax->contract_conditions[condition_id].expression
+            );
+            resolver->refinement_self_definition = SOL_AST_NONE;
+            condition_id = resolver->syntax->contract_conditions[condition_id].next;
+        }
+        clause_id = clause->next;
+    }
+    resolver->binding_count = 0;
+}
+
 static void sol_resolver_capability_members(SolResolver *resolver, SolDefId definition) {
     const SolSyntaxItem *item = &resolver->syntax->items[definition];
     SolCapabilityMemberId member_id = item->first_member;
@@ -1855,6 +1921,7 @@ static bool sol_hir_lower_impl(
         .scopes = scopes,
         .scope_count = scope_count,
         .package_aware = package_aware,
+        .refinement_self_definition = SOL_AST_NONE,
     };
     if (!sol_resolver_validate(&resolver)
         || !sol_resolver_validate_scopes(&resolver)) {
@@ -1881,6 +1948,8 @@ static bool sol_hir_lower_impl(
     for (size_t index = 0; index < syntax->item_count; ++index) {
         if (syntax->items[index].kind == SOL_ITEM_FUNCTION) {
             sol_resolver_function(&resolver, index);
+        } else if (syntax->items[index].kind == SOL_ITEM_TYPE) {
+            sol_resolver_type_declaration(&resolver, index);
         } else if (syntax->items[index].kind == SOL_ITEM_CAPABILITY) {
             sol_resolver_capability_members(&resolver, index);
         } else if (syntax->items[index].kind == SOL_ITEM_TRAIT

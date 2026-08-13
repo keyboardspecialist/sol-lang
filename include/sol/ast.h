@@ -238,6 +238,7 @@ typedef struct {
 typedef enum {
     SOL_CONTRACT_OWNER_ITEM,
     SOL_CONTRACT_OWNER_CAPABILITY_MEMBER,
+    SOL_CONTRACT_OWNER_TYPE,
 } SolContractOwnerKind;
 
 typedef enum {

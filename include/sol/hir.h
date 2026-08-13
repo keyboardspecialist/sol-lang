@@ -67,6 +67,7 @@ typedef enum {
     SOL_RESOLUTION_DEFINITION,
     SOL_RESOLUTION_LOCAL,
     SOL_RESOLUTION_BUILTIN,
+    SOL_RESOLUTION_REFINEMENT_SELF,
 } SolResolutionKind;
 
 typedef enum {

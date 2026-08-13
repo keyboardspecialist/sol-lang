@@ -1609,13 +1609,22 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
         SolResolution resolution = hir->resolutions[index];
         valid = valid
             && (int)resolution.kind >= 0
-            && resolution.kind <= SOL_RESOLUTION_BUILTIN;
+            && resolution.kind <= SOL_RESOLUTION_REFINEMENT_SELF;
         if (resolution.kind == SOL_RESOLUTION_DEFINITION) {
             valid = valid && resolution.target < hir->definition_count;
         } else if (resolution.kind == SOL_RESOLUTION_LOCAL) {
             valid = valid && resolution.target < hir->local_count;
         } else if (resolution.kind == SOL_RESOLUTION_BUILTIN) {
             valid = valid && resolution.target <= SOL_BUILTIN_NONE;
+        } else if (resolution.kind == SOL_RESOLUTION_REFINEMENT_SELF) {
+            valid = valid
+                && expression->kind == SOL_EXPR_PATH
+                && sol_effect_span_text_equal(source, expression->as.name, "self")
+                && resolution.target < syntax->item_count
+                && syntax->items[resolution.target].kind == SOL_ITEM_TYPE
+                && syntax->items[resolution.target].flavor
+                    == SOL_TYPE_DECLARATION_REFINED
+                && hir->expression_owners[index] == resolution.target;
         }
         if (!valid) return false;
     }
@@ -1871,9 +1880,9 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
                 ];
             const SolContractClause *clause
                 = &checker->syntax->contract_clauses[condition->owner_clause];
-            owner = clause->owner_kind == SOL_CONTRACT_OWNER_ITEM
-                ? clause->owner
-                : checker->syntax->capability_members[clause->owner].owner_item;
+            owner = clause->owner_kind == SOL_CONTRACT_OWNER_CAPABILITY_MEMBER
+                ? checker->syntax->capability_members[clause->owner].owner_item
+                : clause->owner;
             root_expression = condition->expression;
         } else {
             root_expression = root - declared_roots;
@@ -2750,10 +2759,12 @@ static bool sol_effect_closed_implementation_target(
     if (type.kind == SOL_TYPE_NOMINAL) {
         if (type.definition >= checker->syntax->item_count
             || (checker->syntax->items[type.definition].kind != SOL_ITEM_RECORD
-                && checker->syntax->items[type.definition].kind != SOL_ITEM_ENUM)) return false;
+                && checker->syntax->items[type.definition].kind != SOL_ITEM_ENUM
+                && checker->syntax->items[type.definition].kind != SOL_ITEM_TYPE)) return false;
         return checker->syntax->items[type.definition].first_type_parameter == SOL_AST_NONE
             && (checker->syntax->items[type.definition].kind == SOL_ITEM_RECORD
-                || checker->syntax->items[type.definition].kind == SOL_ITEM_ENUM);
+                || checker->syntax->items[type.definition].kind == SOL_ITEM_ENUM
+                || checker->syntax->items[type.definition].kind == SOL_ITEM_TYPE);
     }
     if (type.kind != SOL_TYPE_APPLICATION) return false;
     const SolTypeApplication *application = sol_type_application(checker->types, type);
@@ -3024,6 +3035,23 @@ static bool sol_effect_coercion_shape_matches(
         && sol_effect_semantic_type_equal(result, expected->result);
 }
 
+static bool sol_effect_construction_argument_matches(
+    const SolEffectChecker *checker,
+    SolExprId expression,
+    SolType expected
+) {
+    SolType actual = checker->types->expressions[expression];
+    if (sol_effect_semantic_type_equal(expected, actual)) return true;
+    for (size_t index = 0; index < checker->types->function_coercion_count; ++index) {
+        const SolFunctionCoercion *coercion
+            = &checker->types->function_coercions[index];
+        if (coercion->expression == expression
+            && sol_effect_semantic_type_equal(coercion->expected, expected)
+            && sol_effect_coercion_shape_matches(checker, coercion, actual)) return true;
+    }
+    return false;
+}
+
 static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
     const SolSource *source = checker->source;
     const SolSyntaxTree *syntax = checker->syntax;
@@ -3105,6 +3133,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || types->variant_constructor_count > types->variant_constructor_capacity
         || types->method_resolution_count != syntax->expression_count
         || types->implementation_target_count != syntax->item_count
+        || types->representation_count != syntax->item_count
+        || types->construction_count != syntax->expression_count
         || ((types->function_coercion_count == 0)
             != (types->function_coercion_capacity == 0))
         || (types->expression_count != 0 && types->expressions == NULL)
@@ -3132,7 +3162,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             && types->variant_constructors == NULL)
         || (types->method_resolution_count != 0 && types->method_resolutions == NULL)
         || (types->implementation_target_count != 0
-            && types->implementation_targets == NULL)) {
+            && types->implementation_targets == NULL)
+        || (types->representation_count != 0 && types->representations == NULL)
+        || (types->construction_count != 0 && types->constructions == NULL)) {
         return false;
     }
     if (!sol_syntax_contracts_validate(source, syntax)) return false;
@@ -3196,7 +3228,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || (application->constructor == SOL_TYPE_CONSTRUCTOR_USER
                 && (application->definition >= syntax->item_count
                     || (syntax->items[application->definition].kind != SOL_ITEM_RECORD
-                        && syntax->items[application->definition].kind != SOL_ITEM_ENUM)))) {
+                        && syntax->items[application->definition].kind != SOL_ITEM_ENUM
+                        && syntax->items[application->definition].kind != SOL_ITEM_TYPE)))) {
             return false;
         }
         for (size_t argument = 0; argument < application->argument_count; ++argument) {
@@ -3232,6 +3265,65 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         application_argument_offset += argument_count;
     }
     if (application_argument_offset != types->type_application_argument_count) return false;
+    for (SolDefId definition = 0; definition < types->representation_count; ++definition) {
+        const SolSyntaxItem *item = &syntax->items[definition];
+        const SolTypeRepresentation *representation = &types->representations[definition];
+        if (item->kind == SOL_ITEM_TYPE) {
+            if (item->representation_type >= types->declared_type_count
+                || representation->flavor != item->flavor
+                || !sol_effect_semantic_type_equal(
+                    representation->representation,
+                    types->declared_types[item->representation_type]
+                )
+                || !sol_type_exact_reference_valid(
+                    syntax, types, representation->representation
+                )) return false;
+        } else if (representation->flavor != SOL_TYPE_DECLARATION_NONE
+            || representation->representation.kind != SOL_TYPE_UNKNOWN
+            || representation->representation.definition != 0) {
+            return false;
+        }
+    }
+    for (SolExprId expression = 0; expression < types->construction_count; ++expression) {
+        const SolTypeConstruction *construction = &types->constructions[expression];
+        if (construction->definition == SOL_AST_NONE) {
+            if (construction->representation.kind != SOL_TYPE_UNKNOWN
+                || construction->representation.definition != 0
+                || construction->result.kind != SOL_TYPE_UNKNOWN
+                || construction->result.definition != 0) return false;
+            continue;
+        }
+        if (construction->definition >= syntax->item_count
+            || syntax->items[construction->definition].kind != SOL_ITEM_TYPE
+            || syntax->items[construction->definition].flavor
+                != SOL_TYPE_DECLARATION_DISTINCT
+            || syntax->expressions[expression].kind != SOL_EXPR_CALL
+            || !sol_type_exact_reference_valid(syntax, types, construction->representation)
+            || !sol_type_exact_reference_valid(syntax, types, construction->result)
+            || !sol_effect_semantic_type_equal(
+                construction->result, types->expressions[expression]
+            )
+            || sol_type_construction(types, expression) == NULL) return false;
+        SolArgumentId argument = syntax->expressions[expression].as.call.first_argument;
+        if (argument >= syntax->argument_count || syntax->arguments[argument].is_named
+            || syntax->arguments[argument].next != SOL_AST_NONE
+            || !sol_effect_construction_argument_matches(
+                checker,
+                syntax->arguments[argument].value,
+                construction->representation
+            )) return false;
+        SolExprId callee = syntax->expressions[expression].as.call.callee;
+        SolType callee_type = types->expressions[callee];
+        const SolTypeApplication *callee_application
+            = sol_type_application(types, callee_type);
+        SolDefId callee_definition = callee_type.kind == SOL_TYPE_NOMINAL
+            ? callee_type.definition
+            : callee_application != NULL
+                    && callee_application->constructor == SOL_TYPE_CONSTRUCTOR_USER
+                ? callee_application->definition
+                : SOL_AST_NONE;
+        if (callee_definition != construction->definition) return false;
+    }
     size_t call_argument_total = 0;
     for (size_t expression = 0; expression < types->call_instantiation_count; ++expression) {
         const SolCallInstantiation *instantiation
@@ -3595,6 +3687,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || !sol_effect_span_valid(source, local->name)
             || local->owner >= syntax->item_count
             || (syntax->items[local->owner].kind != SOL_ITEM_FUNCTION
+                && syntax->items[local->owner].kind != SOL_ITEM_TYPE
                 && syntax->items[local->owner].kind != SOL_ITEM_CAPABILITY
                 && syntax->items[local->owner].kind != SOL_ITEM_TRAIT
                 && syntax->items[local->owner].kind != SOL_ITEM_IMPLEMENTATION)

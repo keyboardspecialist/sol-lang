@@ -3,7 +3,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 static int failures = 0;
 
@@ -29,12 +31,12 @@ typedef struct {
 
 static const ExpectedFile expected_files[] = {
     {"/interfaces/display.sol", "example.interfaces", 0, 0, 0, 1},
-    {"/main.sol", "example.main", 0, 6, 1, 1},
-    {"/models/core.sol", "example.models", 6, 0, 2, 2},
-    {"/models/create.sol", "example.models", 6, 0, 4, 1},
-    {"/models/display.sol", "example.models", 6, 1, 5, 2},
-    {"/rules/numbers.sol", "example.rules", 7, 0, 7, 1},
-    {"/services/read.sol", "example.services", 7, 0, 8, 2},
+    {"/main.sol", "example.main", 0, 8, 1, 1},
+    {"/models/core.sol", "example.models", 8, 1, 2, 4},
+    {"/models/create.sol", "example.models", 9, 0, 6, 1},
+    {"/models/display.sol", "example.models", 9, 1, 7, 2},
+    {"/rules/numbers.sol", "example.rules", 10, 0, 9, 1},
+    {"/services/read.sol", "example.services", 10, 2, 10, 4},
 };
 
 static bool span_text_equal(const SolSource *source, SolSpan span, const char *text) {
@@ -48,8 +50,8 @@ static void check_valid_package(const SolPackage *package) {
     CHECK(package->is_directory);
     CHECK(strcmp(package->path, VALID_DIRECTORY) == 0);
     CHECK(package->file_count == sizeof(expected_files) / sizeof(expected_files[0]));
-    CHECK(package->syntax.import_count == 7);
-    CHECK(package->syntax.item_count == 10);
+    CHECK(package->syntax.import_count == 12);
+    CHECK(package->syntax.item_count == 14);
     CHECK(sol_syntax_contracts_validate(&package->source, &package->syntax));
 
     if (package->file_count != sizeof(expected_files) / sizeof(expected_files[0])) return;
@@ -144,9 +146,64 @@ static void test_package_reuse(void) {
     sol_package_free(&package);
 }
 
+static bool write_text_file(const char *path, const char *text) {
+    FILE *stream = fopen(path, "wb");
+    if (stream == NULL) return false;
+    size_t length = strlen(text);
+    bool written = fwrite(text, 1, length, stream) == length;
+    return fclose(stream) == 0 && written;
+}
+
+static void test_type_declaration_relocation(void) {
+    char directory[] = "/tmp/sol-package-types-XXXXXX";
+    CHECK(mkdtemp(directory) != NULL);
+    char first_path[sizeof(directory) + 8];
+    char second_path[sizeof(directory) + 8];
+    snprintf(first_path, sizeof(first_path), "%s/a.sol", directory);
+    snprintf(second_path, sizeof(second_path), "%s/z.sol", directory);
+    CHECK(write_text_file(first_path,
+        "module first\nfunction seed(value: Int64) -> Int64 { return value }\n"));
+    CHECK(write_text_file(second_path,
+        "module second\ntype Positive = refined Int64 where self > 0\n"));
+
+    SolPackage package;
+    SolDiagnostics diagnostics;
+    char error[256];
+    sol_package_init(&package);
+    sol_diagnostics_init(&diagnostics);
+    CHECK(sol_package_load(&package, directory, &diagnostics, error, sizeof(error)));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(package.file_count == 2);
+    CHECK(package.syntax.item_count == 2);
+    if (package.syntax.item_count == 2) {
+        const SolSyntaxItem *type = &package.syntax.items[1];
+        CHECK(type->kind == SOL_ITEM_TYPE);
+        CHECK(type->representation_type != SOL_AST_NONE);
+        CHECK(type->representation_type < package.syntax.type_count);
+        CHECK(package.syntax.types[type->representation_type].owner_item == 1);
+        CHECK(span_text_equal(&package.source,
+            package.syntax.types[type->representation_type].name, "Int64"));
+        CHECK(type->first_contract != SOL_AST_NONE);
+        if (type->first_contract != SOL_AST_NONE) {
+            const SolContractClause *clause
+                = &package.syntax.contract_clauses[type->first_contract];
+            CHECK(clause->owner_kind == SOL_CONTRACT_OWNER_TYPE);
+            CHECK(clause->owner == 1);
+        }
+    }
+    CHECK(sol_syntax_contracts_validate(&package.source, &package.syntax));
+
+    sol_diagnostics_free(&diagnostics);
+    sol_package_free(&package);
+    CHECK(unlink(first_path) == 0);
+    CHECK(unlink(second_path) == 0);
+    CHECK(rmdir(directory) == 0);
+}
+
 int main(void) {
     test_directory_load_and_boundaries();
     test_package_reuse();
+    test_type_declaration_relocation();
     if (failures != 0) {
         fprintf(stderr, "%d package test failure(s)\n", failures);
         return 1;

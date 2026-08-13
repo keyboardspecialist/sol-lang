@@ -11,14 +11,22 @@
 typedef enum {
     SOL_ITEM_RECORD,
     SOL_ITEM_ENUM,
+    SOL_ITEM_TYPE,
     SOL_ITEM_CAPABILITY,
     SOL_ITEM_FUNCTION,
     SOL_ITEM_TRAIT,
     SOL_ITEM_IMPLEMENTATION,
 } SolItemKind;
 
+typedef enum {
+    SOL_TYPE_DECLARATION_NONE,
+    SOL_TYPE_DECLARATION_DISTINCT,
+    SOL_TYPE_DECLARATION_REFINED,
+} SolTypeDeclarationFlavor;
+
 typedef struct {
     SolItemKind kind;
+    SolTypeDeclarationFlavor flavor;
     SolSpan name;
     SolSpan span;
     bool is_public;
@@ -32,6 +40,7 @@ typedef struct {
     SolEffectId first_effect;
     bool has_effect_clause;
     SolContractClauseId first_contract;
+    SolTypeId representation_type;
     SolCapabilityMemberId first_member;
     SolParameterId result_authority_parameter;
     SolParameterId capability_source;

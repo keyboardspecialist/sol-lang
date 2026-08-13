@@ -31,6 +31,8 @@ static void check_ast_links(const SolSyntaxTree *tree) {
             || tree->items[index].first_parameter < tree->parameter_count);
         CHECK(tree->items[index].return_type_id == SOL_AST_NONE
             || tree->items[index].return_type_id < tree->type_count);
+        CHECK(tree->items[index].representation_type == SOL_AST_NONE
+            || tree->items[index].representation_type < tree->type_count);
         CHECK(tree->items[index].first_field == SOL_AST_NONE
             || tree->items[index].first_field < tree->field_count);
         CHECK(tree->items[index].first_variant == SOL_AST_NONE
@@ -1512,7 +1514,121 @@ static void test_trait_method_authority_rejected(void) {
     sol_source_free(&source);
 }
 
+static void test_type_declaration_syntax(void) {
+    static const char text[] =
+        "module type_declarations\n"
+        "public type UserId = distinct Int64\n"
+        "type NonEmpty<T> = refined List<T> where value.size > 0\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "type_declarations.sol", text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    if (sol_diagnostics_has_errors(&diagnostics)) {
+        sol_diagnostics_render_human(stderr, &source, &diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.item_count == 2);
+    CHECK(tree.items[0].kind == SOL_ITEM_TYPE);
+    CHECK(tree.items[0].flavor == SOL_TYPE_DECLARATION_DISTINCT);
+    CHECK(tree.items[0].first_contract == SOL_AST_NONE);
+    CHECK(tree.items[1].kind == SOL_ITEM_TYPE);
+    CHECK(tree.items[1].flavor == SOL_TYPE_DECLARATION_REFINED);
+    CHECK(tree.items[1].first_type_parameter == 0);
+    CHECK(tree.items[1].first_contract == 0);
+    CHECK(tree.contract_clause_count == 1);
+    CHECK(tree.contract_condition_count == 1);
+    CHECK(tree.contract_clauses[0].kind == SOL_CONTRACT_REQUIRES);
+    CHECK(tree.contract_clauses[0].owner_kind == SOL_CONTRACT_OWNER_TYPE);
+    CHECK(tree.contract_clauses[0].owner == 1);
+    CHECK(tree.contract_conditions[0].outcome == SOL_CONTRACT_OUTCOME_ALWAYS);
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+    check_ast_links(&tree);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_invalid_type_declarations_and_recovery(void) {
+    static const char text[] =
+        "module invalid_types\n"
+        "type Bounded<T: Trait> = distinct T\n"
+        "type Effectful<effects E> = distinct Int64\n"
+        "type Defaulted<T = Int64> = distinct T\n"
+        "type Inline = distinct refined Int64\n"
+        "type Using = distinct Int64 using value\n"
+        "type DistinctWhere = distinct Int64 where true\n"
+        "type Missing = refined Int64 where\n"
+        "type Recovered<T> = refined T where true\n"
+        "function after() -> Bool { return true }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "invalid_types.sol", text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.item_count == 5);
+    CHECK(tree.items[0].kind == SOL_ITEM_TYPE);
+    CHECK(tree.items[1].kind == SOL_ITEM_TYPE);
+    CHECK(tree.items[2].kind == SOL_ITEM_TYPE);
+    CHECK(tree.items[3].kind == SOL_ITEM_TYPE);
+    CHECK(tree.items[4].kind == SOL_ITEM_FUNCTION);
+    CHECK(span_text_equal(&source, tree.items[3].name, "Recovered"));
+    CHECK(tree.type_parameter_count == 3);
+    CHECK(tree.contract_clause_count == 1);
+    CHECK(tree.contract_condition_count == 1);
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+    check_ast_links(&tree);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_type_refinement_structure_rejections(void) {
+    static const char text[] =
+        "module type_structure\n"
+        "type Checked = refined Int64 where true\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "type_structure.sol", text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+    tree.contract_conditions[0].outcome = SOL_CONTRACT_OUTCOME_SUCCESS;
+    CHECK(!sol_syntax_contracts_validate(&source, &tree));
+    tree.contract_conditions[0].outcome = SOL_CONTRACT_OUTCOME_ALWAYS;
+    tree.expressions[0].kind = SOL_EXPR_RESULT;
+    CHECK(!sol_syntax_contracts_validate(&source, &tree));
+    tree.expressions[0].kind = SOL_EXPR_OLD;
+    tree.expressions[0].as.old_expression = 0;
+    CHECK(!sol_syntax_contracts_validate(&source, &tree));
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
 int main(void) {
+    test_type_declaration_syntax();
+    test_invalid_type_declarations_and_recovery();
+    test_type_refinement_structure_rejections();
     test_valid_declarations();
     test_retained_imports();
     test_malformed_imports();

@@ -59,6 +59,17 @@ typedef struct {
 } SolVariantConstructor;
 
 typedef struct {
+    SolTypeDeclarationFlavor flavor;
+    SolType representation;
+} SolTypeRepresentation;
+
+typedef struct {
+    SolDefId definition;
+    SolType representation;
+    SolType result;
+} SolTypeConstruction;
+
+typedef struct {
     SolType *parameters;
     size_t parameter_count;
     SolType result;
@@ -159,6 +170,12 @@ typedef struct {
     /* Indexed by SolDefId; only implementation entries are meaningful. */
     SolType *implementation_targets;
     size_t implementation_target_count;
+    /* Indexed by SolDefId; non-type entries use SOL_TYPE_DECLARATION_NONE. */
+    SolTypeRepresentation *representations;
+    size_t representation_count;
+    /* Indexed by SolExprId; non-construction entries have definition == SOL_AST_NONE. */
+    SolTypeConstruction *constructions;
+    size_t construction_count;
 } SolTypeTable;
 
 const SolMethodResolution *sol_type_method_resolution(
@@ -197,6 +214,14 @@ bool sol_type_call_instantiation_valid(
 const SolVariantConstructor *sol_type_variant_constructor(
     const SolTypeTable *table,
     SolType type
+);
+const SolTypeRepresentation *sol_type_representation(
+    const SolTypeTable *table,
+    SolDefId definition
+);
+const SolTypeConstruction *sol_type_construction(
+    const SolTypeTable *table,
+    SolExprId expression
 );
 bool sol_type_exact_reference_valid(
     const SolSyntaxTree *syntax,

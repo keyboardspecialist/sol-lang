@@ -25,6 +25,8 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
       transactional directory rewrites.
 - [x] Non-ambient effect authority: capability roots are lexical, while only
       `panic` and `diverge` are authority-free bootstrap atoms.
+- [x] Nominal distinct types and refined declaration predicates with checked,
+      pure, deterministic obligation templates.
 
 ## Prioritized Work
 
@@ -37,7 +39,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [x] | 5 | Resolve modules and imports across multiple files and packages | 5 | 5 | Name resolution |
 | [x] | 6 | Implement the canonical formatter and enforce idempotence | 4 | 3 | Parser and token stream |
 | [x] | 7 | Close authority gaps for static and unparameterized effects | 5 | 4 | Capability model |
-| [ ] | 8 | Add distinct and refined types with checked predicates | 4 | 4 | Generics and contracts |
+| [x] | 8 | Add distinct and refined types with checked predicates | 4 | 4 | Generics and contracts |
 | [ ] | 9 | Define stable semantic IDs, references, and rename identity | 5 | 5 | Modules and packages |
 | [ ] | 10 | Define a canonical typed Sol IR | 5 | 5 | Types, traits, and IDs |
 | [ ] | 11 | Implement an interpreter for language conformance tests | 5 | 4 | Typed IR |

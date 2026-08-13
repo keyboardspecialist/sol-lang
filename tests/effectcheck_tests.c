@@ -566,6 +566,61 @@ static void test_forged_generic_type_metadata_rejected(void) {
     free_compilation(&compilation);
 }
 
+static void test_refined_type_effect_inputs(void) {
+    static const char text[] =
+        "module refined_effect_inputs\n"
+        "type Positive = refined Int64 where self > 0\n"
+        "type Meter = distinct Int64\n"
+        "function make(value: Int64) -> Meter effects { pure } { return Meter(value) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolExprId self = SOL_AST_NONE;
+    SolExprId construction = SOL_AST_NONE;
+    for (SolExprId expression = 0;
+        expression < compilation.syntax.expression_count;
+        ++expression) {
+        if (compilation.hir.resolutions[expression].kind
+            == SOL_RESOLUTION_REFINEMENT_SELF) self = expression;
+        if (sol_type_construction(&compilation.types, expression) != NULL) {
+            construction = expression;
+        }
+    }
+    CHECK(self != SOL_AST_NONE);
+    CHECK(construction != SOL_AST_NONE);
+    if (self != SOL_AST_NONE) {
+        SolResolution resolution = compilation.hir.resolutions[self];
+        compilation.hir.resolutions[self].target = 1;
+        CHECK(!rerun_effectcheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+        compilation.hir.resolutions[self] = resolution;
+
+        size_t start = compilation.syntax.expressions[self].as.name.start;
+        char spelling = compilation.source.text[start];
+        compilation.source.text[start] = 'S';
+        CHECK(!rerun_effectcheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+        compilation.source.text[start] = spelling;
+    }
+    SolTypeRepresentation representation = compilation.types.representations[1];
+    compilation.types.representations[1].flavor = SOL_TYPE_DECLARATION_REFINED;
+    CHECK(!rerun_effectcheck(&compilation));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+    compilation.types.representations[1] = representation;
+    if (construction != SOL_AST_NONE) {
+        SolType result = compilation.types.constructions[construction].result;
+        compilation.types.constructions[construction].result
+            = (SolType){.kind = SOL_TYPE_NOMINAL, .definition = 0};
+        CHECK(!rerun_effectcheck(&compilation));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+        compilation.types.constructions[construction].result = result;
+    }
+    free_compilation(&compilation);
+}
+
 static void test_forward_transitive_inference(void) {
     static const char text[] =
         "module forward_transitive\n"
@@ -2419,6 +2474,28 @@ static void test_trait_method_effects_and_metadata(void) {
     free_compilation(&compilation);
 }
 
+static void test_distinct_implementation_and_function_representation(void) {
+    static const char text[] =
+        "module distinct_pipeline\n"
+        "type Identifier = distinct Int64\n"
+        "type Callback = distinct function(Int64) -> Int64 effects { pure }\n"
+        "trait Value { function value(self: Self) -> Int64 effects { pure } }\n"
+        "implementation Value for Identifier {\n"
+        " function value(self: Self) -> Int64 effects { pure } { return 1 }\n"
+        "}\n"
+        "function source(value: Int64) -> Int64 effects { pure } { return value }\n"
+        "function make() -> Callback effects { pure } { return Callback(source) }\n"
+        "function read_value(value: Identifier) -> Int64 effects { pure } { return value.value() }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.types.function_coercion_count == 1);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_private_pure_inference();
     test_generic_closed_effect_rows();
@@ -2426,6 +2503,7 @@ int main(void) {
     test_type_parameter_is_not_effect_authority();
     test_malformed_generic_instantiation_rejected();
     test_forged_generic_type_metadata_rejected();
+    test_refined_type_effect_inputs();
     test_forward_transitive_inference();
     test_capability_self_inference_identity();
     test_branch_argument_union_and_deduplication();
@@ -2473,6 +2551,7 @@ int main(void) {
     test_forged_handler_metadata_rejected();
     test_malformed_provenance_sets_rejected();
     test_trait_method_effects_and_metadata();
+    test_distinct_implementation_and_function_representation();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;

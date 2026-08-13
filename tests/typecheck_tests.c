@@ -1615,6 +1615,203 @@ static void test_method_named_arguments(void) {
     }
 }
 
+static void test_distinct_type_identity_and_construction(void) {
+    static const char text[] =
+        "module distinct_types\n"
+        "type UserId = distinct Int64\n"
+        "type Count = distinct Int64\n"
+        "type Wrapped<T> = distinct Option<T>\n"
+        "trait Tag { function tag(self: Self) -> Int64 effects { pure } }\n"
+        "implementation Tag for UserId {\n"
+        "    function tag(self: Self) -> Int64 effects { pure } { return 1 }\n"
+        "}\n"
+        "implementation Tag for Wrapped<Int64> {\n"
+        "    function tag(self: Self) -> Int64 effects { pure } { return 2 }\n"
+        "}\n"
+        "function user() -> UserId { return UserId(1) }\n"
+        "function count() -> Count { return Count(1) }\n"
+        "function wrapped(value: Option<Int64>) -> Wrapped<Int64> {\n"
+        "    return Wrapped<Int64>(value)\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.types.definitions[0].kind == SOL_TYPE_NOMINAL);
+    CHECK(compilation.types.definitions[1].kind == SOL_TYPE_NOMINAL);
+    CHECK(compilation.types.definitions[0].definition != compilation.types.definitions[1].definition);
+    const SolTypeRepresentation *user = sol_type_representation(&compilation.types, 0);
+    const SolTypeRepresentation *wrapped = sol_type_representation(&compilation.types, 2);
+    CHECK(user != NULL);
+    CHECK(wrapped != NULL);
+    if (user != NULL) CHECK(user->representation.kind == SOL_TYPE_INT64);
+    if (wrapped != NULL) CHECK(wrapped->representation.kind == SOL_TYPE_APPLICATION);
+    size_t constructions = 0;
+    bool generic = false;
+    for (SolExprId expression = 0; expression < compilation.syntax.expression_count;
+        ++expression) {
+        const SolTypeConstruction *construction = sol_type_construction(
+            &compilation.types, expression
+        );
+        if (construction == NULL) continue;
+        generic = generic || construction->result.kind == SOL_TYPE_APPLICATION;
+        ++constructions;
+    }
+    CHECK(constructions == 3);
+    CHECK(generic);
+    CHECK(sol_type_exact_reference_valid(
+        &compilation.syntax, &compilation.types, compilation.types.definitions[0]
+    ));
+    CHECK(compilation.types.implementation_targets[4].kind == SOL_TYPE_NOMINAL);
+    CHECK(compilation.types.implementation_targets[5].kind == SOL_TYPE_APPLICATION);
+    free_compilation(&compilation);
+}
+
+static void test_refined_type_predicates_and_construction_rejection(void) {
+    static const char valid[] =
+        "module refined_self\n"
+        "type Positive = refined Int64 where self > 0\n"
+        "type Identity<T> = refined T where self == self\n"
+        "function retain(value: Identity<Int64>) -> Identity<Int64> { return value }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, valid));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolExprId predicate = compilation.syntax.contract_conditions[0].expression;
+    CHECK(compilation.types.expressions[predicate].kind == SOL_TYPE_BOOL);
+    free_compilation(&compilation);
+
+    static const char invalid[] =
+        "module invalid_refined\n"
+        "type NotBool = refined Int64 where self\n"
+        "type Positive = refined Int64 where self > 0\n"
+        "function bad() -> Positive { return Positive(1) }\n";
+    CHECK(compile_source(&compilation, invalid));
+    CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-001"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-024"));
+    bool bootstrap_message = false;
+    for (size_t index = 0; index < compilation.diagnostics.count; ++index) {
+        bootstrap_message = bootstrap_message || strstr(
+            compilation.diagnostics.items[index].message,
+            "unsupported by this bootstrap"
+        ) != NULL;
+    }
+    CHECK(bootstrap_message);
+    free_compilation(&compilation);
+}
+
+static void test_declared_constructor_requires_definition_head(void) {
+    static const char text[] =
+        "module constructor_head\n"
+        "type Id = distinct Int64\n"
+        "function existing() -> Id { return Id(1) }\n"
+        "function bad() -> Id { return existing()(2) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-010"));
+    size_t constructions = 0;
+    for (SolExprId expression = 0; expression < compilation.types.construction_count;
+        ++expression) {
+        constructions += sol_type_construction(&compilation.types, expression) != NULL;
+    }
+    CHECK(constructions == 1);
+    free_compilation(&compilation);
+}
+
+static void test_invalid_type_representations_and_constructors(void) {
+    static const char text[] =
+        "module invalid_type_items\n"
+        "capability Clock {}\n"
+        "type A = distinct B\n"
+        "type B = distinct A\n"
+        "type Authority = distinct capability Clock\n"
+        "type Box<T> = distinct T\n"
+        "function implicit(value: Int64) -> A { return value }\n"
+        "function bare(value: Int64) -> Box<Int64> { return Box(value) }\n"
+        "function named() -> Box<Int64> { return Box<Int64>(value = 1) }\n"
+        "function wrong() -> Box<Int64> { return Box<Int64>(true) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(diagnostic_count(&compilation, "SOL-TYPE-024") >= 5);
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-004"));
+    free_compilation(&compilation);
+}
+
+static void test_generic_representation_safety(void) {
+    static const char text[] =
+        "module generic_representation_safety\n"
+        "capability Clock {}\n"
+        "record Box<T> { value: T, }\n"
+        "enum Envelope<T> { value(item: T), fixed(clock: capability Clock), }\n"
+        "record Phantom<T> {}\n"
+        "type Laundered<T> = distinct Box<T>\n"
+        "type Fixed<T> = distinct Envelope<T>\n"
+        "type SafePhantom<T> = distinct Phantom<T>\n"
+        "function safe(clock: capability Clock) -> SafePhantom<capability Clock> {\n"
+        "    return SafePhantom<capability Clock>(Phantom<capability Clock> {})\n"
+        "}\n"
+        "function bad(clock: capability Clock) -> Laundered<capability Clock> {\n"
+        "    return Laundered<capability Clock>(Box<capability Clock> { value = clock, })\n"
+        "}\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(diagnostic_count(&compilation, "SOL-TYPE-024") >= 2);
+    CHECK(!has_diagnostic(&compilation, "SOL-INTERNAL-003"));
+    free_compilation(&compilation);
+}
+
+static void test_representation_storage_cycles(void) {
+    static const char text[] =
+        "module representation_storage_cycles\n"
+        "record RecordStorage { value: RecordCycle, }\n"
+        "type RecordCycle = distinct RecordStorage\n"
+        "enum EnumStorage { value(item: EnumCycle), }\n"
+        "type EnumCycle = distinct EnumStorage\n"
+        "record OrdinaryRecord { next: OrdinaryRecord, }\n"
+        "enum OrdinaryEnum { next(value: OrdinaryEnum), }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(diagnostic_count(&compilation, "SOL-TYPE-024") == 2);
+    free_compilation(&compilation);
+}
+
+static void test_type_metadata_defensive_validation(void) {
+    static const char text[] =
+        "module type_metadata\n"
+        "type Id = distinct Int64\n"
+        "function make() -> Id { return Id(1) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(sol_type_representation(&compilation.types, 0) != NULL);
+    SolExprId construction = SOL_AST_NONE;
+    for (SolExprId expression = 0; expression < compilation.syntax.expression_count;
+        ++expression) {
+        if (sol_type_construction(&compilation.types, expression) != NULL) {
+            construction = expression;
+            break;
+        }
+    }
+    CHECK(construction != SOL_AST_NONE);
+    if (construction != SOL_AST_NONE) {
+        compilation.types.representations[0].flavor = SOL_TYPE_DECLARATION_REFINED;
+        CHECK(sol_type_construction(&compilation.types, construction) == NULL);
+        compilation.types.representations[0].flavor = SOL_TYPE_DECLARATION_DISTINCT;
+    }
+    compilation.types.representations[0].representation.kind = SOL_TYPE_ERROR;
+    CHECK(sol_type_representation(&compilation.types, 0) == NULL);
+    if (construction != SOL_AST_NONE) {
+        CHECK(sol_type_construction(&compilation.types, construction) == NULL);
+    }
+    compilation.types.representation_count = compilation.types.definition_count + 1;
+    CHECK(sol_type_representation(&compilation.types, 0) == NULL);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -1666,6 +1863,13 @@ int main(void) {
     test_computed_enum_receiver_methods();
     test_bound_evidence_forwarding();
     test_method_named_arguments();
+    test_distinct_type_identity_and_construction();
+    test_refined_type_predicates_and_construction_rejection();
+    test_declared_constructor_requires_definition_head();
+    test_invalid_type_representations_and_constructors();
+    test_generic_representation_safety();
+    test_representation_storage_cycles();
+    test_type_metadata_defensive_validation();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;

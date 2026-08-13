@@ -285,6 +285,9 @@ static void sol_package_relocate_items(
         item->first_parameter = sol_relocate_id(item->first_parameter, offsets.parameters);
         item->return_type = sol_relocate_optional_span(item->return_type, base);
         item->return_type_id = sol_relocate_id(item->return_type_id, offsets.types);
+        item->representation_type = sol_relocate_id(
+            item->representation_type, offsets.types
+        );
         item->first_field = sol_relocate_id(item->first_field, offsets.fields);
         item->first_variant = sol_relocate_id(item->first_variant, offsets.variants);
         item->first_effect = sol_relocate_id(item->first_effect, offsets.effects);
@@ -427,7 +430,14 @@ static size_t sol_package_effect_owner_offset(SolEffectOwnerKind kind, SolArenaO
 static size_t sol_package_contract_owner_offset(
     SolContractOwnerKind kind, SolArenaOffsets offsets
 ) {
-    return kind == SOL_CONTRACT_OWNER_ITEM ? offsets.items : offsets.capability_members;
+    switch (kind) {
+        case SOL_CONTRACT_OWNER_ITEM:
+        case SOL_CONTRACT_OWNER_TYPE:
+            return offsets.items;
+        case SOL_CONTRACT_OWNER_CAPABILITY_MEMBER:
+            return offsets.capability_members;
+    }
+    return 0;
 }
 
 static void sol_package_relocate_arenas(SolSyntaxTree *tree, SolArenaOffsets o, size_t base) {
