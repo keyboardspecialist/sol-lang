@@ -6,9 +6,15 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 typedef size_t SolDefId;
 typedef size_t SolLocalId;
+
+typedef struct {
+    uint64_t high;
+    uint64_t low;
+} SolSemanticId;
 
 typedef enum {
     SOL_TYPE_RESOLUTION_ERROR,
@@ -45,8 +51,26 @@ typedef struct {
 typedef struct {
     SolItemKind kind;
     SolSpan name;
+    SolSpan stable_identity;
+    SolSemanticId semantic_id;
     size_t syntax_item;
 } SolHirDefinition;
+
+typedef enum {
+    SOL_SEMANTIC_REFERENCE_DECLARATION,
+    SOL_SEMANTIC_REFERENCE_IMPORT,
+    SOL_SEMANTIC_REFERENCE_EXPRESSION,
+    SOL_SEMANTIC_REFERENCE_TYPE,
+    SOL_SEMANTIC_REFERENCE_TRAIT,
+    SOL_SEMANTIC_REFERENCE_BOUND,
+} SolSemanticReferenceKind;
+
+typedef struct {
+    SolSemanticReferenceKind kind;
+    SolSpan span;
+    SolDefId target;
+    SolSemanticId target_id;
+} SolSemanticReference;
 
 typedef enum {
     SOL_LOCAL_PARAMETER,
@@ -113,6 +137,13 @@ typedef struct {
     size_t trait_resolution_count;
     SolResolution *bound_resolutions;
     size_t bound_resolution_count;
+    /* Stable symbol occurrences; targets remain valid independent of arena ordering. */
+    SolSemanticReference *semantic_references;
+    size_t semantic_reference_count;
+    size_t semantic_reference_capacity;
+    /* Indexed by SolImport when package-aware. */
+    SolResolution *import_resolutions;
+    size_t import_resolution_count;
     /* Owned package scope metadata; item_files is indexed by syntax item. */
     SolHirFileScope *file_scopes;
     size_t file_scope_count;

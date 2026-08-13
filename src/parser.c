@@ -3007,21 +3007,25 @@ static bool sol_parser_trait_like(
     return true;
 }
 
-static void sol_parser_annotation(SolParser *parser) {
-    SolToken annotation = sol_parser_advance(parser);
+static SolSpan sol_parser_annotation(SolParser *parser) {
+    sol_parser_advance(parser);
+    SolToken name = sol_parser_current(parser);
     if (!sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER, "expected an annotation name")) {
-        return;
+        return (SolSpan){0};
     }
     if (!sol_parser_expect(parser, SOL_TOKEN_LEFT_PAREN, "expected '(' after annotation name")) {
-        return;
+        return (SolSpan){0};
     }
+    SolToken argument = sol_parser_current(parser);
     if (!sol_parser_expect(parser, SOL_TOKEN_STRING, "expected a string annotation argument")) {
-        return;
+        return (SolSpan){0};
     }
     if (!sol_parser_expect(parser, SOL_TOKEN_RIGHT_PAREN, "expected ')' after annotation")) {
-        return;
+        return (SolSpan){0};
     }
-    (void)annotation;
+    return sol_token_text_equal(parser->source, name, "stable")
+        ? argument.span
+        : (SolSpan){0};
 }
 
 static bool sol_parser_is_declaration_start(SolTokenKind kind) {
@@ -3066,8 +3070,22 @@ static void sol_parser_declaration(SolParser *parser) {
     size_t contract_clause_mark = parser->tree->contract_clause_count;
     size_t contract_condition_mark = parser->tree->contract_condition_count;
     size_t start = sol_parser_current(parser).span.start;
+    SolSpan stable_identity = {0};
     while (sol_parser_kind(parser) == SOL_TOKEN_AT) {
-        sol_parser_annotation(parser);
+        SolSpan annotation = sol_parser_annotation(parser);
+        if (annotation.start != annotation.end) {
+            if (stable_identity.start != stable_identity.end) {
+                sol_diagnostics_add(
+                    parser->diagnostics,
+                    "SOL-PARSE-020",
+                    SOL_SEVERITY_ERROR,
+                    annotation,
+                    "a declaration may have only one @stable annotation"
+                );
+            } else {
+                stable_identity = annotation;
+            }
+        }
     }
     bool is_public = sol_parser_match(parser, SOL_TOKEN_PUBLIC);
     if (!is_public) {
@@ -3202,6 +3220,7 @@ static void sol_parser_declaration(SolParser *parser) {
             .flavor = flavor,
             .name = name,
             .span = whole,
+            .stable_identity = stable_identity,
             .is_public = is_public,
             .body = body,
             .first_parameter = first_parameter,

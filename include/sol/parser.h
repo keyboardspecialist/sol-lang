@@ -29,6 +29,8 @@ typedef struct {
     SolTypeDeclarationFlavor flavor;
     SolSpan name;
     SolSpan span;
+    /* Quoted token for @stable("..."); empty when no stable identity is declared. */
+    SolSpan stable_identity;
     bool is_public;
     SolExprId body;
     SolParameterId first_parameter;

@@ -47,6 +47,8 @@ void sol_hir_module_free(SolHirModule *module) {
     free(module->type_effect_resolutions);
     free(module->trait_resolutions);
     free(module->bound_resolutions);
+    free(module->semantic_references);
+    free(module->import_resolutions);
     free(module->file_scopes);
     free(module->item_files);
     memset(module, 0, sizeof(*module));
@@ -164,6 +166,108 @@ static SolSpan sol_path_final_component(const SolSource *source, SolSpan path) {
         if (byte == '.') component = cursor;
     }
     return (SolSpan){component, path.end};
+}
+
+static void sol_semantic_hash_byte(SolSemanticId *hash, unsigned char byte) {
+    hash->high ^= byte;
+    hash->high *= UINT64_C(1099511628211);
+    hash->low ^= byte;
+    hash->low *= UINT64_C(14029467366897019727);
+}
+
+static void sol_semantic_hash_text(
+    SolSemanticId *hash,
+    const char *text,
+    size_t length
+) {
+    for (size_t index = 0; index < length; ++index) {
+        sol_semantic_hash_byte(hash, (unsigned char)text[index]);
+    }
+    sol_semantic_hash_byte(hash, 0xff);
+}
+
+static void sol_semantic_hash_path(
+    SolSemanticId *hash,
+    const SolSource *source,
+    SolSpan path
+) {
+    size_t cursor = path.start;
+    int byte;
+    while ((byte = sol_path_next_byte(source, path, &cursor)) >= 0) {
+        sol_semantic_hash_byte(hash, (unsigned char)byte);
+    }
+    sol_semantic_hash_byte(hash, 0xff);
+}
+
+static bool sol_semantic_id_equal(SolSemanticId left, SolSemanticId right) {
+    return left.high == right.high && left.low == right.low;
+}
+
+static bool sol_stable_identity_valid(const SolSource *source, SolSpan span) {
+    if (span.end < span.start + 3 || source->text[span.start] != '"'
+        || source->text[span.end - 1] != '"') return false;
+    for (size_t index = span.start + 1; index + 1 < span.end; ++index) {
+        unsigned char byte = (unsigned char)source->text[index];
+        bool valid = (byte >= 'a' && byte <= 'z') || (byte >= 'A' && byte <= 'Z')
+            || (byte >= '0' && byte <= '9') || byte == '.' || byte == '_'
+            || byte == '-' || byte == ':' || byte == '/';
+        if (!valid) return false;
+    }
+    return true;
+}
+
+static SolSemanticId sol_resolver_semantic_id(
+    SolResolver *resolver,
+    size_t item_index
+) {
+    static const char version[] = "sol.semantic-id/1";
+    const SolSyntaxItem *item = &resolver->syntax->items[item_index];
+    SolSemanticId hash = {
+        UINT64_C(14695981039346656037),
+        UINT64_C(7809847782465536322),
+    };
+    sol_semantic_hash_text(&hash, version, sizeof(version) - 1);
+    if (item->stable_identity.start != item->stable_identity.end) {
+        static const char domain[] = "stable";
+        sol_semantic_hash_text(&hash, domain, sizeof(domain) - 1);
+        sol_semantic_hash_text(
+            &hash,
+            resolver->source->text + item->stable_identity.start + 1,
+            item->stable_identity.end - item->stable_identity.start - 2
+        );
+        return hash;
+    }
+    static const char domain[] = "current";
+    sol_semantic_hash_text(&hash, domain, sizeof(domain) - 1);
+    size_t file = resolver->module->item_files[item_index];
+    sol_semantic_hash_path(&hash, resolver->source, resolver->scopes[file].module_name);
+    unsigned char kind = (unsigned char)item->kind;
+    sol_semantic_hash_byte(&hash, kind);
+    sol_semantic_hash_byte(&hash, 0xff);
+    sol_semantic_hash_path(&hash, resolver->source, item->name);
+    return hash;
+}
+
+static void sol_resolver_add_semantic_reference(
+    SolResolver *resolver,
+    SolSemanticReferenceKind kind,
+    SolSpan span,
+    SolDefId target
+) {
+    if (target >= resolver->module->definition_count
+        || resolver->module->semantic_reference_count
+            >= resolver->module->semantic_reference_capacity) {
+        resolver->allocation_failed = true;
+        return;
+    }
+    resolver->module->semantic_references[
+        resolver->module->semantic_reference_count++
+    ] = (SolSemanticReference){
+        .kind = kind,
+        .span = span,
+        .target = target,
+        .target_id = resolver->module->definitions[target].semantic_id,
+    };
 }
 
 static bool sol_span_text_equal(const SolSource *source, SolSpan span, const char *text) {
@@ -301,6 +405,9 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || item->flavor > SOL_TYPE_DECLARATION_REFINED
             || !sol_span_valid(resolver->source, item->name)
             || !sol_span_valid(resolver->source, item->span)
+            || !sol_span_valid(resolver->source, item->stable_identity)
+            || (item->stable_identity.start != item->stable_identity.end
+                && item->stable_identity.end - item->stable_identity.start < 2)
             || !sol_span_valid(resolver->source, item->return_type)
             || !sol_span_valid(resolver->source, item->trait_name)
             || (item->body != SOL_AST_NONE && item->body >= syntax->expression_count)
@@ -912,6 +1019,20 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
         || syntax->type_count > SIZE_MAX / sizeof(*resolver->module->type_resolutions)) {
         return false;
     }
+    size_t reference_capacity = syntax->item_count;
+    if (syntax->import_count > SIZE_MAX - reference_capacity) return false;
+    reference_capacity += syntax->import_count;
+    if (syntax->expression_count > SIZE_MAX - reference_capacity) return false;
+    reference_capacity += syntax->expression_count;
+    if (syntax->type_count > SIZE_MAX - reference_capacity) return false;
+    reference_capacity += syntax->type_count;
+    if (syntax->item_count > SIZE_MAX - reference_capacity) return false;
+    reference_capacity += syntax->item_count;
+    if (syntax->type_parameter_count > SIZE_MAX - reference_capacity) return false;
+    reference_capacity += syntax->type_parameter_count;
+    if (reference_capacity > SIZE_MAX / sizeof(*resolver->module->semantic_references)) {
+        return false;
+    }
 
     resolver->module->definition_count = syntax->item_count;
     resolver->module->resolution_count = syntax->expression_count;
@@ -920,6 +1041,9 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
     resolver->module->type_effect_resolution_count = syntax->type_count;
     resolver->module->trait_resolution_count = syntax->item_count;
     resolver->module->bound_resolution_count = syntax->type_parameter_count;
+    resolver->module->semantic_reference_capacity = reference_capacity;
+    resolver->module->import_resolution_count
+        = resolver->package_aware ? syntax->import_count : 0;
     resolver->module->file_scope_count = resolver->scope_count;
     resolver->module->definitions = calloc(
         syntax->item_count,
@@ -949,6 +1073,13 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
     resolver->module->bound_resolutions = calloc(
         syntax->type_parameter_count, sizeof(*resolver->module->bound_resolutions)
     );
+    resolver->module->semantic_references = malloc(
+        reference_capacity * sizeof(*resolver->module->semantic_references)
+    );
+    resolver->module->import_resolutions = calloc(
+        resolver->module->import_resolution_count,
+        sizeof(*resolver->module->import_resolutions)
+    );
     resolver->module->file_scopes = malloc(
         resolver->scope_count * sizeof(*resolver->module->file_scopes)
     );
@@ -969,6 +1100,9 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
         || (syntax->item_count != 0 && resolver->module->trait_resolutions == NULL)
         || (syntax->type_parameter_count != 0
             && resolver->module->bound_resolutions == NULL)
+        || (reference_capacity != 0 && resolver->module->semantic_references == NULL)
+        || (resolver->module->import_resolution_count != 0
+            && resolver->module->import_resolutions == NULL)
         || resolver->module->file_scopes == NULL
         || (syntax->item_count != 0 && resolver->module->item_files == NULL)
         || (import_count != 0
@@ -1006,6 +1140,12 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
     for (size_t index = 0; index < syntax->type_parameter_count; ++index) {
         resolver->module->bound_resolutions[index] = (SolResolution){
             .kind = SOL_RESOLUTION_NOT_APPLICABLE,
+            .target = SOL_AST_NONE,
+        };
+    }
+    for (size_t index = 0; index < resolver->module->import_resolution_count; ++index) {
+        resolver->module->import_resolutions[index] = (SolResolution){
+            .kind = SOL_RESOLUTION_ERROR,
             .target = SOL_AST_NONE,
         };
     }
@@ -1445,8 +1585,45 @@ static void sol_resolver_collect_definitions(SolResolver *resolver) {
         resolver->module->definitions[index] = (SolHirDefinition){
             .kind = item->kind,
             .name = item->name,
+            .stable_identity = item->stable_identity,
+            .semantic_id = sol_resolver_semantic_id(resolver, index),
             .syntax_item = index,
         };
+        if (item->stable_identity.start != item->stable_identity.end
+            && (!item->is_public || item->kind == SOL_ITEM_IMPLEMENTATION)) {
+            sol_diagnostics_add(
+                resolver->diagnostics,
+                "SOL-IDENTITY-001",
+                SOL_SEVERITY_ERROR,
+                item->stable_identity,
+                "@stable is only valid on named public declarations"
+            );
+        } else if (item->stable_identity.start != item->stable_identity.end
+            && !sol_stable_identity_valid(resolver->source, item->stable_identity)) {
+            sol_diagnostics_add(
+                resolver->diagnostics,
+                "SOL-IDENTITY-002",
+                SOL_SEVERITY_ERROR,
+                item->stable_identity,
+                "stable identity must be a non-empty ASCII token using letters, digits, '.', '_', '-', ':', or '/'"
+            );
+        }
+        for (size_t previous = 0; previous < index; ++previous) {
+            if (sol_semantic_id_equal(
+                resolver->module->definitions[previous].semantic_id,
+                resolver->module->definitions[index].semantic_id
+            )) {
+                sol_diagnostics_add(
+                    resolver->diagnostics,
+                    "SOL-IDENTITY-003",
+                    SOL_SEVERITY_ERROR,
+                    item->stable_identity.start != item->stable_identity.end
+                        ? item->stable_identity : item->name,
+                    "semantic declaration identity collides within the package"
+                );
+                break;
+            }
+        }
     }
 }
 
@@ -1503,6 +1680,9 @@ static void sol_resolver_resolve_imports(SolResolver *resolver) {
                 continue;
             }
             resolver->import_targets[import] = target;
+            resolver->module->import_resolutions[import] = (SolResolution){
+                SOL_RESOLUTION_DEFINITION, target
+            };
             SolSpan spelling = resolver->import_names[import];
             for (size_t previous = 0; previous < offset; ++previous) {
                 size_t other = scope->import_start + previous;
@@ -1516,6 +1696,12 @@ static void sol_resolver_resolve_imports(SolResolver *resolver) {
                     );
                     resolver->import_targets[import] = SOL_AST_NONE;
                     resolver->import_targets[other] = SOL_AST_NONE;
+                    resolver->module->import_resolutions[import] = (SolResolution){
+                        SOL_RESOLUTION_ERROR, SOL_AST_NONE
+                    };
+                    resolver->module->import_resolutions[other] = (SolResolution){
+                        SOL_RESOLUTION_ERROR, SOL_AST_NONE
+                    };
                 }
             }
             for (size_t definition = 0;
@@ -1533,9 +1719,86 @@ static void sol_resolver_resolve_imports(SolResolver *resolver) {
                         spelling, "imported spelling collides with a module declaration"
                     );
                     resolver->import_targets[import] = SOL_AST_NONE;
+                    resolver->module->import_resolutions[import] = (SolResolution){
+                        SOL_RESOLUTION_ERROR, SOL_AST_NONE
+                    };
                     break;
                 }
             }
+        }
+    }
+}
+
+static void sol_resolver_collect_semantic_references(SolResolver *resolver) {
+    for (SolDefId definition = 0;
+        definition < resolver->module->definition_count;
+        ++definition) {
+        sol_resolver_add_semantic_reference(
+            resolver,
+            SOL_SEMANTIC_REFERENCE_DECLARATION,
+            resolver->module->definitions[definition].name,
+            definition
+        );
+    }
+    for (size_t import = 0;
+        import < resolver->module->import_resolution_count;
+        ++import) {
+        SolResolution resolution = resolver->module->import_resolutions[import];
+        if (resolution.kind == SOL_RESOLUTION_DEFINITION) {
+            sol_resolver_add_semantic_reference(
+                resolver,
+                SOL_SEMANTIC_REFERENCE_IMPORT,
+                resolver->import_names[import],
+                resolution.target
+            );
+        }
+    }
+    for (SolExprId expression = 0;
+        expression < resolver->module->resolution_count;
+        ++expression) {
+        SolResolution resolution = resolver->module->resolutions[expression];
+        if (resolution.kind == SOL_RESOLUTION_DEFINITION) {
+            sol_resolver_add_semantic_reference(
+                resolver,
+                SOL_SEMANTIC_REFERENCE_EXPRESSION,
+                resolver->syntax->expressions[expression].span,
+                resolution.target
+            );
+        }
+    }
+    for (SolTypeId type = 0; type < resolver->module->type_resolution_count; ++type) {
+        SolTypeResolution resolution = resolver->module->type_resolutions[type];
+        if (resolution.kind == SOL_TYPE_RESOLUTION_DEFINITION) {
+            sol_resolver_add_semantic_reference(
+                resolver,
+                SOL_SEMANTIC_REFERENCE_TYPE,
+                resolver->syntax->types[type].name,
+                resolution.target
+            );
+        }
+    }
+    for (size_t item = 0; item < resolver->module->trait_resolution_count; ++item) {
+        SolResolution resolution = resolver->module->trait_resolutions[item];
+        if (resolution.kind == SOL_RESOLUTION_DEFINITION) {
+            sol_resolver_add_semantic_reference(
+                resolver,
+                SOL_SEMANTIC_REFERENCE_TRAIT,
+                resolver->syntax->items[item].trait_name,
+                resolution.target
+            );
+        }
+    }
+    for (size_t parameter = 0;
+        parameter < resolver->module->bound_resolution_count;
+        ++parameter) {
+        SolResolution resolution = resolver->module->bound_resolutions[parameter];
+        if (resolution.kind == SOL_RESOLUTION_DEFINITION) {
+            sol_resolver_add_semantic_reference(
+                resolver,
+                SOL_SEMANTIC_REFERENCE_BOUND,
+                resolver->syntax->type_parameters[parameter].bound,
+                resolution.target
+            );
         }
     }
 }
@@ -1957,6 +2220,7 @@ static bool sol_hir_lower_impl(
             sol_resolver_trait_methods(&resolver, index);
         }
     }
+    sol_resolver_collect_semantic_references(&resolver);
 
     free(resolver.bindings);
     free(resolver.expression_states);

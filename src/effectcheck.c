@@ -1659,6 +1659,8 @@ static bool sol_effect_hir_matches_source(SolEffectChecker *checker) {
             == checker->hir->type_effect_resolution_count
         && rebuilt.trait_resolution_count == checker->hir->trait_resolution_count
         && rebuilt.bound_resolution_count == checker->hir->bound_resolution_count
+        && rebuilt.semantic_reference_count == checker->hir->semantic_reference_count
+        && rebuilt.import_resolution_count == checker->hir->import_resolution_count
         && rebuilt.file_scope_count == checker->hir->file_scope_count;
     for (size_t index = 0; matches && index < rebuilt.file_scope_count; ++index) {
         const SolHirFileScope *left = &rebuilt.file_scopes[index];
@@ -1681,7 +1683,27 @@ static bool sol_effect_hir_matches_source(SolEffectChecker *checker) {
         matches = left->kind == right->kind
             && left->name.start == right->name.start
             && left->name.end == right->name.end
+            && left->stable_identity.start == right->stable_identity.start
+            && left->stable_identity.end == right->stable_identity.end
+            && left->semantic_id.high == right->semantic_id.high
+            && left->semantic_id.low == right->semantic_id.low
             && left->syntax_item == right->syntax_item;
+    }
+    for (size_t index = 0; matches && index < rebuilt.semantic_reference_count; ++index) {
+        const SolSemanticReference *left = &rebuilt.semantic_references[index];
+        const SolSemanticReference *right = &checker->hir->semantic_references[index];
+        matches = left->kind == right->kind
+            && left->span.start == right->span.start
+            && left->span.end == right->span.end
+            && left->target == right->target
+            && left->target_id.high == right->target_id.high
+            && left->target_id.low == right->target_id.low;
+    }
+    for (size_t index = 0; matches && index < rebuilt.import_resolution_count; ++index) {
+        matches = rebuilt.import_resolutions[index].kind
+                == checker->hir->import_resolutions[index].kind
+            && rebuilt.import_resolutions[index].target
+                == checker->hir->import_resolutions[index].target;
     }
     for (size_t index = 0; matches && index < rebuilt.local_count; ++index) {
         const SolHirLocal *left = &rebuilt.locals[index];
@@ -3095,6 +3117,10 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || hir->type_effect_resolution_count != syntax->type_count
         || hir->trait_resolution_count != syntax->item_count
         || hir->bound_resolution_count != syntax->type_parameter_count
+        || hir->semantic_reference_count > hir->semantic_reference_capacity
+        || hir->semantic_reference_capacity > SIZE_MAX / sizeof(*hir->semantic_references)
+        || hir->import_resolution_count
+            != (hir->file_scope_count == 0 ? 0 : syntax->import_count)
         || hir->local_count > hir->local_capacity
         || hir->file_scope_count > SIZE_MAX / sizeof(*hir->file_scopes)
         || ((hir->file_scope_count == 0) != (hir->file_scopes == NULL))
@@ -3110,6 +3136,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             && hir->type_effect_resolutions == NULL)
         || (hir->trait_resolution_count != 0 && hir->trait_resolutions == NULL)
         || (hir->bound_resolution_count != 0 && hir->bound_resolutions == NULL)
+        || (hir->semantic_reference_count != 0 && hir->semantic_references == NULL)
+        || (hir->import_resolution_count != 0 && hir->import_resolutions == NULL)
         || (hir->local_count != 0 && hir->locals == NULL)
         || types->expression_count != syntax->expression_count
         || types->local_count != hir->local_count

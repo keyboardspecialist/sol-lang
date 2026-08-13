@@ -281,6 +281,7 @@ static void sol_package_relocate_items(
         SolSyntaxItem *item = &tree->items[index];
         item->name = sol_relocate_span(item->name, base);
         item->span = sol_relocate_span(item->span, base);
+        item->stable_identity = sol_relocate_optional_span(item->stable_identity, base);
         item->body = sol_relocate_id(item->body, offsets.expressions);
         item->first_parameter = sol_relocate_id(item->first_parameter, offsets.parameters);
         item->return_type = sol_relocate_optional_span(item->return_type, base);

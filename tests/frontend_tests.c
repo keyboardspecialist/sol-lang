@@ -250,6 +250,12 @@ static void test_valid_declarations(void) {
         CHECK(span_text_equal(&source, tree.imports[0].path, "core.Text"));
     }
     CHECK(tree.item_count == 4);
+    if (tree.item_count == 4) {
+        CHECK(span_text_equal(&source, tree.items[0].stable_identity,
+            "\"demo.User.v1\""));
+        CHECK(tree.items[1].stable_identity.start
+            == tree.items[1].stable_identity.end);
+    }
     CHECK(tree.capability_member_count == 1);
     CHECK(tree.items[2].first_member == 0);
     if (tree.capability_member_count == 1) {

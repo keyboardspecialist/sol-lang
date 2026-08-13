@@ -94,6 +94,20 @@ static SolSpan text_span(const SolSource *source, const char *text) {
     };
 }
 
+static bool semantic_id_equal(SolSemanticId left, SolSemanticId right) {
+    return left.high == right.high && left.low == right.low;
+}
+
+static SolSemanticId definition_id(const TestCompilation *compilation, const char *name) {
+    for (size_t index = 0; index < compilation->hir.definition_count; ++index) {
+        if (span_text_equal(
+            &compilation->source, compilation->hir.definitions[index].name, name
+        )) return compilation->hir.definitions[index].semantic_id;
+    }
+    CHECK(false);
+    return (SolSemanticId){0};
+}
+
 static void test_successful_resolution(void) {
     static const char text[] =
         "module resolution\n"
@@ -157,6 +171,87 @@ static void test_duplicate_declaration(void) {
     CHECK(sol_diagnostics_has_errors(&compilation.diagnostics));
     CHECK(has_diagnostic(&compilation, "SOL-RESOLVE-001"));
     free_compilation(&compilation);
+}
+
+static void test_stable_semantic_identity(void) {
+    static const char first[] =
+        "module original.location\n"
+        "@stable(\"example.User.v1\") public record User {}\n"
+        "public record Other {}\n"
+        "function consume(value: User) -> User { return User {} }\n";
+    static const char second[] =
+        "module moved.location\n"
+        "public record Other {}\n"
+        "@stable(\"example.User.v1\") public record RenamedUser {}\n"
+        "function consume(value: RenamedUser) -> RenamedUser { return RenamedUser {} }\n";
+    TestCompilation left;
+    TestCompilation right;
+    CHECK(compile_source(&left, first));
+    CHECK(compile_source(&right, second));
+    CHECK(!sol_diagnostics_has_errors(&left.diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&right.diagnostics));
+    SolSemanticId user = definition_id(&left, "User");
+    CHECK(semantic_id_equal(user, definition_id(&right, "RenamedUser")));
+    CHECK(!semantic_id_equal(
+        definition_id(&left, "Other"), definition_id(&right, "Other")
+    ));
+    size_t user_references = 0;
+    for (size_t index = 0; index < left.hir.semantic_reference_count; ++index) {
+        const SolSemanticReference *reference = &left.hir.semantic_references[index];
+        if (semantic_id_equal(reference->target_id, user)) ++user_references;
+        CHECK(reference->target < left.hir.definition_count);
+        CHECK(semantic_id_equal(
+            reference->target_id,
+            left.hir.definitions[reference->target].semantic_id
+        ));
+    }
+    CHECK(user_references == 4);
+    free_compilation(&right);
+    free_compilation(&left);
+
+    static const char ordered[] =
+        "module deterministic\n"
+        "public record First {}\n"
+        "public record Second {}\n";
+    static const char reordered[] =
+        "module deterministic\n"
+        "public record Second {}\n"
+        "public record First {}\n";
+    CHECK(compile_source(&left, ordered));
+    CHECK(compile_source(&right, reordered));
+    CHECK(semantic_id_equal(
+        definition_id(&left, "First"), definition_id(&right, "First")
+    ));
+    CHECK(semantic_id_equal(
+        definition_id(&left, "Second"), definition_id(&right, "Second")
+    ));
+    free_compilation(&right);
+    free_compilation(&left);
+
+    static const char collisions[] =
+        "module identity_errors\n"
+        "@stable(\"duplicate\") public record First {}\n"
+        "@stable(\"duplicate\") public record Second {}\n"
+        "@stable(\"bad key\") public record Invalid {}\n"
+        "@stable(\"private\") record Private {}\n";
+    TestCompilation invalid;
+    CHECK(compile_source(&invalid, collisions));
+    CHECK(has_diagnostic(&invalid, "SOL-IDENTITY-001"));
+    CHECK(has_diagnostic(&invalid, "SOL-IDENTITY-002"));
+    CHECK(has_diagnostic(&invalid, "SOL-IDENTITY-003"));
+    free_compilation(&invalid);
+
+    static const char malformed_span[] =
+        "module malformed_identity\npublic record Value {}\n";
+    CHECK(compile_source(&invalid, malformed_span));
+    CHECK(!sol_diagnostics_has_errors(&invalid.diagnostics));
+    invalid.syntax.items[0].stable_identity = (SolSpan){0, 1};
+    reset_hir_diagnostics(&invalid);
+    CHECK(!sol_hir_lower(
+        &invalid.source, &invalid.syntax, &invalid.hir, &invalid.diagnostics
+    ));
+    CHECK(has_diagnostic(&invalid, "SOL-INTERNAL-002"));
+    free_compilation(&invalid);
 }
 
 static void test_generic_type_namespace(void) {
@@ -772,6 +867,17 @@ static void test_effectcheck_rejects_forged_scoped_metadata(void) {
     CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
     compilation.hir.item_files[0] = 0;
 
+    SolSemanticReference *semantic_references = compilation.hir.semantic_references;
+    compilation.hir.semantic_references = NULL;
+    sol_diagnostics_free(&compilation.diagnostics);
+    sol_diagnostics_init(&compilation.diagnostics);
+    CHECK(!sol_effect_check(
+        &compilation.source, &compilation.syntax, &compilation.hir,
+        &types, &effects, &compilation.diagnostics
+    ));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-004"));
+    compilation.hir.semantic_references = semantic_references;
+
     sol_effect_table_free(&effects);
     sol_type_table_free(&types);
     free_compilation(&compilation);
@@ -967,6 +1073,7 @@ int main(void) {
     test_successful_resolution();
     test_unresolved_name();
     test_duplicate_declaration();
+    test_stable_semantic_identity();
     test_generic_type_namespace();
     test_type_declaration_hir();
     test_imported_public_type_resolution();

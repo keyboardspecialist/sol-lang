@@ -167,7 +167,7 @@ Sol uses a two-tier correctness model. The base language provides fast, predicta
 
 The compiler is intended to expose a canonical typed semantic graph, stable declaration identities, machine-readable diagnostics, constrained repair actions, proof caches, and behavior-change reports. These interfaces let tools patch declarations and obligations rather than brittle line numbers. Humans retain authority over intent, architecture, accepted effects, and proof policy.
 
-#status("IMPLEMENTED", [The C17 bootstrap is an experimental edition-2027 front end, not an executor. It currently lexes and parses a core language, resolves lexical, multi-file module, explicit import, and declaration-owned type/effect names, checks built-in, nominal, bounded first-order generic, and bounded trait semantics, exhaustive matches, closed normalized effects plus callback-driven rank-1 row parameters, capabilities and exact handlers, and lowers deterministic contract templates. Ownership, richer traits and general constrained or recursive row polymorphism, runtime checks, SMT discharge, code generation, stable public semantic IDs, and semantic patches remain future work.])
+#status("IMPLEMENTED", [The C17 bootstrap is an experimental edition-2027 front end, not an executor. It currently lexes and parses a core language, resolves lexical, multi-file module, explicit import, and declaration-owned type/effect names, assigns stable top-level semantic IDs and resolved occurrence records, checks built-in, nominal, bounded first-order generic, and bounded trait semantics, exhaustive matches, closed normalized effects plus callback-driven rank-1 row parameters, capabilities and exact handlers, and lowers deterministic contract templates. Ownership, richer traits and general constrained or recursive row polymorphism, runtime checks, SMT discharge, code generation, stable public schemas/IR, and semantic patches remain future work.])
 
 #heading(level: 2, numbering: none)[Key Decisions]
 
@@ -1103,7 +1103,9 @@ Every exported declaration receives a stable semantic ID, derived by default fro
 public function transfer(...) -> ... { ... }
 ```)
 
-Stable IDs anchor patches, API history, proof caches, documentation links, telemetry schemas, and deprecations. Reusing an ID incompatibly is rejected. Bootstrap arena/definition identities are deterministic within a compilation, but public evolution-stable IDs are not implemented.
+Stable IDs anchor patches, API history, proof caches, documentation links, telemetry schemas, and deprecations. Reusing an ID incompatibly is rejected.
+
+#status("IMPLEMENTED", [The bootstrap assigns every top-level declaration a versioned 128-bit ID separate from its dense session handle. The default hashes normalized module path, declaration kind, and name, so source ordering and file placement do not affect it. A named public declaration may instead retain a validated package-local `@stable` token across module movement and rename. Collisions and malformed/private/implementation uses are rejected. HIR occurrence records cover declarations, imports, resolved expression/type names, implementation trait heads, and trait bounds. Manifests and dependency identities, member/local identity, incompatible-reuse analysis beyond collisions, serialized schema guarantees, and public IR remain future work.])
 
 == Schema Definitions and Evolution
 
@@ -1514,8 +1516,9 @@ The current C17 bootstrap provides:
 - Exact authority-preserving returns and nominal checked single-source wrappers.
 - Exact capability-backed handlers with syntax, source/provider matching, scoped root-sensitive subtraction, residual/provider effects, runtime metadata, and singleton target limitation.
 - Structured contracts resolved in fresh signature scopes; generic template typing; `Bool` typing; finalized purity; `Result` outcome-specific `result`; distinct `old` snapshots; deterministic obligation templates.
+- Versioned 128-bit top-level semantic IDs, package-local explicit evolution tokens, collision validation, and resolved declaration/import/expression/type/trait occurrence records.
 
-It does not execute programs and is not a production compiler. In particular, general row constraints and explicit/multiple/recursive or authority-capturing effect parameters, refined construction/validation/assumptions, richer traits and constrained or higher-order generics, ownership/regions, unsafe/FFI authority gates, general algebraic handlers, static/unparameterized or runtime-dynamic handler matching, runtime contract checks, call-site contract/refinement use, logical normalization, SMT/proof discharge, concurrency, package manifests/host wiring/dependencies, width-based and declaration-reordering formatting, stable public IDs, public IR, semantic patches, and code generation are not implemented.
+It does not execute programs and is not a production compiler. In particular, general row constraints and explicit/multiple/recursive or authority-capturing effect parameters, refined construction/validation/assumptions, richer traits and constrained or higher-order generics, ownership/regions, unsafe/FFI authority gates, general algebraic handlers, static/unparameterized or runtime-dynamic handler matching, runtime contract checks, call-site contract/refinement use, logical normalization, SMT/proof discharge, concurrency, package manifests/host wiring/dependencies, member/local stable identities, width-based and declaration-reordering formatting, stable public schemas/IR, semantic patches, and code generation are not implemented.
 
 == Phased Roadmap
 
