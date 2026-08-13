@@ -343,7 +343,9 @@ Modules and imports are explicit. Data types are algebraic and nominal. Nullabil
 - One formatter produces stable output for each edition and defines canonical source representation.
 - Comments use `//`, `/* ... */`, and `///`; nested block comments are supported.
 
-#callout([CANONICAL SOURCE], [The compiler accepts a narrow grammar and `sol fmt` produces a normalized spelling. Canonicality reduces diff noise, simplifies generated patches, and stabilizes semantic hashes. The formatter itself is not yet implemented.])
+#callout([CANONICAL SOURCE], [The compiler accepts a narrow grammar and `sol fmt` produces a normalized spelling. Canonicality reduces diff noise, simplifies generated patches, and stabilizes semantic hashes.])
+
+#status("IMPLEMENTED", [The bootstrap formatter accepts syntactically valid edition-2027 files and deterministic directory packages. It preserves source token/comment bytes, source order, commas, and deliberate hard line breaks while normalizing spaces, four-space indentation, LF line endings outside comments, blank-line runs, final newline, braces, operators, delimiters, generic/effect angles, and comparisons. Output is re-lexed, reparsed, checked for token preservation, and formatted again for byte idempotence. `sol fmt` writes through a staged package transaction; `--check` is read-only and `--stdout` accepts one file. Malformed files are never rewritten. Width-based reflow, trailing-comma insertion/removal, import/declaration sorting, and comment/semantic reordering are future work.])
 
 == Declaration Ordering
 
@@ -1342,7 +1344,7 @@ The target front end provides:
 - Constraint-based type/effect/region inference bounded for predictable diagnostics.
 - Exhaustiveness and protocol-state checking before proof generation.
 
-The bootstrap implements lossless tokens, recovering core parsing, arena-backed syntax, deterministic package-session definition IDs, lexical and explicit multi-file module/import resolution, declaration-owned type resolution, typed HIR foundations, generic and nongeneric records/enums/functions, bounded coherent traits and constrained calls, exact invariant applications, matches, closed effects/capabilities/handlers, and generic contract templates. It does not yet implement incremental parsing, dependency packages or manifests, ownership/regions, richer trait or row-polymorphic generics, protocols, or formatter.
+The bootstrap implements lossless tokens, recovering core parsing, token-preserving idempotent formatting, arena-backed syntax, deterministic package-session definition IDs, lexical and explicit multi-file module/import resolution, declaration-owned type resolution, typed HIR foundations, generic and nongeneric records/enums/functions, bounded coherent traits and constrained calls, exact invariant applications, matches, closed effects/capabilities/handlers, and generic contract templates. It does not yet implement incremental parsing, dependency packages or manifests, ownership/regions, richer trait or row-polymorphic generics, protocols, or width/reordering formatter policies.
 
 == Verification Engine
 
@@ -1393,7 +1395,7 @@ sol audit --unsafe --capabilities --proofs
 sol patch apply change.solpatch
 ```)
 
-Only `sol check` is currently implemented.
+The bootstrap currently implements `sol check` and `sol fmt`. Formatting accepts one file or a recursively discovered directory package; `--check` reports noncanonical files and `--stdout` formats one file without writing.
 
 == Language Server and IDE
 
@@ -1499,6 +1501,7 @@ Begin with a deliberately small core proving interactions among canonical syntax
 The current C17 bootstrap provides:
 
 - Lossless lexing, recovering parsing for core declarations/contracts/body expressions, arena syntax, deterministic package-session definition IDs, lexical and explicit multi-file module/import HIR resolution, and source-aware human/JSON diagnostics.
+- Token-preserving syntax formatting with canonical whitespace, checked parse/token preservation, byte idempotence, and transactional package rewrites.
 - Primitive types; exact variable-arity interned built-in/user applications; bounded generic records, enums, and free functions; constructors; exhaustive user-enum and `Bool` matching; expression/call/return checking.
 - Nongeneric coherent traits; exact closed implementations; one inline free-function bound; symbolic bound forwarding; immediate type-directed method calls; checked method-resolution metadata and exact closed method effects.
 - Closed structural function types and bounded declaration-owned callback row parameters; exact function and bound-operation effects; callback subset checking; local and per-call row inference.
@@ -1508,7 +1511,7 @@ The current C17 bootstrap provides:
 - Exact capability-backed handlers with syntax, source/provider matching, scoped root-sensitive subtraction, residual/provider effects, runtime metadata, and singleton target limitation.
 - Structured contracts resolved in fresh signature scopes; generic template typing; `Bool` typing; finalized purity; `Result` outcome-specific `result`; distinct `old` snapshots; deterministic obligation templates.
 
-It does not execute programs and is not a production compiler. In particular, general row constraints and explicit/multiple/recursive effect parameters, richer traits and constrained or higher-order generics, ownership/regions, general algebraic handlers, runtime dynamic handler matching, runtime contract checks, call-site contract use, logical normalization, SMT/proof discharge, concurrency, package manifests/dependencies, formatter, stable public IDs, public IR, semantic patches, and code generation are not implemented.
+It does not execute programs and is not a production compiler. In particular, general row constraints and explicit/multiple/recursive effect parameters, richer traits and constrained or higher-order generics, ownership/regions, general algebraic handlers, runtime dynamic handler matching, runtime contract checks, call-site contract use, logical normalization, SMT/proof discharge, concurrency, package manifests/dependencies, width-based and declaration-reordering formatting, stable public IDs, public IR, semantic patches, and code generation are not implemented.
 
 == Phased Roadmap
 

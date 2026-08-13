@@ -404,7 +404,7 @@ The language server is expected to expose typed syntax, inferred effects, owners
 
 ## Bootstrap Compiler
 
-The bootstrap compiler is written in C17 and currently provides a lossless lexer, a recovering parser for core declarations, structured function contracts, and function-body expressions, an arena-backed syntax AST, deterministic package-session definition IDs, lexical, module, import, and declaration-owned type/effect resolution, exact invariant interning for built-in and user type applications, bounded first-order generic records/enums/free functions, coherent traits and exact implementations, type-directed method calls, callback-inferred effect-row instantiation, checked records and enums, exhaustive matching, semantic effect rows with local inference across statically known calls, capability-backed exact handlers, deterministic contract obligation templates, and source-aware human or JSON diagnostics through `sol check`.
+The bootstrap compiler is written in C17 and currently provides a lossless lexer, a recovering parser for core declarations, structured function contracts, and function-body expressions, an arena-backed syntax AST, a token-preserving canonical formatter, deterministic package-session definition IDs, lexical, module, import, and declaration-owned type/effect resolution, exact invariant interning for built-in and user type applications, bounded first-order generic records/enums/free functions, coherent traits and exact implementations, type-directed method calls, callback-inferred effect-row instantiation, checked records and enums, exhaustive matching, semantic effect rows with local inference across statically known calls, capability-backed exact handlers, deterministic contract obligation templates, and source-aware human or JSON diagnostics through `sol check`.
 
 ```text
 cmake -S . -B build -G Ninja -DSOL_ENABLE_SANITIZERS=ON
@@ -412,7 +412,12 @@ cmake --build build
 cmake --build build --target test
 ./build/sol check tests/valid.sol
 ./build/sol check tests/packages/valid
+./build/sol fmt --check tests/valid.sol
 ```
+
+`sol fmt <file-or-directory>` formats syntactically valid edition-2027 source in place; `--check` reports drift without writing, and `--stdout` prints one file. Directory formatting discovers files in package order, validates and formats every source before starting a transactional staged rewrite, rejects direct symbolic-link operands, preserves mode bits, and detects concurrent source changes before commit. The formatter preserves non-whitespace token and comment bytes, source order, commas, and deliberate hard line breaks. It canonicalizes spaces, four-space indentation, LF line endings outside comments, at most one blank line, one final newline, unary/binary operators, generic/effect angle delimiters, comparisons, braces, and delimiters. Every result is re-lexed, reparsed, checked for token preservation, and formatted a second time for byte idempotence.
+
+Width-based reflow, insertion or removal of trailing commas, import/declaration sorting, comment reflow, and semantic effect/order normalization remain future formatter work. Malformed source is diagnosed and never rewritten.
 
 Directory checking recursively discovers regular `.sol` files in deterministic bytewise path order and treats them as one dependency-free package. Each file declares its module; files with the same module path share declarations, while each file has its own explicit `use module.path.Symbol` scope. Cross-module imports require a public declaration. Imported types, functions, generic bounds, traits, effects, and contract calls use package-wide checked identities. Import cycles are permitted because this subset has no top-level initialization. Direct single-file checking remains compatible with the earlier bootstrap and parses but does not enforce imports.
 

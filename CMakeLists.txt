@@ -29,6 +29,7 @@ add_library(sol_compiler STATIC
     src/contract.c
     src/diagnostic.c
     src/effectcheck.c
+    src/formatter.c
     src/hir.c
     src/lexer.c
     src/package.c
@@ -77,6 +78,8 @@ enable_testing()
 if(BUILD_TESTING)
     add_executable(sol_frontend_tests tests/frontend_tests.c)
     target_link_libraries(sol_frontend_tests PRIVATE sol_compiler)
+    add_executable(sol_formatter_tests tests/formatter_tests.c)
+    target_link_libraries(sol_formatter_tests PRIVATE sol_compiler)
     add_executable(sol_sema_tests tests/sema_tests.c)
     target_link_libraries(sol_sema_tests PRIVATE sol_compiler)
     add_executable(sol_typecheck_tests tests/typecheck_tests.c)
@@ -92,6 +95,7 @@ if(BUILD_TESTING)
     )
     if(MSVC)
         target_compile_options(sol_frontend_tests PRIVATE /std:c17 /W4)
+        target_compile_options(sol_formatter_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_sema_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_typecheck_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_effectcheck_tests PRIVATE /std:c17 /W4)
@@ -99,13 +103,14 @@ if(BUILD_TESTING)
         target_compile_options(sol_package_tests PRIVATE /std:c17 /W4)
     elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
         target_compile_options(sol_frontend_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
+        target_compile_options(sol_formatter_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_sema_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_typecheck_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_effectcheck_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_contract_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_package_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
     else()
-        set_target_properties(sol_frontend_tests sol_sema_tests sol_typecheck_tests sol_effectcheck_tests sol_contract_tests sol_package_tests PROPERTIES
+        set_target_properties(sol_frontend_tests sol_formatter_tests sol_sema_tests sol_typecheck_tests sol_effectcheck_tests sol_contract_tests sol_package_tests PROPERTIES
             C_STANDARD 17
             C_STANDARD_REQUIRED ON
             C_EXTENSIONS OFF
@@ -115,6 +120,8 @@ if(BUILD_TESTING)
     if(SOL_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
         target_compile_options(sol_frontend_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(sol_frontend_tests PRIVATE -fsanitize=address,undefined)
+        target_compile_options(sol_formatter_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(sol_formatter_tests PRIVATE -fsanitize=address,undefined)
         target_compile_options(sol_sema_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(sol_sema_tests PRIVATE -fsanitize=address,undefined)
         target_compile_options(sol_typecheck_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -128,6 +135,7 @@ if(BUILD_TESTING)
     endif()
 
     add_test(NAME frontend COMMAND sol_frontend_tests)
+    add_test(NAME formatter COMMAND sol_formatter_tests)
     add_test(NAME sema COMMAND sol_sema_tests)
     add_test(NAME typecheck COMMAND sol_typecheck_tests)
     add_test(NAME effectcheck COMMAND sol_effectcheck_tests)
@@ -194,4 +202,17 @@ if(BUILD_TESTING)
             -DEXPECTED_CODE=SOL-EFFECT-002
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
+
+    foreach(formatter_cli_case stdout check rewrite malformed_directory symlink exclusive_options)
+        add_test(
+            NAME formatter_cli_${formatter_cli_case}
+            COMMAND ${CMAKE_COMMAND}
+                -DCASE=${formatter_cli_case}
+                -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
+                -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/formatter_cli
+                -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/tests/formatter_cli/${formatter_cli_case}
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/formatter_cli/test_formatter_cli.cmake
+        )
+        set_tests_properties(formatter_cli_${formatter_cli_case} PROPERTIES LABELS formatter_cli)
+    endforeach()
 endif()

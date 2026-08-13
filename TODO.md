@@ -21,6 +21,8 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
       bound, and deterministic type-directed immediate method calls.
 - [x] Deterministic directory packages, multi-file modules, explicit public imports,
       source-aware diagnostics, and package-wide semantic checking.
+- [x] Token-preserving canonical formatting with checked/idempotent file and
+      transactional directory rewrites.
 
 ## Prioritized Work
 
@@ -31,7 +33,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [x] | 3 | Integrate bounded effect-row variables with generic function instantiation | 5 | 5 | Generics |
 | [x] | 4 | Add traits, implementations, constraints, and type-directed method resolution | 5 | 5 | Generics |
 | [x] | 5 | Resolve modules and imports across multiple files and packages | 5 | 5 | Name resolution |
-| [ ] | 6 | Implement the canonical formatter and enforce idempotence | 4 | 3 | Parser and token stream |
+| [x] | 6 | Implement the canonical formatter and enforce idempotence | 4 | 3 | Parser and token stream |
 | [ ] | 7 | Close authority gaps for static and unparameterized effects | 5 | 4 | Capability model |
 | [ ] | 8 | Add distinct and refined types with checked predicates | 4 | 4 | Generics and contracts |
 | [ ] | 9 | Define stable semantic IDs, references, and rename identity | 5 | 5 | Modules and packages |

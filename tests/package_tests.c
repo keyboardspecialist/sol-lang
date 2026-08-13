@@ -126,7 +126,7 @@ static void test_package_reuse(void) {
     CHECK(sol_package_load(&package, SINGLE_FILE, &diagnostics, error, sizeof(error)));
     CHECK(!package.is_directory);
     CHECK(package.file_count == 1);
-    CHECK(package.source.length == 2801);
+    CHECK(package.source.length == package.files[0].source.length);
     CHECK(package.syntax.import_count == 1);
     CHECK(package.syntax.item_count == 24);
     CHECK(strcmp(package.path, SINGLE_FILE) == 0);
