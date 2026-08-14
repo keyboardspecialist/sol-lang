@@ -36,6 +36,7 @@ add_library(sol_compiler STATIC
     src/ir.c
     src/interpreter.c
     src/lexer.c
+    src/ownership.c
     src/package.c
     src/parser.c
     src/source.c
@@ -259,6 +260,14 @@ if(BUILD_TESTING)
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
             -DSOL_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_authority.sol
             -DEXPECTED_CODE=SOL-EFFECT-010
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
+    )
+    add_test(
+        NAME cli_ownership_error
+        COMMAND ${CMAKE_COMMAND}
+            -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
+            -DSOL_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_ownership.sol
+            -DEXPECTED_CODE=SOL-OWNERSHIP-001
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
 

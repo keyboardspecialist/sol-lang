@@ -136,6 +136,8 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
     }
     for (size_t index = 0; index < left->expression_count; ++index) {
         if (left->expressions[index].kind != right->expressions[index].kind
+            || left->expressions[index].local_use
+                != right->expressions[index].local_use
             || left->expressions[index].type != right->expressions[index].type
             || left->expressions[index].span.start != right->expressions[index].span.start
             || left->expressions[index].span.end != right->expressions[index].span.end) {
@@ -1186,6 +1188,151 @@ static void test_exact_member_table_ownership(void) {
     free_compilation(&compilation);
 }
 
+static void test_affine_ownership(void) {
+    TestCompilation compilation;
+    CHECK(compile_ir(&compilation,
+        "module ownership_copy\n"
+        "record Pair { left: Int64, right: Text }\n"
+        "enum Payload { pair(left: Int64, right: Int64) }\n"
+        "capability Clock { function read() -> Int64 effects { pure } }\n"
+        "function copies(value: Pair) -> Text { let first = value return value.right }\n"
+        "function two(first: Int64, second: Int64) -> Int64 { return first + second }\n"
+        "function unpack(value: Payload) -> Int64 "
+        "{ return match value { pair(left, right) => left + right } }\n"
+        "function repeated(clock: capability Clock) -> Int64 effects { pure } "
+        "{ let first = clock.read() return clock.read() + first }\n"
+        "function scope(clock: capability Clock) -> capability Clock "
+        "{ let outer = { let inner = clock inner } return outer }\n"));
+    bool saw_copy = false;
+    bool saw_receiver = false;
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        const SolIrExpression *expression = &compilation.ir.expressions[index];
+        saw_copy = saw_copy || expression->local_use == SOL_IR_LOCAL_USE_COPY;
+        saw_receiver = saw_receiver
+            || expression->local_use == SOL_IR_LOCAL_USE_RECEIVER;
+    }
+    CHECK(saw_copy);
+    CHECK(saw_receiver);
+
+    for (size_t index = 0; index < compilation.ir.callable_count; ++index) {
+        SolIrCallable *callable = &compilation.ir.callables[index];
+        if (strcmp(callable->name, "two") != 0) continue;
+        CHECK(callable->parameters.count == 2);
+        SolIrLocalId saved = compilation.ir.roots[callable->parameters.offset + 1];
+        compilation.ir.roots[callable->parameters.offset + 1]
+            = compilation.ir.roots[callable->parameters.offset];
+        CHECK(validate_rejected(&compilation.ir));
+        compilation.ir.roots[callable->parameters.offset + 1] = saved;
+    }
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        SolIrExpression *expression = &compilation.ir.expressions[index];
+        if (expression->kind != SOL_IR_EXPR_BINARY) continue;
+        SolIrExpressionId saved = expression->as.binary.right;
+        expression->as.binary.right = expression->as.binary.left;
+        CHECK(validate_rejected(&compilation.ir));
+        expression->as.binary.right = saved;
+        break;
+    }
+    for (size_t index = 0; index < compilation.ir.arm_count; ++index) {
+        SolIrArm *arm = &compilation.ir.arms[index];
+        if (arm->bindings.count != 2) continue;
+        SolIrLocalId saved = compilation.ir.roots[arm->bindings.offset + 1];
+        compilation.ir.roots[arm->bindings.offset + 1]
+            = compilation.ir.roots[arm->bindings.offset];
+        CHECK(validate_rejected(&compilation.ir));
+        compilation.ir.roots[arm->bindings.offset + 1] = saved;
+        break;
+    }
+    SolIrLocalId inner = SOL_IR_NONE;
+    SolIrLocalId outer = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.local_count; ++index) {
+        if (strcmp(compilation.ir.locals[index].name, "inner") == 0) inner = index;
+        if (strcmp(compilation.ir.locals[index].name, "outer") == 0) outer = index;
+    }
+    CHECK(inner != SOL_IR_NONE && outer != SOL_IR_NONE);
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        SolIrExpression *expression = &compilation.ir.expressions[index];
+        if (expression->kind != SOL_IR_EXPR_LOCAL || expression->as.local != outer) continue;
+        expression->as.local = inner;
+        CHECK(validate_rejected(&compilation.ir));
+        expression->as.local = outer;
+        break;
+    }
+    for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
+        SolIrStatement *statement = &compilation.ir.statements[index];
+        if (statement->kind != SOL_IR_STATEMENT_LET || statement->local != outer) continue;
+        statement->local = inner;
+        CHECK(validate_rejected(&compilation.ir));
+        statement->local = outer;
+        break;
+    }
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        SolIrExpression *expression = &compilation.ir.expressions[index];
+        if (expression->local_use == SOL_IR_LOCAL_USE_RECEIVER) {
+            SolIrLocalUse saved = expression->local_use;
+            expression->local_use = SOL_IR_LOCAL_USE_MOVE;
+            CHECK(validate_rejected(&compilation.ir));
+            expression->local_use = (SolIrLocalUse)(SOL_IR_LOCAL_USE_RECEIVER + 1);
+            CHECK(validate_rejected(&compilation.ir));
+            expression->local_use = saved;
+            break;
+        }
+    }
+    free_compilation(&compilation);
+
+    const char *invalid[] = {
+        "module moved_alias\n"
+        "capability Clock { function read() -> Int64 effects { pure } }\n"
+        "function bad(clock: capability Clock) -> Int64 effects { pure } "
+        "{ let alias = clock return clock.read() }\n",
+        "module moved_operation\n"
+        "capability Clock { function read() -> Int64 effects { pure } }\n"
+        "function bad(clock: capability Clock) -> Int64 effects { pure } "
+        "{ let operation = clock.read let first = operation() return operation() + first }\n",
+        "module branch_join\n"
+        "capability Clock { function read() -> Int64 effects { pure } }\n"
+        "function consume(value: capability Clock) -> Int64 { return 0 }\n"
+        "function bad(flag: Bool, clock: capability Clock) -> Int64 effects { pure } "
+        "{ let choice = if flag { consume(clock) } else { 0 } return clock.read() }\n",
+        "module match_join\n"
+        "capability Clock { function read() -> Int64 effects { pure } }\n"
+        "function consume(value: capability Clock) -> Int64 { return 0 }\n"
+        "function bad(flag: Bool, clock: capability Clock) -> Int64 effects { pure } "
+        "{ let choice = match flag { true => consume(clock) false => 0 } "
+        "return clock.read() }\n",
+        "module short_join\n"
+        "capability Clock { function read() -> Int64 effects { pure } }\n"
+        "function consume(value: capability Clock) -> Bool { return false }\n"
+        "function bad(flag: Bool, clock: capability Clock) -> Int64 effects { pure } "
+        "{ let result = flag && consume(clock) return clock.read() }\n",
+        "module aggregate_move\n"
+        "capability Clock { function read() -> Int64 effects { pure } }\n"
+        "record Holder { clock: capability Clock }\n"
+        "function bad(value: Holder) -> Holder "
+        "{ let alias = value return value }\n",
+        "module generic_move\n"
+        "record Box<T> { value: T }\n"
+        "function bad<T>(value: Box<T>) -> Box<T> "
+        "{ let alias = value return value }\n",
+    };
+    for (size_t index = 0; index < sizeof(invalid) / sizeof(invalid[0]); ++index) {
+        CHECK(frontend(&compilation, invalid[index]));
+        CHECK(!sol_ir_lower(&compilation.source, &compilation.syntax,
+            &compilation.hir, &compilation.types, &compilation.effects,
+            &compilation.contracts, &compilation.ir, &compilation.diagnostics));
+        CHECK(has_code(&compilation, "SOL-OWNERSHIP-001"));
+        CHECK(compilation.ir.expression_count == 0);
+        free_compilation(&compilation);
+    }
+
+    CHECK(compile_ir(&compilation,
+        "module terminating_join\n"
+        "capability Clock { function read() -> Int64 effects { pure } }\n"
+        "function keep(flag: Bool, clock: capability Clock) -> capability Clock "
+        "{ if flag { return clock } else { () } return clock }\n"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_geometric_growth();
     test_complete_ir_and_lifetime();
@@ -1200,6 +1347,7 @@ int main(void) {
     test_exact_validation_findings();
     test_release_gate_domains();
     test_exact_member_table_ownership();
+    test_affine_ownership();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

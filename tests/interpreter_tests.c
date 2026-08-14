@@ -496,7 +496,7 @@ static void test_exact_generic_evidence_bindings(void) {
         "function bool_callback(value: Bool) -> Int64 effects { pure } { return 100 }\n"
         "function callback_second<T: Identify, U: Identify>(first: T, right: U, "
         "callback: function(U) -> Int64 effects { pure }) -> Int64 effects { pure } "
-        "{ return right.identify() + callback(right) }\n"
+        "{ return first.identify() + callback(right) }\n"
         "function callback_middle<A: Identify, B: Identify>(first: A, right: B, "
         "callback: function(B) -> Int64 effects { pure }) -> Int64 effects { pure } "
         "{ return callback_second(first, right, callback) }\n"
@@ -519,7 +519,7 @@ static void test_exact_generic_evidence_bindings(void) {
     CHECK(run(&compilation.ir, "callback_forwarded", NULL, 0,
         SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
         NULL, NULL, &result));
-    CHECK(result.value.as.integer == 122);
+    CHECK(result.value.as.integer == 111);
     sol_interpreter_result_free(&result);
 
     SolIrExpression *forwarded_call = NULL;
@@ -1220,6 +1220,55 @@ static void test_package_diagnostic_mapping(void) {
     sol_diagnostics_free(&diagnostics);
 }
 
+static void test_copy_and_move_reads(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module ownership_runtime\n"
+        "capability Token {}\n"
+        "function transfer(value: capability Token) -> capability Token "
+        "authority { result derives_from value } { return value }\n"
+        "function copied(value: Text) -> Text { let first = value return value }\n"));
+    SolIrDefinitionId token = SOL_IR_NONE;
+    bool saw_copy = false;
+    bool saw_move = false;
+    for (size_t index = 0; index < compilation.ir.definition_count; ++index) {
+        if (strcmp(compilation.ir.definitions[index].name, "Token") == 0) token = index;
+    }
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        saw_copy = saw_copy
+            || compilation.ir.expressions[index].local_use == SOL_IR_LOCAL_USE_COPY;
+        saw_move = saw_move
+            || compilation.ir.expressions[index].local_use == SOL_IR_LOCAL_USE_MOVE;
+    }
+    CHECK(token != SOL_IR_NONE);
+    CHECK(saw_copy && saw_move);
+    free_frontend(&compilation);
+
+    int root;
+    SolInterpreterValue argument;
+    CHECK(sol_interpreter_value_capability(&argument, token, &root, NULL));
+    SolInterpreterResult result;
+    CHECK(run(&compilation.ir, "transfer", &argument, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_CAPABILITY
+        && result.value.as.capability.root == &root);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&argument);
+
+    CHECK(sol_interpreter_value_text(&argument, "copy", 4));
+    CHECK(run(&compilation.ir, "copied", &argument, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_TEXT
+        && result.value.as.text.length == 4
+        && memcmp(result.value.as.text.bytes, "copy", 4) == 0);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&argument);
+    sol_ir_free(&compilation.ir);
+    sol_diagnostics_free(&compilation.diagnostics);
+}
+
 int main(void) {
     test_primitives_control_and_lifetime();
     test_data_callbacks_generics_and_traits();
@@ -1229,6 +1278,7 @@ int main(void) {
     test_capability_policy_and_malformed();
     test_deep_handler();
     test_package_diagnostic_mapping();
+    test_copy_and_move_reads();
     if (failures != 0) fprintf(stderr, "%d interpreter test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

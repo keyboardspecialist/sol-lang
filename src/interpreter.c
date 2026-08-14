@@ -20,6 +20,8 @@ struct Frame {
     Frame *parent;
     SolInterpreterValue *locals;
     bool *bound;
+    void **authority_roots;
+    bool *authority_known;
     const SolIrTypeId *type_arguments;
     size_t type_argument_count;
     SolIrGenericParameterId type_parameter_offset;
@@ -487,10 +489,11 @@ static bool clone_runtime(Interpreter *interpreter, SolSpan span,
     return true;
 }
 
-static const SolInterpreterValue *lookup_local(Interpreter *interpreter,
-    SolIrLocalId local) {
+static SolInterpreterValue *lookup_local(Interpreter *interpreter,
+    SolIrLocalId local, Frame **owner) {
     for (Frame *frame = interpreter->frame; frame != NULL; frame = frame->parent) {
         if (local < interpreter->request->ir->local_count && frame->bound[local]) {
+            if (owner != NULL) *owner = frame;
             return &frame->locals[local];
         }
     }
@@ -506,6 +509,10 @@ static bool bind_local(Interpreter *interpreter, Frame *frame,
     }
     if (!clone_runtime(interpreter, span, &frame->locals[local], value)) return false;
     frame->bound[local] = true;
+    if (value->kind == SOL_INTERPRETER_VALUE_CAPABILITY) {
+        frame->authority_roots[local] = value->as.capability.root;
+        frame->authority_known[local] = true;
+    }
     return true;
 }
 
@@ -981,12 +988,20 @@ static bool validate_authority(Interpreter *interpreter,
             "authority-returning callable returned a non-capability");
         return false;
     }
-    const SolInterpreterValue *authority = receiver;
+    void *authority_root = receiver != NULL
+        && receiver->kind == SOL_INTERPRETER_VALUE_CAPABILITY
+        ? receiver->as.capability.root : NULL;
+    bool authority_known = receiver != NULL
+        && receiver->kind == SOL_INTERPRETER_VALUE_CAPABILITY;
     if (callable->result_authority_kind == SOL_IR_AUTHORITY_LOCAL) {
-        authority = lookup_local(interpreter, callable->result_authority);
+        SolIrLocalId local = callable->result_authority;
+        authority_known = interpreter->frame != NULL
+            && local < interpreter->request->ir->local_count
+            && interpreter->frame->authority_known[local];
+        authority_root = authority_known
+            ? interpreter->frame->authority_roots[local] : NULL;
     }
-    if (authority == NULL || authority->kind != SOL_INTERPRETER_VALUE_CAPABILITY
-        || authority->as.capability.root != result->as.capability.root) {
+    if (!authority_known || authority_root != result->as.capability.root) {
         diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT, span,
             "returned capability has the wrong authority root");
         return false;
@@ -1031,9 +1046,16 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
     if (ir->local_count != 0) {
         frame.locals = calloc(ir->local_count, sizeof(*frame.locals));
         frame.bound = calloc(ir->local_count, sizeof(*frame.bound));
-        if (frame.locals == NULL || frame.bound == NULL) {
+        frame.authority_roots = calloc(ir->local_count,
+            sizeof(*frame.authority_roots));
+        frame.authority_known = calloc(ir->local_count,
+            sizeof(*frame.authority_known));
+        if (frame.locals == NULL || frame.bound == NULL
+            || frame.authority_roots == NULL || frame.authority_known == NULL) {
             free(frame.locals);
             free(frame.bound);
+            free(frame.authority_roots);
+            free(frame.authority_known);
             diagnostic(interpreter, SOL_INTERPRETER_INTERNAL_INVARIANT, span,
                 "frame allocation failed");
             return error;
@@ -1100,6 +1122,8 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
     }
     free(frame.locals);
     free(frame.bound);
+    free(frame.authority_roots);
+    free(frame.authority_known);
     --interpreter->depth;
     interpreter->frame = frame.parent;
     if (result.kind == FLOW_RETURN) result.kind = FLOW_VALUE;
@@ -1423,9 +1447,18 @@ static Flow evaluate(Interpreter *interpreter, SolIrExpressionId expression_id) 
             sol_interpreter_value_unit(&output.value);
             return output;
         case SOL_IR_EXPR_LOCAL: {
-            const SolInterpreterValue *value = lookup_local(interpreter, expression->as.local);
-            if (value == NULL || !clone_runtime(interpreter, expression->span,
-                &output.value, value)) {
+            Frame *owner = NULL;
+            SolInterpreterValue *value = lookup_local(
+                interpreter, expression->as.local, &owner);
+            bool copied = value != NULL && expression->local_use != SOL_IR_LOCAL_USE_MOVE
+                && clone_runtime(interpreter, expression->span, &output.value, value);
+            if (value != NULL && expression->local_use == SOL_IR_LOCAL_USE_MOVE) {
+                output.value = *value;
+                sol_interpreter_value_init(value);
+                owner->bound[expression->as.local] = false;
+                copied = true;
+            }
+            if (!copied) {
                 if (value == NULL) diagnostic(interpreter,
                     SOL_INTERPRETER_INTERNAL_INVARIANT, expression->span,
                     "local is not bound in the active frame");

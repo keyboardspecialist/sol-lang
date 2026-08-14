@@ -1,0 +1,397 @@
+#include "sol/ownership.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef struct {
+    const SolIr *ir;
+    SolDiagnostics *diagnostics;
+    SolIrLocalUse *uses;
+    unsigned char *copy_states;
+    SolIrDefinitionId owner;
+    bool validating;
+} Ownership;
+
+static bool ownership_error(Ownership *analysis, SolSpan span,
+    const char *message) {
+    if (analysis->diagnostics != NULL) {
+        sol_diagnostics_add(analysis->diagnostics,
+            analysis->validating ? "SOL-INTERNAL-006" : "SOL-OWNERSHIP-001",
+            SOL_SEVERITY_ERROR, span, "%s", message);
+    }
+    return false;
+}
+
+static bool ownership_internal(Ownership *analysis, SolSpan span,
+    const char *message) {
+    if (analysis->diagnostics != NULL) {
+        sol_diagnostics_add(analysis->diagnostics, "SOL-INTERNAL-006",
+            SOL_SEVERITY_ERROR, span, "%s", message);
+    }
+    return false;
+}
+
+static bool type_is_copy(Ownership *analysis, SolIrTypeId id) {
+    return id < analysis->ir->type_count && analysis->copy_states[id] == 2;
+}
+
+static bool copy_dependencies_hold(Ownership *analysis, SolIrTypeId id) {
+    const SolIrType *type = &analysis->ir->types[id];
+    if (type->kind == SOL_IR_TYPE_OPTION || type->kind == SOL_IR_TYPE_RESULT) {
+        for (size_t index = 0; index < type->argument_count; ++index) {
+            if (!type_is_copy(analysis,
+                analysis->ir->type_ids[type->argument_offset + index])) return false;
+        }
+        return true;
+    }
+    if (type->kind != SOL_IR_TYPE_NOMINAL
+        || type->definition >= analysis->ir->definition_count) return true;
+    const SolIrDefinition *definition = &analysis->ir->definitions[type->definition];
+    if (definition->kind == SOL_IR_DEFINITION_RECORD) {
+        for (size_t index = 0; index < definition->fields.count; ++index) {
+            if (!type_is_copy(analysis,
+                analysis->ir->fields[definition->fields.offset + index].type)) return false;
+        }
+    } else if (definition->kind == SOL_IR_DEFINITION_ENUM) {
+        for (size_t variant = 0; variant < definition->variants.count; ++variant) {
+            SolIrSlice fields = analysis->ir->variants[
+                definition->variants.offset + variant].fields;
+            for (size_t field = 0; field < fields.count; ++field) {
+                if (!type_is_copy(analysis,
+                    analysis->ir->fields[fields.offset + field].type)) return false;
+            }
+        }
+    } else if (definition->representation >= analysis->ir->type_count
+        || !type_is_copy(analysis, definition->representation)) return false;
+    return true;
+}
+
+static void compute_copy_states(Ownership *analysis) {
+    for (size_t id = 0; id < analysis->ir->type_count; ++id) {
+        const SolIrType *type = &analysis->ir->types[id];
+        bool candidate = type->kind == SOL_IR_TYPE_INT64
+            || type->kind == SOL_IR_TYPE_BOOL || type->kind == SOL_IR_TYPE_TEXT
+            || type->kind == SOL_IR_TYPE_UNIT || type->kind == SOL_IR_TYPE_NEVER
+            || type->kind == SOL_IR_TYPE_OPTION || type->kind == SOL_IR_TYPE_RESULT;
+        if (type->kind == SOL_IR_TYPE_NOMINAL
+            && type->definition < analysis->ir->definition_count) {
+            const SolIrDefinition *definition
+                = &analysis->ir->definitions[type->definition];
+            candidate = definition->generic_parameters.count == 0
+                && (definition->kind == SOL_IR_DEFINITION_RECORD
+                    || definition->kind == SOL_IR_DEFINITION_ENUM
+                    || definition->kind == SOL_IR_DEFINITION_DISTINCT
+                    || definition->kind == SOL_IR_DEFINITION_REFINED);
+        }
+        analysis->copy_states[id] = candidate ? 2 : 3;
+    }
+    bool changed;
+    do {
+        changed = false;
+        for (size_t id = 0; id < analysis->ir->type_count; ++id) {
+            if (analysis->copy_states[id] == 2
+                && !copy_dependencies_hold(analysis, id)) {
+                analysis->copy_states[id] = 3;
+                changed = true;
+            }
+        }
+    } while (changed);
+}
+
+static bool analyze_expression(Ownership *analysis, SolIrExpressionId id,
+    bool *available, bool receiver, bool *reachable);
+
+static bool analyze_child(Ownership *analysis, SolIrExpressionId id,
+    bool *available, bool receiver, bool *reachable) {
+    bool direct_receiver = receiver && id < analysis->ir->expression_count
+        && analysis->ir->expressions[id].kind == SOL_IR_EXPR_LOCAL;
+    return analyze_expression(analysis, id, available, direct_receiver, reachable);
+}
+
+static void join_states(bool *destination, const bool *left, const bool *right,
+    size_t count) {
+    for (size_t index = 0; index < count; ++index) {
+        destination[index] = left[index] && right[index];
+    }
+}
+
+static bool analyze_branches(Ownership *analysis, SolIrExpressionId left_id,
+    SolIrExpressionId right_id, bool *available, bool *reachable) {
+    size_t count = analysis->ir->local_count;
+    bool *left = count == 0 ? NULL : malloc(count * sizeof(*left));
+    bool *right = count == 0 ? NULL : malloc(count * sizeof(*right));
+    if (count != 0 && (left == NULL || right == NULL)) {
+        free(left);
+        free(right);
+        return ownership_internal(analysis, (SolSpan){0},
+            "ownership branch allocation failed");
+    }
+    if (count != 0) {
+        memcpy(left, available, count * sizeof(*left));
+        memcpy(right, available, count * sizeof(*right));
+    }
+    bool left_reachable = true;
+    bool right_reachable = true;
+    bool valid = analyze_expression(analysis, left_id, left, false, &left_reachable)
+        && analyze_expression(analysis, right_id, right, false, &right_reachable);
+    if (valid) {
+        if (left_reachable && right_reachable) join_states(available, left, right, count);
+        else if (left_reachable && count != 0) memcpy(available, left, count * sizeof(*left));
+        else if (right_reachable && count != 0) memcpy(available, right, count * sizeof(*right));
+        *reachable = left_reachable || right_reachable;
+    }
+    free(left);
+    free(right);
+    return valid;
+}
+
+static bool analyze_match(Ownership *analysis, const SolIrExpression *expression,
+    bool *available, bool *reachable) {
+    if (!analyze_expression(analysis, expression->as.match_expr.scrutinee,
+        available, false, reachable) || !*reachable) return *reachable == false;
+    size_t count = analysis->ir->local_count;
+    bool *baseline = count == 0 ? NULL : malloc(count * sizeof(*baseline));
+    bool *branch = count == 0 ? NULL : malloc(count * sizeof(*branch));
+    bool *joined = count == 0 ? NULL : malloc(count * sizeof(*joined));
+    if (count != 0 && (baseline == NULL || branch == NULL || joined == NULL)) {
+        free(baseline); free(branch); free(joined);
+        return ownership_internal(analysis, expression->span,
+            "ownership match allocation failed");
+    }
+    if (count != 0) memcpy(baseline, available, count * sizeof(*baseline));
+    bool has_join = false;
+    bool valid = true;
+    for (size_t index = 0; valid && index < expression->as.match_expr.arms.count;
+        ++index) {
+        const SolIrArm *arm = &analysis->ir->arms[analysis->ir->arm_ids[
+            expression->as.match_expr.arms.offset + index]];
+        if (count != 0) memcpy(branch, baseline, count * sizeof(*branch));
+        for (size_t binding = 0; binding < arm->bindings.count; ++binding) {
+            branch[analysis->ir->roots[arm->bindings.offset + binding]] = true;
+        }
+        bool branch_reachable = true;
+        valid = analyze_expression(analysis, arm->value, branch, false,
+            &branch_reachable);
+        for (size_t binding = 0; binding < arm->bindings.count; ++binding) {
+            branch[analysis->ir->roots[arm->bindings.offset + binding]] = false;
+        }
+        if (!valid || !branch_reachable) continue;
+        if (!has_join && count != 0) memcpy(joined, branch, count * sizeof(*joined));
+        else if (has_join) join_states(joined, joined, branch, count);
+        has_join = true;
+    }
+    if (valid && has_join && count != 0) memcpy(available, joined, count * sizeof(*joined));
+    *reachable = valid && has_join;
+    free(baseline); free(branch); free(joined);
+    return valid;
+}
+
+static bool analyze_expression(Ownership *analysis, SolIrExpressionId id,
+    bool *available, bool receiver, bool *reachable) {
+    if (id >= analysis->ir->expression_count) {
+        return ownership_internal(analysis, (SolSpan){0},
+            "ownership expression is out of range");
+    }
+    if (!*reachable) return true;
+    const SolIrExpression *expression = &analysis->ir->expressions[id];
+    switch (expression->kind) {
+        case SOL_IR_EXPR_LOCAL: {
+            SolIrLocalId local = expression->as.local;
+            if (local >= analysis->ir->local_count
+                || analysis->ir->locals[local].owner != analysis->owner) {
+                return ownership_internal(analysis, expression->span,
+                    "local ownership is inconsistent with its callable");
+            }
+            SolIrLocalUse use = receiver ? SOL_IR_LOCAL_USE_RECEIVER
+                : type_is_copy(analysis, analysis->ir->locals[local].type)
+                    ? SOL_IR_LOCAL_USE_COPY : SOL_IR_LOCAL_USE_MOVE;
+            analysis->uses[id] = use;
+            if (!available[local]) {
+                char message[256];
+                const char *name = analysis->ir->locals[local].name;
+                int written = snprintf(message, sizeof(message),
+                    "local '%s' is used after it was moved", name);
+                if (written < 0) return false;
+                return ownership_error(analysis, expression->span, message);
+            }
+            if (use == SOL_IR_LOCAL_USE_MOVE) available[local] = false;
+            return true;
+        }
+        case SOL_IR_EXPR_BOUND_OPERATION:
+            return analyze_child(analysis, expression->as.operation.receiver,
+                available, true, reachable);
+        case SOL_IR_EXPR_UNARY:
+            return analyze_expression(analysis, expression->as.unary.operand,
+                available, false, reachable);
+        case SOL_IR_EXPR_BINARY:
+            if (!analyze_expression(analysis, expression->as.binary.left,
+                available, false, reachable) || !*reachable) return *reachable == false;
+            if (expression->as.binary.operator_kind == SOL_TOKEN_AMP_AMP
+                || expression->as.binary.operator_kind == SOL_TOKEN_PIPE_PIPE) {
+                size_t count = analysis->ir->local_count;
+                bool *skipped = count == 0 ? NULL : malloc(count * sizeof(*skipped));
+                if (count != 0 && skipped == NULL) return ownership_internal(
+                    analysis, expression->span, "ownership join allocation failed");
+                if (count != 0) memcpy(skipped, available, count * sizeof(*skipped));
+                bool right_reachable = true;
+                bool valid = analyze_expression(analysis, expression->as.binary.right,
+                    available, false, &right_reachable);
+                if (valid && right_reachable) join_states(available, skipped, available, count);
+                else if (valid && count != 0) memcpy(available, skipped,
+                    count * sizeof(*skipped));
+                *reachable = valid;
+                free(skipped);
+                return valid;
+            }
+            return analyze_expression(analysis, expression->as.binary.right,
+                available, false, reachable);
+        case SOL_IR_EXPR_CALL:
+            if ((expression->as.call.kind == SOL_IR_CALL_CALLBACK
+                    || expression->as.call.kind == SOL_IR_CALL_CAPABILITY)
+                && !analyze_expression(analysis, expression->as.call.callee,
+                    available, false, reachable)) return false;
+            if (expression->as.call.kind == SOL_IR_CALL_METHOD
+                && !analyze_expression(analysis, expression->as.call.receiver,
+                    available, false, reachable)) return false;
+            for (size_t index = 0; *reachable
+                && index < expression->as.call.operands.count; ++index) {
+                if (!analyze_expression(analysis, analysis->ir->operands[
+                    expression->as.call.operands.offset + index].value,
+                    available, false, reachable)) return false;
+            }
+            return true;
+        case SOL_IR_EXPR_RECORD:
+            for (size_t index = 0; *reachable
+                && index < expression->as.record.fields.count; ++index) {
+                if (!analyze_expression(analysis, analysis->ir->operands[
+                    expression->as.record.fields.offset + index].value,
+                    available, false, reachable)) return false;
+            }
+            return true;
+        case SOL_IR_EXPR_FIELD:
+            return analyze_expression(analysis, expression->as.field.base,
+                available, false, reachable);
+        case SOL_IR_EXPR_IF:
+            if (!analyze_expression(analysis, expression->as.if_expr.condition,
+                available, false, reachable) || !*reachable) return *reachable == false;
+            return analyze_branches(analysis, expression->as.if_expr.then_branch,
+                expression->as.if_expr.else_branch, available, reachable);
+        case SOL_IR_EXPR_MATCH:
+            return analyze_match(analysis, expression, available, reachable);
+        case SOL_IR_EXPR_BLOCK:
+            for (size_t index = 0; *reachable && index < expression->as.block.count;
+                ++index) {
+                const SolIrStatement *statement = &analysis->ir->statements[
+                    analysis->ir->statement_ids[expression->as.block.offset + index]];
+                if (!analyze_expression(analysis, statement->expression,
+                    available, false, reachable)) return false;
+                if (*reachable && statement->kind == SOL_IR_STATEMENT_LET) {
+                    available[statement->local] = true;
+                } else if (*reachable && statement->kind == SOL_IR_STATEMENT_RETURN) {
+                    *reachable = false;
+                }
+            }
+            for (size_t index = 0; index < expression->as.block.count; ++index) {
+                const SolIrStatement *statement = &analysis->ir->statements[
+                    analysis->ir->statement_ids[expression->as.block.offset + index]];
+                if (statement->kind == SOL_IR_STATEMENT_LET) {
+                    available[statement->local] = false;
+                }
+            }
+            return true;
+        case SOL_IR_EXPR_PROPAGATE:
+            return analyze_expression(analysis, expression->as.propagate.operand,
+                available, false, reachable);
+        case SOL_IR_EXPR_HANDLE:
+            if (!analyze_child(analysis, expression->as.handler.authority,
+                available, true, reachable)
+                || !analyze_child(analysis, expression->as.handler.provider,
+                    available, true, reachable)) return false;
+            return analyze_expression(analysis, expression->as.handler.body,
+                available, false, reachable);
+        default:
+            return true;
+    }
+}
+
+static bool run_ownership(Ownership *analysis) {
+    size_t local_count = analysis->ir->local_count;
+    bool *available = local_count == 0 ? NULL
+        : calloc(local_count, sizeof(*available));
+    if (local_count != 0 && available == NULL) return ownership_internal(
+        analysis, (SolSpan){0}, "ownership state allocation failed");
+    bool valid = true;
+    for (size_t index = 0; valid && index < analysis->ir->callable_count; ++index) {
+        const SolIrCallable *callable = &analysis->ir->callables[index];
+        if (callable->body == SOL_IR_NONE) continue;
+        if (local_count != 0) memset(available, 0,
+            local_count * sizeof(*available));
+        analysis->owner = callable->owner;
+        for (size_t parameter = 0; parameter < callable->parameters.count; ++parameter) {
+            available[analysis->ir->roots[callable->parameters.offset + parameter]] = true;
+        }
+        if (callable->receiver != SOL_IR_NONE) available[callable->receiver] = true;
+        if (callable->capability_source != SOL_IR_NONE) {
+            available[callable->capability_source] = true;
+        }
+        bool reachable = true;
+        valid = analyze_expression(analysis, callable->body, available, false,
+            &reachable);
+    }
+    free(available);
+    return valid;
+}
+
+static bool ownership_prepare(const SolIr *ir, SolDiagnostics *diagnostics,
+    bool validating, Ownership *analysis) {
+    memset(analysis, 0, sizeof(*analysis));
+    analysis->ir = ir;
+    analysis->diagnostics = diagnostics;
+    analysis->validating = validating;
+    analysis->uses = ir->expression_count == 0 ? NULL
+        : calloc(ir->expression_count, sizeof(*analysis->uses));
+    analysis->copy_states = ir->type_count == 0 ? NULL
+        : calloc(ir->type_count, sizeof(*analysis->copy_states));
+    if ((ir->expression_count != 0 && analysis->uses == NULL)
+        || (ir->type_count != 0 && analysis->copy_states == NULL)) {
+        free(analysis->uses);
+        free(analysis->copy_states);
+        return ownership_internal(analysis, (SolSpan){0},
+            "ownership metadata allocation failed");
+    }
+    compute_copy_states(analysis);
+    return true;
+}
+
+bool sol_ir_analyze_ownership(SolIr *ir, SolDiagnostics *diagnostics) {
+    if (ir == NULL) return false;
+    Ownership analysis;
+    if (!ownership_prepare(ir, diagnostics, false, &analysis)) return false;
+    bool valid = run_ownership(&analysis);
+    if (valid) {
+        for (size_t index = 0; index < ir->expression_count; ++index) {
+            ir->expressions[index].local_use = analysis.uses[index];
+        }
+    }
+    free(analysis.uses);
+    free(analysis.copy_states);
+    return valid;
+}
+
+bool sol_ir_validate_ownership(const SolIr *ir, SolDiagnostics *diagnostics) {
+    if (ir == NULL) return false;
+    Ownership analysis;
+    if (!ownership_prepare(ir, diagnostics, true, &analysis)) return false;
+    bool valid = run_ownership(&analysis);
+    for (size_t index = 0; valid && index < ir->expression_count; ++index) {
+        if (ir->expressions[index].local_use > SOL_IR_LOCAL_USE_RECEIVER
+            || ir->expressions[index].local_use != analysis.uses[index]) {
+            valid = ownership_error(&analysis, ir->expressions[index].span,
+                "IR local-use ownership metadata is inconsistent");
+        }
+    }
+    free(analysis.uses);
+    free(analysis.copy_states);
+    return valid;
+}

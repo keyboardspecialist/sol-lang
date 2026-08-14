@@ -207,6 +207,14 @@ typedef enum {
 } SolIrExpressionKind;
 
 typedef enum {
+    SOL_IR_LOCAL_USE_NONE,
+    SOL_IR_LOCAL_USE_COPY,
+    SOL_IR_LOCAL_USE_MOVE,
+    /* Direct capability operation and handler setup receivers only. */
+    SOL_IR_LOCAL_USE_RECEIVER,
+} SolIrLocalUse;
+
+typedef enum {
     SOL_IR_CALL_FUNCTION,
     SOL_IR_CALL_CALLBACK,
     SOL_IR_CALL_CAPABILITY,
@@ -231,6 +239,7 @@ typedef struct {
 
 typedef struct {
     SolIrExpressionKind kind;
+    SolIrLocalUse local_use;
     SolSpan span;
     SolIrTypeId type;
     SolIrSlice capability_roots;

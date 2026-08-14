@@ -1,4 +1,5 @@
 #include "sol/ir.h"
+#include "sol/ownership.h"
 
 #include <errno.h>
 #include <stdlib.h>
@@ -2310,8 +2311,7 @@ static bool sol_ir_executable_expression(
     SolIrDefinitionId owner,
     unsigned char *states
 ) {
-    if (id >= ir->expression_count || states[id] == 1) return false;
-    if (states[id] == 2) return true;
+    if (id >= ir->expression_count || states[id] != 0) return false;
     states[id] = 1;
     const SolIrExpression *expression = &ir->expressions[id];
 #define SOL_IR_EXEC(child) \
@@ -2397,7 +2397,8 @@ static bool sol_ir_executable_expression(
     return true;
 }
 
-bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
+static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
+    bool validate_ownership) {
     if (ir == NULL || ir->source_bytes == NULL || ir->source_path == NULL
         || (ir->type_count != 0 && ir->types == NULL)
         || (ir->type_id_count != 0 && ir->type_ids == NULL)
@@ -2700,6 +2701,27 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
                 && owner_kind == SOL_IR_DEFINITION_IMPLEMENTATION);
         if (!exact_owner) return sol_ir_error(diagnostics,
             "IR callable kind does not match its owning definition");
+        for (size_t parameter = 0; parameter < callable->parameters.count;
+            ++parameter) {
+            SolIrLocalId local = ir->roots[callable->parameters.offset + parameter];
+            if (local >= ir->local_count || ir->locals[local].owner != callable->owner
+                || ir->locals[local].kind != SOL_IR_LOCAL_PARAMETER
+                || local == callable->receiver || local == callable->capability_source) {
+                return sol_ir_error(diagnostics,
+                    "IR callable parameter binding is malformed");
+            }
+            for (size_t previous = 0; previous < parameter; ++previous) {
+                if (ir->roots[callable->parameters.offset + previous] == local) {
+                    return sol_ir_error(diagnostics,
+                        "IR callable parameter binding is duplicated");
+                }
+            }
+        }
+        if (callable->receiver != SOL_IR_NONE
+            && callable->receiver == callable->capability_source) {
+            return sol_ir_error(diagnostics,
+                "IR callable receiver bindings are duplicated");
+        }
     }
     for (size_t index = 0; index < ir->generic_parameter_count; ++index) {
         const SolIrGenericParameter *parameter = &ir->generic_parameters[index];
@@ -3166,6 +3188,17 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
                 : statement->local != SOL_IR_NONE)) {
             return sol_ir_error(diagnostics, "malformed IR statement");
         }
+        if (statement->kind == SOL_IR_STATEMENT_LET) {
+            if (ir->locals[statement->local].kind != SOL_IR_LOCAL_BINDING) {
+                return sol_ir_error(diagnostics, "IR let target is not a binding local");
+            }
+            for (size_t previous = 0; previous < index; ++previous) {
+                if (ir->statements[previous].kind == SOL_IR_STATEMENT_LET
+                    && ir->statements[previous].local == statement->local) {
+                    return sol_ir_error(diagnostics, "IR let binding is duplicated");
+                }
+            }
+        }
     }
     for (size_t index = 0; index < ir->arm_id_count; ++index) {
         if (ir->arm_ids[index] >= ir->arm_count) {
@@ -3198,6 +3231,19 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
                         != ir->fields[fields.offset + binding].type) {
                     return sol_ir_error(diagnostics,
                         "IR variant arm payload binding type is invalid");
+                }
+                for (size_t previous_arm = 0; previous_arm <= index;
+                    ++previous_arm) {
+                    const SolIrArm *previous = &ir->arms[previous_arm];
+                    size_t limit = previous_arm == index ? binding : previous->bindings.count;
+                    for (size_t previous_binding = 0; previous_binding < limit;
+                        ++previous_binding) {
+                        if (ir->roots[previous->bindings.offset + previous_binding]
+                            == local) {
+                            return sol_ir_error(diagnostics,
+                                "IR pattern binding is duplicated");
+                        }
+                    }
                 }
             }
         }
@@ -3300,18 +3346,21 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
         return sol_ir_error(diagnostics, "IR executable validation allocation failed");
     }
     for (size_t index = 0; index < ir->callable_count; ++index) {
-        if (states != NULL) memset(states, 0, ir->expression_count);
         SolIrExpressionId body = ir->callables[index].body;
         if (body != SOL_IR_NONE && !sol_ir_executable_expression(
             ir, body, ir->callables[index].owner, states
         )) {
             free(states);
             return sol_ir_error(diagnostics,
-                "contract-only or compile-time expression is executable");
+                "executable expression is shared, cyclic, or non-runtime");
         }
     }
     free(states);
-    return true;
+    return !validate_ownership || sol_ir_validate_ownership(ir, diagnostics);
+}
+
+bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
+    return sol_ir_validate_impl(ir, diagnostics, true);
 }
 
 bool sol_ir_lower_scoped(
@@ -3363,6 +3412,10 @@ bool sol_ir_lower_scoped(
     if (valid && !sol_ir_lower_statements_arms(&lowerer)) valid = sol_ir_error(diagnostics, "IR control-flow lowering failed");
     if (valid && !sol_ir_lower_contracts(&lowerer)) valid = sol_ir_error(diagnostics, "IR contract lowering failed");
     if (valid && !sol_ir_lower_files(&lowerer)) valid = sol_ir_error(diagnostics, "IR source-file lowering failed");
+    if (valid && !lowerer.failed) {
+        valid = sol_ir_validate_impl(&lowered, diagnostics, false);
+    }
+    if (valid && !lowerer.failed) valid = sol_ir_analyze_ownership(&lowered, diagnostics);
     if (valid && !lowerer.failed) valid = sol_ir_validate(&lowered, diagnostics);
     sol_ir_free_maps(&lowerer);
     if (!valid || lowerer.failed) {
