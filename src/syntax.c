@@ -408,7 +408,27 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
                 && (item->flavor != SOL_TYPE_DECLARATION_NONE
                     || item->representation_type != SOL_AST_NONE))
             || (item->kind != SOL_ITEM_FUNCTION && item->kind != SOL_ITEM_TYPE
+                && item->kind != SOL_ITEM_TEST
                 && item->first_contract != SOL_AST_NONE)
+            || (item->kind == SOL_ITEM_TEST
+                && (item->name.end - item->name.start < 2 || item->is_public
+                    || item->stable_identity.start != item->stable_identity.end
+                    || item->body == SOL_AST_NONE
+                    || item->first_parameter != SOL_AST_NONE
+                    || item->return_type.start != 0 || item->return_type.end != 0
+                    || item->return_type_id != SOL_AST_NONE
+                    || item->first_field != SOL_AST_NONE
+                    || item->first_variant != SOL_AST_NONE || item->is_open
+                    || item->first_effect != SOL_AST_NONE || item->has_effect_clause
+                    || item->first_contract != SOL_AST_NONE
+                    || item->first_member != SOL_AST_NONE
+                    || item->result_authority_parameter != SOL_AST_NONE
+                    || item->capability_source != SOL_AST_NONE
+                    || item->first_type_parameter != SOL_AST_NONE
+                    || item->first_effect_parameter != SOL_AST_NONE
+                    || item->trait_name.start != 0 || item->trait_name.end != 0
+                    || item->implementation_type != SOL_AST_NONE
+                    || item->first_trait_method != SOL_AST_NONE))
             || (item->body != SOL_AST_NONE
                 && !sol_structure_expression(
                     &validator,

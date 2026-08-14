@@ -33,6 +33,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
       resolved dispatch/member metadata, normalized effects, and contract templates.
 - [x] Deterministic compiler-internal reference interpreter over validated owning IR,
       with bounded execution, explicit host capabilities, and ignored contracts.
+- [x] Deterministic `sol test` discovery and authored Boolean unit tests over owning IR.
 
 ## Prioritized Work
 
@@ -49,7 +50,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [x] | 9 | Define stable semantic IDs, references, and rename identity | 5 | 5 | Modules and packages |
 | [x] | 10 | Define a canonical typed Sol IR | 5 | 5 | Types, traits, and IDs |
 | [x] | 11 | Implement an interpreter for language conformance tests | 5 | 4 | Typed IR |
-| [ ] | 12 | Add `sol test` for examples, unit tests, and properties | 4 | 3 | Interpreter |
+| [x] | 12 | Add deterministic `sol test` and authored Boolean unit tests | 4 | 3 | Interpreter |
 | [ ] | 13 | Add `sol effects` authority and call-graph inspection | 3 | 2 | Effect tables |
 | [ ] | 14 | Stabilize serialized syntax, HIR, type, effect, contract, and diagnostic schemas | 4 | 5 | Stable IDs and IR |
 | [ ] | 15 | Define and check affine moves, copies, and use-after-move errors | 5 | 5 | Typed IR |
@@ -58,7 +59,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [ ] | 18 | Add explicit unsafe boundaries and initial FFI rules | 4 | 4 | Ownership and effects |
 | [ ] | 19 | Integrate ownership facts with effects, contracts, and diagnostics | 5 | 5 | Ownership pipeline |
 | [ ] | 20 | Generate runtime contract checks and normalized proof obligations | 5 | 5 | IR and ownership |
-| [ ] | 21 | Add properties, generated boundary tests, and ghost state | 4 | 4 | Interpreter and obligations |
+| [ ] | 21 | Add examples, authored/generated properties, boundary generation, shrinking, seeds, and ghost state | 4 | 4 | Interpreter and obligations |
 | [ ] | 22 | Integrate SMT proof policies, solver execution, and caching | 4 | 5 | Logical obligation IR |
 | [ ] | 23 | Select and integrate an established native or WebAssembly backend | 5 | 5 | IR and ownership |
 | [ ] | 24 | Implement package entry points and `sol build` / `sol run` | 5 | 4 | Modules and backend |

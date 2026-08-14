@@ -89,6 +89,7 @@ typedef enum {
     SOL_IR_DEFINITION_FUNCTION,
     SOL_IR_DEFINITION_TRAIT,
     SOL_IR_DEFINITION_IMPLEMENTATION,
+    SOL_IR_DEFINITION_TEST,
 } SolIrDefinitionKind;
 
 typedef struct {
@@ -114,6 +115,7 @@ typedef enum {
     SOL_IR_CALLABLE_CAPABILITY,
     SOL_IR_CALLABLE_TRAIT_REQUIREMENT,
     SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION,
+    SOL_IR_CALLABLE_TEST,
 } SolIrCallableKind;
 
 typedef struct {

@@ -151,6 +151,8 @@ typedef struct {
     SolInterpreterLimits limits;
     SolInterpreterHostOperation host_operation;
     void *host_context;
+    /* Required to select a TEST callable; forbidden for ordinary functions. */
+    bool test_entry;
 } SolInterpreterRequest;
 
 typedef struct {

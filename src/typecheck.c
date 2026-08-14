@@ -289,7 +289,12 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                 && item->implementation_type >= syntax->type_count)
             || definition->syntax_item != index
             || definition->kind != item->kind
-            || !sol_type_span_valid(checker->source, definition->name)) {
+            || !sol_type_span_valid(checker->source, definition->name)
+            || !sol_type_span_valid(checker->source, definition->stable_identity)
+            || definition->name.start != item->name.start
+            || definition->name.end != item->name.end
+            || definition->stable_identity.start != item->stable_identity.start
+            || definition->stable_identity.end != item->stable_identity.end) {
             sol_type_malformed(checker);
             return false;
         }
@@ -6655,6 +6660,8 @@ bool sol_type_check(
         checker.current_definition = index;
         checker.types->definitions[index] = item->kind == SOL_ITEM_FUNCTION
             ? sol_type_from_id(&checker, item->return_type_id)
+            : item->kind == SOL_ITEM_TEST
+                ? (SolType){.kind = SOL_TYPE_BOOL}
             : (item->kind == SOL_ITEM_RECORD || item->kind == SOL_ITEM_ENUM
                     || item->kind == SOL_ITEM_TYPE
                     || item->kind == SOL_ITEM_CAPABILITY)
@@ -7001,7 +7008,8 @@ bool sol_type_check(
     }
     for (size_t index = 0; index < syntax->item_count; ++index) {
         const SolSyntaxItem *item = &syntax->items[index];
-        if (item->kind != SOL_ITEM_FUNCTION || item->body == SOL_AST_NONE) {
+        if ((item->kind != SOL_ITEM_FUNCTION && item->kind != SOL_ITEM_TEST)
+            || item->body == SOL_AST_NONE) {
             continue;
         }
         checker.current_definition = index;
@@ -7036,7 +7044,9 @@ bool sol_type_check(
             snprintf(
                 message,
                 sizeof(message),
-                "function body type mismatch: expected %s, found %s",
+                item->kind == SOL_ITEM_TEST
+                    ? "test body type mismatch: expected %s, found %s"
+                    : "function body type mismatch: expected %s, found %s",
                 sol_type_name(checker.expected_return),
                 sol_type_name(body_type)
             );

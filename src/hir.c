@@ -61,6 +61,29 @@ static bool sol_span_equal(const SolSource *source, SolSpan left, SolSpan right)
         && memcmp(source->text + left.start, source->text + right.start, left_length) == 0;
 }
 
+static int sol_string_next_byte(const SolSource *source, SolSpan span, size_t *cursor) {
+    if (*cursor + 1 >= span.end) return -1;
+    unsigned char byte = (unsigned char)source->text[(*cursor)++];
+    if (byte != '\\') return (int)byte;
+    if (*cursor + 1 >= span.end) return -1;
+    byte = (unsigned char)source->text[(*cursor)++];
+    if (byte == 'n') return '\n';
+    if (byte == 'r') return '\r';
+    if (byte == 't') return '\t';
+    return (int)byte;
+}
+
+static bool sol_string_span_equal(const SolSource *source, SolSpan left, SolSpan right) {
+    size_t left_cursor = left.start + 1;
+    size_t right_cursor = right.start + 1;
+    for (;;) {
+        int left_byte = sol_string_next_byte(source, left, &left_cursor);
+        int right_byte = sol_string_next_byte(source, right, &right_cursor);
+        if (left_byte != right_byte) return false;
+        if (left_byte < 0) return true;
+    }
+}
+
 static int sol_path_next_byte(const SolSource *source, SolSpan span, size_t *cursor) {
     while (*cursor < span.end) {
         unsigned char byte = (unsigned char)source->text[*cursor];
@@ -400,7 +423,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     }
     for (size_t index = 0; index < syntax->item_count; ++index) {
         const SolSyntaxItem *item = &syntax->items[index];
-        if ((int)item->kind < 0 || item->kind > SOL_ITEM_IMPLEMENTATION
+        if ((int)item->kind < 0 || item->kind > SOL_ITEM_TEST
             || (int)item->flavor < 0
             || item->flavor > SOL_TYPE_DECLARATION_REFINED
             || !sol_span_valid(resolver->source, item->name)
@@ -432,6 +455,30 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                 && item->first_type_parameter >= syntax->type_parameter_count)
             || (item->first_effect_parameter != SOL_AST_NONE
                 && item->first_effect_parameter >= syntax->effect_parameter_count)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+        if (item->kind == SOL_ITEM_TEST
+            && (item->name.end - item->name.start < 2
+                || resolver->source->text[item->name.start] != '"'
+                || resolver->source->text[item->name.end - 1] != '"'
+                || item->is_public || item->body == SOL_AST_NONE
+                || item->stable_identity.start != item->stable_identity.end
+                || item->first_parameter != SOL_AST_NONE
+                || item->return_type.start != 0 || item->return_type.end != 0
+                || item->return_type_id != SOL_AST_NONE
+                || item->first_field != SOL_AST_NONE
+                || item->first_variant != SOL_AST_NONE || item->is_open
+                || item->first_effect != SOL_AST_NONE || item->has_effect_clause
+                || item->first_contract != SOL_AST_NONE
+                || item->first_member != SOL_AST_NONE
+                || item->result_authority_parameter != SOL_AST_NONE
+                || item->capability_source != SOL_AST_NONE
+                || item->first_type_parameter != SOL_AST_NONE
+                || item->first_effect_parameter != SOL_AST_NONE
+                || item->trait_name.start != 0 || item->trait_name.end != 0
+                || item->implementation_type != SOL_AST_NONE
+                || item->first_trait_method != SOL_AST_NONE)) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -1235,6 +1282,7 @@ static SolResolution sol_resolver_visible_definition(
     for (size_t definition = 0;
         definition < resolver->module->definition_count;
         ++definition) {
+        if (resolver->syntax->items[definition].kind == SOL_ITEM_TEST) continue;
         if (sol_resolver_same_module(
                 resolver, file, resolver->module->item_files[definition]
             ) && sol_path_span_equal(
@@ -1563,21 +1611,30 @@ static void sol_resolver_collect_definitions(SolResolver *resolver) {
     for (size_t index = 0; index < resolver->syntax->item_count; ++index) {
         const SolSyntaxItem *item = &resolver->syntax->items[index];
         for (size_t previous = 0; previous < index; ++previous) {
+            bool tests = item->kind == SOL_ITEM_TEST
+                && resolver->syntax->items[previous].kind == SOL_ITEM_TEST;
+            bool declarations = item->kind != SOL_ITEM_TEST
+                && resolver->syntax->items[previous].kind != SOL_ITEM_TEST;
             if (sol_resolver_same_module(
                     resolver,
                     resolver->module->item_files[previous],
                     resolver->module->item_files[index]
-                ) && sol_path_span_equal(
-                resolver->source,
-                resolver->module->definitions[previous].name,
-                item->name
-            )) {
+                ) && ((tests && sol_string_span_equal(
+                        resolver->source,
+                        resolver->module->definitions[previous].name,
+                        item->name
+                    )) || (declarations && sol_path_span_equal(
+                        resolver->source,
+                        resolver->module->definitions[previous].name,
+                        item->name
+                    )))) {
                 sol_diagnostics_add(
                     resolver->diagnostics,
                     "SOL-RESOLVE-001",
                     SOL_SEVERITY_ERROR,
                     item->name,
-                    "duplicate declaration in module"
+                    tests ? "duplicate test label in module"
+                        : "duplicate declaration in module"
                 );
                 break;
             }
@@ -2218,7 +2275,8 @@ static bool sol_hir_lower_impl(
     if (package_aware) sol_resolver_resolve_imports(&resolver);
     sol_resolver_resolve_types(&resolver);
     for (size_t index = 0; index < syntax->item_count; ++index) {
-        if (syntax->items[index].kind == SOL_ITEM_FUNCTION) {
+        if (syntax->items[index].kind == SOL_ITEM_FUNCTION
+            || syntax->items[index].kind == SOL_ITEM_TEST) {
             sol_resolver_function(&resolver, index);
         } else if (syntax->items[index].kind == SOL_ITEM_TYPE) {
             sol_resolver_type_declaration(&resolver, index);

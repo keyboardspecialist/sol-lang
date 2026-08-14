@@ -883,9 +883,46 @@ void sol_package_diagnostics_render_human(
     }
 }
 
+static bool sol_package_json_continuation(unsigned char byte) {
+    return byte >= 0x80 && byte <= 0xbf;
+}
+
+static size_t sol_package_json_utf8_length(const unsigned char *text) {
+    unsigned char first = text[0];
+    if (first < 0x80) return 1;
+    unsigned char second = text[1];
+    if (second == 0) return 0;
+    if (first >= 0xc2 && first <= 0xdf) {
+        return sol_package_json_continuation(second) ? 2 : 0;
+    }
+    unsigned char third = text[2];
+    if (third == 0 || !sol_package_json_continuation(third)) return 0;
+    if ((first == 0xe0 && second >= 0xa0 && second <= 0xbf)
+        || ((first >= 0xe1 && first <= 0xec)
+            && sol_package_json_continuation(second))
+        || (first == 0xed && second >= 0x80 && second <= 0x9f)
+        || ((first == 0xee || first == 0xef)
+            && sol_package_json_continuation(second))) return 3;
+    if (first < 0xf0 || first > 0xf4) return 0;
+    unsigned char fourth = text[3];
+    if (fourth == 0 || !sol_package_json_continuation(fourth)) return 0;
+    if ((first == 0xf0 && second >= 0x90 && second <= 0xbf)
+        || ((first >= 0xf1 && first <= 0xf3)
+            && sol_package_json_continuation(second))
+        || (first == 0xf4 && second >= 0x80 && second <= 0x8f)) return 4;
+    return 0;
+}
+
 static void sol_package_json_string(FILE *stream, const char *text) {
     fputc('"', stream);
-    for (const unsigned char *cursor = (const unsigned char *)text; *cursor != '\0'; ++cursor) {
+    const unsigned char *cursor = (const unsigned char *)text;
+    while (*cursor != '\0') {
+        size_t utf8_length = sol_package_json_utf8_length(cursor);
+        if (*cursor >= 0x80 && utf8_length != 0) {
+            (void)fwrite(cursor, 1, utf8_length, stream);
+            cursor += utf8_length;
+            continue;
+        }
         switch (*cursor) {
             case '"': fputs("\\\"", stream); break;
             case '\\': fputs("\\\\", stream); break;
@@ -895,9 +932,12 @@ static void sol_package_json_string(FILE *stream, const char *text) {
             case '\r': fputs("\\r", stream); break;
             case '\t': fputs("\\t", stream); break;
             default:
-                if (*cursor < 0x20) fprintf(stream, "\\u%04x", (unsigned int)*cursor);
+                if (*cursor < 0x20 || *cursor >= 0x80) {
+                    fprintf(stream, "\\u%04x", (unsigned int)*cursor);
+                }
                 else fputc((int)*cursor, stream);
         }
+        ++cursor;
     }
     fputc('"', stream);
 }

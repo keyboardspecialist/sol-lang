@@ -217,6 +217,7 @@ static SolIrDefinitionKind sol_ir_definition_kind(const SolSyntaxItem *item) {
         case SOL_ITEM_FUNCTION: return SOL_IR_DEFINITION_FUNCTION;
         case SOL_ITEM_TRAIT: return SOL_IR_DEFINITION_TRAIT;
         case SOL_ITEM_IMPLEMENTATION: return SOL_IR_DEFINITION_IMPLEMENTATION;
+        case SOL_ITEM_TEST: return SOL_IR_DEFINITION_TEST;
         case SOL_ITEM_TYPE:
             return item->flavor == SOL_TYPE_DECLARATION_REFINED
                 ? SOL_IR_DEFINITION_REFINED : SOL_IR_DEFINITION_DISTINCT;
@@ -225,6 +226,9 @@ static SolIrDefinitionKind sol_ir_definition_kind(const SolSyntaxItem *item) {
 }
 
 static SolIrTypeId sol_ir_type(SolIrLowerer *lowerer, SolType type);
+static bool sol_ir_decode_string(
+    SolIrLowerer *lowerer, SolSpan span, char **output
+);
 static SolIrSlice sol_ir_effect_row(
     SolIrLowerer *lowerer, const SolEffectAtom *atoms, size_t count
 );
@@ -1071,15 +1075,29 @@ static bool sol_ir_lower_declarations(SolIrLowerer *lowerer) {
             definition->implementation_trait = SOL_IR_NONE;
             definition->implementation_target = SOL_IR_NONE;
         }
+        if (source->kind == SOL_ITEM_TEST) {
+            free(definition->name);
+            definition->name = NULL;
+            if (!sol_ir_decode_string(lowerer, source->name, &definition->name)) return false;
+        }
         if (definition->name == NULL) return false;
     }
     for (size_t index = 0; index < count; ++index) {
         const SolSyntaxItem *item = &lowerer->syntax->items[index];
-        if (item->kind != SOL_ITEM_FUNCTION) continue;
-        SolIrCallableId callable = sol_ir_add_callable(lowerer, SOL_IR_CALLABLE_FUNCTION,
+        if (item->kind != SOL_ITEM_FUNCTION && item->kind != SOL_ITEM_TEST) continue;
+        SolIrCallableKind kind = item->kind == SOL_ITEM_TEST
+            ? SOL_IR_CALLABLE_TEST : SOL_IR_CALLABLE_FUNCTION;
+        SolIrCallableId callable = sol_ir_add_callable(lowerer, kind,
             index, item->name, item->span, item->first_parameter, false,
             lowerer->types->definitions[index], item->body, &lowerer->effects->functions[index]);
         if (callable == SOL_IR_NONE) return false;
+        if (item->kind == SOL_ITEM_TEST) {
+            free(lowerer->ir->callables[callable].name);
+            lowerer->ir->callables[callable].name = NULL;
+            if (!sol_ir_decode_string(
+                lowerer, item->name, &lowerer->ir->callables[callable].name
+            )) return false;
+        }
         lowerer->definition_callables[index] = callable;
         lowerer->ir->definitions[index].callable = callable;
         lowerer->ir->callables[callable].generic_parameters
@@ -2050,6 +2068,32 @@ static bool sol_ir_function_type_matches_callable(
     return true;
 }
 
+static bool sol_ir_definition_expression_valid(
+    const SolIr *ir, SolIrExpressionId expression_id
+) {
+    if (expression_id >= ir->expression_count) return false;
+    const SolIrExpression *expression = &ir->expressions[expression_id];
+    SolIrDefinitionId definition_id = expression->as.definition;
+    if (definition_id >= ir->definition_count) return false;
+    const SolIrDefinition *definition = &ir->definitions[definition_id];
+    if (definition->kind != SOL_IR_DEFINITION_FUNCTION) return false;
+    if (definition->callable >= ir->callable_count) return false;
+    const SolIrCallable *callable = &ir->callables[definition->callable];
+    if (callable->kind != SOL_IR_CALLABLE_FUNCTION
+        || callable->owner != definition_id || expression->type >= ir->type_count) return false;
+    const SolIrType *type = &ir->types[expression->type];
+    if (type->kind != SOL_IR_TYPE_FUNCTION) return false;
+    bool exact_type = type->definition == definition_id
+        && type->argument_count == 0 && type->parameter_count == 0
+        && type->result == SOL_IR_NONE && type->effects.count == 0;
+    return callable->generic_parameters.count == 0
+        && callable->effect_parameters.count == 0
+        && (exact_type
+            || (type->definition == SOL_IR_NONE
+                && sol_ir_function_type_matches_callable(
+                    ir, expression->type, definition->callable)));
+}
+
 static bool sol_ir_expression_capability_definition(
     const SolIr *ir, SolIrExpressionId expression, SolIrDefinitionId *definition
 ) {
@@ -2111,13 +2155,7 @@ static bool sol_ir_executable_expression(
         case SOL_IR_EXPR_COMPILE_TIME_HEAD:
             return false;
         case SOL_IR_EXPR_DEFINITION: {
-            SolIrDefinitionId definition = expression->as.definition;
-            if (definition >= ir->definition_count) return false;
-            SolIrCallableId callable = ir->definitions[definition].callable;
-            if (callable == SOL_IR_NONE) break;
-            if (callable >= ir->callable_count
-                || ir->callables[callable].generic_parameters.count != 0
-                || ir->callables[callable].effect_parameters.count != 0) return false;
+            if (!sol_ir_definition_expression_valid(ir, id)) return false;
             break;
         }
         case SOL_IR_EXPR_BOUND_OPERATION:
@@ -2238,7 +2276,7 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
     }
     for (size_t index = 0; index < ir->definition_count; ++index) {
         const SolIrDefinition *definition = &ir->definitions[index];
-        if (definition->name == NULL || definition->kind > SOL_IR_DEFINITION_IMPLEMENTATION
+        if (definition->name == NULL || definition->kind > SOL_IR_DEFINITION_TEST
             || (definition->declared_type != SOL_IR_NONE
                 && definition->declared_type >= ir->type_count)
             || (definition->callable != SOL_IR_NONE
@@ -2274,11 +2312,58 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
                     ].definition].kind != SOL_IR_DEFINITION_CAPABILITY))) {
             return sol_ir_error(diagnostics, "malformed canonical IR declaration");
         }
+        if (definition->kind == SOL_IR_DEFINITION_TEST
+            && (definition->callable >= ir->callable_count
+                || ir->callables[definition->callable].kind != SOL_IR_CALLABLE_TEST
+                || ir->callables[definition->callable].owner != index
+                || definition->declared_type >= ir->type_count
+                || ir->types[definition->declared_type].kind != SOL_IR_TYPE_BOOL
+                || definition->representation != SOL_IR_NONE
+                || definition->fields.count != 0 || definition->variants.count != 0
+                || definition->members.count != 0
+                || definition->generic_parameters.count != 0
+                || definition->effect_parameters.count != 0
+                || definition->capability_source != SOL_IR_NONE)) {
+            return sol_ir_error(diagnostics, "malformed canonical IR test definition");
+        }
+        if ((definition->kind == SOL_IR_DEFINITION_FUNCTION
+                && (definition->callable >= ir->callable_count
+                    || ir->callables[definition->callable].kind
+                        != SOL_IR_CALLABLE_FUNCTION))
+            || ((definition->kind == SOL_IR_DEFINITION_FUNCTION
+                    || definition->kind == SOL_IR_DEFINITION_TEST)
+                != (definition->callable != SOL_IR_NONE))
+            || (definition->callable != SOL_IR_NONE
+                && ir->callables[definition->callable].owner != index)) {
+            return sol_ir_error(diagnostics,
+                "IR definition callable ownership or kind is inconsistent");
+        }
+        bool owns_members = definition->kind == SOL_IR_DEFINITION_CAPABILITY
+            || definition->kind == SOL_IR_DEFINITION_TRAIT
+            || definition->kind == SOL_IR_DEFINITION_IMPLEMENTATION;
+        if (!owns_members && definition->members.count != 0) {
+            return sol_ir_error(diagnostics,
+                "IR non-member definition has a member slice");
+        }
         for (size_t member = 0; member < definition->members.count; ++member) {
             SolIrCallableId callable
                 = ir->members[definition->members.offset + member].callable;
-            if (callable >= ir->callable_count || ir->callables[callable].owner != index) {
-                return sol_ir_error(diagnostics, "IR member has wrong callable owner");
+            SolIrCallableKind expected = definition->kind
+                    == SOL_IR_DEFINITION_CAPABILITY
+                ? SOL_IR_CALLABLE_CAPABILITY
+                : definition->kind == SOL_IR_DEFINITION_TRAIT
+                    ? SOL_IR_CALLABLE_TRAIT_REQUIREMENT
+                    : SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION;
+            if (callable >= ir->callable_count
+                || ir->callables[callable].owner != index
+                || ir->callables[callable].kind != expected) {
+                return sol_ir_error(diagnostics,
+                    "IR member has wrong callable owner or kind");
+            }
+            for (size_t previous = 0; previous < member; ++previous) {
+                if (ir->members[definition->members.offset + previous].callable
+                    == callable) return sol_ir_error(diagnostics,
+                        "IR member callable is duplicated in its owner slice");
             }
         }
         for (size_t field = 0; field < definition->fields.count; ++field) {
@@ -2304,6 +2389,31 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
                     "IR definition effect parameter slice is malformed");
             }
         }
+    }
+    for (size_t member = 0; member < ir->member_count; ++member) {
+        size_t owners = 0;
+        for (size_t definition = 0; definition < ir->definition_count; ++definition) {
+            SolIrSlice slice = ir->definitions[definition].members;
+            if (member >= slice.offset && member - slice.offset < slice.count) ++owners;
+        }
+        if (owners != 1) return sol_ir_error(diagnostics,
+            "IR member table entry is orphaned or shared between definitions");
+    }
+    for (size_t callable = 0; callable < ir->callable_count; ++callable) {
+        SolIrCallableKind kind = ir->callables[callable].kind;
+        if (kind != SOL_IR_CALLABLE_CAPABILITY
+            && kind != SOL_IR_CALLABLE_TRAIT_REQUIREMENT
+            && kind != SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION) continue;
+        SolIrDefinitionId owner = ir->callables[callable].owner;
+        if (owner >= ir->definition_count) return sol_ir_error(diagnostics,
+            "IR member callable owner is out of range");
+        SolIrSlice slice = ir->definitions[owner].members;
+        size_t occurrences = 0;
+        for (size_t member = 0; member < slice.count; ++member) {
+            if (ir->members[slice.offset + member].callable == callable) ++occurrences;
+        }
+        if (occurrences != 1) return sol_ir_error(diagnostics,
+            "IR member callable is missing or duplicated in its owner slice");
     }
     for (size_t index = 0; index < ir->definition_count; ++index) {
         if (ir->definitions[index].kind != SOL_IR_DEFINITION_CAPABILITY) continue;
@@ -2355,7 +2465,7 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
     }
     for (size_t index = 0; index < ir->callable_count; ++index) {
         const SolIrCallable *callable = &ir->callables[index];
-        if (callable->name == NULL || callable->kind > SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION
+        if (callable->name == NULL || callable->kind > SOL_IR_CALLABLE_TEST
             || callable->owner >= ir->definition_count || callable->result >= ir->type_count
             || (callable->body != SOL_IR_NONE && callable->body >= ir->expression_count)
             || !sol_ir_slice_valid(callable->parameters, ir->root_count)
@@ -2386,6 +2496,33 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
                 : callable->result_authority != SOL_IR_NONE)) {
             return sol_ir_error(diagnostics, "malformed canonical IR callable");
         }
+        if (callable->kind == SOL_IR_CALLABLE_TEST
+            && (ir->definitions[callable->owner].kind != SOL_IR_DEFINITION_TEST
+                || ir->definitions[callable->owner].callable != index
+                || callable->parameters.count != 0 || callable->body == SOL_IR_NONE
+                || ir->types[callable->result].kind != SOL_IR_TYPE_BOOL
+                || callable->generic_parameters.count != 0
+                || callable->effect_parameters.count != 0
+                || callable->receiver != SOL_IR_NONE
+                || callable->capability_source != SOL_IR_NONE
+                || callable->result_authority_kind != SOL_IR_AUTHORITY_NONE)) {
+            return sol_ir_error(diagnostics, "malformed canonical IR test callable");
+        }
+        SolIrDefinitionKind owner_kind = ir->definitions[callable->owner].kind;
+        bool exact_owner = (callable->kind == SOL_IR_CALLABLE_FUNCTION
+                && owner_kind == SOL_IR_DEFINITION_FUNCTION
+                && ir->definitions[callable->owner].callable == index)
+            || (callable->kind == SOL_IR_CALLABLE_TEST
+                && owner_kind == SOL_IR_DEFINITION_TEST
+                && ir->definitions[callable->owner].callable == index)
+            || (callable->kind == SOL_IR_CALLABLE_CAPABILITY
+                && owner_kind == SOL_IR_DEFINITION_CAPABILITY)
+            || (callable->kind == SOL_IR_CALLABLE_TRAIT_REQUIREMENT
+                && owner_kind == SOL_IR_DEFINITION_TRAIT)
+            || (callable->kind == SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION
+                && owner_kind == SOL_IR_DEFINITION_IMPLEMENTATION);
+        if (!exact_owner) return sol_ir_error(diagnostics,
+            "IR callable kind does not match its owning definition");
     }
     for (size_t index = 0; index < ir->generic_parameter_count; ++index) {
         const SolIrGenericParameter *parameter = &ir->generic_parameters[index];
@@ -2486,6 +2623,10 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
                 }
                 const SolIrCallable *target
                     = &ir->callables[expression->as.call.callable];
+                if (target->kind != SOL_IR_CALLABLE_FUNCTION) {
+                    return sol_ir_error(diagnostics,
+                        "IR source call target is not a free function");
+                }
                 if (target->generic_parameters.count
                     != expression->as.call.type_arguments.count) {
                     return sol_ir_error(diagnostics,
@@ -2681,8 +2822,12 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
         } else if (expression->kind == SOL_IR_EXPR_LOCAL
             && expression->as.local >= ir->local_count) {
             return sol_ir_error(diagnostics, "IR local expression is out of range");
-        } else if ((expression->kind == SOL_IR_EXPR_DEFINITION
-                || expression->kind == SOL_IR_EXPR_REFINEMENT_SELF)
+        } else if (expression->kind == SOL_IR_EXPR_DEFINITION
+            && (expression->as.definition >= ir->definition_count
+                || ir->definitions[expression->as.definition].kind
+                    == SOL_IR_DEFINITION_TEST)) {
+            return sol_ir_error(diagnostics, "IR definition expression is malformed");
+        } else if (expression->kind == SOL_IR_EXPR_REFINEMENT_SELF
             && expression->as.definition >= ir->definition_count) {
             return sol_ir_error(diagnostics, "IR definition expression is out of range");
         } else if (expression->kind == SOL_IR_EXPR_UNARY

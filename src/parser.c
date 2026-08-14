@@ -3033,7 +3033,8 @@ static bool sol_parser_is_declaration_start(SolTokenKind kind) {
         || kind == SOL_TOKEN_RECORD || kind == SOL_TOKEN_ENUM || kind == SOL_TOKEN_TYPE
         || kind == SOL_TOKEN_OPEN
         || kind == SOL_TOKEN_CAPABILITY || kind == SOL_TOKEN_TRAIT
-        || kind == SOL_TOKEN_IMPLEMENTATION || kind == SOL_TOKEN_FUNCTION;
+        || kind == SOL_TOKEN_IMPLEMENTATION || kind == SOL_TOKEN_FUNCTION
+        || kind == SOL_TOKEN_TEST;
 }
 
 static void sol_parser_recover_declaration(SolParser *parser, size_t failed_at) {
@@ -3088,8 +3089,9 @@ static void sol_parser_declaration(SolParser *parser) {
         }
     }
     bool is_public = sol_parser_match(parser, SOL_TOKEN_PUBLIC);
+    bool has_modifier = is_public;
     if (!is_public) {
-        sol_parser_match(parser, SOL_TOKEN_PRIVATE);
+        has_modifier = sol_parser_match(parser, SOL_TOKEN_PRIVATE);
     }
 
     SolItemKind item_kind;
@@ -3204,6 +3206,32 @@ static void sol_parser_declaration(SolParser *parser) {
             &first_type_parameter,
             &first_effect_parameter
         );
+    } else if (kind == SOL_TOKEN_TEST) {
+        item_kind = SOL_ITEM_TEST;
+        SolToken test_token = sol_parser_advance(parser);
+        SolToken label = sol_parser_current(parser);
+        if (stable_identity.start != stable_identity.end || has_modifier) {
+            sol_diagnostics_add(
+                parser->diagnostics,
+                "SOL-PARSE-021",
+                SOL_SEVERITY_ERROR,
+                (SolSpan){.start = start, .end = test_token.span.end},
+                "test declarations do not accept annotations or modifiers"
+            );
+        }
+        if (sol_parser_expect(parser, SOL_TOKEN_STRING, "expected a test label string")) {
+            name = label.span;
+            body = sol_parser_expression(parser, 1);
+            if (body != SOL_AST_NONE) {
+                whole = (SolSpan){
+                    .start = test_token.span.start,
+                    .end = parser->tree->expressions[body].span.end,
+                };
+                parsed = true;
+                is_public = false;
+                stable_identity = (SolSpan){0};
+            }
+        }
     } else {
         sol_parser_error(
             parser,

@@ -1436,13 +1436,15 @@ static Flow evaluate(Interpreter *interpreter, SolIrExpressionId expression_id) 
         case SOL_IR_EXPR_DEFINITION: {
             SolIrDefinitionId definition = expression->as.definition;
             if (definition >= ir->definition_count
-                || ir->definitions[definition].callable == SOL_IR_NONE) {
+                || ir->definitions[definition].kind != SOL_IR_DEFINITION_FUNCTION
+                || ir->definitions[definition].callable >= ir->callable_count) {
                 diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT,
                     expression->span, "definition is not an executable function");
                 return flow_new(FLOW_ERROR);
             }
             SolIrCallableId callable = ir->definitions[definition].callable;
             if (ir->callables[callable].kind != SOL_IR_CALLABLE_FUNCTION
+                || ir->callables[callable].owner != definition
                 || ir->callables[callable].generic_parameters.count != 0
                 || ir->callables[callable].effect_parameters.count != 0) {
                 diagnostic(interpreter, SOL_INTERPRETER_INVALID_IR,
@@ -1736,6 +1738,7 @@ bool sol_interpret(const SolInterpreterRequest *request, SolInterpreterResult *r
         return false;
     }
     SolIrCallableId callable = request->callable;
+    bool selected_definition = callable == SOL_IR_NONE;
     if (callable == SOL_IR_NONE) {
         if (request->definition >= request->ir->definition_count) {
             diagnostic(&interpreter, SOL_INTERPRETER_INVALID_REQUEST,
@@ -1752,9 +1755,25 @@ bool sol_interpret(const SolInterpreterRequest *request, SolInterpreterResult *r
             (SolSpan){0}, "request argument or callable domain is malformed");
         return false;
     }
-    if (request->ir->callables[callable].kind != SOL_IR_CALLABLE_FUNCTION) {
+    SolIrCallableKind kind = request->ir->callables[callable].kind;
+    if (selected_definition) {
+        const SolIrDefinition *definition
+            = &request->ir->definitions[request->definition];
+        SolIrDefinitionKind expected = request->test_entry
+            ? SOL_IR_DEFINITION_TEST : SOL_IR_DEFINITION_FUNCTION;
+        if (definition->kind != expected
+            || request->ir->callables[callable].owner != request->definition) {
+            diagnostic(&interpreter, SOL_INTERPRETER_INVALID_REQUEST,
+                (SolSpan){0}, "definition does not own the requested entry kind");
+            return false;
+        }
+    }
+    if ((!request->test_entry && kind != SOL_IR_CALLABLE_FUNCTION)
+        || (request->test_entry && kind != SOL_IR_CALLABLE_TEST)) {
         diagnostic(&interpreter, SOL_INTERPRETER_INVALID_REQUEST,
-            (SolSpan){0}, "request must select a free-function callable");
+            (SolSpan){0}, request->test_entry
+                ? "test request must select a test callable"
+                : "request must select a free-function callable");
         return false;
     }
     Flow flow = invoke(&interpreter, callable, NULL, request->arguments,

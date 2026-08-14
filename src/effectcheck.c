@@ -1872,7 +1872,8 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
         SolExprId root_expression;
         if (root < checker->syntax->item_count) {
             const SolSyntaxItem *item = &checker->syntax->items[root];
-            if (item->kind != SOL_ITEM_FUNCTION || item->body == SOL_AST_NONE) continue;
+            if ((item->kind != SOL_ITEM_FUNCTION && item->kind != SOL_ITEM_TEST)
+                || item->body == SOL_AST_NONE) continue;
             owner = root;
             root_expression = item->body;
         } else if (root < checker->syntax->item_count
@@ -3597,7 +3598,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
     }
     for (size_t index = 0; index < syntax->item_count; ++index) {
         const SolSyntaxItem *item = &syntax->items[index];
-        if ((int)item->kind < 0 || item->kind > SOL_ITEM_IMPLEMENTATION
+        if ((int)item->kind < 0 || item->kind > SOL_ITEM_TEST
             || (item->body != SOL_AST_NONE && item->body >= syntax->expression_count)
             || (item->first_effect != SOL_AST_NONE
                 && item->first_effect >= syntax->effect_count)
@@ -3638,7 +3639,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
     }
     for (size_t owner = 0; owner < syntax->item_count; ++owner) {
         const SolSyntaxItem *item = &syntax->items[owner];
-        if (item->kind == SOL_ITEM_FUNCTION) {
+        if (item->kind == SOL_ITEM_FUNCTION || item->kind == SOL_ITEM_TEST) {
             SolParameterId parameter = item->first_parameter;
             size_t traversed = 0;
             while (parameter != SOL_AST_NONE) {
@@ -3725,6 +3726,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || !sol_effect_span_valid(source, local->name)
             || local->owner >= syntax->item_count
             || (syntax->items[local->owner].kind != SOL_ITEM_FUNCTION
+                && syntax->items[local->owner].kind != SOL_ITEM_TEST
                 && syntax->items[local->owner].kind != SOL_ITEM_TYPE
                 && syntax->items[local->owner].kind != SOL_ITEM_CAPABILITY
                 && syntax->items[local->owner].kind != SOL_ITEM_TRAIT
@@ -3909,7 +3911,8 @@ static bool sol_effect_prepare_graph(SolEffectChecker *checker) {
         checker->first_incoming[index] = SOL_AST_NONE;
     }
     for (size_t index = 0; index < count; ++index) {
-        if (checker->syntax->items[index].kind == SOL_ITEM_FUNCTION) {
+        if (checker->syntax->items[index].kind == SOL_ITEM_FUNCTION
+            || checker->syntax->items[index].kind == SOL_ITEM_TEST) {
             sol_effect_walk_function(checker, index, SOL_EFFECT_WALK_GRAPH);
         }
     }
@@ -4009,7 +4012,8 @@ static void sol_effect_infer_functions(
     size_t count = checker->syntax->item_count;
     for (size_t index = 0; index < count; ++index) {
         const SolSyntaxItem *item = &checker->syntax->items[index];
-        if (item->kind == SOL_ITEM_FUNCTION && !item->has_effect_clause
+        if ((item->kind == SOL_ITEM_FUNCTION || item->kind == SOL_ITEM_TEST)
+            && !item->has_effect_clause
             && !item->is_public) {
             checker->effects->functions[index].inferred = true;
         }
@@ -4023,7 +4027,8 @@ static void sol_effect_infer_functions(
             changed = false;
             for (size_t index = 0; index < count; ++index) {
                 const SolSyntaxItem *item = &checker->syntax->items[index];
-                if (components[index] != component || item->kind != SOL_ITEM_FUNCTION
+                if (components[index] != component
+                    || (item->kind != SOL_ITEM_FUNCTION && item->kind != SOL_ITEM_TEST)
                     || item->has_effect_clause || item->is_public) {
                     continue;
                 }
@@ -4202,7 +4207,7 @@ bool sol_effect_check(
     if (!checker.allocation_failed) {
         for (size_t index = 0; index < syntax->item_count; ++index) {
             const SolSyntaxItem *item = &syntax->items[index];
-            if (item->kind != SOL_ITEM_FUNCTION) continue;
+            if (item->kind != SOL_ITEM_FUNCTION && item->kind != SOL_ITEM_TEST) continue;
             SolEffectRow *row = &effects->functions[index];
             sol_effect_validate_and_normalize_row(
                 &checker,

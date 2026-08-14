@@ -692,7 +692,8 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
             : SOL_AST_NONE;
         if ((row->count != 0 && row->atoms == NULL)
             || row->effect_parameter != expected
-            || (syntax->items[index].kind != SOL_ITEM_FUNCTION && row->count != 0)) {
+            || (syntax->items[index].kind != SOL_ITEM_FUNCTION
+                && syntax->items[index].kind != SOL_ITEM_TEST && row->count != 0)) {
             return false;
         }
     }

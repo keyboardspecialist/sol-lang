@@ -16,6 +16,7 @@ typedef enum {
     SOL_ITEM_FUNCTION,
     SOL_ITEM_TRAIT,
     SOL_ITEM_IMPLEMENTATION,
+    SOL_ITEM_TEST,
 } SolItemKind;
 
 typedef enum {

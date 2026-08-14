@@ -99,6 +99,14 @@ if(BUILD_TESTING)
     target_link_libraries(sol_ir_tests PRIVATE sol_compiler)
     add_executable(sol_interpreter_tests tests/interpreter_tests.c)
     target_link_libraries(sol_interpreter_tests PRIVATE sol_compiler)
+    add_executable(sol_test_declaration_tests tests/test_declaration_tests.c)
+    target_link_libraries(sol_test_declaration_tests PRIVATE sol_compiler)
+    if(UNIX)
+        add_executable(sol_cli_io_helper tests/cli_io_helper.c)
+        set(SOL_CLI_IO_HELPER $<TARGET_FILE:sol_cli_io_helper>)
+    else()
+        set(SOL_CLI_IO_HELPER "")
+    endif()
     target_compile_definitions(sol_interpreter_tests PRIVATE
         SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
@@ -115,6 +123,10 @@ if(BUILD_TESTING)
         target_compile_options(sol_package_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_ir_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_interpreter_tests PRIVATE /std:c17 /W4)
+        target_compile_options(sol_test_declaration_tests PRIVATE /std:c17 /W4)
+        if(UNIX)
+            target_compile_options(sol_cli_io_helper PRIVATE /std:c17 /W4)
+        endif()
     elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
         target_compile_options(sol_frontend_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_formatter_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
@@ -125,8 +137,12 @@ if(BUILD_TESTING)
         target_compile_options(sol_package_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_ir_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_interpreter_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
+        target_compile_options(sol_test_declaration_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
+        if(UNIX)
+            target_compile_options(sol_cli_io_helper PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
+        endif()
     else()
-        set_target_properties(sol_frontend_tests sol_formatter_tests sol_sema_tests sol_typecheck_tests sol_effectcheck_tests sol_contract_tests sol_package_tests sol_ir_tests sol_interpreter_tests PROPERTIES
+        set_target_properties(sol_frontend_tests sol_formatter_tests sol_sema_tests sol_typecheck_tests sol_effectcheck_tests sol_contract_tests sol_package_tests sol_ir_tests sol_interpreter_tests sol_test_declaration_tests PROPERTIES
             C_STANDARD 17
             C_STANDARD_REQUIRED ON
             C_EXTENSIONS OFF
@@ -152,6 +168,8 @@ if(BUILD_TESTING)
         target_link_options(sol_ir_tests PRIVATE -fsanitize=address,undefined)
         target_compile_options(sol_interpreter_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(sol_interpreter_tests PRIVATE -fsanitize=address,undefined)
+        target_compile_options(sol_test_declaration_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(sol_test_declaration_tests PRIVATE -fsanitize=address,undefined)
     endif()
 
     add_test(NAME frontend COMMAND sol_frontend_tests)
@@ -163,6 +181,7 @@ if(BUILD_TESTING)
     add_test(NAME package COMMAND sol_package_tests)
     add_test(NAME ir COMMAND sol_ir_tests)
     add_test(NAME interpreter COMMAND sol_interpreter_tests)
+    add_test(NAME test_declarations COMMAND sol_test_declaration_tests)
     add_test(NAME cli_valid COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/valid.sol)
     add_test(
         NAME cli_package_valid
@@ -245,4 +264,13 @@ if(BUILD_TESTING)
         )
         set_tests_properties(formatter_cli_${formatter_cli_case} PROPERTIES LABELS formatter_cli)
     endforeach()
+    add_test(
+        NAME test_cli
+        COMMAND ${CMAKE_COMMAND}
+            -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
+            -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli
+            -DCLI_IO_HELPER=${SOL_CLI_IO_HELPER}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli/test_test_cli.cmake
+    )
+    set_tests_properties(test_cli PROPERTIES LABELS test_cli)
 endif()

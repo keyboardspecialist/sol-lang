@@ -1013,6 +1013,62 @@ static void test_release_gate_domains(void) {
     free_compilation(&compilation);
 }
 
+static void test_exact_member_table_ownership(void) {
+    TestCompilation compilation;
+    CHECK(compile_ir(&compilation,
+        "module member_ownership\n"
+        "capability PairCap {\n"
+        "    function first() -> Bool effects { pure }\n"
+        "    function second() -> Bool effects { pure }\n"
+        "}\n"
+        "trait Pair {\n"
+        "    function first(self: Self) -> Bool effects { pure }\n"
+        "    function second(self: Self) -> Bool effects { pure }\n"
+        "}\n"
+        "implementation Pair for Bool {\n"
+        "    function first(self: Self) -> Bool effects { pure } { return self }\n"
+        "    function second(self: Self) -> Bool effects { pure } { return self }\n"
+        "}\n"));
+    SolIrDefinitionId owners[3] = {SOL_IR_NONE, SOL_IR_NONE, SOL_IR_NONE};
+    for (size_t definition = 0; definition < compilation.ir.definition_count;
+        ++definition) {
+        SolIrDefinitionKind kind = compilation.ir.definitions[definition].kind;
+        if (kind == SOL_IR_DEFINITION_CAPABILITY) owners[0] = definition;
+        else if (kind == SOL_IR_DEFINITION_TRAIT) owners[1] = definition;
+        else if (kind == SOL_IR_DEFINITION_IMPLEMENTATION) owners[2] = definition;
+    }
+    for (size_t owner_index = 0; owner_index < 3; ++owner_index) {
+        CHECK(owners[owner_index] != SOL_IR_NONE);
+        if (owners[owner_index] == SOL_IR_NONE) continue;
+        SolIrDefinition *owner = &compilation.ir.definitions[owners[owner_index]];
+        CHECK(owner->members.count == 2);
+        if (owner->members.count != 2) continue;
+        SolIrSlice saved = owner->members;
+        owner->members = (SolIrSlice){0};
+        CHECK(validate_rejected(&compilation.ir));
+        owner->members = saved;
+
+        SolIrCallableId second
+            = compilation.ir.members[saved.offset + 1].callable;
+        compilation.ir.members[saved.offset + 1].callable
+            = compilation.ir.members[saved.offset].callable;
+        CHECK(validate_rejected(&compilation.ir));
+        compilation.ir.members[saved.offset + 1].callable = second;
+
+        SolIrDefinitionId foreign_owner = owners[(owner_index + 1) % 3];
+        CHECK(foreign_owner != SOL_IR_NONE);
+        if (foreign_owner != SOL_IR_NONE) {
+            SolIrCallableId first = compilation.ir.members[saved.offset].callable;
+            SolIrSlice foreign = compilation.ir.definitions[foreign_owner].members;
+            compilation.ir.members[saved.offset].callable
+                = compilation.ir.members[foreign.offset].callable;
+            CHECK(validate_rejected(&compilation.ir));
+            compilation.ir.members[saved.offset].callable = first;
+        }
+    }
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_complete_ir_and_lifetime();
     test_classified_calls_handler_contract();
@@ -1025,6 +1081,7 @@ int main(void) {
     test_forged_ir_domains();
     test_exact_validation_findings();
     test_release_gate_domains();
+    test_exact_member_table_ownership();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }
