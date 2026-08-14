@@ -159,6 +159,71 @@ static bool has_code(const TestCompilation *compilation, const char *code) {
     return false;
 }
 
+static char *growth_source(void) {
+    size_t capacity = 65536;
+    char *text = malloc(capacity);
+    if (text == NULL) return NULL;
+    size_t length = 0;
+#define APPEND(...) \
+    do { \
+        int written = snprintf(text + length, capacity - length, __VA_ARGS__); \
+        if (written < 0 || (size_t)written >= capacity - length) { \
+            free(text); \
+            return NULL; \
+        } \
+        length += (size_t)written; \
+    } while (0)
+    APPEND("module growth\n");
+    APPEND("enum Choice { yes(value: Int64), no }\n");
+    APPEND("capability Measure {\n");
+    for (size_t index = 0; index < 20; ++index) {
+        APPEND("function m%zu(value: Int64) -> Int64 effects { pure }\n", index);
+    }
+    APPEND("}\n");
+    for (size_t index = 0; index < 20; ++index) {
+        APPEND("record R%zu { value: ", index);
+        for (size_t depth = 0; depth <= index; ++depth) APPEND("Option<");
+        APPEND("Int64");
+        for (size_t depth = 0; depth <= index; ++depth) APPEND(">");
+        APPEND(" }\n");
+    }
+    APPEND("function base(value: Int64) -> Int64 effects { panic } { return value }\n");
+    for (size_t index = 0; index < 40; ++index) {
+        APPEND("function f%zu(value: Int64, choice: Choice) -> Int64 effects { panic } "
+            "{ return { let picked = match choice { yes(item) => item, no => value } "
+            "base(picked) } }\n", index);
+    }
+#undef APPEND
+    return text;
+}
+
+static void test_geometric_growth(void) {
+    char *text = growth_source();
+    CHECK(text != NULL);
+    if (text == NULL) return;
+    TestCompilation compilation;
+    bool compiled = compile_ir(&compilation, text);
+    CHECK(compiled);
+    if (!compiled) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+        free_compilation(&compilation);
+        free(text);
+        return;
+    }
+    CHECK(compilation.ir.type_count > 16);
+    CHECK(compilation.ir.type_id_count > 16);
+    CHECK(compilation.ir.callable_count > 32);
+    CHECK(compilation.ir.member_count > 16);
+    CHECK(compilation.ir.statement_id_count > 32);
+    CHECK(compilation.ir.arm_id_count > 32);
+    CHECK(compilation.ir.operand_count > 32);
+    CHECK(compilation.ir.root_count > 32);
+    CHECK(compilation.ir.effect_count > 32);
+    CHECK(sol_ir_validate(&compilation.ir, &compilation.diagnostics));
+    free_compilation(&compilation);
+    free(text);
+}
+
 static void test_complete_ir_and_lifetime(void) {
     static const char text[] =
         "module complete\n"
@@ -1070,6 +1135,7 @@ static void test_exact_member_table_ownership(void) {
 }
 
 int main(void) {
+    test_geometric_growth();
     test_complete_ir_and_lifetime();
     test_classified_calls_handler_contract();
     test_variants_nested_arenas_and_evidence();

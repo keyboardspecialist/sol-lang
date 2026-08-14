@@ -202,26 +202,40 @@ static size_t sol_relocate_id(size_t id, size_t base) {
 static bool sol_package_append_storage(
     void **target,
     size_t old_count,
+    size_t *capacity,
     const void *source,
     size_t count,
     size_t element_size
 ) {
     size_t total;
-    if (!sol_package_add_size(old_count, count, &total) || total > SIZE_MAX / element_size) return false;
+    if (element_size == 0 || old_count > *capacity
+        || !sol_package_add_size(old_count, count, &total)
+        || total > SIZE_MAX / element_size) return false;
     if (count == 0) return true;
-    void *grown = realloc(*target, total * element_size);
-    if (grown == NULL) return false;
-    *target = grown;
-    memcpy((unsigned char *)grown + old_count * element_size, source, count * element_size);
+    if (total > *capacity) {
+        size_t grown_capacity = *capacity == 0 ? 8 : *capacity;
+        while (grown_capacity < total) {
+            if (grown_capacity > SIZE_MAX / 2) {
+                grown_capacity = total;
+                break;
+            }
+            grown_capacity *= 2;
+        }
+        if (grown_capacity > SIZE_MAX / element_size) return false;
+        void *grown = realloc(*target, grown_capacity * element_size);
+        if (grown == NULL) return false;
+        *target = grown;
+        *capacity = grown_capacity;
+    }
+    memcpy((unsigned char *)*target + old_count * element_size, source, count * element_size);
     return true;
 }
 
 #define SOL_APPEND_ARENA(target, local, field, count_field, capacity_field) \
     (sol_package_append_storage( \
-        (void **)&(target)->field, (target)->count_field, (local)->field, \
+        (void **)&(target)->field, (target)->count_field, &(target)->capacity_field, (local)->field, \
         (local)->count_field, sizeof(*(target)->field) \
-    ) && ((target)->count_field += (local)->count_field, \
-        (target)->capacity_field = (target)->count_field, true))
+    ) && ((target)->count_field += (local)->count_field, true))
 
 static SolArenaOffsets sol_package_offsets(const SolSyntaxTree *tree) {
     return (SolArenaOffsets){

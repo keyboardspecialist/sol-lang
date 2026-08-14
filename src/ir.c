@@ -26,6 +26,16 @@ typedef struct {
     SolIrLocalId *parameter_locals;
     SolIrLocalId *binding_locals;
     SolIrLocalId *pattern_locals;
+    size_t type_capacity;
+    size_t type_id_capacity;
+    size_t callable_capacity;
+    size_t member_capacity;
+    size_t evidence_capacity;
+    size_t statement_id_capacity;
+    size_t arm_id_capacity;
+    size_t operand_capacity;
+    size_t root_capacity;
+    size_t effect_capacity;
     bool failed;
 } SolIrLowerer;
 
@@ -127,29 +137,46 @@ static char *sol_ir_copy_span(const SolSource *source, SolSpan span) {
 }
 
 static bool sol_ir_grow(
-    void **items, size_t *count, size_t additional, size_t size, void **first
+    void **items,
+    size_t *count,
+    size_t *capacity,
+    size_t additional,
+    size_t size,
+    void **first
 ) {
     if (additional == 0) {
         if (first != NULL) *first = NULL;
         return true;
     }
-    if (size == 0 || *count > SIZE_MAX - additional
+    if (size == 0 || *count > *capacity || *count > SIZE_MAX - additional
         || *count + additional > SIZE_MAX / size) return false;
     size_t old = *count;
     size_t next = old + additional;
-    void *grown = realloc(*items, next * size);
-    if (grown == NULL) return false;
-    *items = grown;
-    memset((unsigned char *)grown + old * size, 0, additional * size);
+    if (next > *capacity) {
+        size_t grown_capacity = *capacity == 0 ? 8 : *capacity;
+        while (grown_capacity < next) {
+            if (grown_capacity > SIZE_MAX / 2) {
+                grown_capacity = next;
+                break;
+            }
+            grown_capacity *= 2;
+        }
+        if (grown_capacity > SIZE_MAX / size) return false;
+        void *grown = realloc(*items, grown_capacity * size);
+        if (grown == NULL) return false;
+        *items = grown;
+        *capacity = grown_capacity;
+    }
+    memset((unsigned char *)*items + old * size, 0, additional * size);
     *count = next;
-    if (first != NULL) *first = (unsigned char *)grown + old * size;
+    if (first != NULL) *first = (unsigned char *)*items + old * size;
     return true;
 }
 
 static bool sol_ir_append_type_id(SolIrLowerer *lowerer, SolIrTypeId type) {
     SolIrTypeId *entry = NULL;
     if (!sol_ir_grow((void **)&lowerer->ir->type_ids, &lowerer->ir->type_id_count,
-        1, sizeof(*entry), (void **)&entry)) return false;
+        &lowerer->type_id_capacity, 1, sizeof(*entry), (void **)&entry)) return false;
     *entry = type;
     return true;
 }
@@ -157,7 +184,7 @@ static bool sol_ir_append_type_id(SolIrLowerer *lowerer, SolIrTypeId type) {
 static bool sol_ir_append_root(SolIrLowerer *lowerer, SolIrLocalId root) {
     SolIrLocalId *entry = NULL;
     if (!sol_ir_grow((void **)&lowerer->ir->roots, &lowerer->ir->root_count,
-        1, sizeof(*entry), (void **)&entry)) return false;
+        &lowerer->root_capacity, 1, sizeof(*entry), (void **)&entry)) return false;
     *entry = root;
     return true;
 }
@@ -165,7 +192,7 @@ static bool sol_ir_append_root(SolIrLowerer *lowerer, SolIrLocalId root) {
 static bool sol_ir_append_member(SolIrLowerer *lowerer, SolIrCallableId callable) {
     SolIrMember *entry = NULL;
     if (!sol_ir_grow((void **)&lowerer->ir->members, &lowerer->ir->member_count,
-        1, sizeof(*entry), (void **)&entry)) return false;
+        &lowerer->member_capacity, 1, sizeof(*entry), (void **)&entry)) return false;
     entry->callable = callable;
     return true;
 }
@@ -175,7 +202,8 @@ static bool sol_ir_append_statement_id(
 ) {
     SolIrStatementId *entry = NULL;
     if (!sol_ir_grow((void **)&lowerer->ir->statement_ids,
-        &lowerer->ir->statement_id_count, 1, sizeof(*entry), (void **)&entry)) return false;
+        &lowerer->ir->statement_id_count, &lowerer->statement_id_capacity,
+        1, sizeof(*entry), (void **)&entry)) return false;
     *entry = statement;
     return true;
 }
@@ -183,7 +211,8 @@ static bool sol_ir_append_statement_id(
 static bool sol_ir_append_arm_id(SolIrLowerer *lowerer, SolIrArmId arm) {
     SolIrArmId *entry = NULL;
     if (!sol_ir_grow((void **)&lowerer->ir->arm_ids,
-        &lowerer->ir->arm_id_count, 1, sizeof(*entry), (void **)&entry)) return false;
+        &lowerer->ir->arm_id_count, &lowerer->arm_id_capacity,
+        1, sizeof(*entry), (void **)&entry)) return false;
     *entry = arm;
     return true;
 }
@@ -261,7 +290,7 @@ static SolIrTypeId sol_ir_add_type(SolIrLowerer *lowerer, SolIrType candidate) {
     }
     SolIrType *entry = NULL;
     if (!sol_ir_grow((void **)&lowerer->ir->types, &lowerer->ir->type_count,
-        1, sizeof(*entry), (void **)&entry)) {
+        &lowerer->type_capacity, 1, sizeof(*entry), (void **)&entry)) {
         lowerer->failed = true;
         return SOL_IR_NONE;
     }
@@ -483,7 +512,7 @@ static SolIrSlice sol_ir_effect_row(
     if (count == 0) return slice;
     SolIrEffect *entries = NULL;
     if (!sol_ir_grow((void **)&lowerer->ir->effects, &lowerer->ir->effect_count,
-        count, sizeof(*entries), (void **)&entries)) {
+        &lowerer->effect_capacity, count, sizeof(*entries), (void **)&entries)) {
         lowerer->failed = true;
         return slice;
     }
@@ -887,7 +916,7 @@ static SolIrCallableId sol_ir_add_callable(
 ) {
     SolIrCallable *entry = NULL;
     if (!sol_ir_grow((void **)&lowerer->ir->callables, &lowerer->ir->callable_count,
-        1, sizeof(*entry), (void **)&entry)) return SOL_IR_NONE;
+        &lowerer->callable_capacity, 1, sizeof(*entry), (void **)&entry)) return SOL_IR_NONE;
     entry->kind = kind;
     entry->owner = owner;
     entry->name = sol_ir_copy_span(lowerer->source, name);
@@ -1151,7 +1180,7 @@ static bool sol_ir_append_evidence(
 ) {
     SolIrDispatchEvidence *entry = NULL;
     if (!sol_ir_grow((void **)&lowerer->ir->evidence, &lowerer->ir->evidence_count,
-        1, sizeof(*entry), (void **)&entry)) return false;
+        &lowerer->evidence_capacity, 1, sizeof(*entry), (void **)&entry)) return false;
     *entry = evidence;
     return true;
 }
@@ -1293,7 +1322,7 @@ static bool sol_ir_append_operand(
 ) {
     SolIrOperand *operand = NULL;
     if (!sol_ir_grow((void **)&lowerer->ir->operands, &lowerer->ir->operand_count,
-        1, sizeof(*operand), (void **)&operand)) return false;
+        &lowerer->operand_capacity, 1, sizeof(*operand), (void **)&operand)) return false;
     *operand = (SolIrOperand){.formal = formal, .value = value};
     return true;
 }

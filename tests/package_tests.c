@@ -52,6 +52,31 @@ static void check_valid_package(const SolPackage *package) {
     CHECK(package->file_count == sizeof(expected_files) / sizeof(expected_files[0]));
     CHECK(package->syntax.import_count == 12);
     CHECK(package->syntax.item_count == 14);
+    CHECK(package->syntax.import_capacity > package->syntax.import_count);
+    CHECK(package->syntax.item_capacity > package->syntax.item_count);
+#define CHECK_ARENA_CAPACITY(name) \
+    CHECK(package->syntax.name##_count <= package->syntax.name##_capacity)
+    CHECK_ARENA_CAPACITY(import);
+    CHECK_ARENA_CAPACITY(item);
+    CHECK_ARENA_CAPACITY(expression);
+    CHECK_ARENA_CAPACITY(statement);
+    CHECK_ARENA_CAPACITY(argument);
+    CHECK_ARENA_CAPACITY(parameter);
+    CHECK_ARENA_CAPACITY(type);
+    CHECK_ARENA_CAPACITY(type_argument);
+    CHECK_ARENA_CAPACITY(type_parameter);
+    CHECK_ARENA_CAPACITY(effect_parameter);
+    CHECK_ARENA_CAPACITY(field);
+    CHECK_ARENA_CAPACITY(variant);
+    CHECK_ARENA_CAPACITY(pattern);
+    CHECK_ARENA_CAPACITY(pattern_binding);
+    CHECK_ARENA_CAPACITY(match_arm);
+    CHECK_ARENA_CAPACITY(effect);
+    CHECK_ARENA_CAPACITY(capability_member);
+    CHECK_ARENA_CAPACITY(trait_method);
+    CHECK_ARENA_CAPACITY(contract_clause);
+    CHECK_ARENA_CAPACITY(contract_condition);
+#undef CHECK_ARENA_CAPACITY
     CHECK(sol_syntax_contracts_validate(&package->source, &package->syntax));
 
     if (package->file_count != sizeof(expected_files) / sizeof(expected_files[0])) return;
