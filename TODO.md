@@ -34,6 +34,8 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 - [x] Deterministic compiler-internal reference interpreter over validated owning IR,
       with bounded execution, explicit host capabilities, and ignored contracts.
 - [x] Deterministic `sol test` discovery and authored Boolean unit tests over owning IR.
+- [x] Versioned bounded external inspection projections for syntax, HIR, types,
+      effects, contracts, and diagnostics.
 
 ## Prioritized Work
 
@@ -52,7 +54,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [x] | 11 | Implement an interpreter for language conformance tests | 5 | 4 | Typed IR |
 | [x] | 12 | Add deterministic `sol test` and authored Boolean unit tests | 4 | 3 | Interpreter |
 | [x] | 13 | Add `sol effects` authority and call-graph inspection | 3 | 2 | Effect tables |
-| [ ] | 14 | Stabilize serialized syntax, HIR, type, effect, contract, and diagnostic schemas | 4 | 5 | Stable IDs and IR |
+| [x] | 14 | Stabilize selected external syntax, HIR, type, effect, contract, and diagnostic projections | 4 | 5 | Stable IDs and IR |
 | [ ] | 15 | Define and check affine moves, copies, and use-after-move errors | 5 | 5 | Typed IR |
 | [ ] | 16 | Implement lexical shared and exclusive borrows | 5 | 5 | Affine ownership |
 | [ ] | 17 | Track regions, deterministic cleanup, and resource lifetimes | 5 | 5 | Borrow checking |

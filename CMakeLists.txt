@@ -32,6 +32,7 @@ add_library(sol_compiler STATIC
     src/effects.c
     src/formatter.c
     src/hir.c
+    src/inspection.c
     src/ir.c
     src/interpreter.c
     src/lexer.c
@@ -79,6 +80,7 @@ include(CTest)
 enable_testing()
 
 if(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_executable(sol_frontend_tests tests/frontend_tests.c)
     target_link_libraries(sol_frontend_tests PRIVATE sol_compiler)
     add_executable(sol_formatter_tests tests/formatter_tests.c)
@@ -100,6 +102,8 @@ if(BUILD_TESTING)
     target_link_libraries(sol_ir_tests PRIVATE sol_compiler)
     add_executable(sol_interpreter_tests tests/interpreter_tests.c)
     target_link_libraries(sol_interpreter_tests PRIVATE sol_compiler)
+    add_executable(sol_inspection_tests tests/inspection_tests.c)
+    target_link_libraries(sol_inspection_tests PRIVATE sol_compiler)
     add_executable(sol_test_declaration_tests tests/test_declaration_tests.c)
     target_link_libraries(sol_test_declaration_tests PRIVATE sol_compiler)
     if(UNIX)
@@ -124,6 +128,7 @@ if(BUILD_TESTING)
         target_compile_options(sol_package_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_ir_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_interpreter_tests PRIVATE /std:c17 /W4)
+        target_compile_options(sol_inspection_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_test_declaration_tests PRIVATE /std:c17 /W4)
         if(UNIX)
             target_compile_options(sol_cli_io_helper PRIVATE /std:c17 /W4)
@@ -138,12 +143,13 @@ if(BUILD_TESTING)
         target_compile_options(sol_package_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_ir_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_interpreter_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
+        target_compile_options(sol_inspection_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_test_declaration_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         if(UNIX)
             target_compile_options(sol_cli_io_helper PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         endif()
     else()
-        set_target_properties(sol_frontend_tests sol_formatter_tests sol_sema_tests sol_typecheck_tests sol_effectcheck_tests sol_contract_tests sol_package_tests sol_ir_tests sol_interpreter_tests sol_test_declaration_tests PROPERTIES
+        set_target_properties(sol_frontend_tests sol_formatter_tests sol_sema_tests sol_typecheck_tests sol_effectcheck_tests sol_contract_tests sol_package_tests sol_ir_tests sol_interpreter_tests sol_inspection_tests sol_test_declaration_tests PROPERTIES
             C_STANDARD 17
             C_STANDARD_REQUIRED ON
             C_EXTENSIONS OFF
@@ -169,6 +175,8 @@ if(BUILD_TESTING)
         target_link_options(sol_ir_tests PRIVATE -fsanitize=address,undefined)
         target_compile_options(sol_interpreter_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(sol_interpreter_tests PRIVATE -fsanitize=address,undefined)
+        target_compile_options(sol_inspection_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(sol_inspection_tests PRIVATE -fsanitize=address,undefined)
         target_compile_options(sol_test_declaration_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(sol_test_declaration_tests PRIVATE -fsanitize=address,undefined)
     endif()
@@ -182,6 +190,7 @@ if(BUILD_TESTING)
     add_test(NAME package COMMAND sol_package_tests)
     add_test(NAME ir COMMAND sol_ir_tests)
     add_test(NAME interpreter COMMAND sol_interpreter_tests)
+    add_test(NAME inspection COMMAND sol_inspection_tests)
     add_test(NAME test_declarations COMMAND sol_test_declaration_tests)
     add_test(NAME cli_valid COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/valid.sol)
     add_test(
@@ -284,4 +293,19 @@ if(BUILD_TESTING)
             -DINVALID_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid.sol
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/effects_cli/test_effects_cli.cmake
     )
+    add_test(
+        NAME inspection_cli
+        COMMAND ${CMAKE_COMMAND}
+            -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
+            -DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/valid.sol
+            -DPACKAGE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/packages/valid
+            -DGENERIC_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/inspection_cli/generic.sol
+            -DINVALID_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid.sol
+            -DCLI_IO_HELPER=${SOL_CLI_IO_HELPER}
+            -DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}
+            -DSCHEMA_FILE=${CMAKE_CURRENT_SOURCE_DIR}/schemas/sol-inspection-1.schema.json
+            -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/tests/inspection_cli
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/inspection_cli/test_inspection_cli.cmake
+    )
+    set_tests_properties(inspection_cli PROPERTIES LABELS inspection_cli)
 endif()

@@ -6,6 +6,7 @@
 #include "sol/effects.h"
 #include "sol/formatter.h"
 #include "sol/hir.h"
+#include "sol/inspection.h"
 #include "sol/ir.h"
 #include "sol/interpreter.h"
 #include "sol/lexer.h"
@@ -27,6 +28,7 @@
 static void sol_print_usage(FILE *stream) {
     fputs(
         "usage: sol check [--diagnostic-format=human|json] <file.sol|package-directory>\n"
+        "       sol inspect <file.sol|package-directory>\n"
         "       sol effects [--diagnostic-format=human|json] <file.sol|package-directory>\n"
         "       sol test [--diagnostic-format=human|json] <file.sol|package-directory>\n"
         "       sol fmt [--check|--stdout] <file.sol|package-directory>\n"
@@ -845,6 +847,30 @@ static int sol_effects_path(const char *path, bool json) {
     return rendered ? 0 : 1;
 }
 
+static int sol_inspect_path(const char *path) {
+    SolCompilation compilation;
+    sol_compilation_init(&compilation);
+    SolCompileOutcome outcome = sol_compile_path(&compilation, path);
+    if (outcome == SOL_COMPILE_LOAD_ERROR) {
+        sol_render_cli_error(stdout, "load", compilation.load_error, path);
+    } else if (outcome == SOL_COMPILE_FAILED && compilation.diagnostics.count == 0) {
+        sol_render_cli_error(stdout, "infrastructure",
+            "compilation stopped because the compiler ran out of memory", path);
+    } else if (outcome != SOL_COMPILE_SUCCEEDED) {
+        sol_package_diagnostics_render_json(
+            stdout, &compilation.package, &compilation.diagnostics);
+    } else if (!sol_inspection_render(stdout, &compilation.package, &compilation.hir,
+        &compilation.types, &compilation.effects, &compilation.contracts,
+        &compilation.diagnostics)) {
+        if (ferror(stdout) == 0) sol_render_cli_error(stdout, "infrastructure",
+            "cannot construct inspection projection", path);
+        outcome = SOL_COMPILE_FAILED;
+    }
+    sol_compilation_frontend_free(&compilation);
+    sol_ir_free(&compilation.ir);
+    return outcome == SOL_COMPILE_SUCCEEDED ? 0 : 1;
+}
+
 static int sol_main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
@@ -884,6 +910,14 @@ static int sol_main(int argc, char **argv) {
             return 2;
         }
         return sol_fmt_path(path, check, to_stdout);
+    }
+
+    if (strcmp(argv[1], "inspect") == 0) {
+        if (argc != 3 || argv[2][0] == '-') {
+            fputs("sol: inspect accepts exactly one source file or package directory\n", stderr);
+            return 2;
+        }
+        return sol_inspect_path(argv[2]);
     }
 
     bool testing = strcmp(argv[1], "test") == 0;

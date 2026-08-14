@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://sol-lang.org/schemas/sol-inspection-1.schema.json",
+  "title": "Sol inspection projection version 1",
+  "type": "object",
+  "required": ["schema", "version", "producer", "package", "artifacts"],
+  "additionalProperties": true,
+  "properties": {
+    "schema": {"const": "sol.inspection"},
+    "version": {"const": 1},
+    "producer": {
+      "type": "object", "required": ["name", "version"], "additionalProperties": true,
+      "properties": {"name": {"const": "sol"}, "version": {"type": "string", "minLength": 1}}
+    },
+    "package": {
+      "type": "object", "required": ["kind", "edition", "fileCount"], "additionalProperties": true,
+      "properties": {
+        "kind": {"enum": ["file", "directory"]},
+        "edition": {"$ref": "#/$defs/nonnegative"},
+        "fileCount": {"$ref": "#/$defs/nonnegative"}
+      }
+    },
+    "artifacts": {
+      "type": "object",
+      "required": ["syntax", "hir", "types", "effects", "contracts", "diagnostics"],
+      "additionalProperties": true,
+      "properties": {
+        "syntax": {"$ref": "#/$defs/syntax"},
+        "hir": {"$ref": "#/$defs/hir"},
+        "types": {"$ref": "#/$defs/types"},
+        "effects": {"$ref": "#/$defs/effects"},
+        "contracts": {"$ref": "#/$defs/contracts"},
+        "diagnostics": {"$ref": "#/$defs/diagnostics"}
+      }
+    }
+  },
+  "$defs": {
+    "nonnegative": {"type": "integer", "minimum": 0},
+    "positiveInteger": {"type": "integer", "minimum": 1},
+    "semanticId": {"type": "string", "pattern": "^sem:1:[0-9a-f]{32}$"},
+    "exprId": {"type": "string", "pattern": "^expr:[0-9]+$"},
+    "obligationId": {"type": "string", "pattern": "^obligation:[0-9]+$"},
+    "snapshotId": {"type": "string", "pattern": "^snapshot:[0-9]+$"},
+    "localId": {"type": "string", "pattern": "^local:[0-9]+$"},
+    "snapshotRef": {
+      "type": ["string", "null"],
+      "pattern": "^(type-app|signature|capability-member|variant|type-parameter|trait-method):[0-9]+$"
+    },
+    "path": {"type": "string", "minLength": 1, "pattern": "^(?![A-Za-z]:)(?!/)(?!.*\\\\)(?!\\.\\.(?:/|$))(?!.*\\/\\.\\.(?:/|$)).+$"},
+    "span": {
+      "type": "object", "required": ["file", "start", "end"], "additionalProperties": true,
+      "properties": {"file": {"$ref": "#/$defs/path"}, "start": {"$ref": "#/$defs/nonnegative"}, "end": {"$ref": "#/$defs/nonnegative"}}
+    },
+    "position": {
+      "type": "object", "required": ["line", "column"], "additionalProperties": true,
+      "properties": {"line": {"$ref": "#/$defs/positiveInteger"}, "column": {"$ref": "#/$defs/positiveInteger"}}
+    },
+    "byteSpan": {
+      "type": "object", "required": ["start", "end"], "additionalProperties": true,
+      "properties": {"start": {"$ref": "#/$defs/nonnegative"}, "end": {"$ref": "#/$defs/nonnegative"}}
+    },
+    "diagnosticLocation": {
+      "type": "object", "required": ["file", "start", "end", "role", "byteSpan"], "additionalProperties": true,
+      "properties": {"file": {"$ref": "#/$defs/path"}, "start": {"$ref": "#/$defs/position"}, "end": {"$ref": "#/$defs/position"}, "role": {"const": "primary"}, "byteSpan": {"$ref": "#/$defs/byteSpan"}}
+    },
+    "diagnostic": {
+      "type": "object", "required": ["schema", "code", "severity", "message", "locations"], "additionalProperties": true,
+      "properties": {"schema": {"const": "sol.diagnostic/1"}, "code": {"type": "string"}, "severity": {"enum": ["error", "warning"]}, "message": {"type": "string"}, "locations": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/diagnosticLocation"}}}
+    },
+    "type": {
+      "type": "object", "required": ["kind", "definition", "snapshotRef"], "additionalProperties": true,
+      "properties": {
+        "kind": {"enum": ["unknown", "error", "int64", "bool", "text", "unit", "nominal", "application", "function", "function_signature", "capability_operation", "variant", "never", "parameter", "self", "trait_method"]},
+        "definition": {"anyOf": [{"$ref": "#/$defs/semanticId"}, {"type": "null"}]},
+        "snapshotRef": {"$ref": "#/$defs/snapshotRef"}
+      }
+    },
+    "atom": {
+      "type": "object", "required": ["name", "authority"], "additionalProperties": true,
+      "properties": {
+        "name": {"type": "string"},
+        "authority": {
+          "type": "object", "required": ["kind", "parameter"], "additionalProperties": true,
+          "properties": {"kind": {"enum": ["none", "static", "parameter", "self"]}, "parameter": {"type": ["string", "null"]}}
+        }
+      }
+    },
+    "effectRow": {
+      "type": "object", "required": ["ownerKind", "owner", "inferred", "rowTail", "atoms"], "additionalProperties": true,
+      "properties": {
+        "ownerKind": {"enum": ["function", "capability-member", "trait-method"]},
+        "owner": {"type": "string"}, "inferred": {"type": "boolean"},
+        "rowTail": {"type": ["integer", "null"], "minimum": 0},
+        "atoms": {"type": "array", "items": {"$ref": "#/$defs/atom"}}
+      }
+    },
+    "tag": {
+      "type": "object", "required": ["schema", "version"], "additionalProperties": true,
+      "properties": {"version": {"const": 1}}
+    },
+    "syntax": {
+      "allOf": [{"$ref": "#/$defs/tag"}], "type": "object", "additionalProperties": true,
+      "required": ["schema", "version", "edition", "files", "declarations", "expressions", "arenaCounts"],
+      "properties": {
+        "schema": {"const": "sol.inspection.syntax"}, "version": {"const": 1}, "edition": {"$ref": "#/$defs/nonnegative"},
+        "files": {"type": "array", "items": {"type": "object", "required": ["path", "byteLength", "sourceBase64", "module"], "additionalProperties": true, "properties": {"path": {"$ref": "#/$defs/path"}, "byteLength": {"$ref": "#/$defs/nonnegative"}, "sourceBase64": {"type": "string", "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"}, "module": {"type": "string"}}}},
+        "declarations": {"type": "array", "items": {"type": "object", "required": ["id", "semanticId", "kind", "name", "span", "visibility", "stableToken"], "additionalProperties": true, "properties": {"id": {"type": "string", "pattern": "^declaration:[0-9]+$"}, "semanticId": {"$ref": "#/$defs/semanticId"}, "kind": {"enum": ["record", "enum", "type", "capability", "function", "trait", "implementation", "test"]}, "name": {"type": "string"}, "span": {"$ref": "#/$defs/span"}, "visibility": {"enum": ["public", "private"]}, "stableToken": {"type": ["string", "null"]}}}},
+        "expressions": {"type": "array", "items": {"type": "object", "required": ["id", "kind", "span"], "additionalProperties": true, "properties": {"id": {"$ref": "#/$defs/exprId"}, "kind": {"enum": ["error", "integer", "string", "bool", "unit", "path", "unary", "binary", "call", "field", "record", "if", "match", "block", "propagate", "handle", "result", "old", "type_application"]}, "span": {"$ref": "#/$defs/span"}}}},
+        "arenaCounts": {"type": "object", "additionalProperties": {"$ref": "#/$defs/nonnegative"}}
+      }
+    },
+    "hir": {
+      "allOf": [{"$ref": "#/$defs/tag"}], "type": "object", "additionalProperties": true,
+      "required": ["schema", "version", "definitions", "locals", "expressionResolutions", "typeResolutions", "effectResolutions", "occurrences"],
+      "properties": {
+        "schema": {"const": "sol.inspection.hir"}, "version": {"const": 1},
+        "definitions": {"type": "array", "items": {"type": "object", "required": ["semanticId", "kind", "name", "syntaxDeclaration"], "additionalProperties": true, "properties": {"semanticId": {"$ref": "#/$defs/semanticId"}, "kind": {"enum": ["record", "enum", "type", "capability", "function", "trait", "implementation", "test"]}, "name": {"type": "string"}, "syntaxDeclaration": {"type": "string", "pattern": "^declaration:[0-9]+$"}}}},
+        "locals": {"type": "array", "items": {"type": "object", "required": ["id", "kind", "name", "owner"], "additionalProperties": true, "properties": {"id": {"$ref": "#/$defs/localId"}, "kind": {"enum": ["parameter", "binding", "pattern"]}, "name": {"type": "string"}, "owner": {"$ref": "#/$defs/semanticId"}}}},
+        "expressionResolutions": {"type": "array", "items": {"type": "object", "required": ["expression", "kind", "target"], "additionalProperties": true, "properties": {"expression": {"$ref": "#/$defs/exprId"}, "kind": {"enum": ["not_applicable", "error", "definition", "local", "builtin", "refinement_self"]}, "target": {"type": ["string", "null"]}}}},
+        "typeResolutions": {"type": "array", "items": {"type": "object", "required": ["syntaxType", "kind", "target"], "additionalProperties": true, "properties": {"syntaxType": {"type": "string", "pattern": "^syntax-type:[0-9]+$"}, "kind": {"enum": ["error", "builtin", "definition", "parameter", "self"]}, "target": {"type": ["string", "null"]}}}},
+        "effectResolutions": {"type": "array", "items": {"type": "object", "required": ["ownerKind", "ownerIndex", "kind", "snapshotTarget"], "additionalProperties": true, "properties": {"ownerKind": {"enum": ["effect", "syntax_type"]}, "ownerIndex": {"$ref": "#/$defs/nonnegative"}, "kind": {"enum": ["atom", "parameter", "error"]}, "snapshotTarget": {"type": ["string", "null"]}}}},
+        "occurrences": {"type": "array", "items": {"type": "object", "required": ["kind", "span", "target"], "additionalProperties": true, "properties": {"kind": {"enum": ["declaration", "import", "expression", "type", "trait", "bound"]}, "span": {"$ref": "#/$defs/span"}, "target": {"$ref": "#/$defs/semanticId"}}}}
+      }
+    },
+    "types": {
+      "allOf": [{"$ref": "#/$defs/tag"}], "type": "object", "additionalProperties": true,
+      "required": ["schema", "version", "expressions", "locals", "definitions", "declaredSyntaxTypes", "applications", "functionSignatures", "provenanceRoots", "callInstantiations", "coercions", "handlers", "methodResolutions", "memberResolutions", "representations", "constructions", "provenanceMappings", "variantConstructors", "patternVariantResolutions", "argumentFieldResolutions", "implementationTargets"],
+      "properties": {
+        "schema": {"const": "sol.inspection.types"}, "version": {"const": 1},
+        "expressions": {"$ref": "#/$defs/typeFacts"}, "locals": {"$ref": "#/$defs/typeFacts"}, "definitions": {"$ref": "#/$defs/typeFacts"}, "declaredSyntaxTypes": {"$ref": "#/$defs/typeFacts"},
+        "applications": {"type": "array", "items": {"type": "object", "required": ["id", "constructor", "definition", "arguments"], "additionalProperties": true, "properties": {"id": {"type": "string", "pattern": "^type-app:[0-9]+$"}, "constructor": {"enum": ["option", "result", "user"]}, "definition": {"anyOf": [{"$ref": "#/$defs/semanticId"}, {"type": "null"}]}, "arguments": {"type": "array", "items": {"$ref": "#/$defs/type"}}}}},
+        "functionSignatures": {"type": "array", "items": {"type": "object", "required": ["id", "parameters", "result", "effects", "rowTail"], "additionalProperties": true, "properties": {"id": {"type": "string", "pattern": "^signature:[0-9]+$"}, "parameters": {"type": "array", "items": {"$ref": "#/$defs/type"}}, "result": {"$ref": "#/$defs/type"}, "effects": {"type": "array", "items": {"$ref": "#/$defs/atom"}}, "rowTail": {"type": ["integer", "null"], "minimum": 0}}}},
+        "provenanceRoots": {"type": "array", "items": {"type": "object", "required": ["id", "parameterIndexes"], "additionalProperties": true, "properties": {"id": {"type": "string", "pattern": "^provenance:[0-9]+$"}, "parameterIndexes": {"type": "array", "items": {"$ref": "#/$defs/nonnegative"}}}}},
+        "callInstantiations": {"type": "array", "items": {"type": "object", "required": ["call", "function", "arguments"], "additionalProperties": true, "properties": {"call": {"$ref": "#/$defs/exprId"}, "function": {"$ref": "#/$defs/semanticId"}, "arguments": {"type": "array", "items": {"$ref": "#/$defs/type"}}}}},
+        "coercions": {"type": "array", "items": {"type": "object", "required": ["expression", "expected"], "additionalProperties": true, "properties": {"expression": {"$ref": "#/$defs/exprId"}, "expected": {"$ref": "#/$defs/type"}}}},
+        "handlers": {"type": "array", "items": {"type": "object", "required": ["expression", "sourceMember", "providerMember", "rootParameter"], "additionalProperties": true, "properties": {"expression": {"$ref": "#/$defs/exprId"}, "sourceMember": {"$ref": "#/$defs/nonnegative"}, "providerMember": {"$ref": "#/$defs/nonnegative"}, "rootParameter": {"$ref": "#/$defs/nonnegative"}}}},
+        "methodResolutions": {"type": "array", "items": {"type": "object", "required": ["call", "kind", "trait", "implementation", "requirementIndex", "methodIndex"], "additionalProperties": true, "properties": {"call": {"$ref": "#/$defs/exprId"}, "kind": {"enum": ["requirement", "implementation"]}, "trait": {"$ref": "#/$defs/semanticId"}, "implementation": {"anyOf": [{"$ref": "#/$defs/semanticId"}, {"type": "null"}]}, "requirementIndex": {"$ref": "#/$defs/nonnegative"}, "methodIndex": {"$ref": "#/$defs/nonnegative"}}}},
+        "memberResolutions": {"type": "object", "required": ["fields", "variants"], "additionalProperties": true, "properties": {"fields": {"type": "array", "items": {"type": "object", "required": ["expression", "fieldIndex"], "additionalProperties": true, "properties": {"expression": {"$ref": "#/$defs/exprId"}, "fieldIndex": {"$ref": "#/$defs/nonnegative"}}}}, "variants": {"type": "array", "items": {"type": "object", "required": ["expression", "variantIndex"], "additionalProperties": true, "properties": {"expression": {"$ref": "#/$defs/exprId"}, "variantIndex": {"$ref": "#/$defs/nonnegative"}}}}}},
+        "representations": {"type": "array", "items": {"type": "object", "required": ["definition", "flavor", "type"], "additionalProperties": true, "properties": {"definition": {"$ref": "#/$defs/semanticId"}, "flavor": {"enum": ["distinct", "refined"]}, "type": {"$ref": "#/$defs/type"}}}},
+        "constructions": {"type": "array", "items": {"type": "object", "required": ["expression", "definition", "representation", "result"], "additionalProperties": true, "properties": {"expression": {"$ref": "#/$defs/exprId"}, "definition": {"$ref": "#/$defs/semanticId"}, "representation": {"$ref": "#/$defs/type"}, "result": {"$ref": "#/$defs/type"}}}},
+        "provenanceMappings": {"type": "object", "required": ["expressionCapability", "expressionOperation", "localCapability", "localOperation"], "additionalProperties": true, "properties": {"expressionCapability": {"$ref": "#/$defs/provenanceMapping"}, "expressionOperation": {"$ref": "#/$defs/provenanceMapping"}, "localCapability": {"$ref": "#/$defs/provenanceMapping"}, "localOperation": {"$ref": "#/$defs/provenanceMapping"}}},
+        "variantConstructors": {"type": "array", "items": {"type": "object", "required": ["variantIndex", "owner"], "additionalProperties": true, "properties": {"variantIndex": {"$ref": "#/$defs/nonnegative"}, "owner": {"$ref": "#/$defs/type"}}}},
+        "patternVariantResolutions": {"$ref": "#/$defs/nullableIndexes"},
+        "argumentFieldResolutions": {"$ref": "#/$defs/nullableIndexes"},
+        "implementationTargets": {"type": "array", "items": {"type": "object", "required": ["definition", "target"], "additionalProperties": true, "properties": {"definition": {"$ref": "#/$defs/semanticId"}, "target": {"$ref": "#/$defs/type"}}}}
+      }
+    },
+    "typeFacts": {"type": "array", "items": {"type": "object", "required": ["subject", "type"], "additionalProperties": true, "properties": {"subject": {"type": "string"}, "type": {"$ref": "#/$defs/type"}}}},
+    "nullableIndexes": {"type": "array", "items": {"type": ["integer", "null"], "minimum": 0}},
+    "provenanceMapping": {"type": "array", "items": {"anyOf": [{"type": "string", "pattern": "^provenance:[0-9]+$"}, {"type": "null"}]}},
+    "nullableType": {"anyOf": [{"$ref": "#/$defs/type"}, {"type": "null"}]},
+    "contractObligation": {
+      "type": "object", "required": ["id", "kind", "outcome", "predicate", "predicateType", "resultType", "snapshotStart", "snapshotCount"], "additionalProperties": true,
+      "properties": {"id": {"$ref": "#/$defs/obligationId"}, "kind": {"enum": ["requires", "ensures"]}, "outcome": {"enum": ["always", "success", "failure"]}, "predicate": {"$ref": "#/$defs/exprId"}, "predicateType": {"$ref": "#/$defs/type"}, "resultType": {"$ref": "#/$defs/nullableType"}, "snapshotStart": {"$ref": "#/$defs/nonnegative"}, "snapshotCount": {"$ref": "#/$defs/nonnegative"}}
+    },
+    "contractSnapshot": {
+      "type": "object", "required": ["id", "obligation", "oldExpression", "operand", "type"], "additionalProperties": true,
+      "properties": {"id": {"$ref": "#/$defs/snapshotId"}, "obligation": {"$ref": "#/$defs/obligationId"}, "oldExpression": {"$ref": "#/$defs/exprId"}, "operand": {"$ref": "#/$defs/exprId"}, "type": {"$ref": "#/$defs/type"}}
+    },
+    "expressionSnapshot": {
+      "type": "object", "required": ["expression", "snapshot"], "additionalProperties": true,
+      "properties": {"expression": {"$ref": "#/$defs/exprId"}, "snapshot": {"$ref": "#/$defs/snapshotId"}}
+    },
+    "effects": {
+      "allOf": [{"$ref": "#/$defs/tag"}], "type": "object", "additionalProperties": true,
+      "required": ["schema", "version", "rows", "callInstantiations"],
+      "properties": {"schema": {"const": "sol.inspection.effects"}, "version": {"const": 1}, "rows": {"type": "array", "items": {"$ref": "#/$defs/effectRow"}}, "callInstantiations": {"type": "array", "items": {"type": "object", "required": ["call", "function", "rowTail", "arguments", "instantiatedRow"], "additionalProperties": true, "properties": {"call": {"$ref": "#/$defs/exprId"}, "function": {"$ref": "#/$defs/semanticId"}, "rowTail": {"type": ["integer", "null"], "minimum": 0}, "arguments": {"type": "array", "items": {"$ref": "#/$defs/atom"}}, "instantiatedRow": {"type": "array", "items": {"$ref": "#/$defs/atom"}}}}}
+      }
+    },
+    "contracts": {
+      "allOf": [{"$ref": "#/$defs/tag"}], "type": "object", "additionalProperties": true,
+      "required": ["schema", "version", "obligations", "snapshots", "expressionSnapshots"],
+      "properties": {"schema": {"const": "sol.inspection.contracts"}, "version": {"const": 1}, "obligations": {"type": "array", "items": {"$ref": "#/$defs/contractObligation"}}, "snapshots": {"type": "array", "items": {"$ref": "#/$defs/contractSnapshot"}}, "expressionSnapshots": {"type": "array", "items": {"$ref": "#/$defs/expressionSnapshot"}}}
+    },
+    "diagnostics": {
+      "allOf": [{"$ref": "#/$defs/tag"}], "type": "object", "additionalProperties": true,
+      "required": ["schema", "version", "items"],
+      "properties": {"schema": {"const": "sol.inspection.diagnostics"}, "version": {"const": 1}, "items": {"type": "array", "items": {"$ref": "#/$defs/diagnostic"}}}
+    }
+  }
+}
