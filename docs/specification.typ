@@ -1410,6 +1410,7 @@ Incremental keys are semantic where possible. Parsing, resolution, interfaces, m
 sol new service inventory
 sol fmt
 sol check
+sol effects path/to/package
 sol verify --profile critical
 sol test path/to/package
 sol run
@@ -1421,7 +1422,7 @@ sol audit --unsafe --capabilities --proofs
 sol patch apply change.solpatch
 ```)
 
-The bootstrap currently implements `sol check`, `sol test`, and `sol fmt`. Testing accepts one file or recursively discovered directory package and executes authored Boolean units deterministically. Formatting accepts one file or package; `--check` reports noncanonical files and `--stdout` formats one file without writing.
+The bootstrap currently implements `sol check`, `sol test`, `sol effects`, and `sol fmt`. Testing accepts one file or recursively discovered directory package and executes authored Boolean units deterministically. Formatting accepts one file or package; `--check` reports noncanonical files and `--stdout` formats one file without writing. Effect inspection compiles the same bounded package, then deterministically reports normalized callable rows, lexical authority, and source-ordered direct, capability, method, and callback call sites from owning typed IR. Dynamic callbacks and forwarded generic method evidence remain explicitly unresolved; this bounded command result is not a stable serialization of compiler schemas or internal IR.
 
 == Language Server and IDE
 
@@ -1535,6 +1536,7 @@ The current C17 bootstrap provides:
 - Least-fixed-point recursive inference over call-graph SCCs, including parameter and `Self` substitution.
 - Capability parameters, immutable authority aliases, normalized finite may-origin sets for computed `if`/`match`, and conservative root expansion.
 - Disclosure-only rows with lexical capability authority for resource effects and a closed authority-free `panic`/`diverge` subset.
+- Deterministic inspection of normalized callable rows, lexical authority, and statically represented call edges through `sol effects`.
 - Exact authority-preserving returns and nominal checked single-source wrappers.
 - Exact capability-backed handlers with syntax, source/provider matching, scoped root-sensitive subtraction, residual/provider effects, runtime metadata, and singleton target limitation.
 - Structured contracts resolved in fresh signature scopes; generic template typing; `Bool` typing; finalized purity; `Result` outcome-specific `result`; distinct `old` snapshots; deterministic obligation templates.
@@ -1549,7 +1551,7 @@ It does not execute programs and is not a production compiler. In particular, ge
   ([Phase], [Scope and exit criteria]),
   (
     ([0 - Executable core], [Current front-end semantics plus formalized core interactions; continue resolving contradictions with tests.]),
-    ([1 - Front end/interpreter], [Formatter, modules, richer generics, traits, pattern matching, typed errors, effects, canonical graph, VM.]),
+    ([1 - Front end/interpreter], [Formatter, modules, richer generics, traits, pattern matching, typed errors, effects, effect/authority inspection, canonical graph, VM.]),
     ([2 - Ownership/native], [Affine types, borrows/regions, drop, C FFI, backend, memory-safety validation.]),
     ([3 - Contracts/SMT], [Runtime checks, invariants/refinements, obligation IR, solvers, counterexamples, proof cache.]),
     ([4 - Concurrency/capabilities], [Structured async, actors/channels, `Send`/`Share`, cancellation, broader handlers, sandbox hosts.]),

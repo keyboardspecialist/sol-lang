@@ -218,8 +218,12 @@ int main(int argc, char **argv) {
     char *test_human[] = {(char *)sol, "test", (char *)valid_source, NULL};
     char *test_json[] = {(char *)sol, "test", "--diagnostic-format=json",
         (char *)valid_source, NULL};
+    char *effects_human[] = {(char *)sol, "effects", (char *)valid_source, NULL};
+    char *effects_json[] = {(char *)sol, "effects", "--diagnostic-format=json",
+        (char *)valid_source, NULL};
     if (!run_closed(sol, check_human) || !run_closed(sol, check_json)
-        || !run_closed(sol, test_human) || !run_closed(sol, test_json)) return 1;
+        || !run_closed(sol, test_human) || !run_closed(sol, test_json)
+        || !run_closed(sol, effects_human) || !run_closed(sol, effects_json)) return 1;
 
     char output[8192];
     char *unicode_json[] = {(char *)sol, "test", "--diagnostic-format=json",

@@ -3,6 +3,7 @@
 #include "sol/contract.h"
 #include "sol/diagnostic.h"
 #include "sol/effectcheck.h"
+#include "sol/effects.h"
 #include "sol/formatter.h"
 #include "sol/hir.h"
 #include "sol/ir.h"
@@ -26,6 +27,7 @@
 static void sol_print_usage(FILE *stream) {
     fputs(
         "usage: sol check [--diagnostic-format=human|json] <file.sol|package-directory>\n"
+        "       sol effects [--diagnostic-format=human|json] <file.sol|package-directory>\n"
         "       sol test [--diagnostic-format=human|json] <file.sol|package-directory>\n"
         "       sol fmt [--check|--stdout] <file.sol|package-directory>\n"
         "       sol --version\n",
@@ -805,6 +807,44 @@ static int sol_test_path(const char *path, bool json) {
     return failed == 0 ? 0 : 1;
 }
 
+static int sol_effects_path(const char *path, bool json) {
+    SolCompilation compilation;
+    sol_compilation_init(&compilation);
+    SolCompileOutcome outcome = sol_compile_path(&compilation, path);
+    if (outcome != SOL_COMPILE_SUCCEEDED) {
+        if (json && outcome == SOL_COMPILE_LOAD_ERROR) {
+            sol_render_cli_error(stdout, "load", compilation.load_error, path);
+        } else if (json && compilation.diagnostics.count == 0) {
+            sol_render_cli_error(stdout, "infrastructure",
+                "compilation stopped because the compiler ran out of memory", path);
+        } else if (json) {
+            sol_package_diagnostics_render_json(
+                stdout, &compilation.package, &compilation.diagnostics);
+        } else if (outcome == SOL_COMPILE_LOAD_ERROR) {
+            fprintf(stderr, "sol: %s\n", compilation.load_error);
+        } else if (compilation.diagnostics.count != 0) {
+            sol_package_diagnostics_render_human(
+                stderr, &compilation.package, &compilation.diagnostics);
+        } else {
+            fputs("sol: compilation stopped because the compiler ran out of memory\n", stderr);
+        }
+        sol_compilation_frontend_free(&compilation);
+        sol_ir_free(&compilation.ir);
+        return 1;
+    }
+    SolIr ir = compilation.ir;
+    sol_ir_init(&compilation.ir);
+    sol_compilation_frontend_free(&compilation);
+    bool rendered = sol_effects_render(stdout, &ir, json);
+    sol_ir_free(&ir);
+    if (!rendered && ferror(stdout) == 0) {
+        if (json) sol_render_cli_error(stdout, "infrastructure",
+            "cannot construct effects report", path);
+        else fputs("sol: cannot construct effects report\n", stderr);
+    }
+    return rendered ? 0 : 1;
+}
+
 static int sol_main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
     if (argc == 2 && strcmp(argv[1], "--version") == 0) {
@@ -847,7 +887,8 @@ static int sol_main(int argc, char **argv) {
     }
 
     bool testing = strcmp(argv[1], "test") == 0;
-    if (!testing && strcmp(argv[1], "check") != 0) {
+    bool inspecting_effects = strcmp(argv[1], "effects") == 0;
+    if (!testing && !inspecting_effects && strcmp(argv[1], "check") != 0) {
         sol_print_usage(stderr);
         return 2;
     }
@@ -864,7 +905,7 @@ static int sol_main(int argc, char **argv) {
             return 2;
         } else if (path != NULL) {
             fprintf(stderr, "sol: %s accepts one source file or package directory\n",
-                testing ? "test" : "check");
+                testing ? "test" : inspecting_effects ? "effects" : "check");
             return 2;
         } else {
             path = argv[index];
@@ -874,7 +915,9 @@ static int sol_main(int argc, char **argv) {
         sol_print_usage(stderr);
         return 2;
     }
-    return testing ? sol_test_path(path, json) : sol_check_path(path, json);
+    if (testing) return sol_test_path(path, json);
+    if (inspecting_effects) return sol_effects_path(path, json);
+    return sol_check_path(path, json);
 }
 
 int main(int argc, char **argv) {

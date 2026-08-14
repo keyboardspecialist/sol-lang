@@ -865,7 +865,59 @@ static void test_exact_validation_findings(void) {
         "{ return \"ok\" } }\n"
         "function generic<T: Show>(value: T) -> T { return value }\n"
         "function effectful<effects E>(callback: function() -> Int64 effects E) -> Int64 "
-        "effects { E } { return callback() }\n"));
+        "effects { E } { return callback() }\n"
+        "function untouched<effects F>(callback: function() -> Int64 effects F) -> Int64 "
+        "effects { F } { return callback() }\n"));
+    bool retained_tail = false;
+    bool callback_tail = false;
+    SolIrEffectParameterId foreign_tail = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.effect_parameter_count; ++index) {
+        if (strcmp(compilation.ir.effect_parameters[index].name, "F") == 0) {
+            foreign_tail = index;
+        }
+    }
+    for (size_t index = 0; index < compilation.ir.callable_count; ++index) {
+        SolIrCallable *callable = &compilation.ir.callables[index];
+        if (strcmp(callable->name, "effectful") == 0) {
+            retained_tail = callable->effect_parameter < compilation.ir.effect_parameter_count
+                && strcmp(compilation.ir.effect_parameters[callable->effect_parameter].name,
+                    "E") == 0;
+        }
+    }
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        SolIrExpression *expression = &compilation.ir.expressions[index];
+        if (expression->kind == SOL_IR_EXPR_CALL
+            && expression->as.call.kind == SOL_IR_CALL_CALLBACK) {
+            callback_tail = expression->as.call.effect_parameter
+                < compilation.ir.effect_parameter_count;
+            SolIrEffectParameterId saved = expression->as.call.effect_parameter;
+            expression->as.call.effect_parameter = compilation.ir.effect_parameter_count;
+            CHECK(validate_rejected(&compilation.ir));
+            if (foreign_tail != SOL_IR_NONE && saved != foreign_tail) {
+                expression->as.call.effect_parameter = foreign_tail;
+                CHECK(validate_rejected(&compilation.ir));
+            }
+            expression->as.call.effect_parameter = saved;
+        }
+    }
+    CHECK(retained_tail);
+    CHECK(callback_tail);
+    for (size_t index = 0; index < compilation.ir.type_count; ++index) {
+        if (compilation.ir.types[index].effect_parameter == SOL_IR_NONE) continue;
+        SolIrEffectParameterId saved = compilation.ir.types[index].effect_parameter;
+        compilation.ir.types[index].effect_parameter = compilation.ir.effect_parameter_count;
+        CHECK(validate_rejected(&compilation.ir));
+        compilation.ir.types[index].effect_parameter = saved;
+        break;
+    }
+    for (size_t index = 0; index < compilation.ir.callable_count; ++index) {
+        if (compilation.ir.callables[index].effect_parameter == SOL_IR_NONE) continue;
+        SolIrEffectParameterId saved = compilation.ir.callables[index].effect_parameter;
+        compilation.ir.callables[index].effect_parameter = compilation.ir.effect_parameter_count;
+        CHECK(validate_rejected(&compilation.ir));
+        compilation.ir.callables[index].effect_parameter = saved;
+        break;
+    }
     SolIr forged = compilation.ir;
     forged.generic_parameters = NULL;
     CHECK(validate_rejected(&forged));

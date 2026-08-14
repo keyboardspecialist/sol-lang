@@ -270,7 +270,8 @@ static SolIrTypeId sol_ir_add_type(SolIrLowerer *lowerer, SolIrType candidate) {
             || existing->argument_count != candidate.argument_count
             || existing->parameter_count != candidate.parameter_count
             || existing->result != candidate.result
-            || existing->effects.count != candidate.effects.count) continue;
+            || existing->effects.count != candidate.effects.count
+            || existing->effect_parameter != candidate.effect_parameter) continue;
         bool equal = true;
         for (size_t argument = 0; equal && argument < candidate.argument_count; ++argument) {
             equal = lowerer->ir->type_ids[existing->argument_offset + argument]
@@ -302,6 +303,7 @@ static SolIrTypeId sol_ir_type(SolIrLowerer *lowerer, SolType type) {
     SolIrType candidate = {
         .definition = SOL_IR_NONE,
         .result = SOL_IR_NONE,
+        .effect_parameter = SOL_IR_NONE,
         .argument_offset = lowerer->ir->type_id_count,
         .parameter_offset = lowerer->ir->type_id_count,
     };
@@ -430,6 +432,7 @@ static SolIrTypeId sol_ir_type(SolIrLowerer *lowerer, SolType type) {
             candidate.effects = sol_ir_effect_row(
                 lowerer, function->effects.atoms, function->effects.count
             );
+            candidate.effect_parameter = function->effect_parameter;
             candidate.parameter_offset = lowerer->ir->type_id_count;
             for (size_t index = 0; index < function->parameter_count; ++index) {
                 if (!sol_ir_append_type_id(lowerer, lowered_parameters[index])) {
@@ -931,6 +934,7 @@ static SolIrCallableId sol_ir_add_callable(
     entry->result = sol_ir_type(lowerer, result);
     entry->body = body == SOL_AST_NONE ? SOL_IR_NONE : body;
     entry->effects = sol_ir_effect_row(lowerer, effects->atoms, effects->count);
+    entry->effect_parameter = effects->effect_parameter;
     if (owner < lowerer->ir->definition_count) {
         entry->generic_parameters = lowerer->ir->definitions[owner].generic_parameters;
         entry->effect_parameters = lowerer->ir->definitions[owner].effect_parameters;
@@ -954,6 +958,7 @@ static SolIrTypeId sol_ir_callable_type(
         .parameter_count = callable->parameters.count,
         .result = callable->result,
         .effects = callable->effects,
+        .effect_parameter = callable->effect_parameter,
     };
     for (size_t index = 0; index < callable->parameters.count; ++index) {
         SolIrLocalId local = lowerer->ir->roots[callable->parameters.offset + index];
@@ -1531,6 +1536,127 @@ static bool sol_ir_decode_string(
     return true;
 }
 
+static bool sol_ir_append_instantiated_effect(
+    SolIrLowerer *lowerer,
+    SolIrSlice *slice,
+    const char *name,
+    SolIrAuthorityKind authority_kind,
+    SolIrLocalId authority
+) {
+    SolIrEffect *entry = NULL;
+    if (!sol_ir_grow((void **)&lowerer->ir->effects, &lowerer->ir->effect_count,
+        &lowerer->effect_capacity, 1, sizeof(*entry), (void **)&entry)) return false;
+    entry->name = sol_ir_copy_text(name, strlen(name));
+    entry->authority_kind = authority_kind;
+    entry->authority = authority;
+    if (entry->name == NULL) return false;
+    ++slice->count;
+    return true;
+}
+
+static bool sol_ir_call_actual(
+    const SolIrLowerer *lowerer,
+    const SolIrExpression *call,
+    size_t formal,
+    SolIrExpressionId *actual
+) {
+    for (size_t index = 0; index < call->as.call.operands.count; ++index) {
+        const SolIrOperand *operand
+            = &lowerer->ir->operands[call->as.call.operands.offset + index];
+        if (operand->formal == formal) {
+            *actual = operand->value;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool sol_ir_append_effect_provenance(
+    SolIrLowerer *lowerer,
+    SolIrSlice *slice,
+    const char *name,
+    SolProvenanceId provenance_id
+) {
+    SolProvenance provenance;
+    if (!sol_type_provenance(lowerer->types, provenance_id, &provenance)
+        || provenance.count == 0) return false;
+    for (size_t index = 0; index < provenance.count; ++index) {
+        SolIrLocalId root = sol_ir_local_for_parameter(lowerer, provenance.roots[index]);
+        if (root == SOL_IR_NONE || !sol_ir_append_instantiated_effect(lowerer, slice,
+            name, SOL_IR_AUTHORITY_LOCAL, root)) return false;
+    }
+    return true;
+}
+
+static bool sol_ir_instantiate_call_effects(
+    SolIrLowerer *lowerer, const SolExpr *source, SolIrExpression *call
+) {
+    SolIrSlice original = call->as.call.effects;
+    if (original.count == 0) return true;
+    SolIrEffect *staged = sol_ir_allocate(original.count, sizeof(*staged), false);
+    if (staged == NULL) return false;
+    memcpy(staged, lowerer->ir->effects + original.offset, original.count * sizeof(*staged));
+    SolIrSlice instantiated = {.offset = lowerer->ir->effect_count};
+    SolIrCallableId target = call->as.call.callable;
+    for (size_t index = 0; index < original.count; ++index) {
+        const SolIrEffect *effect = &staged[index];
+        if (effect->authority_kind == SOL_IR_AUTHORITY_NONE) {
+            if (!sol_ir_append_instantiated_effect(lowerer, &instantiated,
+                effect->name, SOL_IR_AUTHORITY_NONE, SOL_IR_NONE)) goto failed;
+            continue;
+        }
+        if (effect->authority_kind == SOL_IR_AUTHORITY_SELF) {
+            if (source->as.call.callee >= lowerer->types->expression_count
+                || !sol_ir_append_effect_provenance(lowerer, &instantiated, effect->name,
+                    lowerer->types->expression_operation_origins[
+                        source->as.call.callee])) goto failed;
+            continue;
+        }
+        bool substituted = false;
+        if (target != SOL_IR_NONE && target < lowerer->ir->callable_count) {
+            const SolIrCallable *callable = &lowerer->ir->callables[target];
+            for (size_t formal = 0; formal < callable->parameters.count; ++formal) {
+                if (lowerer->ir->roots[callable->parameters.offset + formal]
+                    != effect->authority) continue;
+                SolIrExpressionId actual;
+                if (!sol_ir_call_actual(lowerer, call, formal, &actual)
+                    || actual >= lowerer->types->expression_count
+                    || !sol_ir_append_effect_provenance(lowerer, &instantiated,
+                        effect->name,
+                        lowerer->types->expression_capability_origins[actual])) goto failed;
+                substituted = true;
+                break;
+            }
+        }
+        if (!substituted && !sol_ir_append_instantiated_effect(lowerer, &instantiated,
+            effect->name, SOL_IR_AUTHORITY_LOCAL, effect->authority)) goto failed;
+    }
+    free(staged);
+    if (instantiated.count > 1) qsort(lowerer->ir->effects + instantiated.offset,
+        instantiated.count, sizeof(*lowerer->ir->effects), sol_ir_effect_compare);
+    size_t unique = 0;
+    for (size_t index = 0; index < instantiated.count; ++index) {
+        SolIrEffect *effect = &lowerer->ir->effects[instantiated.offset + index];
+        if (unique != 0 && sol_ir_effect_compare(
+            &lowerer->ir->effects[instantiated.offset + unique - 1], effect) == 0) {
+            free(effect->name);
+            continue;
+        }
+        if (unique != index) {
+            lowerer->ir->effects[instantiated.offset + unique] = *effect;
+        }
+        ++unique;
+    }
+    instantiated.count = unique;
+    lowerer->ir->effect_count = instantiated.offset + unique;
+    call->as.call.effects = instantiated;
+    return true;
+
+failed:
+    free(staged);
+    return false;
+}
+
 static bool sol_ir_lower_call(
     SolIrLowerer *lowerer, SolExprId id, const SolExpr *source, SolIrExpression *output
 ) {
@@ -1538,6 +1664,7 @@ static bool sol_ir_lower_call(
     output->as.call.receiver = SOL_IR_NONE;
     output->as.call.variant = SOL_IR_NONE;
     output->as.call.definition = SOL_IR_NONE;
+    output->as.call.effect_parameter = SOL_IR_NONE;
     output->as.call.callee = source->as.call.callee;
     SolResolution resolution = sol_ir_callee_resolution(lowerer, source->as.call.callee);
     const SolMethodResolution *method = &lowerer->types->method_resolutions[id];
@@ -1590,6 +1717,9 @@ static bool sol_ir_lower_call(
     } else if (callee_type.kind == SOL_TYPE_FUNCTION_SIGNATURE) {
         output->as.call.kind = SOL_IR_CALL_CALLBACK;
         const SolFunctionType *function = &lowerer->types->function_types[callee_type.definition];
+        output->as.call.effects = sol_ir_effect_row(
+            lowerer, function->effects.atoms, function->effects.count);
+        output->as.call.effect_parameter = function->effect_parameter;
         output->as.call.operands.offset = lowerer->ir->operand_count;
         SolArgumentId argument = source->as.call.first_argument;
         for (size_t formal = 0; formal < function->parameter_count; ++formal) {
@@ -1660,9 +1790,14 @@ static bool sol_ir_lower_call(
         }
         output->as.call.effects = sol_ir_effect_row(lowerer,
             lowerer->effects->call_rows + effect->row_offset, effect->row_count);
+        output->as.call.effect_parameter = effect->parameter;
     } else if (output->as.call.callable != SOL_IR_NONE) {
         output->as.call.effects = lowerer->ir->callables[output->as.call.callable].effects;
+        output->as.call.effect_parameter
+            = lowerer->ir->callables[output->as.call.callable].effect_parameter;
     }
+    if (output->as.call.kind <= SOL_IR_CALL_METHOD
+        && !sol_ir_instantiate_call_effects(lowerer, source, output)) return false;
     if (lowerer->failed) {
         sol_diagnostics_add(lowerer->diagnostics, "SOL-INTERNAL-006",
             SOL_SEVERITY_ERROR, source->span,
@@ -2083,7 +2218,8 @@ static bool sol_ir_function_type_matches_callable(
     if (type->kind != SOL_IR_TYPE_FUNCTION || type->definition != SOL_IR_NONE
         || type->parameter_count != callable->parameters.count
         || type->result != callable->result
-        || type->effects.count != callable->effects.count) return false;
+        || type->effects.count != callable->effects.count
+        || type->effect_parameter != callable->effect_parameter) return false;
     for (size_t index = 0; index < type->parameter_count; ++index) {
         SolIrLocalId local = ir->roots[callable->parameters.offset + index];
         if (local >= ir->local_count
@@ -2169,14 +2305,17 @@ static bool sol_ir_callable_shapes_equal(
 }
 
 static bool sol_ir_executable_expression(
-    const SolIr *ir, SolIrExpressionId id, unsigned char *states
+    const SolIr *ir,
+    SolIrExpressionId id,
+    SolIrDefinitionId owner,
+    unsigned char *states
 ) {
     if (id >= ir->expression_count || states[id] == 1) return false;
     if (states[id] == 2) return true;
     states[id] = 1;
     const SolIrExpression *expression = &ir->expressions[id];
 #define SOL_IR_EXEC(child) \
-    do { if (!sol_ir_executable_expression(ir, (child), states)) return false; } while (0)
+    do { if (!sol_ir_executable_expression(ir, (child), owner, states)) return false; } while (0)
     switch (expression->kind) {
         case SOL_IR_EXPR_REFINEMENT_SELF:
         case SOL_IR_EXPR_RESULT:
@@ -2198,6 +2337,15 @@ static bool sol_ir_executable_expression(
             SOL_IR_EXEC(expression->as.binary.right);
             break;
         case SOL_IR_EXPR_CALL:
+            if (expression->as.call.effect_parameter != SOL_IR_NONE
+                && ir->effect_parameters[expression->as.call.effect_parameter].owner
+                    != owner) return false;
+            for (size_t index = 0; index < expression->as.call.effects.count; ++index) {
+                const SolIrEffect *effect
+                    = &ir->effects[expression->as.call.effects.offset + index];
+                if (effect->authority_kind == SOL_IR_AUTHORITY_LOCAL
+                    && ir->locals[effect->authority].owner != owner) return false;
+            }
             if (expression->as.call.kind == SOL_IR_CALL_CALLBACK
                 || expression->as.call.kind == SOL_IR_CALL_CAPABILITY) {
                 SOL_IR_EXEC(expression->as.call.callee);
@@ -2591,6 +2739,10 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
     const SolIrSlice *effect_slices = NULL;
     size_t effect_slice_count = 0;
     for (size_t type = 0; type < ir->type_count; ++type) {
+        if (ir->types[type].effect_parameter != SOL_IR_NONE
+            && ir->types[type].effect_parameter >= ir->effect_parameter_count) {
+            return sol_ir_error(diagnostics, "IR type effect parameter is out of range");
+        }
         effect_slices = &ir->types[type].effects;
         effect_slice_count = 1;
         for (size_t slice = 0; slice < effect_slice_count; ++slice) {
@@ -2604,6 +2756,15 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
         }
     }
     for (size_t callable = 0; callable < ir->callable_count; ++callable) {
+        if (ir->callables[callable].effect_parameter != SOL_IR_NONE
+            && ir->callables[callable].effect_parameter >= ir->effect_parameter_count) {
+            return sol_ir_error(diagnostics, "IR callable effect parameter is out of range");
+        }
+        if (ir->callables[callable].effect_parameter != SOL_IR_NONE
+            && ir->effect_parameters[ir->callables[callable].effect_parameter].owner
+                != ir->callables[callable].owner) {
+            return sol_ir_error(diagnostics, "IR callable effect parameter has the wrong owner");
+        }
         SolIrSlice row = ir->callables[callable].effects;
         for (size_t atom = 1; atom < row.count; ++atom) {
             if (sol_ir_effect_compare(&ir->effects[row.offset + atom - 1],
@@ -2633,6 +2794,17 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
                     ir->type_id_count)
                 || !sol_ir_slice_valid(expression->as.call.effects, ir->effect_count)) {
                 return sol_ir_error(diagnostics, "malformed canonical IR call");
+            }
+            if (expression->as.call.effect_parameter != SOL_IR_NONE
+                && expression->as.call.effect_parameter >= ir->effect_parameter_count) {
+                return sol_ir_error(diagnostics, "IR call effect parameter is out of range");
+            }
+            for (size_t atom = 1; atom < expression->as.call.effects.count; ++atom) {
+                if (sol_ir_effect_compare(&ir->effects[
+                        expression->as.call.effects.offset + atom - 1],
+                    &ir->effects[expression->as.call.effects.offset + atom]) >= 0) {
+                    return sol_ir_error(diagnostics, "IR call effect row is not canonical");
+                }
             }
             if (!sol_ir_slice_valid(expression->as.call.evidence, ir->evidence_count)) {
                 return sol_ir_error(diagnostics, "IR call evidence is out of range");
@@ -3038,6 +3210,28 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
             || !sol_ir_slice_valid(local->operation_roots, ir->root_count)) {
             return sol_ir_error(diagnostics, "malformed IR local");
         }
+        SolIrSlice provenances[2] = {local->capability_roots, local->operation_roots};
+        for (size_t provenance = 0; provenance < 2; ++provenance) {
+            SolIrSlice roots = provenances[provenance];
+            for (size_t root_index = 0; root_index < roots.count; ++root_index) {
+                SolIrLocalId root = ir->roots[roots.offset + root_index];
+                if (root >= ir->local_count) {
+                    return sol_ir_error(diagnostics, "IR local provenance is malformed");
+                }
+                SolIrTypeId root_type = ir->locals[root].type;
+                if (ir->locals[root].kind != SOL_IR_LOCAL_PARAMETER
+                    || ir->locals[root].owner != local->owner
+                    || root_type >= ir->type_count
+                    || ir->types[root_type].kind != SOL_IR_TYPE_NOMINAL
+                    || ir->types[root_type].definition >= ir->definition_count
+                    || ir->definitions[ir->types[root_type].definition].kind
+                        != SOL_IR_DEFINITION_CAPABILITY
+                    || (root_index != 0
+                        && ir->roots[roots.offset + root_index - 1] >= root)) {
+                    return sol_ir_error(diagnostics, "IR local provenance is malformed");
+                }
+            }
+        }
     }
     for (size_t index = 0; index < ir->root_count; ++index) {
         if (ir->roots[index] >= ir->local_count) {
@@ -3106,8 +3300,11 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
         return sol_ir_error(diagnostics, "IR executable validation allocation failed");
     }
     for (size_t index = 0; index < ir->callable_count; ++index) {
+        if (states != NULL) memset(states, 0, ir->expression_count);
         SolIrExpressionId body = ir->callables[index].body;
-        if (body != SOL_IR_NONE && !sol_ir_executable_expression(ir, body, states)) {
+        if (body != SOL_IR_NONE && !sol_ir_executable_expression(
+            ir, body, ir->callables[index].owner, states
+        )) {
             free(states);
             return sol_ir_error(diagnostics,
                 "contract-only or compile-time expression is executable");

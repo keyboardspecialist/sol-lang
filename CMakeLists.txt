@@ -29,6 +29,7 @@ add_library(sol_compiler STATIC
     src/contract.c
     src/diagnostic.c
     src/effectcheck.c
+    src/effects.c
     src/formatter.c
     src/hir.c
     src/ir.c
@@ -273,4 +274,14 @@ if(BUILD_TESTING)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli/test_test_cli.cmake
     )
     set_tests_properties(test_cli PROPERTIES LABELS test_cli)
+    add_test(
+        NAME effects_cli
+        COMMAND ${CMAKE_COMMAND}
+            -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
+            -DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/valid.sol
+            -DPACKAGE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/packages/valid
+            -DSUBSTITUTION_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/effects_cli/substitution.sol
+            -DINVALID_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid.sol
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/effects_cli/test_effects_cli.cmake
+    )
 endif()

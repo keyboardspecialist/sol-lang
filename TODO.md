@@ -51,7 +51,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [x] | 10 | Define a canonical typed Sol IR | 5 | 5 | Types, traits, and IDs |
 | [x] | 11 | Implement an interpreter for language conformance tests | 5 | 4 | Typed IR |
 | [x] | 12 | Add deterministic `sol test` and authored Boolean unit tests | 4 | 3 | Interpreter |
-| [ ] | 13 | Add `sol effects` authority and call-graph inspection | 3 | 2 | Effect tables |
+| [x] | 13 | Add `sol effects` authority and call-graph inspection | 3 | 2 | Effect tables |
 | [ ] | 14 | Stabilize serialized syntax, HIR, type, effect, contract, and diagnostic schemas | 4 | 5 | Stable IDs and IR |
 | [ ] | 15 | Define and check affine moves, copies, and use-after-move errors | 5 | 5 | Typed IR |
 | [ ] | 16 | Implement lexical shared and exclusive borrows | 5 | 5 | Affine ownership |

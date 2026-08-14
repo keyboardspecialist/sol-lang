@@ -53,6 +53,7 @@ typedef struct {
     size_t parameter_count;
     SolIrTypeId result;
     SolIrSlice effects;
+    SolIrEffectParameterId effect_parameter;
 } SolIrType;
 
 typedef enum {
@@ -127,6 +128,7 @@ typedef struct {
     SolIrTypeId result;
     SolIrExpressionId body;
     SolIrSlice effects;
+    SolIrEffectParameterId effect_parameter;
     SolIrSlice generic_parameters;
     SolIrSlice effect_parameters;
     SolIrLocalId receiver;
@@ -255,6 +257,7 @@ typedef struct {
             SolIrSlice operands;
             SolIrSlice type_arguments;
             SolIrSlice effects;
+            SolIrEffectParameterId effect_parameter;
             SolIrSlice evidence;
         } call;
         struct { SolIrDefinitionId definition; SolIrSlice fields; } record;
