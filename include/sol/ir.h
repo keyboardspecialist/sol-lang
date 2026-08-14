@@ -51,6 +51,7 @@ typedef struct {
     size_t argument_count;
     size_t parameter_offset;
     size_t parameter_count;
+    size_t parameter_access_offset;
     SolIrTypeId result;
     SolIrSlice effects;
     SolIrEffectParameterId effect_parameter;
@@ -132,6 +133,7 @@ typedef struct {
     SolIrSlice generic_parameters;
     SolIrSlice effect_parameters;
     SolIrLocalId receiver;
+    SolAccessMode receiver_access;
     SolIrLocalId capability_source;
     SolIrAuthorityKind result_authority_kind;
     SolIrLocalId result_authority;
@@ -165,6 +167,7 @@ typedef struct {
     SolIrDefinitionId owner;
     char *name;
     SolIrTypeId type;
+    SolAccessMode access;
     SolIrSlice capability_roots;
     SolIrSlice operation_roots;
 } SolIrLocal;
@@ -210,8 +213,8 @@ typedef enum {
     SOL_IR_LOCAL_USE_NONE,
     SOL_IR_LOCAL_USE_COPY,
     SOL_IR_LOCAL_USE_MOVE,
-    /* Direct capability operation and handler setup receivers only. */
-    SOL_IR_LOCAL_USE_RECEIVER,
+    SOL_IR_LOCAL_USE_SHARED,
+    SOL_IR_LOCAL_USE_EXCLUSIVE,
 } SolIrLocalUse;
 
 typedef enum {
@@ -235,6 +238,7 @@ typedef enum {
 typedef struct {
     size_t formal;
     SolIrExpressionId value;
+    SolAccessMode access;
 } SolIrOperand;
 
 typedef struct {
@@ -261,6 +265,7 @@ typedef struct {
             SolIrCallableId callable;
             SolIrExpressionId callee;
             SolIrExpressionId receiver;
+            SolAccessMode receiver_access;
             SolIrVariantId variant;
             SolIrDefinitionId definition;
             SolIrSlice operands;
@@ -360,6 +365,8 @@ typedef struct {
     size_t type_count;
     SolIrTypeId *type_ids;
     size_t type_id_count;
+    SolAccessMode *accesses;
+    size_t access_count;
     SolIrDefinition *definitions;
     size_t definition_count;
     SolIrCallable *callables;

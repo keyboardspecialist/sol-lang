@@ -253,6 +253,14 @@ static bool sol_effect_function_type_matches_syntax(
     if (semantic.kind != SOL_TYPE_FUNCTION_SIGNATURE
         || semantic.definition >= checker->types->function_type_count) return false;
     const SolFunctionType *function = &checker->types->function_types[semantic.definition];
+    SolTypeArgumentId parameter = syntax_type->first_argument;
+    for (size_t index = 0; index < function->parameter_count; ++index) {
+        if (parameter >= checker->syntax->type_argument_count
+            || checker->syntax->type_arguments[parameter].access
+                != function->accesses[index]) return false;
+        parameter = checker->syntax->type_arguments[parameter].next;
+    }
+    if (parameter != SOL_AST_NONE) return false;
     size_t expected_count = 0;
     SolEffectId effect_id = syntax_type->first_effect;
     while (effect_id != SOL_AST_NONE) {
@@ -2503,6 +2511,8 @@ static bool sol_effect_validate_local_resolutions(const SolEffectChecker *checke
         if (local->kind == SOL_LOCAL_PARAMETER) {
             if (local->syntax_id >= checker->syntax->parameter_count
                 || checker->parameter_owners[local->syntax_id] != owner
+                || local->access
+                    != checker->syntax->parameters[local->syntax_id].access
                 || !sol_effect_span_equal(
                     checker->source,
                     local->name,
@@ -2938,6 +2948,7 @@ static bool sol_effect_member_signatures_equal(
         const SolParameter *right_entry = &checker->syntax->parameters[right_parameter];
         if (left_entry->type_id >= checker->types->declared_type_count
             || right_entry->type_id >= checker->types->declared_type_count
+            || left_entry->access != right_entry->access
             || !sol_effect_span_equal(checker->source, left_entry->name, right_entry->name)
             || !sol_effect_semantic_type_equal(
                 checker->types->declared_types[left_entry->type_id],
@@ -3047,10 +3058,10 @@ static bool sol_effect_coercion_shape_matches(
         SolType actual_parameter = checker->types->declared_types[
             checker->syntax->parameters[parameter].type_id
         ];
-        if (!sol_effect_semantic_type_equal(
-            actual_parameter,
-            expected->parameters[index]
-        )) return false;
+        if (!sol_effect_semantic_type_equal(actual_parameter,
+                expected->parameters[index])
+            || checker->syntax->parameters[parameter].access
+                != expected->accesses[index]) return false;
         parameter = checker->syntax->parameters[parameter].next;
         ++index;
     }
@@ -3455,7 +3466,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
     }
     for (size_t index = 0; index < types->function_type_count; ++index) {
         const SolFunctionType *function = &types->function_types[index];
-        if ((function->parameter_count != 0 && function->parameters == NULL)
+        if ((function->parameter_count != 0
+                && (function->parameters == NULL || function->accesses == NULL))
             || (function->effects.count != 0 && function->effects.atoms == NULL)
             || !sol_type_exact_reference_valid(syntax, types, function->result)
             || (function->result.kind == SOL_TYPE_FUNCTION_SIGNATURE
@@ -3467,7 +3479,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             }
         for (size_t parameter = 0; parameter < function->parameter_count; ++parameter) {
             SolType type = function->parameters[parameter];
-            if (!sol_type_exact_reference_valid(syntax, types, type)
+            if (function->accesses[parameter] > SOL_ACCESS_EXCLUSIVE
+                || !sol_type_exact_reference_valid(syntax, types, type)
                 || (type.kind == SOL_TYPE_FUNCTION_SIGNATURE && type.definition >= index)
                 ) {
                 return false;
@@ -3509,10 +3522,11 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
                 && function->effect_parameter == other->effect_parameter;
             for (size_t parameter = 0; equal && parameter < function->parameter_count;
                 ++parameter) {
-                equal = sol_effect_semantic_type_equal(
-                    function->parameters[parameter],
-                    other->parameters[parameter]
-                );
+                equal = function->accesses[parameter] == other->accesses[parameter]
+                    && sol_effect_semantic_type_equal(
+                        function->parameters[parameter],
+                        other->parameters[parameter]
+                    );
             }
             for (size_t atom = 0; equal && atom < function->effects.count; ++atom) {
                 bool found = false;
@@ -3723,6 +3737,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
     for (size_t index = 0; index < hir->local_count; ++index) {
         const SolHirLocal *local = &hir->locals[index];
         if ((int)local->kind < 0 || local->kind > SOL_LOCAL_PATTERN
+            || local->access > SOL_ACCESS_EXCLUSIVE
+            || (local->kind != SOL_LOCAL_PARAMETER
+                && local->access != SOL_ACCESS_OWNED)
             || !sol_effect_span_valid(source, local->name)
             || local->owner >= syntax->item_count
             || (syntax->items[local->owner].kind != SOL_ITEM_FUNCTION

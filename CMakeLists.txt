@@ -270,6 +270,14 @@ if(BUILD_TESTING)
             -DEXPECTED_CODE=SOL-OWNERSHIP-001
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
+    add_test(
+        NAME cli_borrow_error
+        COMMAND ${CMAKE_COMMAND}
+            -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
+            -DSOL_SOURCE=${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid_borrow.sol
+            -DEXPECTED_CODE=SOL-OWNERSHIP-002
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
+    )
 
     foreach(formatter_cli_case stdout check rewrite malformed_directory symlink exclusive_options)
         add_test(

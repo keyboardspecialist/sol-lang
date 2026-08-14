@@ -2497,6 +2497,20 @@ static void test_distinct_implementation_and_function_representation(void) {
     free_compilation(&compilation);
 }
 
+static void test_distinct_borrowed_function_signatures(void) {
+    static const char text[] =
+        "module borrowed_signatures\n"
+        "function shared(callback: function(borrow Text) -> Int64 effects { pure }) "
+        "-> Int64 effects { pure } { return 1 }\n"
+        "function exclusive(callback: function(inout Text) -> Int64 effects { pure }) "
+        "-> Int64 effects { pure } { return 2 }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.types.function_type_count >= 2);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_private_pure_inference();
     test_generic_closed_effect_rows();
@@ -2553,6 +2567,7 @@ int main(void) {
     test_malformed_provenance_sets_rejected();
     test_trait_method_effects_and_metadata();
     test_distinct_implementation_and_function_representation();
+    test_distinct_borrowed_function_signatures();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;

@@ -678,6 +678,8 @@ static bool value_matches_type(Interpreter *interpreter,
             for (size_t index = 0; index < type->parameter_count; ++index) {
                 SolIrLocalId local = ir->roots[callable->parameters.offset + index];
                 if (local >= ir->local_count
+                    || ir->locals[local].access
+                        != ir->accesses[type->parameter_access_offset + index]
                     || ir->locals[local].type != substituted_type(interpreter,
                         ir->type_ids[type->parameter_offset + index])) return false;
             }

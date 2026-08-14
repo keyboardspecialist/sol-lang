@@ -83,6 +83,7 @@ typedef struct {
     SolSpan name;
     SolDefId owner;
     size_t syntax_id;
+    SolAccessMode access;
 } SolHirLocal;
 
 typedef enum {

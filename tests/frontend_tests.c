@@ -1631,10 +1631,70 @@ static void test_type_refinement_structure_rejections(void) {
     sol_source_free(&source);
 }
 
+static void test_callable_access_syntax(void) {
+    static const char valid[] =
+        "module access\n"
+        "function access_values(left: borrow Text, right: inout Text, "
+        "callback: function(borrow Text, inout Text) -> () effects { pure }) "
+        "-> () effects { pure } { () }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "access.sol", valid));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.parameter_count == 3);
+    CHECK(tree.parameters[0].access == SOL_ACCESS_SHARED);
+    CHECK(tree.parameters[1].access == SOL_ACCESS_EXCLUSIVE);
+    SolTypeId callback = tree.parameters[2].type_id;
+    CHECK(tree.types[callback].kind == SOL_SYNTAX_TYPE_FUNCTION);
+    SolTypeArgumentId argument = tree.types[callback].first_argument;
+    CHECK(tree.type_arguments[argument].access == SOL_ACCESS_SHARED);
+    argument = tree.type_arguments[argument].next;
+    CHECK(tree.type_arguments[argument].access == SOL_ACCESS_EXCLUSIVE);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+
+    static const char invalid[] =
+        "module invalid_access\n"
+        "record Bad { field: borrow Text }\n"
+        "enum BadEnum { item(value: inout Text) }\n"
+        "type BadAlias = distinct borrow Text\n"
+        "record BadGeneric { field: Option<borrow Text> }\n"
+        "capability Parent { function read() -> Int64 effects { pure } }\n"
+        "capability Child derives_from source: borrow capability Parent "
+        "{ function read() -> Int64 effects { pure } { return source.read() } }\n"
+        "function bad(value: Text, callback: function() -> borrow Text "
+        "effects { pure }) -> inout Text effects { pure } { value }\n";
+    CHECK(sol_source_from_text(&source, "invalid_access.sol", invalid));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    size_t invalid_access = 0;
+    for (size_t index = 0; index < diagnostics.count; ++index) {
+        invalid_access += strcmp(diagnostics.items[index].code, "SOL-PARSE-021") == 0;
+    }
+    CHECK(invalid_access == 7);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
 int main(void) {
     test_type_declaration_syntax();
     test_invalid_type_declarations_and_recovery();
     test_type_refinement_structure_rejections();
+    test_callable_access_syntax();
     test_valid_declarations();
     test_retained_imports();
     test_malformed_imports();

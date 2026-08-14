@@ -71,6 +71,7 @@ typedef struct {
 
 typedef struct {
     SolType *parameters;
+    SolAccessMode *accesses;
     size_t parameter_count;
     SolType result;
     SolEffectSet effects;

@@ -533,6 +533,8 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                 && item->kind != SOL_ITEM_CAPABILITY)
             || (item->capability_source != SOL_AST_NONE
                 && (syntax->parameters[item->capability_source].next != SOL_AST_NONE
+                    || syntax->parameters[item->capability_source].access
+                        != SOL_ACCESS_OWNED
                     || syntax->parameters[item->capability_source].type_id
                         >= syntax->type_count
                     || syntax->types[
@@ -586,6 +588,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         if (!sol_span_valid(resolver->source, parameter->name)
             || !sol_span_valid(resolver->source, parameter->type)
             || parameter->type_id >= syntax->type_count
+            || parameter->access > SOL_ACCESS_EXCLUSIVE
             || (parameter->next != SOL_AST_NONE && parameter->next >= syntax->parameter_count)) {
             sol_resolver_malformed(resolver);
             return false;
@@ -645,10 +648,28 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     for (size_t index = 0; index < syntax->type_argument_count; ++index) {
         const SolTypeArgument *argument = &syntax->type_arguments[index];
         if (argument->type >= syntax->type_count
+            || argument->access > SOL_ACCESS_EXCLUSIVE
             || (argument->next != SOL_AST_NONE
                 && argument->next >= syntax->type_argument_count)) {
             sol_resolver_malformed(resolver);
             return false;
+        }
+        if (argument->access != SOL_ACCESS_OWNED) {
+            bool function_parameter = false;
+            for (size_t type = 0; type < syntax->type_count; ++type) {
+                if (syntax->types[type].kind != SOL_SYNTAX_TYPE_FUNCTION) continue;
+                SolTypeArgumentId parameter = syntax->types[type].first_argument;
+                size_t traversed = 0;
+                while (parameter != SOL_AST_NONE
+                    && traversed++ < syntax->type_argument_count) {
+                    if (parameter == index) function_parameter = true;
+                    parameter = syntax->type_arguments[parameter].next;
+                }
+            }
+            if (!function_parameter) {
+                sol_resolver_malformed(resolver);
+                return false;
+            }
         }
     }
     for (size_t target = 0; target < syntax->type_argument_count; ++target) {
@@ -1384,6 +1405,8 @@ static bool sol_resolver_add_binding(
             .name = name,
             .owner = resolver->current_definition,
             .syntax_id = syntax_id,
+            .access = kind == SOL_LOCAL_PARAMETER
+                ? resolver->syntax->parameters[syntax_id].access : SOL_ACCESS_OWNED,
         };
     }
     resolver->bindings[resolver->binding_count++] = (SolBinding){

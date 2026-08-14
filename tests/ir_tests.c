@@ -87,6 +87,7 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
         || memcmp(left->source_bytes, right->source_bytes, left->source_length) != 0
         || left->type_count != right->type_count
         || left->type_id_count != right->type_id_count
+        || left->access_count != right->access_count
         || left->definition_count != right->definition_count
         || left->callable_count != right->callable_count
         || left->member_count != right->member_count
@@ -108,6 +109,8 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
     if (memcmp(left->types, right->types, left->type_count * sizeof(*left->types)) != 0
         || memcmp(left->type_ids, right->type_ids,
             left->type_id_count * sizeof(*left->type_ids)) != 0
+        || memcmp(left->accesses, right->accesses,
+            left->access_count * sizeof(*left->accesses)) != 0
         || memcmp(left->operands, right->operands,
             left->operand_count * sizeof(*left->operands)) != 0
         || memcmp(left->members, right->members,
@@ -1209,7 +1212,8 @@ static void test_affine_ownership(void) {
         const SolIrExpression *expression = &compilation.ir.expressions[index];
         saw_copy = saw_copy || expression->local_use == SOL_IR_LOCAL_USE_COPY;
         saw_receiver = saw_receiver
-            || expression->local_use == SOL_IR_LOCAL_USE_RECEIVER;
+            || expression->local_use == SOL_IR_LOCAL_USE_SHARED
+            || expression->local_use == SOL_IR_LOCAL_USE_EXCLUSIVE;
     }
     CHECK(saw_copy);
     CHECK(saw_receiver);
@@ -1268,17 +1272,125 @@ static void test_affine_ownership(void) {
     }
     for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
         SolIrExpression *expression = &compilation.ir.expressions[index];
-        if (expression->local_use == SOL_IR_LOCAL_USE_RECEIVER) {
+        if (expression->local_use == SOL_IR_LOCAL_USE_SHARED
+            || expression->local_use == SOL_IR_LOCAL_USE_EXCLUSIVE) {
             SolIrLocalUse saved = expression->local_use;
             expression->local_use = SOL_IR_LOCAL_USE_MOVE;
             CHECK(validate_rejected(&compilation.ir));
-            expression->local_use = (SolIrLocalUse)(SOL_IR_LOCAL_USE_RECEIVER + 1);
+            expression->local_use = (SolIrLocalUse)(SOL_IR_LOCAL_USE_EXCLUSIVE + 1);
             CHECK(validate_rejected(&compilation.ir));
             expression->local_use = saved;
             break;
         }
     }
     free_compilation(&compilation);
+
+    CHECK(compile_ir(&compilation,
+        "module borrow_valid\n"
+        "capability Token { function read() -> Int64 effects { pure } }\n"
+        "function inspect(value: borrow capability Token) -> Int64 effects { pure } "
+        "{ return value.read() }\n"
+        "function apply(callback: function(borrow capability Token) -> Int64 "
+        "effects { pure }, value: borrow capability Token) -> Int64 effects { pure } "
+        "{ return callback(value) }\n"
+        "function entry(value: capability Token) -> Int64 effects { pure } "
+        "{ return apply(inspect, value) }\n"));
+    bool saw_shared_parameter = false;
+    bool saw_shared_operand = false;
+    for (size_t index = 0; index < compilation.ir.local_count; ++index) {
+        saw_shared_parameter = saw_shared_parameter
+            || compilation.ir.locals[index].access == SOL_ACCESS_SHARED;
+    }
+    for (size_t index = 0; index < compilation.ir.operand_count; ++index) {
+        saw_shared_operand = saw_shared_operand
+            || compilation.ir.operands[index].access == SOL_ACCESS_SHARED;
+    }
+    CHECK(saw_shared_parameter && saw_shared_operand);
+    for (size_t index = 0; index < compilation.ir.operand_count; ++index) {
+        if (compilation.ir.operands[index].access != SOL_ACCESS_SHARED) continue;
+        SolAccessMode saved = compilation.ir.operands[index].access;
+        compilation.ir.operands[index].access = SOL_ACCESS_OWNED;
+        CHECK(validate_rejected(&compilation.ir));
+        compilation.ir.operands[index].access = saved;
+        break;
+    }
+    for (size_t index = 0; index < compilation.ir.type_count; ++index) {
+        SolIrType *type = &compilation.ir.types[index];
+        if (type->kind != SOL_IR_TYPE_FUNCTION || type->parameter_count == 0) continue;
+        size_t access = type->parameter_access_offset;
+        SolAccessMode saved = compilation.ir.accesses[access];
+        compilation.ir.accesses[access]
+            = (SolAccessMode)(SOL_ACCESS_EXCLUSIVE + 1);
+        CHECK(validate_rejected(&compilation.ir));
+        compilation.ir.accesses[access] = saved;
+        break;
+    }
+    free_compilation(&compilation);
+
+    const struct { const char *source; const char *code; } borrow_invalid[] = {
+        {
+            "module borrow_conflict\n"
+            "capability Token { function read() -> Int64 effects { pure } }\n"
+            "function clash(left: inout capability Token, "
+            "right: borrow capability Token) -> Int64 { return 0 }\n"
+            "function bad(value: capability Token) -> Int64 "
+            "{ return clash(value, value) }\n",
+            "SOL-OWNERSHIP-002"
+        },
+        {
+            "module borrow_move\n"
+            "capability Token { function read() -> Int64 effects { pure } }\n"
+            "function clash(left: borrow capability Token, "
+            "right: capability Token) -> Int64 { return 0 }\n"
+            "function bad(value: capability Token) -> Int64 "
+            "{ return clash(value, value) }\n",
+            "SOL-OWNERSHIP-003"
+        },
+        {
+            "module exclusive_copy\n"
+            "function clash(left: inout Text, right: Text) -> Int64 { return 0 }\n"
+            "function bad(value: Text) -> Int64 { return clash(value, value) }\n",
+            "SOL-OWNERSHIP-003"
+        },
+        {
+            "module borrow_temporary\n"
+            "function inspect(value: borrow Text) -> Int64 { return 0 }\n"
+            "function bad(flag: Bool, left: Text, right: Text) -> Int64 "
+            "{ return inspect(if flag { left } else { right }) }\n",
+            "SOL-OWNERSHIP-004"
+        },
+        {
+            "module unreachable_borrow_temporary\n"
+            "function inspect(value: borrow Text) -> Int64 { return 0 }\n"
+            "function bad(flag: Bool, left: Text, right: Text) -> Int64 "
+            "{ return 0 inspect(if flag { left } else { right }) }\n",
+            "SOL-OWNERSHIP-004"
+        },
+        {
+            "module borrow_escape\n"
+            "capability Token { function read() -> Int64 effects { pure } }\n"
+            "function bad(value: borrow capability Token) -> capability Token "
+            "{ return value }\n",
+            "SOL-OWNERSHIP-004"
+        },
+        {
+            "module invalid_reborrow\n"
+            "capability Token { function read() -> Int64 effects { pure } }\n"
+            "function exclusive(value: inout capability Token) -> Int64 { return 0 }\n"
+            "function bad(value: borrow capability Token) -> Int64 "
+            "{ return exclusive(value) }\n",
+            "SOL-OWNERSHIP-004"
+        },
+    };
+    for (size_t index = 0; index < sizeof(borrow_invalid) / sizeof(borrow_invalid[0]);
+        ++index) {
+        CHECK(frontend(&compilation, borrow_invalid[index].source));
+        CHECK(!sol_ir_lower(&compilation.source, &compilation.syntax,
+            &compilation.hir, &compilation.types, &compilation.effects,
+            &compilation.contracts, &compilation.ir, &compilation.diagnostics));
+        CHECK(has_code(&compilation, borrow_invalid[index].code));
+        free_compilation(&compilation);
+    }
 
     const char *invalid[] = {
         "module moved_alias\n"

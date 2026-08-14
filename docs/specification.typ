@@ -574,7 +574,7 @@ effects { pure } {
 }
 ```)
 
-#status("IMPLEMENTED", [The bootstrap checks whole-local affine moves after typed IR lowering and reports later reads with `SOL-OWNERSHIP-001`. `Int64`, `Bool`, `Text`, `Unit`, `Never`, recursively copyable `Option`/`Result`, and recursively copyable nongeneric records, enums, distinct types, and refined types are structurally `Copy`; capabilities, functions, bound operations, `Self`, generic parameters, and generic nominal values are affine. `if`, `match`, and short-circuit joins retain availability only from every continuing path. A narrow non-consuming receiver classification permits repeated direct capability operations and handler setup; aliases remain by-value. IR validation recomputes the metadata, and interpretation clones copy/receiver reads but transfers move reads. Partial moves, borrows, loops, drops, regions, cleanup, unsafe, and FFI remain future work.])
+#status("IMPLEMENTED", [The bootstrap checks whole-local affine moves and callable-scoped shared/exclusive loans after typed IR lowering. Unqualified parameters are owned; `borrow T` is shared and `inout T` is exclusive access over underlying `T`. Qualifiers are accepted only on callable and callback parameters, including trait/implementation `self`, and participate in exact signatures. Borrowed operands must be direct local places. Their loans overlap from operand evaluation through call completion; shared loans coexist, exclusive loans conflict with every overlapping loan, and moves/owned affine uses conflict with loans. Shared parameters reborrow only shared; exclusive parameters reborrow shared or exclusive. Borrowed affine parameters may be read through capability receivers and forwarded to compatible borrowed formals but cannot escape through return, owned arguments, aggregate/variant construction, or bound-operation capture. Immediate capability calls and handlers borrow their direct authority/provider locals; standalone bound-operation capture consumes an owned capability. `SOL-OWNERSHIP-001` reports use after move, and `002` through `004` report conflicts, owned use while borrowed, and invalid places/reborrows/escapes. HIR, semantic function signatures, canonical IR locals/types/operands/receivers, validation, and interpretation preserve these facts. Runtime loan reads clone immutable values after validation. Inspection v1 exposes access through optional additive HIR-local and function-signature fields without changing existing tags or required fields. There are no first-class borrow values, borrowed `let` aliases, partial/field borrows, mutation, loops, regions, drops, or cleanup.])
 
 == Borrow Categories
 
@@ -582,8 +582,8 @@ effects { pure } {
   (1fr, 2fr),
   ([Form], [Meaning]),
   (
-    ([`View<T>` or `borrow T`], [Shared immutable borrow; any number coexist while mutation is excluded.]),
-    ([`inout T`], [Exclusive mutable borrow for a call or scope.]),
+    ([`borrow T` parameter], [Bootstrap shared callable access; any number coexist and the operand is a direct local.]),
+    ([`inout T` parameter], [Bootstrap exclusive callable access; mutation is not implemented yet.]),
     ([`Owned T`], [Callee receives responsibility for destruction or transfer.]),
     ([`shared T`], [Explicit reference-counted/runtime ownership; traits govern task safety.]),
     ([`handle<Resource>`], [Opaque capability-bearing resource with protocol operations and deterministic close.]),
@@ -1372,7 +1372,7 @@ The target front end provides:
 - Constraint-based type/effect/region inference bounded for predictable diagnostics.
 - Exhaustiveness and protocol-state checking before proof generation.
 
-The bootstrap implements lossless tokens, recovering core parsing, token-preserving idempotent formatting, arena-backed syntax, deterministic package-session definition IDs, lexical and explicit multi-file module/import resolution, declaration-owned type resolution, typed HIR foundations, generic and nongeneric records/enums/functions/distinct/refined declarations, bounded coherent traits and constrained calls, exact invariant applications, matches, closed effects/capabilities/handlers, generic contract/refinement templates, and whole-local affine ownership. It does not yet implement incremental parsing, dependency packages or manifests, borrows/regions/drop, refined construction or proof/runtime validation, richer trait or row-polymorphic generics, protocols, or width/reordering formatter policies.
+The bootstrap implements lossless tokens, recovering core parsing, token-preserving idempotent formatting, arena-backed syntax, deterministic package-session definition IDs, lexical and explicit multi-file module/import resolution, declaration-owned type resolution, typed HIR foundations, generic and nongeneric records/enums/functions/distinct/refined declarations, bounded coherent traits and constrained calls, exact invariant applications, matches, closed effects/capabilities/handlers, generic contract/refinement templates, whole-local affine ownership, and callable-scoped whole-local shared/exclusive borrowing. It does not yet implement incremental parsing, dependency packages or manifests, first-class borrows, regions/drop, refined construction or proof/runtime validation, richer trait or row-polymorphic generics, protocols, or width/reordering formatter policies.
 
 == Verification Engine
 
@@ -1543,9 +1543,9 @@ The current C17 bootstrap provides:
 - Exact capability-backed handlers with syntax, source/provider matching, scoped root-sensitive subtraction, residual/provider effects, runtime metadata, and singleton target limitation.
 - Structured contracts resolved in fresh signature scopes; generic template typing; `Bool` typing; finalized purity; `Result` outcome-specific `result`; distinct `old` snapshots; deterministic obligation templates.
 - Versioned 128-bit top-level semantic IDs, package-local explicit evolution tokens, collision validation, and resolved declaration/import/expression/type/trait occurrence records.
-- Structural bootstrap copies, whole-local affine moves, use-after-move diagnostics, structured control-flow joins, validated local-use IR metadata, and move-aware interpretation.
+- Structural bootstrap copies, whole-local affine moves, callable-scoped shared/exclusive loans, use-after-move/conflict/escape diagnostics, structured control-flow joins, validated access/local-use IR metadata, and ownership-aware interpretation.
 
-It is not a production compiler. In particular, general row constraints and explicit/multiple/recursive or authority-capturing effect parameters, refined construction/validation/assumptions, richer traits and constrained or higher-order generics, borrows/regions/partial moves/drop, unsafe/FFI authority gates, general algebraic handlers, static/unparameterized or runtime-dynamic handler matching, runtime contract checks, call-site contract/refinement use, logical normalization, SMT/proof discharge, concurrency, package manifests/host wiring/dependencies, member/local stable identities, width-based and declaration-reordering formatting, stable public schemas/IR, semantic patches, and code generation are not implemented.
+It is not a production compiler. In particular, general row constraints and explicit/multiple/recursive or authority-capturing effect parameters, refined construction/validation/assumptions, richer traits and constrained or higher-order generics, first-class/partial/field borrows, mutation, regions/drop, unsafe/FFI authority gates, general algebraic handlers, static/unparameterized or runtime-dynamic handler matching, runtime contract checks, call-site contract/refinement use, logical normalization, SMT/proof discharge, concurrency, package manifests/host wiring/dependencies, member/local stable identities, width-based and declaration-reordering formatting, stable public schemas/IR, semantic patches, and code generation are not implemented.
 
 == Phased Roadmap
 

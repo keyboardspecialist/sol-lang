@@ -1061,7 +1061,7 @@ static void test_deep_handler(void) {
         "module handlers\n"
         "capability Read { function read() -> Int64 effects { service.read<Self> } }\n"
         "capability Mock { function read() -> Int64 effects { pure } }\n"
-        "function helper(source: capability Read) -> Int64 effects { service.read<source> } "
+        "function helper(source: borrow capability Read) -> Int64 effects { service.read<source> } "
         "{ return source.read() }\n"
         "function handled(source: capability Read, mock: capability Mock) -> Int64 "
         "effects { pure } { return handle service.read<source> with mock { helper(source) } }\n"
@@ -1269,6 +1269,52 @@ static void test_copy_and_move_reads(void) {
     sol_diagnostics_free(&compilation.diagnostics);
 }
 
+static void test_callable_borrow_execution(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module borrow_execution\n"
+        "function identity(value: borrow Text) -> Text { return value }\n"
+        "function owned(value: Text) -> Text { return value }\n"
+        "function apply(callback: function(borrow Text) -> Text effects { pure }, "
+        "value: borrow Text) -> Text effects { pure } { return callback(value) }\n"));
+    bool saw_shared = false;
+    for (size_t index = 0; index < compilation.ir.local_count; ++index) {
+        saw_shared = saw_shared
+            || compilation.ir.locals[index].access == SOL_ACCESS_SHARED;
+    }
+    CHECK(saw_shared);
+    SolInterpreterValue argument;
+    CHECK(sol_interpreter_value_text(&argument, "borrowed", 8));
+    SolInterpreterResult result;
+    CHECK(run(&compilation.ir, "identity", &argument, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_TEXT
+        && result.value.as.text.length == 8
+        && memcmp(result.value.as.text.bytes, "borrowed", 8) == 0);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&argument);
+
+    SolIrCallableId owned = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.callable_count; ++index) {
+        if (strcmp(compilation.ir.callables[index].name, "owned") == 0) owned = index;
+    }
+    CHECK(owned != SOL_IR_NONE);
+    SolInterpreterValue mismatch[2];
+    sol_interpreter_value_init(&mismatch[0]);
+    mismatch[0].kind = SOL_INTERPRETER_VALUE_FUNCTION;
+    mismatch[0].as.callable.callable = owned;
+    CHECK(sol_interpreter_value_text(&mismatch[1], "borrowed", 8));
+    CHECK(!run(&compilation.ir, "apply", mismatch, 2,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_INVALID_REQUEST);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&mismatch[0]);
+    sol_interpreter_value_free(&mismatch[1]);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_primitives_control_and_lifetime();
     test_data_callbacks_generics_and_traits();
@@ -1279,6 +1325,7 @@ int main(void) {
     test_deep_handler();
     test_package_diagnostic_mapping();
     test_copy_and_move_reads();
+    test_callable_borrow_execution();
     if (failures != 0) fprintf(stderr, "%d interpreter test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

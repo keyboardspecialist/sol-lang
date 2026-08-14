@@ -30,6 +30,12 @@ typedef size_t SolContractConditionId;
 #define SOL_AST_NONE SIZE_MAX
 
 typedef enum {
+    SOL_ACCESS_OWNED,
+    SOL_ACCESS_SHARED,
+    SOL_ACCESS_EXCLUSIVE,
+} SolAccessMode;
+
+typedef enum {
     SOL_EXPR_ERROR,
     SOL_EXPR_INTEGER,
     SOL_EXPR_STRING,
@@ -136,6 +142,7 @@ typedef struct {
     SolSpan type;
     SolTypeId type_id;
     SolParameterId next;
+    SolAccessMode access;
 } SolParameter;
 
 typedef enum {
@@ -168,6 +175,8 @@ typedef enum {
 typedef struct {
     SolTypeId type;
     SolTypeArgumentId next;
+    /* Meaningful only for parameters of SOL_SYNTAX_TYPE_FUNCTION. */
+    SolAccessMode access;
 } SolTypeArgument;
 
 typedef struct {

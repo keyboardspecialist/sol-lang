@@ -327,6 +327,24 @@ static void test_embedded_nul_is_rejected(void) {
     sol_formatted_free(&formatted);
 }
 
+static void test_access_qualifiers(void) {
+    SolFormatted formatted;
+    SolDiagnostics diagnostics;
+    sol_formatted_init(&formatted);
+    sol_diagnostics_init(&diagnostics);
+    CHECK(format_text(
+        "module access\nfunction f(a:borrow Text,b:inout Text,"
+        "c:function(borrow Text)->() effects { pure })->() effects { pure } { () }\n",
+        &formatted, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(strstr(formatted.text, "a: borrow Text") != NULL);
+    CHECK(strstr(formatted.text, "b: inout Text") != NULL);
+    CHECK(strstr(formatted.text, "function(borrow Text)") != NULL);
+    check_second_pass(&formatted);
+    sol_diagnostics_free(&diagnostics);
+    sol_formatted_free(&formatted);
+}
+
 int main(void) {
     test_golden_formatting();
     test_comments_and_preserved_bytes();
@@ -336,6 +354,7 @@ int main(void) {
     test_continuation_indentation();
     test_malformed_source_preserves_output();
     test_embedded_nul_is_rejected();
+    test_access_qualifiers();
 
     if (failures != 0) {
         fprintf(stderr, "%d formatter test(s) failed\n", failures);

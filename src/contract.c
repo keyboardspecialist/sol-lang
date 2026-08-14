@@ -217,7 +217,9 @@ static bool sol_contract_coercion_shape_matches(
             lowerer->syntax->parameters[parameter].type_id
         ];
         if (actual_parameter.kind != expected->parameters[index].kind
-            || actual_parameter.definition != expected->parameters[index].definition) return false;
+            || actual_parameter.definition != expected->parameters[index].definition
+            || lowerer->syntax->parameters[parameter].access
+                != expected->accesses[index]) return false;
         parameter = lowerer->syntax->parameters[parameter].next;
         ++index;
     }
@@ -646,7 +648,8 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
     }
     for (size_t index = 0; index < types->function_type_count; ++index) {
         const SolFunctionType *function = &types->function_types[index];
-        if ((function->parameter_count != 0 && function->parameters == NULL)
+        if ((function->parameter_count != 0
+                && (function->parameters == NULL || function->accesses == NULL))
             || (function->effects.count != 0 && function->effects.atoms == NULL)
             || !sol_type_exact_reference_valid(syntax, types, function->result)
             || (function->effect_parameter != SOL_AST_NONE
@@ -655,7 +658,8 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
                 && function->result.definition >= index)) return false;
         for (size_t parameter = 0; parameter < function->parameter_count; ++parameter) {
             SolType type = function->parameters[parameter];
-            if (!sol_type_exact_reference_valid(syntax, types, type)
+            if (function->accesses[parameter] > SOL_ACCESS_EXCLUSIVE
+                || !sol_type_exact_reference_valid(syntax, types, type)
                 || (type.kind == SOL_TYPE_FUNCTION_SIGNATURE
                     && type.definition >= index)) {
                 return false;

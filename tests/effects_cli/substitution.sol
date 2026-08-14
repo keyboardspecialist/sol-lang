@@ -3,7 +3,7 @@ module inspect.substitution
 capability Reader {
     function read() -> Int64 effects { service.read<Self> }
     function copy(other: capability Reader) -> Int64 effects { service.read<other> }
-    function both(other: capability Reader) -> Int64
+    function both(other: borrow capability Reader) -> Int64
     effects { service.read<Self>, service.read<other> }
 }
 

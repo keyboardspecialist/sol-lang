@@ -1354,6 +1354,8 @@ static void test_invalid_handlers(void) {
         "capability Impure { function read(value: Int64) -> Int64 effects { service.read<Self> } }\n"
         "capability Wrong { function read(value: Bool) -> Int64 effects { pure } }\n"
         "capability Missing { function value(value: Int64) -> Int64 effects { pure } }\n"
+        "capability Borrowed { function read(value: borrow Text) -> Int64 effects { service.read<Self> } }\n"
+        "capability Exclusive { function read(value: inout Text) -> Int64 effects { pure } }\n"
         "function ambiguous(clock: capability Clock, provider: capability Wrong) -> Int64 {\n"
         "    return handle clock.read<clock> with provider { 1 }\n"
         "}\n"
@@ -1367,6 +1369,9 @@ static void test_invalid_handlers(void) {
         "    return handle service.read<authority> with provider { 1 }\n"
         "}\n"
         "function impure(authority: capability Impure, provider: capability Impure) -> Int64 {\n"
+        "    return handle service.read<authority> with provider { 1 }\n"
+        "}\n"
+        "function access_mismatch(authority: capability Borrowed, provider: capability Exclusive) -> Int64 {\n"
         "    return handle service.read<authority> with provider { 1 }\n"
         "}\n"
         "function dynamic(\n"
@@ -1389,6 +1394,18 @@ static void test_invalid_handlers(void) {
         ) != NULL;
     }
     CHECK(found_dynamic);
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module handler_access_mismatch\n"
+        "capability Source { function read(value: borrow Text) -> Int64 "
+        "effects { service.read<Self> } }\n"
+        "capability Provider { function read(value: inout Text) -> Int64 "
+        "effects { pure } }\n"
+        "function bad(authority: capability Source, provider: capability Provider) "
+        "-> Int64 { return handle service.read<authority> with provider { 1 } }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-HANDLER-001"));
+    CHECK(!has_diagnostic(&compilation, "SOL-INTERNAL-006"));
     free_compilation(&compilation);
 }
 
@@ -1835,6 +1852,49 @@ static void test_runtime_identity_equality_rejected(void) {
     free_compilation(&compilation);
 }
 
+static void test_access_modes_are_exact(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module access_exact\n"
+        "trait Show { function show(self: borrow Self) -> Text effects { pure } }\n"
+        "implementation Show for Int64 { "
+        "function show(self: borrow Self) -> Text effects { pure } { return \"ok\" } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module generic_access\n"
+        "function apply<T>(callback: function(borrow T) -> Int64 effects { pure }, "
+        "value: borrow T) -> Int64 effects { pure } { return callback(value) }\n"
+        "function inspect(value: borrow Text) -> Int64 effects { pure } { return 1 }\n"
+        "function shared_callback(callback: function(borrow Text) -> Int64 "
+        "effects { pure }) -> Int64 effects { pure } { return 1 }\n"
+        "function exclusive_callback(callback: function(inout Text) -> Int64 "
+        "effects { pure }) -> Int64 effects { pure } { return 2 }\n"
+        "function good(value: borrow Text) -> Int64 effects { pure } "
+        "{ return apply<Text>(inspect, value) }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module generic_access_mismatch\n"
+        "function apply<T>(callback: function(borrow T) -> Int64 effects { pure }, "
+        "value: borrow T) -> Int64 effects { pure } { return callback(value) }\n"
+        "function inspect(value: Text) -> Int64 effects { pure } { return 1 }\n"
+        "function bad(value: borrow Text) -> Int64 effects { pure } "
+        "{ return apply<Text>(inspect, value) }\n"));
+    CHECK(sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module access_mismatch\n"
+        "trait Show { function show(self: borrow Self) -> Text effects { pure } }\n"
+        "implementation Show for Int64 { "
+        "function show(self: inout Self) -> Text effects { pure } { return \"bad\" } }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-023"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -1894,6 +1954,7 @@ int main(void) {
     test_representation_storage_cycles();
     test_type_metadata_defensive_validation();
     test_runtime_identity_equality_rejected();
+    test_access_modes_are_exact();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;

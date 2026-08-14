@@ -203,6 +203,8 @@ def validate(path, schema_path, require_generic):
     hir = artifacts["hir"]
     assert {entry["semanticId"] for entry in hir["definitions"]} == semantic_ids
     assert all(entry["kind"] in ITEM_KINDS for entry in hir["definitions"])
+    assert all(entry.get("access") in ("owned", "shared", "exclusive")
+               for entry in hir["locals"])
     for occurrence in hir["occurrences"]:
         assert occurrence["kind"] in OCCURRENCE_KINDS
         assert SEMANTIC.fullmatch(occurrence["target"])
@@ -226,6 +228,10 @@ def validate(path, schema_path, require_generic):
             assert SEMANTIC.fullmatch(node) or IDS.fullmatch(node) or node.startswith(("builtin:", "builtin-type:")), f"invalid reference {node!r}"
 
     types = artifacts["types"]
+    for signature in types["functionSignatures"]:
+        assert len(signature.get("accesses", [])) == len(signature["parameters"])
+        assert all(access in ("owned", "shared", "exclusive")
+                   for access in signature["accesses"])
     for entry in types["representations"]:
         require_object(entry, ["definition", "flavor", "type"], "representation")
         assert entry["definition"] in semantic_ids and entry["flavor"] in ("distinct", "refined")

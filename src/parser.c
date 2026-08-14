@@ -624,6 +624,12 @@ static bool sol_parser_type_arguments(SolParser *parser, SolTypeArgumentId *firs
 
 static bool sol_parser_type(SolParser *parser, SolSpan *span, SolTypeId *type_id) {
     SolToken first = sol_parser_current(parser);
+    if (first.kind == SOL_TOKEN_BORROW || first.kind == SOL_TOKEN_INOUT) {
+        sol_parser_error(parser, "SOL-PARSE-021", first,
+            "borrow and inout are allowed only as callable parameter qualifiers");
+        sol_parser_advance(parser);
+        return sol_parser_type(parser, span, type_id);
+    }
     if (parser->type_depth >= 256) {
         sol_diagnostics_add(
             parser->diagnostics,
@@ -665,6 +671,11 @@ static bool sol_parser_type(SolParser *parser, SolSpan *span, SolTypeId *type_id
         SolTypeArgumentId last_argument = SOL_AST_NONE;
         if (parsed && !sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
             for (;;) {
+                SolAccessMode access = SOL_ACCESS_OWNED;
+                if (sol_parser_match(parser, SOL_TOKEN_BORROW)) access = SOL_ACCESS_SHARED;
+                else if (sol_parser_match(parser, SOL_TOKEN_INOUT)) {
+                    access = SOL_ACCESS_EXCLUSIVE;
+                }
                 SolTypeId parameter_type;
                 if (!sol_parser_type(parser, NULL, &parameter_type)) {
                     parsed = false;
@@ -672,7 +683,9 @@ static bool sol_parser_type(SolParser *parser, SolSpan *span, SolTypeId *type_id
                 }
                 SolTypeArgumentId argument = sol_parser_add_type_argument(
                     parser,
-                    (SolTypeArgument){.type = parameter_type, .next = SOL_AST_NONE}
+                    (SolTypeArgument){
+                        .type = parameter_type, .next = SOL_AST_NONE, .access = access
+                    }
                 );
                 if (argument == SOL_AST_NONE) {
                     parsed = false;
@@ -914,6 +927,10 @@ static bool sol_parser_lookahead_type_list(
 static bool sol_parser_lookahead_type(const SolParser *parser, size_t *index, size_t depth) {
     if (depth >= 256) return false;
     SolTokenKind kind = sol_parser_lookahead_kind(parser, index);
+    if (kind == SOL_TOKEN_BORROW || kind == SOL_TOKEN_INOUT) {
+        ++*index;
+        return sol_parser_lookahead_type(parser, index, depth + 1);
+    }
     if (kind == SOL_TOKEN_FUNCTION) {
         ++*index;
         if (sol_parser_lookahead_kind(parser, index) != SOL_TOKEN_LEFT_PAREN) return false;
@@ -1982,6 +1999,9 @@ static bool sol_parser_parameters(
         if (!sol_parser_expect(parser, SOL_TOKEN_COLON, "expected ':' after the parameter name")) {
             return false;
         }
+        SolAccessMode access = SOL_ACCESS_OWNED;
+        if (sol_parser_match(parser, SOL_TOKEN_BORROW)) access = SOL_ACCESS_SHARED;
+        else if (sol_parser_match(parser, SOL_TOKEN_INOUT)) access = SOL_ACCESS_EXCLUSIVE;
         SolSpan type;
         SolTypeId type_id;
         if (!sol_parser_type(parser, &type, &type_id)) {
@@ -1993,6 +2013,7 @@ static bool sol_parser_parameters(
                 .type = type,
                 .type_id = type_id,
                 .next = SOL_AST_NONE,
+                .access = access,
             });
             if (parameter == SOL_AST_NONE) {
                 return false;

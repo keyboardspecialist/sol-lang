@@ -302,6 +302,8 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                 && item->kind != SOL_ITEM_CAPABILITY)
             || (item->capability_source != SOL_AST_NONE
                 && (syntax->parameters[item->capability_source].next != SOL_AST_NONE
+                    || syntax->parameters[item->capability_source].access
+                        != SOL_ACCESS_OWNED
                     || syntax->parameters[item->capability_source].type_id
                         >= syntax->type_count
                     || syntax->types[
@@ -355,6 +357,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         if (!sol_type_span_valid(checker->source, parameter->name)
             || !sol_type_span_valid(checker->source, parameter->type)
             || parameter->type_id >= syntax->type_count
+            || parameter->access > SOL_ACCESS_EXCLUSIVE
             || (parameter->next != SOL_AST_NONE && parameter->next >= syntax->parameter_count)) {
             sol_type_malformed(checker);
             return false;
@@ -414,10 +417,28 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     for (size_t index = 0; index < syntax->type_argument_count; ++index) {
         const SolTypeArgument *argument = &syntax->type_arguments[index];
         if (argument->type >= syntax->type_count
+            || argument->access > SOL_ACCESS_EXCLUSIVE
             || (argument->next != SOL_AST_NONE
                 && argument->next >= syntax->type_argument_count)) {
             sol_type_malformed(checker);
             return false;
+        }
+        if (argument->access != SOL_ACCESS_OWNED) {
+            bool function_parameter = false;
+            for (size_t type = 0; type < syntax->type_count; ++type) {
+                if (syntax->types[type].kind != SOL_SYNTAX_TYPE_FUNCTION) continue;
+                SolTypeArgumentId parameter = syntax->types[type].first_argument;
+                size_t traversed = 0;
+                while (parameter != SOL_AST_NONE
+                    && traversed++ < syntax->type_argument_count) {
+                    if (parameter == index) function_parameter = true;
+                    parameter = syntax->type_arguments[parameter].next;
+                }
+            }
+            if (!function_parameter) {
+                sol_type_malformed(checker);
+                return false;
+            }
         }
     }
     for (size_t index = 0; index < syntax->field_count; ++index) {
@@ -853,8 +874,12 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         const SolHirLocal *local = &hir->locals[index];
         if ((int)local->kind < 0 || local->kind > SOL_LOCAL_PATTERN
             || local->owner >= hir->definition_count
+            || local->access > SOL_ACCESS_EXCLUSIVE
             || (local->kind == SOL_LOCAL_PARAMETER
-                && local->syntax_id >= syntax->parameter_count)
+                && (local->syntax_id >= syntax->parameter_count
+                    || local->access != syntax->parameters[local->syntax_id].access))
+            || (local->kind != SOL_LOCAL_PARAMETER
+                && local->access != SOL_ACCESS_OWNED)
             || (local->kind == SOL_LOCAL_BINDING
                 && local->syntax_id >= syntax->statement_count)
             || (local->kind == SOL_LOCAL_PATTERN
@@ -912,6 +937,7 @@ void sol_type_table_free(SolTypeTable *table) {
     free(table->type_application_arguments);
     for (size_t index = 0; index < table->function_type_count; ++index) {
         free(table->function_types[index].parameters);
+        free(table->function_types[index].accesses);
         free(table->function_types[index].effects.atoms);
     }
     free(table->function_types);
@@ -1650,11 +1676,13 @@ static bool sol_type_matches_instantiation(
         const SolFunctionType *right = &table->function_types[actual.definition];
         if (left->parameter_count != right->parameter_count
             || (left->parameter_count != 0
-                && (left->parameters == NULL || right->parameters == NULL))
+                && (left->parameters == NULL || right->parameters == NULL
+                    || left->accesses == NULL || right->accesses == NULL))
             || !sol_type_effect_set_identity_equal(&left->effects, &right->effects)) {
             return false;
         }
         for (size_t index = 0; index < left->parameter_count; ++index) {
+            if (left->accesses[index] != right->accesses[index]) return false;
             if (!sol_type_matches_instantiation(
                 syntax,
                 table,
@@ -2069,7 +2097,8 @@ static bool sol_type_function_equal(
         return false;
     }
     for (size_t index = 0; index < left->parameter_count; ++index) {
-        if (!sol_type_exact_equal(left->parameters[index], right->parameters[index])) {
+        if (left->accesses[index] != right->accesses[index]
+            || !sol_type_exact_equal(left->parameters[index], right->parameters[index])) {
             return false;
         }
     }
@@ -2087,6 +2116,7 @@ static SolType sol_type_intern_function(
             &candidate
         )) {
             free(candidate.parameters);
+            free(candidate.accesses);
             free(candidate.effects.atoms);
             return (SolType){.kind = SOL_TYPE_FUNCTION_SIGNATURE, .definition = index};
         }
@@ -2099,6 +2129,7 @@ static SolType sol_type_intern_function(
             || capacity > SIZE_MAX / sizeof(*checker->types->function_types)) {
             checker->allocation_failed = true;
             free(candidate.parameters);
+            free(candidate.accesses);
             free(candidate.effects.atoms);
             return (SolType){.kind = SOL_TYPE_ERROR};
         }
@@ -2109,6 +2140,7 @@ static SolType sol_type_intern_function(
         if (grown == NULL) {
             checker->allocation_failed = true;
             free(candidate.parameters);
+            free(candidate.accesses);
             free(candidate.effects.atoms);
             return (SolType){.kind = SOL_TYPE_ERROR};
         }
@@ -2318,13 +2350,19 @@ static SolType sol_type_from_id(SolTypeChecker *checker, SolTypeId type_id) {
             }
         }
         if (parameter_count != 0) {
-            if (parameter_count > SIZE_MAX / sizeof(*candidate.parameters)) {
+            if (parameter_count > SIZE_MAX / sizeof(*candidate.parameters)
+                || parameter_count > SIZE_MAX / sizeof(*candidate.accesses)) {
                 checker->allocation_failed = true;
             } else {
                 candidate.parameters = malloc(
                     parameter_count * sizeof(*candidate.parameters)
                 );
-                if (candidate.parameters == NULL) checker->allocation_failed = true;
+                candidate.accesses = malloc(
+                    parameter_count * sizeof(*candidate.accesses)
+                );
+                if (candidate.parameters == NULL || candidate.accesses == NULL) {
+                    checker->allocation_failed = true;
+                }
             }
         }
         candidate.parameter_count = parameter_count;
@@ -2333,6 +2371,7 @@ static SolType sol_type_from_id(SolTypeChecker *checker, SolTypeId type_id) {
         for (size_t index = 0; valid && index < parameter_count; ++index) {
             const SolTypeArgument *argument = &checker->syntax->type_arguments[argument_id];
             candidate.parameters[index] = sol_type_from_id(checker, argument->type);
+            candidate.accesses[index] = argument->access;
             valid = candidate.parameters[index].kind != SOL_TYPE_ERROR;
             argument_id = argument->next;
         }
@@ -2352,6 +2391,7 @@ static SolType sol_type_from_id(SolTypeChecker *checker, SolTypeId type_id) {
             type = sol_type_intern_function(checker, candidate);
         } else {
             free(candidate.parameters);
+            free(candidate.accesses);
             free(candidate.effects.atoms);
         }
     } else if (syntax_type->kind == SOL_SYNTAX_TYPE_UNIT) {
@@ -2598,9 +2638,14 @@ static SolType sol_type_substitute(
             candidate.parameters = malloc(
                 stored->parameter_count * sizeof(*candidate.parameters)
             );
-            if (original == NULL || candidate.parameters == NULL) {
+            candidate.accesses = malloc(
+                stored->parameter_count * sizeof(*candidate.accesses)
+            );
+            if (original == NULL || candidate.parameters == NULL
+                || candidate.accesses == NULL) {
                 free(original);
                 free(candidate.parameters);
+                free(candidate.accesses);
                 checker->allocation_failed = true;
                 return (SolType){.kind = SOL_TYPE_ERROR};
             }
@@ -2609,6 +2654,8 @@ static SolType sol_type_substitute(
                 stored->parameters,
                 stored->parameter_count * sizeof(*original)
             );
+            memcpy(candidate.accesses, stored->accesses,
+                stored->parameter_count * sizeof(*candidate.accesses));
         }
         SolType original_result = stored->result;
         if (stored->effects.count != 0) {
@@ -2618,6 +2665,7 @@ static SolType sol_type_substitute(
             if (candidate.effects.atoms == NULL) {
                 free(original);
                 free(candidate.parameters);
+                free(candidate.accesses);
                 checker->allocation_failed = true;
                 return (SolType){.kind = SOL_TYPE_ERROR};
             }
@@ -2653,6 +2701,7 @@ static SolType sol_type_substitute(
         free(original);
         if (!changed) {
             free(candidate.parameters);
+            free(candidate.accesses);
             free(candidate.effects.atoms);
             return type;
         }
@@ -2897,6 +2946,10 @@ static bool sol_type_infer_argument(
             return false;
         }
         for (size_t index = 0; index < left->parameter_count; ++index) {
+            if (left->accesses[index] != right->accesses[index]) {
+                *conflict = true;
+                return false;
+            }
             if (!sol_type_infer_argument(
                 checker,
                 left->parameters[index],
@@ -2945,7 +2998,8 @@ static bool sol_type_signature_shape_matches_parameters(
         if (!sol_type_equal(
             parameter,
             checker->types->function_types[expected_id].parameters[index]
-        )) return false;
+        ) || checker->syntax->parameters[parameter_id].access
+            != checker->types->function_types[expected_id].accesses[index]) return false;
         parameter_id = checker->syntax->parameters[parameter_id].next;
         ++index;
     }
@@ -3014,7 +3068,8 @@ static bool sol_type_assignable(
             return false;
         }
         for (size_t index = 0; index < actual_function->parameter_count; ++index) {
-            if (!sol_type_equal(
+            if (actual_function->accesses[index] != expected_function->accesses[index]
+                || !sol_type_equal(
                 actual_function->parameters[index],
                 expected_function->parameters[index]
             )) return false;
@@ -3634,15 +3689,20 @@ static SolType sol_type_replace_self(SolTypeChecker *checker, SolType type, SolT
             candidate.parameters = malloc(
                 candidate.parameter_count * sizeof(*candidate.parameters)
             );
+            candidate.accesses = malloc(
+                candidate.parameter_count * sizeof(*candidate.accesses)
+            );
         }
         if (original->effects.count != 0) {
             candidate.effects.atoms = malloc(
                 original->effects.count * sizeof(*candidate.effects.atoms)
             );
         }
-        if ((candidate.parameter_count != 0 && candidate.parameters == NULL)
+        if ((candidate.parameter_count != 0
+                && (candidate.parameters == NULL || candidate.accesses == NULL))
             || (original->effects.count != 0 && candidate.effects.atoms == NULL)) {
             free(candidate.parameters);
+            free(candidate.accesses);
             free(candidate.effects.atoms);
             checker->allocation_failed = true;
             return (SolType){.kind = SOL_TYPE_ERROR};
@@ -3650,6 +3710,10 @@ static SolType sol_type_replace_self(SolTypeChecker *checker, SolType type, SolT
         if (candidate.parameter_count != 0) memcpy(
             candidate.parameters, original->parameters,
             candidate.parameter_count * sizeof(*candidate.parameters)
+        );
+        if (candidate.parameter_count != 0) memcpy(
+            candidate.accesses, original->accesses,
+            candidate.parameter_count * sizeof(*candidate.accesses)
         );
         candidate.result = original->result;
         candidate.effects.count = original->effects.count;
@@ -5273,6 +5337,8 @@ static bool sol_type_member_signature_equal(
                 checker->syntax->parameters[left_parameter].name,
                 checker->syntax->parameters[right_parameter].name
             )
+            || checker->syntax->parameters[left_parameter].access
+                != checker->syntax->parameters[right_parameter].access
             || !sol_type_equal(left_type, right_type)) return false;
         left_parameter = checker->syntax->parameters[left_parameter].next;
         right_parameter = checker->syntax->parameters[right_parameter].next;
@@ -6481,7 +6547,8 @@ static bool sol_type_method_signature_equal(
         SolType right_type = sol_type_replace_self(
             checker, sol_type_from_id(checker, right_parameter->type_id), target
         );
-        if (!sol_type_exact_equal(left_type, right_type)) return false;
+        if (left_parameter->access != right_parameter->access
+            || !sol_type_exact_equal(left_type, right_type)) return false;
         left = left_parameter->next;
         right = right_parameter->next;
     }

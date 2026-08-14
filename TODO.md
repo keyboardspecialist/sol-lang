@@ -58,7 +58,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [x] | 13 | Add `sol effects` authority and call-graph inspection | 3 | 2 | Effect tables |
 | [x] | 14 | Stabilize selected external syntax, HIR, type, effect, contract, and diagnostic projections | 4 | 5 | Stable IDs and IR |
 | [x] | 15 | Define and check affine moves, copies, and use-after-move errors | 5 | 5 | Typed IR |
-| [ ] | 16 | Implement lexical shared and exclusive borrows | 5 | 5 | Affine ownership |
+| [x] | 16 | Implement lexical shared and exclusive borrows | 5 | 5 | Affine ownership |
 | [ ] | 17 | Track regions, deterministic cleanup, and resource lifetimes | 5 | 5 | Borrow checking |
 | [ ] | 18 | Add explicit unsafe boundaries and initial FFI rules | 4 | 4 | Ownership and effects |
 | [ ] | 19 | Integrate ownership facts with effects, contracts, and diagnostics | 5 | 5 | Ownership pipeline |

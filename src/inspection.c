@@ -423,6 +423,12 @@ static const char *sol_inspection_reference_kind(SolSemanticReferenceKind kind) 
     return (size_t)kind < sizeof(names) / sizeof(names[0]) ? names[kind] : "unknown";
 }
 
+static const char *sol_inspection_access(SolAccessMode access) {
+    static const char *const names[] = {"owned", "shared", "exclusive"};
+    return (size_t)access < sizeof(names) / sizeof(names[0])
+        ? names[access] : "unknown";
+}
+
 static void sol_inspection_hir(SolInspector *inspector) {
     SolInspectionBuffer *out = inspector->output;
     sol_inspection_text(out, "\"hir\":{\"schema\":\"sol.inspection.hir\",\"version\":1,\"definitions\":[");
@@ -443,6 +449,8 @@ static void sol_inspection_hir(SolInspector *inspector) {
         sol_inspection_string(out, (size_t)local->kind < 3 ? local_kinds[local->kind] : "unknown");
         sol_inspection_text(out, ",\"name\":"); sol_inspection_source_span(inspector, local->name);
         sol_inspection_text(out, ",\"owner\":"); sol_inspection_semantic_id(inspector, local->owner);
+        sol_inspection_text(out, ",\"access\":");
+        sol_inspection_string(out, sol_inspection_access(local->access));
         sol_inspection_text(out, "}");
     }
     sol_inspection_text(out, "],\"expressionResolutions\":[");
@@ -571,6 +579,11 @@ static void sol_inspection_types(SolInspector *inspector) {
         for (size_t parameter = 0; parameter < function->parameter_count; ++parameter) {
             if (parameter != 0) sol_inspection_text(out, ",");
             sol_inspection_type(inspector, function->parameters[parameter]);
+        }
+        sol_inspection_text(out, "],\"accesses\":[");
+        for (size_t parameter = 0; parameter < function->parameter_count; ++parameter) {
+            if (parameter != 0) sol_inspection_text(out, ",");
+            sol_inspection_string(out, sol_inspection_access(function->accesses[parameter]));
         }
         sol_inspection_text(out, "],\"result\":"); sol_inspection_type(inspector, function->result);
         sol_inspection_text(out, ",\"effects\":");
@@ -1031,6 +1044,9 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
     }
     for (size_t index = 0; index < hir->local_count; ++index) {
         if (hir->locals[index].kind > SOL_LOCAL_PATTERN
+            || hir->locals[index].access > SOL_ACCESS_EXCLUSIVE
+            || (hir->locals[index].kind != SOL_LOCAL_PARAMETER
+                && hir->locals[index].access != SOL_ACCESS_OWNED)
             || hir->locals[index].owner >= hir->definition_count
             || !sol_inspection_span_valid(hir->locals[index].name, package->source.length)) {
             return false;
@@ -1155,13 +1171,17 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
     }
     for (size_t index = 0; index < types->function_type_count; ++index) {
         const SolFunctionType *entry = &types->function_types[index];
-        if ((entry->parameter_count != 0 && entry->parameters == NULL)
+        if ((entry->parameter_count != 0
+                && (entry->parameters == NULL || entry->accesses == NULL))
             || !sol_inspection_type_valid(inspector, entry->result)
             || (entry->effect_parameter != SOL_AST_NONE
                 && entry->effect_parameter >= syntax->effect_parameter_count)
             || !sol_inspection_atoms_valid(inspector, entry->effects.atoms,
                 entry->effects.count)) return false;
         SOL_INSPECTION_CHECK_TYPES(entry->parameters, entry->parameter_count);
+        for (size_t parameter = 0; parameter < entry->parameter_count; ++parameter) {
+            if (entry->accesses[parameter] > SOL_ACCESS_EXCLUSIVE) return false;
+        }
     }
 #undef SOL_INSPECTION_CHECK_TYPES
     for (size_t index = 0; index < types->provenance_count; ++index) {
