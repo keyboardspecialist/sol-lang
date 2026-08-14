@@ -2125,6 +2125,15 @@ static void sol_resolver_type_declaration(
 
 static void sol_resolver_capability_members(SolResolver *resolver, SolDefId definition) {
     const SolSyntaxItem *item = &resolver->syntax->items[definition];
+    resolver->current_definition = definition;
+    resolver->binding_count = 0;
+    resolver->scope_depth = 0;
+    if (item->capability_source != SOL_AST_NONE) {
+        sol_resolver_add_binding(resolver,
+            resolver->syntax->parameters[item->capability_source].name,
+            SOL_LOCAL_PARAMETER, item->capability_source);
+        resolver->binding_count = 0;
+    }
     SolCapabilityMemberId member_id = item->first_member;
     while (member_id != SOL_AST_NONE) {
         const SolCapabilityMember *member = &resolver->syntax->capability_members[member_id];

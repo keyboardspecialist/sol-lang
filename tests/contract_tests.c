@@ -232,10 +232,11 @@ static void test_generic_contract_templates(void) {
     static const char text[] =
         "module generic_contracts\n"
         "enum Failure { invalid }\n"
+        "function accepts<T>(value: T) -> Bool effects { pure } { return true }\n"
         "function identity<T>(value: T) -> T effects { pure }\n"
-        "ensures { result == old(value) } { return value }\n"
+        "ensures { accepts(result) && accepts(old(value)) } { return value }\n"
         "function fallible<T>(value: T) -> Result<T, Failure> effects { pure }\n"
-        "ensures { success => result == old(value) } { return ok(value) }\n"
+        "ensures { success => accepts(result) && accepts(old(value)) } { return ok(value) }\n"
         "function first() -> Int64 effects { pure } { return identity(1) }\n"
         "function second() -> Text effects { pure } { return identity<Text>(\"x\") }\n";
     TestCompilation compilation;
@@ -254,7 +255,7 @@ static void test_generic_contract_templates(void) {
             &compilation.types,
             expression
         );
-        if (instantiation != NULL && instantiation->function == 1) ++identity_calls;
+        if (instantiation != NULL && instantiation->function == 2) ++identity_calls;
     }
     CHECK(identity_calls == 2);
     SolExprId generic_call = SOL_AST_NONE;
@@ -757,7 +758,7 @@ static void test_refinement_contracts_and_distinct_construction(void) {
     static const char valid[] =
         "module refined_contract\n"
         "type Positive = refined Int64 where self > 0\n"
-        "type Identity<T> = refined T where self == self\n"
+        "type Identity<T> = refined T where true\n"
         "type Meter = distinct Int64\n"
         "function retain(value: Identity<Int64>) -> Identity<Int64> { return value }\n"
         "function same(value: Int64) -> Bool effects { pure }\n"

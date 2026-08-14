@@ -1688,10 +1688,11 @@ static void test_contract_result_provenance(void) {
     static const char text[] =
         "module contract_result_provenance\n"
         "capability Clock {}\n"
+        "function accepts(value: capability Clock) -> Bool effects { pure } { return true }\n"
         "function keep(clock: capability Clock) -> capability Clock\n"
         "authority { result derives_from clock }\n"
         "effects { pure }\n"
-        "ensures { result == clock }\n"
+        "ensures { accepts(result) }\n"
         "{ return clock }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
@@ -1699,7 +1700,7 @@ static void test_contract_result_provenance(void) {
         sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
     }
     CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
-    SolParameterId root = compilation.syntax.items[1].first_parameter;
+    SolParameterId root = compilation.syntax.items[2].first_parameter;
     bool found = false;
     for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
         if (compilation.syntax.expressions[index].kind == SOL_EXPR_RESULT) {

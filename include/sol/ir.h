@@ -106,6 +106,7 @@ typedef struct {
     SolIrSlice members;
     SolIrSlice generic_parameters;
     SolIrSlice effect_parameters;
+    SolIrLocalId capability_source;
 } SolIrDefinition;
 
 typedef enum {
@@ -126,6 +127,10 @@ typedef struct {
     SolIrSlice effects;
     SolIrSlice generic_parameters;
     SolIrSlice effect_parameters;
+    SolIrLocalId receiver;
+    SolIrLocalId capability_source;
+    SolIrAuthorityKind result_authority_kind;
+    SolIrLocalId result_authority;
 } SolIrCallable;
 
 typedef struct {
@@ -138,6 +143,11 @@ typedef struct {
     SolIrDefinitionId implementation;
     SolIrCallableId method;
     SolIrTypeId type;
+    /* Invocation binding target; SOL_IR_NONE for immediate method evidence. */
+    SolIrGenericParameterId binding;
+    /* Caller parameter used when forwarded; otherwise SOL_IR_NONE. */
+    SolIrGenericParameterId parameter;
+    bool forwarded;
 } SolIrDispatchEvidence;
 
 typedef enum {
@@ -189,6 +199,7 @@ typedef enum {
     SOL_IR_EXPR_RESULT,
     SOL_IR_EXPR_SNAPSHOT_READ,
     SOL_IR_EXPR_COMPILE_TIME_HEAD,
+    SOL_IR_EXPR_BOUND_OPERATION,
 } SolIrExpressionKind;
 
 typedef enum {
@@ -247,6 +258,7 @@ typedef struct {
         struct { SolIrDefinitionId definition; SolIrSlice fields; } record;
         struct { SolIrVariantId variant; } variant;
         struct { SolIrExpressionId base; SolIrFieldId field; } field;
+        struct { SolIrExpressionId receiver; SolIrCallableId callable; } operation;
         struct {
             SolIrExpressionId condition;
             SolIrExpressionId then_branch;

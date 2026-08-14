@@ -411,6 +411,42 @@ static SolIrTypeId sol_ir_type(SolIrLowerer *lowerer, SolType type) {
             lowerer->function_states[type.definition] = 2;
             return result;
         }
+        case SOL_TYPE_CAPABILITY_OPERATION: {
+            if (type.definition >= lowerer->syntax->capability_member_count) {
+                lowerer->failed = true;
+                return SOL_IR_NONE;
+            }
+            const SolCapabilityMember *member
+                = &lowerer->syntax->capability_members[type.definition];
+            candidate.kind = SOL_IR_TYPE_FUNCTION;
+            candidate.parameter_offset = lowerer->ir->type_id_count;
+            SolParameterId parameter = member->first_parameter;
+            size_t traversed = 0;
+            while (parameter != SOL_AST_NONE) {
+                if (parameter >= lowerer->syntax->parameter_count
+                    || traversed++ >= lowerer->syntax->parameter_count) {
+                    lowerer->failed = true;
+                    return SOL_IR_NONE;
+                }
+                const SolParameter *entry = &lowerer->syntax->parameters[parameter];
+                SolIrTypeId parameter_type = sol_ir_type(
+                    lowerer, lowerer->types->declared_types[entry->type_id]);
+                if (parameter_type == SOL_IR_NONE
+                    || !sol_ir_append_type_id(lowerer, parameter_type)) {
+                    lowerer->failed = true;
+                    return SOL_IR_NONE;
+                }
+                ++candidate.parameter_count;
+                parameter = entry->next;
+            }
+            candidate.result = sol_ir_type(lowerer,
+                lowerer->types->declared_types[member->return_type_id]);
+            candidate.effects = sol_ir_effect_row(lowerer,
+                lowerer->effects->capability_members[type.definition].atoms,
+                lowerer->effects->capability_members[type.definition].count);
+            if (candidate.result == SOL_IR_NONE || lowerer->failed) return SOL_IR_NONE;
+            return sol_ir_add_type(lowerer, candidate);
+        }
         default:
             lowerer->failed = true;
             return SOL_IR_NONE;
@@ -852,6 +888,12 @@ static SolIrCallableId sol_ir_add_callable(
     entry->owner = owner;
     entry->name = sol_ir_copy_span(lowerer->source, name);
     entry->span = span;
+    entry->receiver = SOL_IR_NONE;
+    entry->capability_source = SOL_IR_NONE;
+    entry->result_authority = SOL_IR_NONE;
+    if (skip_first && parameters != SOL_AST_NONE) {
+        entry->receiver = sol_ir_local_for_parameter(lowerer, parameters);
+    }
     entry->parameters = sol_ir_parameter_slice(lowerer, parameters, skip_first);
     entry->result = sol_ir_type(lowerer, result);
     entry->body = body == SOL_AST_NONE ? SOL_IR_NONE : body;
@@ -859,11 +901,36 @@ static SolIrCallableId sol_ir_add_callable(
     if (owner < lowerer->ir->definition_count) {
         entry->generic_parameters = lowerer->ir->definitions[owner].generic_parameters;
         entry->effect_parameters = lowerer->ir->definitions[owner].effect_parameters;
+        entry->capability_source = lowerer->ir->definitions[owner].capability_source;
     }
     if (entry->name == NULL || entry->result == SOL_IR_NONE || lowerer->failed) {
         return SOL_IR_NONE;
     }
     return lowerer->ir->callable_count - 1;
+}
+
+static SolIrTypeId sol_ir_callable_type(
+    SolIrLowerer *lowerer, SolIrCallableId callable_id
+) {
+    if (callable_id >= lowerer->ir->callable_count) return SOL_IR_NONE;
+    const SolIrCallable *callable = &lowerer->ir->callables[callable_id];
+    SolIrType candidate = {
+        .kind = SOL_IR_TYPE_FUNCTION,
+        .definition = SOL_IR_NONE,
+        .parameter_offset = lowerer->ir->type_id_count,
+        .parameter_count = callable->parameters.count,
+        .result = callable->result,
+        .effects = callable->effects,
+    };
+    for (size_t index = 0; index < callable->parameters.count; ++index) {
+        SolIrLocalId local = lowerer->ir->roots[callable->parameters.offset + index];
+        if (local >= lowerer->ir->local_count
+            || !sol_ir_append_type_id(lowerer, lowerer->ir->locals[local].type)) {
+            lowerer->failed = true;
+            return SOL_IR_NONE;
+        }
+    }
+    return sol_ir_add_type(lowerer, candidate);
 }
 
 static bool sol_ir_lower_generic_metadata(SolIrLowerer *lowerer) {
@@ -946,6 +1013,12 @@ static bool sol_ir_lower_declarations(SolIrLowerer *lowerer) {
         definition->representation = SOL_IR_NONE;
         definition->implementation_trait = SOL_IR_NONE;
         definition->implementation_target = SOL_IR_NONE;
+        definition->capability_source = SOL_IR_NONE;
+        if (source->capability_source != SOL_AST_NONE) {
+            definition->capability_source = sol_ir_local_for_parameter(
+                lowerer, source->capability_source);
+            if (definition->capability_source == SOL_IR_NONE) return false;
+        }
         definition->fields.offset = source->first_field == SOL_AST_NONE
             ? lowerer->syntax->field_count : source->first_field;
         definition->variants.offset = source->first_variant == SOL_AST_NONE
@@ -1013,6 +1086,13 @@ static bool sol_ir_lower_declarations(SolIrLowerer *lowerer) {
             = lowerer->ir->definitions[index].generic_parameters;
         lowerer->ir->callables[callable].effect_parameters
             = lowerer->ir->definitions[index].effect_parameters;
+        if (item->result_authority_parameter != SOL_AST_NONE) {
+            lowerer->ir->callables[callable].result_authority_kind
+                = SOL_IR_AUTHORITY_LOCAL;
+            lowerer->ir->callables[callable].result_authority
+                = sol_ir_local_for_parameter(lowerer, item->result_authority_parameter);
+            if (lowerer->ir->callables[callable].result_authority == SOL_IR_NONE) return false;
+        }
     }
     for (size_t index = 0; index < lowerer->syntax->capability_member_count; ++index) {
         const SolCapabilityMember *member = &lowerer->syntax->capability_members[index];
@@ -1024,6 +1104,10 @@ static bool sol_ir_lower_declarations(SolIrLowerer *lowerer) {
         if (definition->members.count == 0) definition->members.offset = lowerer->ir->member_count;
         if (callable == SOL_IR_NONE || !sol_ir_append_member(lowerer, callable)) return false;
         lowerer->member_callables[index] = callable;
+        if (member->result_authority_from_self) {
+            lowerer->ir->callables[callable].result_authority_kind
+                = SOL_IR_AUTHORITY_SELF;
+        }
         ++definition->members.count;
     }
     for (size_t index = 0; index < lowerer->syntax->trait_method_count; ++index) {
@@ -1055,7 +1139,7 @@ static bool sol_ir_append_evidence(
 }
 
 static SolIrSlice sol_ir_method_evidence(
-    SolIrLowerer *lowerer, const SolMethodResolution *method
+    SolIrLowerer *lowerer, const SolMethodResolution *method, SolExprId receiver
 ) {
     SolIrSlice slice = {.offset = lowerer->ir->evidence_count};
     if (method->kind == SOL_METHOD_RESOLUTION_IMPLEMENTATION) {
@@ -1070,6 +1154,8 @@ static SolIrSlice sol_ir_method_evidence(
                 .implementation = method->implementation,
                 .method = lowerer->method_callables[method->method],
                 .type = target,
+                .binding = SOL_IR_NONE,
+                .parameter = SOL_IR_NONE,
             })) {
             lowerer->failed = true;
             return slice;
@@ -1077,48 +1163,98 @@ static SolIrSlice sol_ir_method_evidence(
         slice.count = 1;
         return slice;
     }
-    for (SolDefId definition = 0; definition < lowerer->syntax->item_count; ++definition) {
-        if (lowerer->syntax->items[definition].kind != SOL_ITEM_IMPLEMENTATION
-            || lowerer->hir->trait_resolutions[definition].kind
-                != SOL_RESOLUTION_DEFINITION
-            || lowerer->hir->trait_resolutions[definition].target != method->trait) continue;
-        SolTraitMethodId implementation_method = lowerer->syntax->items[
-            definition
-        ].first_trait_method;
-        while (implementation_method != SOL_AST_NONE) {
-            if (implementation_method >= lowerer->syntax->trait_method_count) {
-                lowerer->failed = true;
-                return slice;
-            }
-            const SolTraitMethod *candidate
-                = &lowerer->syntax->trait_methods[implementation_method];
-            const SolTraitMethod *requirement
-                = &lowerer->syntax->trait_methods[method->requirement];
-            size_t left = candidate->name.end - candidate->name.start;
-            size_t right = requirement->name.end - requirement->name.start;
-            if (left == right && memcmp(lowerer->source->text + candidate->name.start,
-                lowerer->source->text + requirement->name.start, left) == 0) break;
-            implementation_method = candidate->next;
-        }
-        if (implementation_method == SOL_AST_NONE) continue;
-        SolIrTypeId target = sol_ir_type(
-            lowerer, lowerer->types->implementation_targets[definition]
-        );
-        if (target == SOL_IR_NONE || !sol_ir_append_evidence(lowerer,
-            (SolIrDispatchEvidence){
-                .trait = method->trait,
-                .requirement = lowerer->method_callables[method->requirement],
-                .implementation = definition,
-                .method = lowerer->method_callables[implementation_method],
-                .type = target,
-            })) {
-            lowerer->failed = true;
-            return slice;
-        }
-        ++slice.count;
+    if (receiver >= lowerer->types->expression_count) {
+        lowerer->failed = true;
+        return slice;
     }
-    if (slice.count == 0) lowerer->failed = true;
+    SolType type = lowerer->types->expressions[receiver];
+    if (type.kind != SOL_TYPE_PARAMETER
+        || type.definition >= lowerer->syntax->type_parameter_count
+        || lowerer->generic_parameters[type.definition] == SOL_IR_NONE
+        || !sol_ir_append_evidence(lowerer, (SolIrDispatchEvidence){
+            .trait = method->trait,
+            .requirement = lowerer->method_callables[method->requirement],
+            .implementation = SOL_IR_NONE,
+            .method = SOL_IR_NONE,
+            .type = SOL_IR_NONE,
+            .binding = SOL_IR_NONE,
+            .parameter = lowerer->generic_parameters[type.definition],
+            .forwarded = true,
+        })) {
+        lowerer->failed = true;
+        return slice;
+    }
+    slice.count = 1;
     return slice;
+}
+
+static bool sol_ir_append_bound_evidence(
+    SolIrLowerer *lowerer, SolIrExpression *call
+) {
+    if (call->as.call.callable == SOL_IR_NONE) return true;
+    const SolIrCallable *target = &lowerer->ir->callables[call->as.call.callable];
+    if (target->generic_parameters.count != call->as.call.type_arguments.count) return true;
+    if (call->as.call.evidence.count == 0) {
+        call->as.call.evidence.offset = lowerer->ir->evidence_count;
+    }
+    for (size_t ordinal = 0; ordinal < target->generic_parameters.count; ++ordinal) {
+        SolIrGenericParameterId parameter = target->generic_parameters.offset + ordinal;
+        SolIrDefinitionId trait = lowerer->ir->generic_parameters[parameter].trait_bound;
+        if (trait == SOL_IR_NONE) continue;
+        SolIrTypeId type_id = lowerer->ir->type_ids[
+            call->as.call.type_arguments.offset + ordinal
+        ];
+        if (type_id >= lowerer->ir->type_count) return false;
+        const SolIrType *type = &lowerer->ir->types[type_id];
+        SolIrSlice requirements = lowerer->ir->definitions[trait].members;
+        for (size_t member = 0; member < requirements.count; ++member) {
+            SolIrCallableId requirement
+                = lowerer->ir->members[requirements.offset + member].callable;
+            SolIrDispatchEvidence evidence = {
+                .trait = trait,
+                .requirement = requirement,
+                .implementation = SOL_IR_NONE,
+                .method = SOL_IR_NONE,
+                .type = SOL_IR_NONE,
+                .binding = parameter,
+                .parameter = SOL_IR_NONE,
+            };
+            if (type->kind == SOL_IR_TYPE_PARAMETER) {
+                evidence.forwarded = true;
+                evidence.parameter = type->definition;
+                if (evidence.parameter >= lowerer->ir->generic_parameter_count
+                    || lowerer->ir->generic_parameters[evidence.parameter].trait_bound
+                        != trait) return false;
+            } else {
+                for (SolIrDefinitionId definition = 0;
+                    definition < lowerer->ir->definition_count; ++definition) {
+                    const SolIrDefinition *implementation
+                        = &lowerer->ir->definitions[definition];
+                    if (implementation->kind != SOL_IR_DEFINITION_IMPLEMENTATION
+                        || implementation->implementation_trait != trait
+                        || implementation->implementation_target != type_id) continue;
+                    for (size_t candidate = 0;
+                        candidate < implementation->members.count; ++candidate) {
+                        SolIrCallableId method = lowerer->ir->members[
+                            implementation->members.offset + candidate
+                        ].callable;
+                        if (strcmp(lowerer->ir->callables[method].name,
+                            lowerer->ir->callables[requirement].name) == 0) {
+                            evidence.implementation = definition;
+                            evidence.method = method;
+                            evidence.type = type_id;
+                            break;
+                        }
+                    }
+                    if (evidence.method != SOL_IR_NONE) break;
+                }
+                if (evidence.method == SOL_IR_NONE) return false;
+            }
+            if (!sol_ir_append_evidence(lowerer, evidence)) return false;
+            ++call->as.call.evidence.count;
+        }
+    }
+    return true;
 }
 
 static SolResolution sol_ir_callee_resolution(
@@ -1296,6 +1432,33 @@ static bool sol_ir_compile_time_head_used(
     return false;
 }
 
+static SolCapabilityMemberId sol_ir_bound_member(
+    const SolIrLowerer *lowerer, const SolExpr *field
+) {
+    if (field->kind != SOL_EXPR_FIELD
+        || field->as.field.base >= lowerer->types->expression_count) return SOL_AST_NONE;
+    SolType base = lowerer->types->expressions[field->as.field.base];
+    if (base.kind != SOL_TYPE_NOMINAL || base.definition >= lowerer->syntax->item_count
+        || lowerer->syntax->items[base.definition].kind != SOL_ITEM_CAPABILITY) {
+        return SOL_AST_NONE;
+    }
+    SolCapabilityMemberId member
+        = lowerer->syntax->items[base.definition].first_member;
+    size_t traversed = 0;
+    while (member != SOL_AST_NONE) {
+        if (member >= lowerer->syntax->capability_member_count
+            || traversed++ >= lowerer->syntax->capability_member_count) return SOL_AST_NONE;
+        const SolCapabilityMember *candidate
+            = &lowerer->syntax->capability_members[member];
+        size_t left = candidate->name.end - candidate->name.start;
+        size_t right = field->as.field.name.end - field->as.field.name.start;
+        if (left == right && memcmp(lowerer->source->text + candidate->name.start,
+            lowerer->source->text + field->as.field.name.start, left) == 0) return member;
+        member = candidate->next;
+    }
+    return SOL_AST_NONE;
+}
+
 static bool sol_ir_decode_string(
     SolIrLowerer *lowerer, SolSpan span, char **output
 ) {
@@ -1352,7 +1515,8 @@ static bool sol_ir_lower_call(
         const SolExpr *callee = &lowerer->syntax->expressions[source->as.call.callee];
         if (callee->kind != SOL_EXPR_FIELD) return false;
         output->as.call.receiver = callee->as.field.base;
-        output->as.call.evidence = sol_ir_method_evidence(lowerer, method);
+        output->as.call.evidence = sol_ir_method_evidence(
+            lowerer, method, callee->as.field.base);
         SolParameterId parameter
             = lowerer->syntax->trait_methods[method->requirement].first_parameter;
         if (parameter != SOL_AST_NONE) parameter = lowerer->syntax->parameters[parameter].next;
@@ -1393,9 +1557,6 @@ static bool sol_ir_lower_call(
         if (callee_type.definition >= lowerer->syntax->capability_member_count) return false;
         output->as.call.kind = SOL_IR_CALL_CAPABILITY;
         output->as.call.callable = lowerer->member_callables[callee_type.definition];
-        const SolExpr *callee = &lowerer->syntax->expressions[source->as.call.callee];
-        if (callee->kind != SOL_EXPR_FIELD) return false;
-        output->as.call.receiver = callee->as.field.base;
         output->as.call.operands = sol_ir_order_arguments(lowerer,
             source->as.call.first_argument,
             lowerer->syntax->capability_members[callee_type.definition].first_parameter);
@@ -1442,6 +1603,7 @@ static bool sol_ir_lower_call(
     } else {
         output->as.call.type_arguments.offset = lowerer->ir->type_id_count;
     }
+    if (!sol_ir_append_bound_evidence(lowerer, output)) return false;
     const SolEffectCallInstantiation *effect
         = sol_effect_call_instantiation(lowerer->effects, id);
     if (effect != NULL) {
@@ -1478,7 +1640,6 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
         SolType frontend_type = lowerer->types->expressions[id];
         bool transient_head = frontend_type.kind == SOL_TYPE_UNKNOWN
             || frontend_type.kind == SOL_TYPE_VARIANT
-            || frontend_type.kind == SOL_TYPE_CAPABILITY_OPERATION
             || frontend_type.kind == SOL_TYPE_TRAIT_METHOD;
         if (!transient_head) {
             output->type = sol_ir_type(lowerer, lowerer->types->expressions[id]);
@@ -1518,6 +1679,9 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
                     if (resolution.target >= lowerer->ir->local_count) return false;
                     output->kind = SOL_IR_EXPR_LOCAL;
                     output->as.local = resolution.target;
+                    if (output->type == SOL_IR_NONE) {
+                        output->type = lowerer->ir->locals[resolution.target].type;
+                    }
                 } else if (resolution.kind == SOL_RESOLUTION_REFINEMENT_SELF) {
                     output->kind = SOL_IR_EXPR_REFINEMENT_SELF;
                     output->as.definition = resolution.target;
@@ -1564,6 +1728,8 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
                 }
                 break;
             case SOL_EXPR_FIELD:
+                {
+                SolCapabilityMemberId bound_member = sol_ir_bound_member(lowerer, source);
                 if (lowerer->types->field_resolutions[id] != SOL_AST_NONE) {
                     SolFieldId field = lowerer->types->field_resolutions[id];
                     if (field >= lowerer->syntax->field_count) return false;
@@ -1578,11 +1744,26 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
                     ].first_field == SOL_AST_NONE) {
                     output->kind = SOL_IR_EXPR_VARIANT;
                     output->as.variant.variant = lowerer->types->variant_resolutions[id];
+                } else if ((frontend_type.kind == SOL_TYPE_CAPABILITY_OPERATION
+                        && frontend_type.definition
+                            < lowerer->syntax->capability_member_count)
+                    || bound_member != SOL_AST_NONE) {
+                    SolCapabilityMemberId member
+                        = frontend_type.kind == SOL_TYPE_CAPABILITY_OPERATION
+                        ? frontend_type.definition : bound_member;
+                    output->kind = SOL_IR_EXPR_BOUND_OPERATION;
+                    output->as.operation.receiver = source->as.field.base;
+                    output->as.operation.callable
+                        = lowerer->member_callables[member];
+                    output->type = sol_ir_callable_type(
+                        lowerer, output->as.operation.callable);
+                    if (output->type == SOL_IR_NONE) return false;
                 } else {
                     output->kind = SOL_IR_EXPR_COMPILE_TIME_HEAD;
                     if (!sol_ir_compile_time_head_used(lowerer, id)) return false;
                 }
                 break;
+                }
             case SOL_EXPR_RECORD: {
                 SolType type = lowerer->types->expressions[id];
                 SolIrTypeId ir_type = sol_ir_type(lowerer, type);
@@ -1685,7 +1866,8 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
         if (output->kind != SOL_IR_EXPR_COMPILE_TIME_HEAD && output->type == SOL_IR_NONE) {
             sol_diagnostics_add(lowerer->diagnostics, "SOL-INTERNAL-006",
                 SOL_SEVERITY_ERROR, source->span,
-                "expression %zu has no exact IR type", id);
+                "expression %zu has no exact IR type (frontend kind %d)",
+                id, (int)frontend_type.kind);
             return false;
         }
     }
@@ -1845,6 +2027,161 @@ static bool sol_ir_slice_valid(SolIrSlice slice, size_t count) {
     return slice.offset <= count && slice.count <= count - slice.offset;
 }
 
+static bool sol_ir_function_type_matches_callable(
+    const SolIr *ir, SolIrTypeId type_id, SolIrCallableId callable_id
+) {
+    if (type_id >= ir->type_count || callable_id >= ir->callable_count) return false;
+    const SolIrType *type = &ir->types[type_id];
+    const SolIrCallable *callable = &ir->callables[callable_id];
+    if (type->kind != SOL_IR_TYPE_FUNCTION || type->definition != SOL_IR_NONE
+        || type->parameter_count != callable->parameters.count
+        || type->result != callable->result
+        || type->effects.count != callable->effects.count) return false;
+    for (size_t index = 0; index < type->parameter_count; ++index) {
+        SolIrLocalId local = ir->roots[callable->parameters.offset + index];
+        if (local >= ir->local_count
+            || ir->type_ids[type->parameter_offset + index]
+                != ir->locals[local].type) return false;
+    }
+    for (size_t index = 0; index < type->effects.count; ++index) {
+        if (sol_ir_effect_compare(&ir->effects[type->effects.offset + index],
+            &ir->effects[callable->effects.offset + index]) != 0) return false;
+    }
+    return true;
+}
+
+static bool sol_ir_expression_capability_definition(
+    const SolIr *ir, SolIrExpressionId expression, SolIrDefinitionId *definition
+) {
+    if (expression >= ir->expression_count) return false;
+    SolIrTypeId type_id = ir->expressions[expression].type;
+    if (type_id >= ir->type_count) return false;
+    const SolIrType *type = &ir->types[type_id];
+    if (type->kind != SOL_IR_TYPE_NOMINAL || type->definition >= ir->definition_count
+        || ir->definitions[type->definition].kind != SOL_IR_DEFINITION_CAPABILITY) {
+        return false;
+    }
+    if (definition != NULL) *definition = type->definition;
+    return true;
+}
+
+static bool sol_ir_callable_effect_has_self(
+    const SolIr *ir, SolIrCallableId callable, const char *name
+) {
+    if (callable >= ir->callable_count || name == NULL) return false;
+    SolIrSlice effects = ir->callables[callable].effects;
+    for (size_t index = 0; index < effects.count; ++index) {
+        const SolIrEffect *effect = &ir->effects[effects.offset + index];
+        if (effect->authority_kind == SOL_IR_AUTHORITY_SELF
+            && strcmp(effect->name, name) == 0) return true;
+    }
+    return false;
+}
+
+static bool sol_ir_callable_shapes_equal(
+    const SolIr *ir, SolIrCallableId left_id, SolIrCallableId right_id
+) {
+    if (left_id >= ir->callable_count || right_id >= ir->callable_count) return false;
+    const SolIrCallable *left = &ir->callables[left_id];
+    const SolIrCallable *right = &ir->callables[right_id];
+    if (left->parameters.count != right->parameters.count
+        || left->result != right->result) return false;
+    for (size_t index = 0; index < left->parameters.count; ++index) {
+        SolIrLocalId left_local = ir->roots[left->parameters.offset + index];
+        SolIrLocalId right_local = ir->roots[right->parameters.offset + index];
+        if (left_local >= ir->local_count || right_local >= ir->local_count
+            || ir->locals[left_local].type != ir->locals[right_local].type) return false;
+    }
+    return true;
+}
+
+static bool sol_ir_executable_expression(
+    const SolIr *ir, SolIrExpressionId id, unsigned char *states
+) {
+    if (id >= ir->expression_count || states[id] == 1) return false;
+    if (states[id] == 2) return true;
+    states[id] = 1;
+    const SolIrExpression *expression = &ir->expressions[id];
+#define SOL_IR_EXEC(child) \
+    do { if (!sol_ir_executable_expression(ir, (child), states)) return false; } while (0)
+    switch (expression->kind) {
+        case SOL_IR_EXPR_REFINEMENT_SELF:
+        case SOL_IR_EXPR_RESULT:
+        case SOL_IR_EXPR_SNAPSHOT_READ:
+        case SOL_IR_EXPR_COMPILE_TIME_HEAD:
+            return false;
+        case SOL_IR_EXPR_DEFINITION: {
+            SolIrDefinitionId definition = expression->as.definition;
+            if (definition >= ir->definition_count) return false;
+            SolIrCallableId callable = ir->definitions[definition].callable;
+            if (callable == SOL_IR_NONE) break;
+            if (callable >= ir->callable_count
+                || ir->callables[callable].generic_parameters.count != 0
+                || ir->callables[callable].effect_parameters.count != 0) return false;
+            break;
+        }
+        case SOL_IR_EXPR_BOUND_OPERATION:
+            SOL_IR_EXEC(expression->as.operation.receiver);
+            break;
+        case SOL_IR_EXPR_UNARY:
+            SOL_IR_EXEC(expression->as.unary.operand);
+            break;
+        case SOL_IR_EXPR_BINARY:
+            SOL_IR_EXEC(expression->as.binary.left);
+            SOL_IR_EXEC(expression->as.binary.right);
+            break;
+        case SOL_IR_EXPR_CALL:
+            if (expression->as.call.kind == SOL_IR_CALL_CALLBACK
+                || expression->as.call.kind == SOL_IR_CALL_CAPABILITY) {
+                SOL_IR_EXEC(expression->as.call.callee);
+            } else if (expression->as.call.kind == SOL_IR_CALL_METHOD) {
+                SOL_IR_EXEC(expression->as.call.receiver);
+            }
+            for (size_t index = 0; index < expression->as.call.operands.count; ++index) {
+                SOL_IR_EXEC(ir->operands[expression->as.call.operands.offset + index].value);
+            }
+            break;
+        case SOL_IR_EXPR_RECORD:
+            for (size_t index = 0; index < expression->as.record.fields.count; ++index) {
+                SOL_IR_EXEC(ir->operands[expression->as.record.fields.offset + index].value);
+            }
+            break;
+        case SOL_IR_EXPR_FIELD:
+            SOL_IR_EXEC(expression->as.field.base);
+            break;
+        case SOL_IR_EXPR_IF:
+            SOL_IR_EXEC(expression->as.if_expr.condition);
+            SOL_IR_EXEC(expression->as.if_expr.then_branch);
+            SOL_IR_EXEC(expression->as.if_expr.else_branch);
+            break;
+        case SOL_IR_EXPR_MATCH:
+            SOL_IR_EXEC(expression->as.match_expr.scrutinee);
+            for (size_t index = 0; index < expression->as.match_expr.arms.count; ++index) {
+                SOL_IR_EXEC(ir->arms[ir->arm_ids[
+                    expression->as.match_expr.arms.offset + index]].value);
+            }
+            break;
+        case SOL_IR_EXPR_BLOCK:
+            for (size_t index = 0; index < expression->as.block.count; ++index) {
+                SOL_IR_EXEC(ir->statements[ir->statement_ids[
+                    expression->as.block.offset + index]].expression);
+            }
+            break;
+        case SOL_IR_EXPR_PROPAGATE:
+            SOL_IR_EXEC(expression->as.propagate.operand);
+            break;
+        case SOL_IR_EXPR_HANDLE:
+            SOL_IR_EXEC(expression->as.handler.authority);
+            SOL_IR_EXEC(expression->as.handler.provider);
+            SOL_IR_EXEC(expression->as.handler.body);
+            break;
+        default: break;
+    }
+#undef SOL_IR_EXEC
+    states[id] = 2;
+    return true;
+}
+
 bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
     if (ir == NULL || ir->source_bytes == NULL || ir->source_path == NULL
         || (ir->type_count != 0 && ir->types == NULL)
@@ -1920,7 +2257,21 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
             || !sol_ir_slice_valid(definition->generic_parameters,
                 ir->generic_parameter_count)
             || !sol_ir_slice_valid(definition->effect_parameters,
-                ir->effect_parameter_count)) {
+                ir->effect_parameter_count)
+            || (definition->capability_source != SOL_IR_NONE
+                && (definition->kind != SOL_IR_DEFINITION_CAPABILITY
+                    || definition->capability_source >= ir->local_count
+                    || ir->locals[definition->capability_source].owner != index
+                    || ir->locals[definition->capability_source].kind
+                        != SOL_IR_LOCAL_PARAMETER
+                    || ir->locals[definition->capability_source].type >= ir->type_count
+                    || ir->types[ir->locals[definition->capability_source].type].kind
+                        != SOL_IR_TYPE_NOMINAL
+                    || ir->types[ir->locals[definition->capability_source].type].definition
+                        >= ir->definition_count
+                    || ir->definitions[ir->types[
+                        ir->locals[definition->capability_source].type
+                    ].definition].kind != SOL_IR_DEFINITION_CAPABILITY))) {
             return sol_ir_error(diagnostics, "malformed canonical IR declaration");
         }
         for (size_t member = 0; member < definition->members.count; ++member) {
@@ -1954,24 +2305,51 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
             }
         }
     }
+    for (size_t index = 0; index < ir->definition_count; ++index) {
+        if (ir->definitions[index].kind != SOL_IR_DEFINITION_CAPABILITY) continue;
+        SolIrDefinitionId current = index;
+        for (size_t depth = 0; depth <= ir->definition_count; ++depth) {
+            SolIrLocalId source = ir->definitions[current].capability_source;
+            if (source == SOL_IR_NONE) break;
+            SolIrTypeId type = ir->locals[source].type;
+            current = ir->types[type].definition;
+            if (current == index || depth == ir->definition_count) {
+                return sol_ir_error(diagnostics, "IR capability source chain is cyclic");
+            }
+        }
+    }
     for (size_t index = 0; index < ir->evidence_count; ++index) {
         const SolIrDispatchEvidence *evidence = &ir->evidence[index];
         if (evidence->trait >= ir->definition_count
             || evidence->requirement >= ir->callable_count
-            || evidence->implementation >= ir->definition_count
-            || evidence->method >= ir->callable_count || evidence->type >= ir->type_count
             || ir->definitions[evidence->trait].kind != SOL_IR_DEFINITION_TRAIT
-            || ir->definitions[evidence->implementation].kind
-                != SOL_IR_DEFINITION_IMPLEMENTATION
-            || ir->definitions[evidence->implementation].implementation_trait
-                != evidence->trait
-            || ir->definitions[evidence->implementation].implementation_target
-                != evidence->type
             || ir->callables[evidence->requirement].kind
                 != SOL_IR_CALLABLE_TRAIT_REQUIREMENT
-            || ir->callables[evidence->method].kind
-                != SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION
-            || ir->callables[evidence->method].owner != evidence->implementation) {
+            || ir->callables[evidence->requirement].owner != evidence->trait
+            || (evidence->binding != SOL_IR_NONE
+                && (evidence->binding >= ir->generic_parameter_count
+                    || ir->generic_parameters[evidence->binding].trait_bound
+                        != evidence->trait))
+            || (evidence->forwarded
+                ? (evidence->parameter >= ir->generic_parameter_count
+                    || ir->generic_parameters[evidence->parameter].trait_bound
+                        != evidence->trait
+                    || evidence->implementation != SOL_IR_NONE
+                    || evidence->method != SOL_IR_NONE || evidence->type != SOL_IR_NONE)
+                : (evidence->parameter != SOL_IR_NONE
+                    || evidence->implementation >= ir->definition_count
+                    || evidence->method >= ir->callable_count
+                    || evidence->type >= ir->type_count
+                    || ir->definitions[evidence->implementation].kind
+                        != SOL_IR_DEFINITION_IMPLEMENTATION
+                    || ir->definitions[evidence->implementation].implementation_trait
+                        != evidence->trait
+                    || ir->definitions[evidence->implementation].implementation_target
+                        != evidence->type
+                    || ir->callables[evidence->method].kind
+                        != SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION
+                    || ir->callables[evidence->method].owner
+                        != evidence->implementation))) {
             return sol_ir_error(diagnostics, "malformed IR dispatch evidence");
         }
     }
@@ -1993,7 +2371,19 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
             || callable->effect_parameters.offset
                 != ir->definitions[callable->owner].effect_parameters.offset
             || callable->effect_parameters.count
-                != ir->definitions[callable->owner].effect_parameters.count) {
+                != ir->definitions[callable->owner].effect_parameters.count
+            || (callable->receiver != SOL_IR_NONE
+                && (callable->receiver >= ir->local_count
+                    || ir->locals[callable->receiver].owner != callable->owner
+                    || (callable->kind != SOL_IR_CALLABLE_TRAIT_REQUIREMENT
+                        && callable->kind != SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION)))
+            || callable->capability_source
+                != ir->definitions[callable->owner].capability_source
+            || callable->result_authority_kind > SOL_IR_AUTHORITY_SELF
+            || (callable->result_authority_kind == SOL_IR_AUTHORITY_LOCAL
+                ? (callable->result_authority >= ir->local_count
+                    || ir->locals[callable->result_authority].owner != callable->owner)
+                : callable->result_authority != SOL_IR_NONE)) {
             return sol_ir_error(diagnostics, "malformed canonical IR callable");
         }
     }
@@ -2058,11 +2448,13 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
     }
     for (size_t index = 0; index < ir->expression_count; ++index) {
         const SolIrExpression *expression = &ir->expressions[index];
-        if (expression->kind > SOL_IR_EXPR_COMPILE_TIME_HEAD
+        if (expression->kind > SOL_IR_EXPR_BOUND_OPERATION
             || expression->span.start > expression->span.end
             || expression->span.end > ir->source_length
             || (expression->kind != SOL_IR_EXPR_COMPILE_TIME_HEAD
                 && expression->type >= ir->type_count)
+            || (expression->kind == SOL_IR_EXPR_STRING
+                && expression->as.string == NULL)
             || !sol_ir_slice_valid(expression->capability_roots, ir->root_count)
             || !sol_ir_slice_valid(expression->operation_roots, ir->root_count)) {
             return sol_ir_error(diagnostics, "malformed canonical IR expression");
@@ -2087,6 +2479,89 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
                     return sol_ir_error(diagnostics, "IR call type argument is out of range");
                 }
             }
+            if (expression->as.call.kind == SOL_IR_CALL_FUNCTION) {
+                if (expression->as.call.callable >= ir->callable_count) {
+                    return sol_ir_error(diagnostics,
+                        "IR function call target is out of range");
+                }
+                const SolIrCallable *target
+                    = &ir->callables[expression->as.call.callable];
+                if (target->generic_parameters.count
+                    != expression->as.call.type_arguments.count) {
+                    return sol_ir_error(diagnostics,
+                        "IR function call generic argument set is incomplete");
+                }
+                for (size_t evidence_index = 0;
+                    evidence_index < expression->as.call.evidence.count;
+                    ++evidence_index) {
+                    const SolIrDispatchEvidence *entry = &ir->evidence[
+                        expression->as.call.evidence.offset + evidence_index
+                    ];
+                    if (entry->binding < target->generic_parameters.offset
+                        || entry->binding - target->generic_parameters.offset
+                            >= target->generic_parameters.count) {
+                        return sol_ir_error(diagnostics,
+                            "IR call evidence binding is outside the target callable");
+                    }
+                    size_t ordinal = entry->binding - target->generic_parameters.offset;
+                    SolIrTypeId argument = ir->type_ids[
+                        expression->as.call.type_arguments.offset + ordinal
+                    ];
+                    if ((!entry->forwarded && entry->type != argument)
+                        || (entry->forwarded
+                            && (ir->types[argument].kind != SOL_IR_TYPE_PARAMETER
+                                || ir->types[argument].definition
+                                    != entry->parameter))) {
+                        return sol_ir_error(diagnostics,
+                            "IR call evidence does not match its type argument");
+                    }
+                    for (size_t previous = 0; previous < evidence_index; ++previous) {
+                        const SolIrDispatchEvidence *other = &ir->evidence[
+                            expression->as.call.evidence.offset + previous
+                        ];
+                        if (other->binding == entry->binding
+                            && other->requirement == entry->requirement) {
+                            return sol_ir_error(diagnostics,
+                                "IR call evidence binding is duplicated");
+                        }
+                    }
+                }
+                for (size_t ordinal = 0; ordinal < target->generic_parameters.count;
+                    ++ordinal) {
+                    SolIrGenericParameterId parameter
+                        = target->generic_parameters.offset + ordinal;
+                    SolIrDefinitionId trait
+                        = ir->generic_parameters[parameter].trait_bound;
+                    if (trait == SOL_IR_NONE) continue;
+                    SolIrSlice requirements = ir->definitions[trait].members;
+                    for (size_t member = 0; member < requirements.count; ++member) {
+                        SolIrCallableId requirement
+                            = ir->members[requirements.offset + member].callable;
+                        size_t found = 0;
+                        for (size_t evidence_index = 0;
+                            evidence_index < expression->as.call.evidence.count;
+                            ++evidence_index) {
+                            const SolIrDispatchEvidence *entry = &ir->evidence[
+                                expression->as.call.evidence.offset + evidence_index
+                            ];
+                            if (entry->binding == parameter
+                                && entry->requirement == requirement) ++found;
+                        }
+                        if (found != 1) return sol_ir_error(diagnostics,
+                            "IR call evidence binding is incomplete");
+                    }
+                }
+            } else if (expression->as.call.kind == SOL_IR_CALL_METHOD) {
+                for (size_t evidence_index = 0;
+                    evidence_index < expression->as.call.evidence.count;
+                    ++evidence_index) {
+                    if (ir->evidence[expression->as.call.evidence.offset
+                        + evidence_index].binding != SOL_IR_NONE) {
+                        return sol_ir_error(diagnostics,
+                            "IR immediate method evidence has an invocation binding");
+                    }
+                }
+            }
             if (expression->as.call.kind == SOL_IR_CALL_METHOD
                 && expression->as.call.evidence.count == 0) {
                 return sol_ir_error(diagnostics, "IR method call has no dispatch evidence");
@@ -2097,8 +2572,6 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
             if ((callable_call && expression->as.call.callable >= ir->callable_count)
                 || (!callable_call && expression->as.call.callable != SOL_IR_NONE)
                 || (expression->as.call.kind == SOL_IR_CALL_METHOD
-                    && expression->as.call.receiver >= ir->expression_count)
-                || (expression->as.call.kind == SOL_IR_CALL_CAPABILITY
                     && expression->as.call.receiver >= ir->expression_count)
                 || (expression->as.call.kind == SOL_IR_CALL_ENUM_CONSTRUCTOR
                     && expression->as.call.variant >= ir->variant_count)
@@ -2112,6 +2585,17 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
                     || ir->types[ir->expressions[expression->as.call.callee].type].kind
                         != SOL_IR_TYPE_FUNCTION)) {
                 return sol_ir_error(diagnostics, "IR callback callee is malformed");
+            }
+            if (expression->as.call.kind == SOL_IR_CALL_CAPABILITY
+                && (expression->as.call.callee >= ir->expression_count
+                    || ir->expressions[expression->as.call.callee].type >= ir->type_count
+                    || ir->types[ir->expressions[expression->as.call.callee].type].kind
+                        != SOL_IR_TYPE_FUNCTION
+                    || expression->as.call.callable >= ir->callable_count
+                    || !sol_ir_function_type_matches_callable(ir,
+                        ir->expressions[expression->as.call.callee].type,
+                        expression->as.call.callable))) {
+                return sol_ir_error(diagnostics, "IR capability callee is malformed");
             }
             size_t formal_count = 0;
             if (callable_call) {
@@ -2153,6 +2637,34 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
             && (expression->as.field.base >= ir->expression_count
                 || expression->as.field.field >= ir->field_count)) {
             return sol_ir_error(diagnostics, "malformed canonical IR field projection");
+        } else if (expression->kind == SOL_IR_EXPR_BOUND_OPERATION) {
+            SolIrDefinitionId receiver_definition = SOL_IR_NONE;
+            if (expression->as.operation.receiver >= ir->expression_count
+                || expression->as.operation.callable >= ir->callable_count
+                || ir->callables[expression->as.operation.callable].kind
+                    != SOL_IR_CALLABLE_CAPABILITY
+                || !sol_ir_expression_capability_definition(ir,
+                    expression->as.operation.receiver, &receiver_definition)
+                || ir->callables[expression->as.operation.callable].owner
+                    != receiver_definition
+                || !sol_ir_function_type_matches_callable(ir, expression->type,
+                    expression->as.operation.callable)) {
+                return sol_ir_error(diagnostics, "malformed IR bound operation");
+            }
+            SolIrSlice roots = ir->expressions[
+                expression->as.operation.receiver
+            ].capability_roots;
+            if (roots.count != expression->operation_roots.count) {
+                return sol_ir_error(diagnostics,
+                    "IR bound operation authority roots are inconsistent");
+            }
+            for (size_t root = 0; root < roots.count; ++root) {
+                if (ir->roots[roots.offset + root]
+                    != ir->roots[expression->operation_roots.offset + root]) {
+                    return sol_ir_error(diagnostics,
+                        "IR bound operation authority roots are inconsistent");
+                }
+            }
         } else if (expression->kind == SOL_IR_EXPR_PROPAGATE
             && (expression->as.propagate.kind > SOL_IR_PROPAGATE_RESULT
                 || expression->as.propagate.operand >= ir->expression_count
@@ -2194,9 +2706,21 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
                 = &ir->definitions[expression->as.record.definition];
             if (definition->kind == SOL_IR_DEFINITION_CAPABILITY) {
                 SolIrSlice operands = expression->as.record.fields;
+                SolIrDefinitionId source_definition = SOL_IR_NONE;
+                if (definition->capability_source != SOL_IR_NONE) {
+                    source_definition = ir->types[ir->locals[
+                        definition->capability_source
+                    ].type].definition;
+                }
                 if (operands.count != 1
+                    || definition->capability_source == SOL_IR_NONE
                     || ir->operands[operands.offset].formal != 0
-                    || ir->operands[operands.offset].value >= ir->expression_count) {
+                    || ir->operands[operands.offset].value >= ir->expression_count
+                    || !sol_ir_expression_capability_definition(ir,
+                        ir->operands[operands.offset].value, NULL)
+                    || ir->types[ir->expressions[ir->operands[
+                        operands.offset
+                    ].value].type].definition != source_definition) {
                     return sol_ir_error(diagnostics,
                         "IR capability construction source is malformed");
                 }
@@ -2218,15 +2742,41 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
                     }
                 }
             }
-        } else if (expression->kind == SOL_IR_EXPR_HANDLE
-            && (expression->as.handler.effect_name == NULL
+        } else if (expression->kind == SOL_IR_EXPR_HANDLE) {
+            SolIrDefinitionId authority_definition = SOL_IR_NONE;
+            SolIrDefinitionId provider_definition = SOL_IR_NONE;
+            if (expression->as.handler.effect_name == NULL
                 || expression->as.handler.authority >= ir->expression_count
                 || expression->as.handler.provider >= ir->expression_count
                 || expression->as.handler.body >= ir->expression_count
                 || expression->as.handler.source >= ir->callable_count
                 || expression->as.handler.provider_callable >= ir->callable_count
-                || expression->as.handler.root >= ir->local_count)) {
-            return sol_ir_error(diagnostics, "IR handler is malformed");
+                || expression->as.handler.root >= ir->local_count
+                || ir->callables[expression->as.handler.source].kind
+                    != SOL_IR_CALLABLE_CAPABILITY
+                || ir->callables[expression->as.handler.provider_callable].kind
+                    != SOL_IR_CALLABLE_CAPABILITY
+                || !sol_ir_expression_capability_definition(ir,
+                    expression->as.handler.authority, &authority_definition)
+                || !sol_ir_expression_capability_definition(ir,
+                    expression->as.handler.provider, &provider_definition)
+                || ir->callables[expression->as.handler.source].owner
+                    != authority_definition
+                || ir->callables[expression->as.handler.provider_callable].owner
+                    != provider_definition
+                || !sol_ir_callable_shapes_equal(ir,
+                    expression->as.handler.source,
+                    expression->as.handler.provider_callable)
+                || ir->locals[expression->as.handler.root].type >= ir->type_count
+                || ir->types[ir->locals[expression->as.handler.root].type].kind
+                    != SOL_IR_TYPE_NOMINAL
+                || ir->types[ir->locals[expression->as.handler.root].type].definition
+                    != authority_definition
+                || !sol_ir_callable_effect_has_self(ir,
+                    expression->as.handler.source,
+                    expression->as.handler.effect_name)) {
+                return sol_ir_error(diagnostics, "IR handler is malformed");
+            }
         } else if (expression->kind == SOL_IR_EXPR_SNAPSHOT_READ
             && expression->as.snapshot >= ir->snapshot_count) {
             return sol_ir_error(diagnostics, "IR snapshot read is out of range");
@@ -2286,6 +2836,24 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
             || (arm->kind != SOL_IR_PATTERN_VARIANT
                 && (arm->variant != SOL_IR_NONE || arm->bindings.count != 0))) {
             return sol_ir_error(diagnostics, "malformed IR match arm");
+        }
+        if (arm->kind == SOL_IR_PATTERN_VARIANT) {
+            SolIrSlice fields = ir->variants[arm->variant].fields;
+            if (!sol_ir_slice_valid(fields, ir->field_count)
+                || arm->bindings.count != fields.count) {
+                return sol_ir_error(diagnostics,
+                    "IR variant arm payload bindings are incomplete");
+            }
+            for (size_t binding = 0; binding < fields.count; ++binding) {
+                SolIrLocalId local = ir->roots[arm->bindings.offset + binding];
+                if (local >= ir->local_count
+                    || ir->locals[local].kind != SOL_IR_LOCAL_PATTERN
+                    || ir->locals[local].type
+                        != ir->fields[fields.offset + binding].type) {
+                    return sol_ir_error(diagnostics,
+                        "IR variant arm payload binding type is invalid");
+                }
+            }
         }
     }
     for (size_t index = 0; index < ir->local_count; ++index) {
@@ -2358,6 +2926,20 @@ bool sol_ir_validate(const SolIr *ir, SolDiagnostics *diagnostics) {
         }
         previous_end = file->aggregate_end;
     }
+    unsigned char *states = ir->expression_count == 0 ? NULL
+        : calloc(ir->expression_count, 1);
+    if (ir->expression_count != 0 && states == NULL) {
+        return sol_ir_error(diagnostics, "IR executable validation allocation failed");
+    }
+    for (size_t index = 0; index < ir->callable_count; ++index) {
+        SolIrExpressionId body = ir->callables[index].body;
+        if (body != SOL_IR_NONE && !sol_ir_executable_expression(ir, body, states)) {
+            free(states);
+            return sol_ir_error(diagnostics,
+                "contract-only or compile-time expression is executable");
+        }
+    }
+    free(states);
     return true;
 }
 

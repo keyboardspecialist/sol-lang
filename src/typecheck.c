@@ -2656,6 +2656,158 @@ static SolType sol_type_substitute(
     return type;
 }
 
+static bool sol_type_equality_definition_supported(
+    SolTypeChecker *checker,
+    SolDefId definition,
+    const SolType *arguments,
+    size_t argument_count,
+    unsigned char *active
+);
+
+static bool sol_type_equality_supported_recursive(
+    SolTypeChecker *checker,
+    SolType type,
+    unsigned char *active
+) {
+    switch (type.kind) {
+        case SOL_TYPE_INT64:
+        case SOL_TYPE_BOOL:
+        case SOL_TYPE_TEXT:
+        case SOL_TYPE_UNIT:
+        case SOL_TYPE_NEVER:
+            return true;
+        case SOL_TYPE_NOMINAL:
+            return sol_type_equality_definition_supported(
+                checker, type.definition, NULL, 0, active);
+        case SOL_TYPE_APPLICATION: {
+            const SolTypeApplication *application
+                = sol_type_application(checker->types, type);
+            const SolType *arguments = NULL;
+            size_t argument_count = 0;
+            if (application == NULL || !sol_type_application_arguments(
+                checker->types, type, &arguments, &argument_count)) {
+                sol_type_malformed(checker);
+                return false;
+            }
+            if (application->constructor == SOL_TYPE_CONSTRUCTOR_OPTION
+                || application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT) {
+                for (size_t index = 0; index < argument_count; ++index) {
+                    if (!sol_type_equality_supported_recursive(
+                        checker, arguments[index], active)) return false;
+                }
+                return true;
+            }
+            return sol_type_equality_definition_supported(checker,
+                application->definition, arguments, argument_count, active);
+        }
+        case SOL_TYPE_UNKNOWN:
+        case SOL_TYPE_ERROR:
+        case SOL_TYPE_FUNCTION:
+        case SOL_TYPE_FUNCTION_SIGNATURE:
+        case SOL_TYPE_CAPABILITY_OPERATION:
+        case SOL_TYPE_VARIANT:
+        case SOL_TYPE_PARAMETER:
+        case SOL_TYPE_SELF:
+        case SOL_TYPE_TRAIT_METHOD:
+            return false;
+    }
+    return false;
+}
+
+static bool sol_type_equality_definition_supported(
+    SolTypeChecker *checker,
+    SolDefId definition,
+    const SolType *arguments,
+    size_t argument_count,
+    unsigned char *active
+) {
+    if (definition >= checker->syntax->item_count) {
+        sol_type_malformed(checker);
+        return false;
+    }
+    if (active[definition] != 0) return true;
+    const SolSyntaxItem *item = &checker->syntax->items[definition];
+    if (item->kind == SOL_ITEM_CAPABILITY || item->kind == SOL_ITEM_FUNCTION
+        || item->kind == SOL_ITEM_TRAIT || item->kind == SOL_ITEM_IMPLEMENTATION) {
+        return false;
+    }
+    active[definition] = 1;
+    bool supported = true;
+    if (item->kind == SOL_ITEM_RECORD) {
+        SolFieldId field = item->first_field;
+        size_t traversed = 0;
+        while (supported && field != SOL_AST_NONE) {
+            if (field >= checker->syntax->field_count
+                || traversed++ >= checker->syntax->field_count) {
+                sol_type_malformed(checker);
+                supported = false;
+                break;
+            }
+            SolType field_type = checker->types->declared_types[
+                checker->syntax->fields[field].type
+            ];
+            if (argument_count != 0) field_type = sol_type_substitute(
+                checker, field_type, definition, arguments, argument_count);
+            supported = sol_type_equality_supported_recursive(
+                checker, field_type, active);
+            field = checker->syntax->fields[field].next;
+        }
+    } else if (item->kind == SOL_ITEM_ENUM) {
+        SolVariantId variant = item->first_variant;
+        size_t variants = 0;
+        while (supported && variant != SOL_AST_NONE) {
+            if (variant >= checker->syntax->variant_count
+                || variants++ >= checker->syntax->variant_count) {
+                sol_type_malformed(checker);
+                supported = false;
+                break;
+            }
+            SolFieldId field = checker->syntax->variants[variant].first_field;
+            size_t fields = 0;
+            while (supported && field != SOL_AST_NONE) {
+                if (field >= checker->syntax->field_count
+                    || fields++ >= checker->syntax->field_count) {
+                    sol_type_malformed(checker);
+                    supported = false;
+                    break;
+                }
+                SolType field_type = checker->types->declared_types[
+                    checker->syntax->fields[field].type
+                ];
+                if (argument_count != 0) field_type = sol_type_substitute(
+                    checker, field_type, definition, arguments, argument_count);
+                supported = sol_type_equality_supported_recursive(
+                    checker, field_type, active);
+                field = checker->syntax->fields[field].next;
+            }
+            variant = checker->syntax->variants[variant].next;
+        }
+    } else if (item->kind == SOL_ITEM_TYPE) {
+        SolType representation = checker->types->representations[definition].representation;
+        if (argument_count != 0) representation = sol_type_substitute(
+            checker, representation, definition, arguments, argument_count);
+        supported = sol_type_equality_supported_recursive(
+            checker, representation, active);
+    }
+    active[definition] = 0;
+    return supported;
+}
+
+static bool sol_type_equality_supported(
+    SolTypeChecker *checker,
+    SolType type
+) {
+    unsigned char *active = checker->syntax->item_count == 0 ? NULL
+        : calloc(checker->syntax->item_count, 1);
+    if (checker->syntax->item_count != 0 && active == NULL) {
+        checker->allocation_failed = true;
+        return false;
+    }
+    bool supported = sol_type_equality_supported_recursive(checker, type, active);
+    free(active);
+    return supported;
+}
+
 static bool sol_type_infer_argument(
     SolTypeChecker *checker,
     SolType pattern,
@@ -5924,7 +6076,8 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
                     )
                     : sol_type_expression(checker, expression->as.binary.right);
             }
-            if ((equality && !sol_type_equal(left, right))
+            bool equal_types = sol_type_equal(left, right);
+            if ((equality && !equal_types)
                 || (!equality
                     && (!sol_type_equal(left, expected) || !sol_type_equal(right, expected)))) {
                 sol_type_error(
@@ -5932,6 +6085,15 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
                     "SOL-TYPE-002",
                     expression->span,
                     "invalid operand types for binary operator"
+                );
+            } else if (equality && equal_types
+                && !sol_type_equality_supported(checker, left)
+                && !checker->allocation_failed && !checker->malformed) {
+                sol_type_error(
+                    checker,
+                    "SOL-TYPE-027",
+                    expression->span,
+                    "equality is unavailable for values containing runtime-only identity"
                 );
             }
             type = logical || equality || comparison

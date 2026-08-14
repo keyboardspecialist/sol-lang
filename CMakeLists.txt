@@ -32,6 +32,7 @@ add_library(sol_compiler STATIC
     src/formatter.c
     src/hir.c
     src/ir.c
+    src/interpreter.c
     src/lexer.c
     src/package.c
     src/parser.c
@@ -96,6 +97,11 @@ if(BUILD_TESTING)
     )
     add_executable(sol_ir_tests tests/ir_tests.c)
     target_link_libraries(sol_ir_tests PRIVATE sol_compiler)
+    add_executable(sol_interpreter_tests tests/interpreter_tests.c)
+    target_link_libraries(sol_interpreter_tests PRIVATE sol_compiler)
+    target_compile_definitions(sol_interpreter_tests PRIVATE
+        SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
     target_compile_definitions(sol_ir_tests PRIVATE
         SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
@@ -108,6 +114,7 @@ if(BUILD_TESTING)
         target_compile_options(sol_contract_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_package_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_ir_tests PRIVATE /std:c17 /W4)
+        target_compile_options(sol_interpreter_tests PRIVATE /std:c17 /W4)
     elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
         target_compile_options(sol_frontend_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_formatter_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
@@ -117,8 +124,9 @@ if(BUILD_TESTING)
         target_compile_options(sol_contract_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_package_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_ir_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
+        target_compile_options(sol_interpreter_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
     else()
-        set_target_properties(sol_frontend_tests sol_formatter_tests sol_sema_tests sol_typecheck_tests sol_effectcheck_tests sol_contract_tests sol_package_tests sol_ir_tests PROPERTIES
+        set_target_properties(sol_frontend_tests sol_formatter_tests sol_sema_tests sol_typecheck_tests sol_effectcheck_tests sol_contract_tests sol_package_tests sol_ir_tests sol_interpreter_tests PROPERTIES
             C_STANDARD 17
             C_STANDARD_REQUIRED ON
             C_EXTENSIONS OFF
@@ -142,6 +150,8 @@ if(BUILD_TESTING)
         target_link_options(sol_package_tests PRIVATE -fsanitize=address,undefined)
         target_compile_options(sol_ir_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(sol_ir_tests PRIVATE -fsanitize=address,undefined)
+        target_compile_options(sol_interpreter_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(sol_interpreter_tests PRIVATE -fsanitize=address,undefined)
     endif()
 
     add_test(NAME frontend COMMAND sol_frontend_tests)
@@ -152,6 +162,7 @@ if(BUILD_TESTING)
     add_test(NAME contract COMMAND sol_contract_tests)
     add_test(NAME package COMMAND sol_package_tests)
     add_test(NAME ir COMMAND sol_ir_tests)
+    add_test(NAME interpreter COMMAND sol_interpreter_tests)
     add_test(NAME cli_valid COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/valid.sol)
     add_test(
         NAME cli_package_valid

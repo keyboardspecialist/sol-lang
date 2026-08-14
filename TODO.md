@@ -31,6 +31,8 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
       collision validation, and resolved semantic occurrence records.
 - [x] Owning deterministic compiler-internal typed IR with exact executable types,
       resolved dispatch/member metadata, normalized effects, and contract templates.
+- [x] Deterministic compiler-internal reference interpreter over validated owning IR,
+      with bounded execution, explicit host capabilities, and ignored contracts.
 
 ## Prioritized Work
 
@@ -46,7 +48,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [x] | 8 | Add distinct and refined types with checked predicates | 4 | 4 | Generics and contracts |
 | [x] | 9 | Define stable semantic IDs, references, and rename identity | 5 | 5 | Modules and packages |
 | [x] | 10 | Define a canonical typed Sol IR | 5 | 5 | Types, traits, and IDs |
-| [ ] | 11 | Implement an interpreter for language conformance tests | 5 | 4 | Typed IR |
+| [x] | 11 | Implement an interpreter for language conformance tests | 5 | 4 | Typed IR |
 | [ ] | 12 | Add `sol test` for examples, unit tests, and properties | 4 | 3 | Interpreter |
 | [ ] | 13 | Add `sol effects` authority and call-graph inspection | 3 | 2 | Effect tables |
 | [ ] | 14 | Stabilize serialized syntax, HIR, type, effect, contract, and diagnostic schemas | 4 | 5 | Stable IDs and IR |

@@ -1673,7 +1673,7 @@ static void test_refined_type_predicates_and_construction_rejection(void) {
     static const char valid[] =
         "module refined_self\n"
         "type Positive = refined Int64 where self > 0\n"
-        "type Identity<T> = refined T where self == self\n"
+        "type Identity<T> = refined T where true\n"
         "function retain(value: Identity<Int64>) -> Identity<Int64> { return value }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, valid));
@@ -1812,6 +1812,29 @@ static void test_type_metadata_defensive_validation(void) {
     free_compilation(&compilation);
 }
 
+static void test_runtime_identity_equality_rejected(void) {
+    static const char text[] =
+        "module equality_domains\n"
+        "capability Token { function read() -> Int64 effects { pure } }\n"
+        "record Holder { token: capability Token }\n"
+        "record Outer { holder: Holder }\n"
+        "function function_value(value: function() -> Int64 effects { pure }) -> Bool "
+        "effects { pure } { return value == value }\n"
+        "function capability_value(value: capability Token) -> Bool effects { pure } "
+        "{ return value == value }\n"
+        "function operation_value(value: capability Token) -> Bool effects { pure } "
+        "{ return value.read == value.read }\n"
+        "function aggregate_value(value: Outer) -> Bool effects { pure } "
+        "{ return value == value }\n"
+        "function generic_value<T>(left: T, right: T) -> Bool effects { pure } "
+        "{ return left == right }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(diagnostic_count(&compilation, "SOL-TYPE-027") == 5);
+    CHECK(!has_diagnostic(&compilation, "SOL-TYPE-002"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -1870,6 +1893,7 @@ int main(void) {
     test_generic_representation_safety();
     test_representation_storage_cycles();
     test_type_metadata_defensive_validation();
+    test_runtime_identity_equality_rejected();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;
