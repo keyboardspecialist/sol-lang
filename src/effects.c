@@ -156,9 +156,11 @@ static bool sol_effects_collect_callable(
                 }
                 break;
             case SOL_IR_EXPR_BLOCK:
-                for (size_t index = 0; index < expression->as.block.count; ++index) {
+                for (size_t index = 0;
+                    index < expression->as.block.statements.count; ++index) {
                     SolIrStatementId statement
-                        = ir->statement_ids[expression->as.block.offset + index];
+                        = ir->statement_ids[
+                            expression->as.block.statements.offset + index];
                     PUSH(ir->statements[statement].expression);
                 }
                 break;

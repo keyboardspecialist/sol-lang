@@ -109,6 +109,38 @@ static bool run(const SolIr *ir, const char *name,
     return sol_interpret(&request, result);
 }
 
+typedef struct {
+    const SolIr *ir;
+    const char *names[32];
+    size_t count;
+} CleanupLog;
+
+static void observe_cleanup(void *context, SolIrLocalId local, size_t ordinal) {
+    CleanupLog *log = context;
+    CHECK(ordinal == log->count);
+    CHECK(local < log->ir->local_count);
+    if (log->count < sizeof(log->names) / sizeof(log->names[0])
+        && local < log->ir->local_count) {
+        log->names[log->count++] = log->ir->locals[local].name;
+    }
+}
+
+static bool run_observed(const SolIr *ir, const char *name,
+    const SolInterpreterValue *arguments, size_t argument_count,
+    CleanupLog *log, SolInterpreterResult *result) {
+    SolInterpreterRequest request;
+    memset(&request, 0, sizeof(request));
+    request.ir = ir;
+    request.callable = callable(ir, name);
+    request.definition = SOL_IR_NONE;
+    request.arguments = arguments;
+    request.argument_count = argument_count;
+    request.contracts = SOL_INTERPRETER_CONTRACTS_IGNORE;
+    request.cleanup_observer = observe_cleanup;
+    request.cleanup_context = log;
+    return sol_interpret(&request, result);
+}
+
 static void test_primitives_control_and_lifetime(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -1315,6 +1347,142 @@ static void test_callable_borrow_execution(void) {
     free_compilation(&compilation);
 }
 
+static void test_regions_and_deterministic_cleanup(void) {
+    Compilation compilation;
+    bool compiled = compile(&compilation,
+        "module cleanup\n"
+        "capability Token {}\n"
+        "enum Payload { item(value: Text) }\n"
+        "function normal() -> () { region outer { let a = \"a\" "
+            "region inner { let b = \"b\" let c = \"c\" } } }\n"
+        "function returned() -> Int64 { region r { let a = \"a\" return 7 } }\n"
+        "function propagated() -> Option<Int64> { region r { let a = \"a\" "
+            "none()? let done = () } return some(1) }\n"
+        "function failed() -> Int64 { region r { let a = \"a\" "
+            "let crash = 1 / 0 } return 0 }\n"
+        "function moved(value: capability Token) -> capability Token "
+            "authority { result derives_from value } { return value }\n"
+        "function parameters(first: Text, second: Text) -> () { () }\n"
+        "function borrowed(value: borrow Text) -> () { () }\n"
+        "function matched(value: Payload) -> Text { "
+            "return match value { item(text) => text } }\n");
+    CHECK(compiled);
+    if (!compiled) {
+        sol_diagnostics_render_human(stderr, &compilation.source,
+            &compilation.diagnostics);
+        free_compilation(&compilation);
+        return;
+    }
+    free_frontend(&compilation);
+    SolInterpreterResult result;
+    CleanupLog log = {.ir = &compilation.ir};
+    CHECK(run_observed(&compilation.ir, "normal", NULL, 0, &log, &result));
+    CHECK(log.count == 3);
+    CHECK(strcmp(log.names[0], "c") == 0);
+    CHECK(strcmp(log.names[1], "b") == 0);
+    CHECK(strcmp(log.names[2], "a") == 0);
+    CHECK(result.cleanup_actions == 3);
+    sol_interpreter_result_free(&result);
+
+    SolIrLocalId saved_cleanup = compilation.ir.cleanup_locals[0];
+    compilation.ir.cleanup_locals[0] = SOL_IR_NONE;
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(!run_observed(&compilation.ir, "normal", NULL, 0, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_INVALID_IR);
+    CHECK(log.count == 0 && result.cleanup_actions == 0);
+    sol_interpreter_result_free(&result);
+    compilation.ir.cleanup_locals[0] = saved_cleanup;
+
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "returned", NULL, 0, &log, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 7);
+    CHECK(log.count == 1 && strcmp(log.names[0], "a") == 0);
+    sol_interpreter_result_free(&result);
+
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "propagated", NULL, 0, &log, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_OPTION
+        && !result.value.as.sum.has_value);
+    CHECK(log.count == 1 && strcmp(log.names[0], "a") == 0);
+    sol_interpreter_result_free(&result);
+
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(!run_observed(&compilation.ir, "failed", NULL, 0, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_DIVISION_BY_ZERO);
+    CHECK(log.count == 1 && strcmp(log.names[0], "a") == 0);
+    sol_interpreter_result_free(&result);
+
+    SolIrDefinitionId token = SOL_IR_NONE;
+    SolIrDefinitionId payload = SOL_IR_NONE;
+    SolIrVariantId item = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.definition_count; ++index) {
+        if (strcmp(compilation.ir.definitions[index].name, "Token") == 0) token = index;
+        if (strcmp(compilation.ir.definitions[index].name, "Payload") == 0) payload = index;
+    }
+    CHECK(payload != SOL_IR_NONE);
+    if (payload != SOL_IR_NONE) item = compilation.ir.definitions[payload].variants.offset;
+    int root;
+    SolInterpreterValue argument;
+    CHECK(sol_interpreter_value_capability(&argument, token, &root, NULL));
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "moved", &argument, 1, &log, &result));
+    CHECK(log.count == 0 && result.cleanup_actions == 0);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&argument);
+
+    SolInterpreterValue arguments[2];
+    CHECK(sol_interpreter_value_text(&arguments[0], "x", 1));
+    sol_interpreter_value_init(&arguments[1]);
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(!run_observed(&compilation.ir, "parameters", arguments, 2, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_INVALID_REQUEST);
+    CHECK(log.count == 0 && result.cleanup_actions == 0);
+    sol_interpreter_result_free(&result);
+    CHECK(sol_interpreter_value_text(&arguments[1], "y", 1));
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "parameters", arguments, 2, &log, &result));
+    CHECK(log.count == 2 && strcmp(log.names[0], "second") == 0
+        && strcmp(log.names[1], "first") == 0);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&arguments[0]);
+    sol_interpreter_value_free(&arguments[1]);
+
+    CHECK(sol_interpreter_value_text(&argument, "borrow", 6));
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "borrowed", &argument, 1, &log, &result));
+    CHECK(log.count == 0);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&argument);
+
+    sol_interpreter_value_init(&argument);
+    argument.kind = SOL_INTERPRETER_VALUE_ENUM;
+    argument.as.aggregate.definition = payload;
+    argument.as.aggregate.variant = item;
+    argument.as.aggregate.field_count = 1;
+    argument.as.aggregate.fields = calloc(1, sizeof(*argument.as.aggregate.fields));
+    CHECK(argument.as.aggregate.fields != NULL);
+    if (argument.as.aggregate.fields != NULL) {
+        CHECK(sol_interpreter_value_text(argument.as.aggregate.fields, "match", 5));
+        memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+        CHECK(run_observed(&compilation.ir, "matched", &argument, 1, &log, &result));
+        CHECK(log.count == 2 && strcmp(log.names[0], "text") == 0
+            && strcmp(log.names[1], "value") == 0);
+        sol_interpreter_result_free(&result);
+    }
+    sol_interpreter_value_free(&argument);
+    sol_ir_free(&compilation.ir);
+    sol_diagnostics_free(&compilation.diagnostics);
+
+    CHECK(!compile(&compilation,
+        "module escape\ncapability Token {}\n"
+        "function bad(value: capability Token) -> capability Token "
+        "authority { result derives_from value } "
+        "{ region r { return value } }\n"));
+    CHECK(has_code(&compilation, "SOL-REGION-001"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_primitives_control_and_lifetime();
     test_data_callbacks_generics_and_traits();
@@ -1326,6 +1494,7 @@ int main(void) {
     test_package_diagnostic_mapping();
     test_copy_and_move_reads();
     test_callable_borrow_execution();
+    test_regions_and_deterministic_cleanup();
     if (failures != 0) fprintf(stderr, "%d interpreter test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

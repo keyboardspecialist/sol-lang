@@ -2511,6 +2511,17 @@ static void test_distinct_borrowed_function_signatures(void) {
     free_compilation(&compilation);
 }
 
+static void test_region_effects(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module region_effects\n"
+        "function helper() -> () effects { panic } { () }\n"
+        "function caller() -> () effects { panic } "
+        "{ region work { helper() } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_private_pure_inference();
     test_generic_closed_effect_rows();
@@ -2568,6 +2579,7 @@ int main(void) {
     test_trait_method_effects_and_metadata();
     test_distinct_implementation_and_function_representation();
     test_distinct_borrowed_function_signatures();
+    test_region_effects();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;

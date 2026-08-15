@@ -86,6 +86,13 @@ typedef struct {
     size_t host_calls;
 } SolInterpreterLimits;
 
+/* Unstable synchronous, infallible cleanup observation hook for tests/tools. */
+typedef void (*SolInterpreterCleanupObserver)(
+    void *context,
+    SolIrLocalId local,
+    size_t ordinal
+);
+
 typedef enum {
     SOL_INTERPRETER_OK,
     SOL_INTERPRETER_INVALID_REQUEST,
@@ -151,6 +158,8 @@ typedef struct {
     SolInterpreterLimits limits;
     SolInterpreterHostOperation host_operation;
     void *host_context;
+    SolInterpreterCleanupObserver cleanup_observer;
+    void *cleanup_context;
     /* Required to select a TEST callable; forbidden for ordinary functions. */
     bool test_entry;
 } SolInterpreterRequest;
@@ -159,6 +168,7 @@ typedef struct {
     SolInterpreterValue value;
     SolInterpreterDiagnostic diagnostic;
     SolInterpreterLimits used;
+    size_t cleanup_actions;
 } SolInterpreterResult;
 
 void sol_interpreter_value_init(SolInterpreterValue *value);

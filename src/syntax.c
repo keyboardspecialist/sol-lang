@@ -61,9 +61,22 @@ static bool sol_structure_statements(
         }
         validator->statements[statement] = 1;
         const SolStatement *current = &validator->tree->statements[statement];
+        if (current->kind > SOL_STATEMENT_REGION
+            || (current->kind == SOL_STATEMENT_REGION
+                && context != SOL_EXPRESSION_CONTEXT_BODY)) return false;
         SolExprId value = current->kind == SOL_STATEMENT_LET
             ? current->as.let_statement.value
-            : current->as.expression;
+            : current->kind == SOL_STATEMENT_REGION
+                ? current->as.region_statement.body : current->as.expression;
+        if (current->kind == SOL_STATEMENT_REGION
+            && (!sol_structure_span_valid(validator,
+                    current->as.region_statement.label)
+                || current->as.region_statement.label.start
+                    == current->as.region_statement.label.end
+                || value >= validator->tree->expression_count
+                || validator->tree->expressions[value].kind != SOL_EXPR_BLOCK)) {
+            return false;
+        }
         if (!sol_structure_expression(validator, value, context, depth)) return false;
         statement = current->next;
     }

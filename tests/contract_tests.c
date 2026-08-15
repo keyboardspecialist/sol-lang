@@ -873,6 +873,20 @@ static void test_function_valued_distinct_construction(void) {
     free_compilation(&compilation);
 }
 
+static void test_regions_forbidden_in_predicates(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module region_contract\n"
+        "function bad() -> Bool requires { region r { true } } { return true }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-PARSE-022"));
+    free_compilation(&compilation);
+    CHECK(compile_source(&compilation,
+        "module region_refinement\n"
+        "type Bad = refined Int64 where region r { true }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-PARSE-022"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_obligations_result_and_snapshots();
     test_member_contract_ownership();
@@ -885,6 +899,7 @@ int main(void) {
     test_trait_method_contract_purity();
     test_refinement_contracts_and_distinct_construction();
     test_function_valued_distinct_construction();
+    test_regions_forbidden_in_predicates();
     if (failures != 0) {
         fprintf(stderr, "%d contract test failure(s)\n", failures);
         return 1;

@@ -930,18 +930,25 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     }
     for (size_t index = 0; index < syntax->statement_count; ++index) {
         const SolStatement *statement = &syntax->statements[index];
-        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_EXPRESSION) {
+        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_REGION) {
             sol_resolver_malformed(resolver);
             return false;
         }
         SolExprId value = statement->kind == SOL_STATEMENT_LET
             ? statement->as.let_statement.value
-            : statement->as.expression;
+            : statement->kind == SOL_STATEMENT_REGION
+                ? statement->as.region_statement.body : statement->as.expression;
         if (!sol_span_valid(resolver->source, statement->span)
             || value >= syntax->expression_count
             || (statement->next != SOL_AST_NONE && statement->next >= syntax->statement_count)
             || (statement->kind == SOL_STATEMENT_LET
-                && !sol_span_valid(resolver->source, statement->as.let_statement.name))) {
+                && !sol_span_valid(resolver->source, statement->as.let_statement.name))
+            || (statement->kind == SOL_STATEMENT_REGION
+                && (!sol_span_valid(resolver->source,
+                        statement->as.region_statement.label)
+                    || statement->as.region_statement.label.start
+                        == statement->as.region_statement.label.end
+                    || syntax->expressions[value].kind != SOL_EXPR_BLOCK))) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -1489,6 +1496,8 @@ static void sol_resolver_block(SolResolver *resolver, const SolExpr *block) {
                 SOL_LOCAL_BINDING,
                 statement_id
             );
+        } else if (statement->kind == SOL_STATEMENT_REGION) {
+            sol_resolver_expression(resolver, statement->as.region_statement.body);
         } else {
             sol_resolver_expression(resolver, statement->as.expression);
         }

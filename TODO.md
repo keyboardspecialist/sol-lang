@@ -38,6 +38,8 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
       effects, contracts, and diagnostics.
 - [x] Whole-local affine moves, structural bootstrap copies, ownership joins,
       use-after-move diagnostics, and ownership-explicit interpreter reads.
+- [x] Statement-only lexical regions, exact block/arm cleanup metadata,
+      deterministic interpreter storage cleanup, and affine region-escape checks.
 
 ## Prioritized Work
 
@@ -59,7 +61,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [x] | 14 | Stabilize selected external syntax, HIR, type, effect, contract, and diagnostic projections | 4 | 5 | Stable IDs and IR |
 | [x] | 15 | Define and check affine moves, copies, and use-after-move errors | 5 | 5 | Typed IR |
 | [x] | 16 | Implement lexical shared and exclusive borrows | 5 | 5 | Affine ownership |
-| [ ] | 17 | Track regions, deterministic cleanup, and resource lifetimes | 5 | 5 | Borrow checking |
+| [x] | 17 | Track regions, deterministic cleanup, and resource lifetimes | 5 | 5 | Borrow checking |
 | [ ] | 18 | Add explicit unsafe boundaries and initial FFI rules | 4 | 4 | Ownership and effects |
 | [ ] | 19 | Integrate ownership facts with effects, contracts, and diagnostics | 5 | 5 | Ownership pipeline |
 | [ ] | 20 | Generate runtime contract checks and normalized proof obligations | 5 | 5 | IR and ownership |

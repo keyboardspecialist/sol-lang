@@ -1690,6 +1690,53 @@ static void test_callable_access_syntax(void) {
     sol_source_free(&source);
 }
 
+static void test_region_statement_syntax(void) {
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "regions.sol",
+        "module regions\nfunction f() -> () { region outer { "
+        "region inner { let value = 1 } } }\n"));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.item_count == 1);
+    SolStatementId statement = SOL_AST_NONE;
+    if (tree.item_count == 1 && tree.items[0].body < tree.expression_count) {
+        statement = tree.expressions[tree.items[0].body].as.block.first_statement;
+    }
+    CHECK(statement < tree.statement_count);
+    if (statement < tree.statement_count) {
+        CHECK(tree.statements[statement].kind == SOL_STATEMENT_REGION);
+        SolToken label = {.span = tree.statements[statement].as.region_statement.label};
+        CHECK(sol_token_text_equal(&source, label, "outer"));
+        SolExprId body = tree.statements[statement].as.region_statement.body;
+        CHECK(body < tree.expression_count && tree.expressions[body].kind == SOL_EXPR_BLOCK);
+    }
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+
+    CHECK(sol_source_from_text(&source, "bad_regions.sol",
+        "module bad\nfunction f() -> () { region { } }\n"
+        "function g() -> () { return region named { } }\n"));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
 int main(void) {
     test_type_declaration_syntax();
     test_invalid_type_declarations_and_recovery();
@@ -1730,6 +1777,7 @@ int main(void) {
     test_trait_and_implementation_syntax();
     test_malformed_trait_method_recovery();
     test_trait_method_authority_rejected();
+    test_region_statement_syntax();
     if (failures != 0) {
         fprintf(stderr, "%d frontend test failure(s)\n", failures);
         return 1;

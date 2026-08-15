@@ -37,6 +37,7 @@ typedef struct {
     size_t arm_id_capacity;
     size_t operand_capacity;
     size_t root_capacity;
+    size_t cleanup_local_capacity;
     size_t effect_capacity;
     bool failed;
 } SolIrLowerer;
@@ -71,6 +72,9 @@ void sol_ir_free(SolIr *ir) {
         if (expression->kind == SOL_IR_EXPR_STRING) free(expression->as.string);
         if (expression->kind == SOL_IR_EXPR_HANDLE) free(expression->as.handler.effect_name);
     }
+    for (size_t index = 0; index < ir->statement_count; ++index) {
+        free(ir->statements[index].region_label);
+    }
     for (size_t index = 0; index < ir->effect_count; ++index) free(ir->effects[index].name);
     for (size_t index = 0; index < ir->generic_parameter_count; ++index) {
         free(ir->generic_parameters[index].name);
@@ -95,6 +99,7 @@ void sol_ir_free(SolIr *ir) {
     free(ir->arm_ids);
     free(ir->operands);
     free(ir->roots);
+    free(ir->cleanup_locals);
     free(ir->effects);
     free(ir->generic_parameters);
     free(ir->effect_parameters);
@@ -117,6 +122,25 @@ static bool sol_ir_empty(const SolIr *ir) {
 static bool sol_ir_span_valid(const SolSource *source, SolSpan span) {
     return source != NULL && source->text != NULL
         && span.start <= span.end && span.end <= source->length;
+}
+
+static bool sol_ir_region_label_valid(const SolIr *ir,
+    const SolIrStatement *statement) {
+    SolSpan span = statement->region_label_span;
+    if (statement->region_label == NULL || span.start >= span.end
+        || span.end > ir->source_length
+        || strlen(statement->region_label) != span.end - span.start
+        || memcmp(statement->region_label, ir->source_bytes + span.start,
+            span.end - span.start) != 0) return false;
+    for (size_t index = 0; index < span.end - span.start; ++index) {
+        unsigned char byte = (unsigned char)statement->region_label[index];
+        bool letter = (byte >= (unsigned char)'a' && byte <= (unsigned char)'z')
+            || (byte >= (unsigned char)'A' && byte <= (unsigned char)'Z')
+            || byte == (unsigned char)'_';
+        bool digit = byte >= (unsigned char)'0' && byte <= (unsigned char)'9';
+        if (!letter && (index == 0 || !digit)) return false;
+    }
+    return true;
 }
 
 static char *sol_ir_copy_text(const char *text, size_t length) {
@@ -193,6 +217,17 @@ static bool sol_ir_append_root(SolIrLowerer *lowerer, SolIrLocalId root) {
     if (!sol_ir_grow((void **)&lowerer->ir->roots, &lowerer->ir->root_count,
         &lowerer->root_capacity, 1, sizeof(*entry), (void **)&entry)) return false;
     *entry = root;
+    return true;
+}
+
+static bool sol_ir_append_cleanup_local(
+    SolIrLowerer *lowerer, SolIrLocalId local
+) {
+    SolIrLocalId *entry = NULL;
+    if (!sol_ir_grow((void **)&lowerer->ir->cleanup_locals,
+        &lowerer->ir->cleanup_local_count, &lowerer->cleanup_local_capacity,
+        1, sizeof(*entry), (void **)&entry)) return false;
+    *entry = local;
     return true;
 }
 
@@ -2018,13 +2053,22 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
             }
             case SOL_EXPR_BLOCK: {
                 output->kind = SOL_IR_EXPR_BLOCK;
-                output->as.block.offset = lowerer->ir->statement_id_count;
+                output->as.block.statements.offset = lowerer->ir->statement_id_count;
+                output->as.block.cleanup.offset = lowerer->ir->cleanup_local_count;
                 SolStatementId statement = source->as.block.first_statement;
                 while (statement != SOL_AST_NONE) {
                     if (statement >= lowerer->syntax->statement_count
-                        || output->as.block.count++ >= lowerer->syntax->statement_count
+                        || output->as.block.statements.count++
+                            >= lowerer->syntax->statement_count
                         || !sol_ir_append_statement_id(lowerer, statement)) {
                         return false;
+                    }
+                    if (lowerer->syntax->statements[statement].kind
+                            == SOL_STATEMENT_LET) {
+                        SolIrLocalId local = lowerer->binding_locals[statement];
+                        if (local == SOL_IR_NONE
+                            || !sol_ir_append_cleanup_local(lowerer, local)) return false;
+                        ++output->as.block.cleanup.count;
                     }
                     statement = lowerer->syntax->statements[statement].next;
                 }
@@ -2111,11 +2155,19 @@ static bool sol_ir_lower_statements_arms(SolIrLowerer *lowerer) {
         SolIrStatement *output = &lowerer->ir->statements[index];
         output->span = source->span;
         output->local = SOL_IR_NONE;
+        output->region_label = NULL;
         if (source->kind == SOL_STATEMENT_LET) {
             output->kind = SOL_IR_STATEMENT_LET;
             output->expression = source->as.let_statement.value;
             output->local = lowerer->binding_locals[index];
             if (output->local == SOL_IR_NONE) return false;
+        } else if (source->kind == SOL_STATEMENT_REGION) {
+            output->kind = SOL_IR_STATEMENT_REGION;
+            output->expression = source->as.region_statement.body;
+            output->region_label = sol_ir_copy_span(lowerer->source,
+                source->as.region_statement.label);
+            output->region_label_span = source->as.region_statement.label;
+            if (output->region_label == NULL) return false;
         } else {
             output->kind = source->kind == SOL_STATEMENT_RETURN
                 ? SOL_IR_STATEMENT_RETURN : SOL_IR_STATEMENT_EXPRESSION;
@@ -2130,6 +2182,7 @@ static bool sol_ir_lower_statements_arms(SolIrLowerer *lowerer) {
         output->value = source->value;
         output->variant = SOL_IR_NONE;
         output->bindings.offset = lowerer->ir->root_count;
+        output->cleanup.offset = lowerer->ir->cleanup_local_count;
         if (pattern->kind == SOL_PATTERN_WILDCARD) {
             output->kind = SOL_IR_PATTERN_WILDCARD;
         } else if (pattern->kind == SOL_PATTERN_BOOL) {
@@ -2147,6 +2200,9 @@ static bool sol_ir_lower_statements_arms(SolIrLowerer *lowerer) {
                     return false;
                 }
                 ++output->bindings.count;
+                if (!sol_ir_append_cleanup_local(lowerer,
+                    lowerer->pattern_locals[binding])) return false;
+                ++output->cleanup.count;
                 binding = lowerer->syntax->pattern_bindings[binding].next;
             }
             if (output->bindings.count
@@ -2427,9 +2483,9 @@ static bool sol_ir_executable_expression(
             }
             break;
         case SOL_IR_EXPR_BLOCK:
-            for (size_t index = 0; index < expression->as.block.count; ++index) {
+            for (size_t index = 0; index < expression->as.block.statements.count; ++index) {
                 const SolIrStatement *statement = &ir->statements[ir->statement_ids[
-                    expression->as.block.offset + index]];
+                    expression->as.block.statements.offset + index]];
                 if (statement->kind == SOL_IR_STATEMENT_LET
                     && (statement->local >= ir->local_count
                         || ir->locals[statement->local].owner != owner)) return false;
@@ -2449,6 +2505,74 @@ static bool sol_ir_executable_expression(
 #undef SOL_IR_EXEC
     states[id] = 2;
     return true;
+}
+
+static bool sol_ir_validate_arena_ownership(
+    const SolIr *ir, SolDiagnostics *diagnostics
+) {
+    size_t *statement_slots = ir->statement_id_count == 0 ? NULL
+        : calloc(ir->statement_id_count, sizeof(*statement_slots));
+    size_t *statements = ir->statement_count == 0 ? NULL
+        : calloc(ir->statement_count, sizeof(*statements));
+    size_t *arm_slots = ir->arm_id_count == 0 ? NULL
+        : calloc(ir->arm_id_count, sizeof(*arm_slots));
+    size_t *arms = ir->arm_count == 0 ? NULL
+        : calloc(ir->arm_count, sizeof(*arms));
+    size_t *cleanups = ir->cleanup_local_count == 0 ? NULL
+        : calloc(ir->cleanup_local_count, sizeof(*cleanups));
+    if ((ir->statement_id_count != 0 && statement_slots == NULL)
+        || (ir->statement_count != 0 && statements == NULL)
+        || (ir->arm_id_count != 0 && arm_slots == NULL)
+        || (ir->arm_count != 0 && arms == NULL)
+        || (ir->cleanup_local_count != 0 && cleanups == NULL)) {
+        free(statement_slots); free(statements); free(arm_slots); free(arms);
+        free(cleanups);
+        return sol_ir_error(diagnostics, "IR arena ownership allocation failed");
+    }
+    for (size_t index = 0; index < ir->expression_count; ++index) {
+        const SolIrExpression *expression = &ir->expressions[index];
+        if (expression->kind == SOL_IR_EXPR_BLOCK) {
+            for (size_t slot = 0; slot < expression->as.block.statements.count; ++slot) {
+                size_t position = expression->as.block.statements.offset + slot;
+                ++statement_slots[position];
+                ++statements[ir->statement_ids[position]];
+            }
+            for (size_t slot = 0; slot < expression->as.block.cleanup.count; ++slot) {
+                ++cleanups[expression->as.block.cleanup.offset + slot];
+            }
+        } else if (expression->kind == SOL_IR_EXPR_MATCH) {
+            for (size_t slot = 0; slot < expression->as.match_expr.arms.count; ++slot) {
+                size_t position = expression->as.match_expr.arms.offset + slot;
+                ++arm_slots[position];
+                ++arms[ir->arm_ids[position]];
+            }
+        }
+    }
+    for (size_t index = 0; index < ir->arm_count; ++index) {
+        for (size_t slot = 0; slot < ir->arms[index].cleanup.count; ++slot) {
+            ++cleanups[ir->arms[index].cleanup.offset + slot];
+        }
+    }
+    bool valid = true;
+    for (size_t index = 0; valid && index < ir->statement_id_count; ++index) {
+        valid = statement_slots[index] == 1;
+    }
+    for (size_t index = 0; valid && index < ir->statement_count; ++index) {
+        valid = statements[index] == 1;
+    }
+    for (size_t index = 0; valid && index < ir->arm_id_count; ++index) {
+        valid = arm_slots[index] == 1;
+    }
+    for (size_t index = 0; valid && index < ir->arm_count; ++index) {
+        valid = arms[index] == 1;
+    }
+    for (size_t index = 0; valid && index < ir->cleanup_local_count; ++index) {
+        valid = cleanups[index] == 1;
+    }
+    free(statement_slots); free(statements); free(arm_slots); free(arms);
+    free(cleanups);
+    return valid || sol_ir_error(diagnostics,
+        "IR statement, arm, or cleanup arena entry is orphaned or shared");
 }
 
 static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
@@ -2474,6 +2598,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
         || (ir->arm_id_count != 0 && ir->arm_ids == NULL)
         || (ir->operand_count != 0 && ir->operands == NULL)
         || (ir->root_count != 0 && ir->roots == NULL)
+        || (ir->cleanup_local_count != 0 && ir->cleanup_locals == NULL)
         || (ir->effect_count != 0 && ir->effects == NULL)
         || (ir->obligation_count != 0 && ir->obligations == NULL)
         || (ir->snapshot_count != 0 && ir->snapshots == NULL)) {
@@ -3168,7 +3293,10 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                     && expression->as.propagate.residual >= ir->type_count))) {
             return sol_ir_error(diagnostics, "malformed canonical IR propagation");
         } else if (expression->kind == SOL_IR_EXPR_BLOCK
-            && !sol_ir_slice_valid(expression->as.block, ir->statement_id_count)) {
+            && (!sol_ir_slice_valid(expression->as.block.statements,
+                    ir->statement_id_count)
+                || !sol_ir_slice_valid(expression->as.block.cleanup,
+                    ir->cleanup_local_count))) {
             return sol_ir_error(diagnostics, "IR block statement slice is malformed");
         } else if (expression->kind == SOL_IR_EXPR_MATCH
             && (!sol_ir_slice_valid(expression->as.match_expr.arms, ir->arm_id_count)
@@ -3310,21 +3438,90 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                 return sol_ir_error(diagnostics, "IR propagation type relation is invalid");
             }
         }
+        if (expression->kind == SOL_IR_EXPR_BLOCK) {
+            size_t cleanup = 0;
+            for (size_t item = 0; item < expression->as.block.statements.count;
+                ++item) {
+                SolIrStatementId statement_id = ir->statement_ids[
+                    expression->as.block.statements.offset + item];
+                if (statement_id >= ir->statement_count) {
+                    return sol_ir_error(diagnostics,
+                        "IR block statement ID is out of range");
+                }
+                for (size_t previous_expression = 0;
+                    previous_expression < index; ++previous_expression) {
+                    const SolIrExpression *previous
+                        = &ir->expressions[previous_expression];
+                    if (previous->kind != SOL_IR_EXPR_BLOCK) continue;
+                    for (size_t previous_item = 0;
+                        previous_item < previous->as.block.statements.count;
+                        ++previous_item) {
+                        if (ir->statement_ids[
+                                previous->as.block.statements.offset + previous_item]
+                            == statement_id) {
+                            return sol_ir_error(diagnostics,
+                                "IR statement is shared by executable blocks");
+                        }
+                    }
+                }
+                const SolIrStatement *statement = &ir->statements[statement_id];
+                if (statement->kind == SOL_IR_STATEMENT_LET) {
+                    if (cleanup >= expression->as.block.cleanup.count
+                        || ir->cleanup_locals[
+                            expression->as.block.cleanup.offset + cleanup]
+                            != statement->local
+                        || statement->local >= ir->local_count
+                        || ir->locals[statement->local].kind
+                            != SOL_IR_LOCAL_BINDING
+                        || ir->locals[statement->local].access
+                            != SOL_ACCESS_OWNED) {
+                        return sol_ir_error(diagnostics,
+                            "IR block cleanup metadata is invalid");
+                    }
+                    ++cleanup;
+                }
+            }
+            if (cleanup != expression->as.block.cleanup.count) {
+                return sol_ir_error(diagnostics,
+                    "IR block cleanup does not exactly match its lets");
+            }
+        }
     }
     for (size_t index = 0; index < ir->statement_id_count; ++index) {
         if (ir->statement_ids[index] >= ir->statement_count) {
             return sol_ir_error(diagnostics, "IR statement ID is out of range");
         }
+        for (size_t previous = 0; previous < index; ++previous) {
+            if (ir->statement_ids[previous] == ir->statement_ids[index]) {
+                return sol_ir_error(diagnostics,
+                    "IR statement is shared by executable blocks");
+            }
+        }
     }
     for (size_t index = 0; index < ir->statement_count; ++index) {
         const SolIrStatement *statement = &ir->statements[index];
-        if (statement->kind > SOL_IR_STATEMENT_EXPRESSION
+        if (statement->kind > SOL_IR_STATEMENT_REGION
             || statement->span.start > statement->span.end
             || statement->span.end > ir->source_length
             || statement->expression >= ir->expression_count
             || (statement->kind == SOL_IR_STATEMENT_LET
                 ? statement->local >= ir->local_count
-                : statement->local != SOL_IR_NONE)) {
+                : statement->local != SOL_IR_NONE)
+            || (statement->kind == SOL_IR_STATEMENT_REGION
+                ? !sol_ir_region_label_valid(ir, statement)
+                    || statement->region_label_span.start
+                        >= statement->region_label_span.end
+                    || statement->region_label_span.start < statement->span.start
+                    || statement->region_label_span.end > statement->span.end
+                    || ir->expressions[statement->expression].kind != SOL_IR_EXPR_BLOCK
+                    || ir->expressions[statement->expression].type >= ir->type_count
+                    || (ir->types[ir->expressions[statement->expression].type].kind
+                            != SOL_IR_TYPE_UNIT
+                        && ir->types[ir->expressions[statement->expression].type].kind
+                            != SOL_IR_TYPE_NEVER)
+                : statement->region_label != NULL
+                    || statement->region_label_span.start != 0
+                    || statement->region_label_span.end != 0)) {
             return sol_ir_error(diagnostics, "malformed IR statement");
         }
         if (statement->kind == SOL_IR_STATEMENT_LET) {
@@ -3343,22 +3540,31 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
         if (ir->arm_ids[index] >= ir->arm_count) {
             return sol_ir_error(diagnostics, "IR arm ID is out of range");
         }
+        for (size_t previous = 0; previous < index; ++previous) {
+            if (ir->arm_ids[previous] == ir->arm_ids[index]) {
+                return sol_ir_error(diagnostics,
+                    "IR match arm is shared by executable matches");
+            }
+        }
     }
     for (size_t index = 0; index < ir->arm_count; ++index) {
         const SolIrArm *arm = &ir->arms[index];
         if (arm->kind > SOL_IR_PATTERN_VARIANT || arm->value >= ir->expression_count
             || arm->span.start > arm->span.end || arm->span.end > ir->source_length
             || !sol_ir_slice_valid(arm->bindings, ir->root_count)
+            || !sol_ir_slice_valid(arm->cleanup, ir->cleanup_local_count)
             || (arm->kind == SOL_IR_PATTERN_VARIANT
                 && arm->variant >= ir->variant_count)
             || (arm->kind != SOL_IR_PATTERN_VARIANT
-                && (arm->variant != SOL_IR_NONE || arm->bindings.count != 0))) {
+                && (arm->variant != SOL_IR_NONE || arm->bindings.count != 0
+                    || arm->cleanup.count != 0))) {
             return sol_ir_error(diagnostics, "malformed IR match arm");
         }
         if (arm->kind == SOL_IR_PATTERN_VARIANT) {
             SolIrSlice fields = ir->variants[arm->variant].fields;
             if (!sol_ir_slice_valid(fields, ir->field_count)
-                || arm->bindings.count != fields.count) {
+                || arm->bindings.count != fields.count
+                || arm->cleanup.count != arm->bindings.count) {
                 return sol_ir_error(diagnostics,
                     "IR variant arm payload bindings are incomplete");
             }
@@ -3370,6 +3576,11 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                         != ir->fields[fields.offset + binding].type) {
                     return sol_ir_error(diagnostics,
                         "IR variant arm payload binding type is invalid");
+                }
+                if (ir->cleanup_locals[arm->cleanup.offset + binding] != local
+                    || ir->locals[local].access != SOL_ACCESS_OWNED) {
+                    return sol_ir_error(diagnostics,
+                        "IR match cleanup metadata is invalid");
                 }
                 for (size_t previous_arm = 0; previous_arm <= index;
                     ++previous_arm) {
@@ -3495,6 +3706,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
         }
     }
     free(states);
+    if (!sol_ir_validate_arena_ownership(ir, diagnostics)) return false;
     return !validate_ownership || sol_ir_validate_ownership(ir, diagnostics);
 }
 

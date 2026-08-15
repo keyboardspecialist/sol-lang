@@ -1895,6 +1895,19 @@ static void test_access_modes_are_exact(void) {
     free_compilation(&compilation);
 }
 
+static void test_region_types(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module regions\nfunction valid() -> () { region outer { "
+        "let a = 1 region inner { let b = 2 } } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+    CHECK(compile_source(&compilation,
+        "module bad_region\nfunction bad() -> () { region r { 1 } }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-002"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -1955,6 +1968,7 @@ int main(void) {
     test_type_metadata_defensive_validation();
     test_runtime_identity_equality_rejected();
     test_access_modes_are_exact();
+    test_region_types();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;

@@ -470,6 +470,11 @@ static void sol_package_relocate_arenas(SolSyntaxTree *tree, SolArenaOffsets o, 
             entry->as.let_statement.value = sol_relocate_id(
                 entry->as.let_statement.value, o.expressions
             );
+        } else if (entry->kind == SOL_STATEMENT_REGION) {
+            entry->as.region_statement.label = sol_relocate_span(
+                entry->as.region_statement.label, base);
+            entry->as.region_statement.body = sol_relocate_id(
+                entry->as.region_statement.body, o.expressions);
         } else {
             entry->as.expression = sol_relocate_id(entry->as.expression, o.expressions);
         }

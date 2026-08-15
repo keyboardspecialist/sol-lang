@@ -926,9 +926,14 @@ static void sol_contract_statements(
                 "return is not allowed in a contract predicate"
             );
         }
+        if (entry->kind == SOL_STATEMENT_REGION) {
+            sol_contract_error(lowerer, "SOL-CONTRACT-002", entry->span,
+                "region statements are not allowed in contract or refinement predicates");
+        }
         SolExprId value = entry->kind == SOL_STATEMENT_LET
             ? entry->as.let_statement.value
-            : entry->as.expression;
+            : entry->kind == SOL_STATEMENT_REGION
+                ? entry->as.region_statement.body : entry->as.expression;
         sol_contract_expression(lowerer, value, in_old);
         statement = entry->next;
     }

@@ -284,7 +284,7 @@ typedef struct {
             SolIrExpressionId else_branch;
         } if_expr;
         struct { SolIrExpressionId scrutinee; SolIrSlice arms; } match_expr;
-        SolIrSlice block;
+        struct { SolIrSlice statements; SolIrSlice cleanup; } block;
         struct {
             SolIrPropagationKind kind;
             SolIrExpressionId operand;
@@ -307,6 +307,7 @@ typedef enum {
     SOL_IR_STATEMENT_LET,
     SOL_IR_STATEMENT_RETURN,
     SOL_IR_STATEMENT_EXPRESSION,
+    SOL_IR_STATEMENT_REGION,
 } SolIrStatementKind;
 
 typedef struct {
@@ -314,6 +315,8 @@ typedef struct {
     SolSpan span;
     SolIrLocalId local;
     SolIrExpressionId expression;
+    char *region_label;
+    SolSpan region_label_span;
 } SolIrStatement;
 
 typedef enum {
@@ -327,6 +330,7 @@ typedef struct {
     bool boolean;
     SolIrVariantId variant;
     SolIrSlice bindings;
+    SolIrSlice cleanup;
     SolIrExpressionId value;
     SolSpan span;
 } SolIrArm;
@@ -395,6 +399,8 @@ typedef struct {
     size_t operand_count;
     SolIrLocalId *roots;
     size_t root_count;
+    SolIrLocalId *cleanup_locals;
+    size_t cleanup_local_count;
     SolIrEffect *effects;
     size_t effect_count;
     SolIrGenericParameter *generic_parameters;

@@ -22,6 +22,8 @@ struct Frame {
     bool *bound;
     void **authority_roots;
     bool *authority_known;
+    SolIrLocalId *binding_order;
+    size_t binding_count;
     const SolIrTypeId *type_arguments;
     size_t type_argument_count;
     SolIrGenericParameterId type_parameter_offset;
@@ -509,11 +511,38 @@ static bool bind_local(Interpreter *interpreter, Frame *frame,
     }
     if (!clone_runtime(interpreter, span, &frame->locals[local], value)) return false;
     frame->bound[local] = true;
+    frame->binding_order[frame->binding_count++] = local;
     if (value->kind == SOL_INTERPRETER_VALUE_CAPABILITY) {
         frame->authority_roots[local] = value->as.capability.root;
         frame->authority_known[local] = true;
     }
     return true;
+}
+
+static void cleanup_local(Interpreter *interpreter, Frame *frame,
+    SolIrLocalId local) {
+    if (local >= interpreter->request->ir->local_count || !frame->bound[local]) return;
+    const SolIrLocal *metadata = &interpreter->request->ir->locals[local];
+    if (metadata->access == SOL_ACCESS_OWNED) {
+        size_t ordinal = interpreter->result->cleanup_actions++;
+        if (interpreter->request->cleanup_observer != NULL) {
+            interpreter->request->cleanup_observer(
+                interpreter->request->cleanup_context, local, ordinal);
+        }
+    }
+    sol_interpreter_value_free(&frame->locals[local]);
+    frame->bound[local] = false;
+    frame->authority_roots[local] = NULL;
+    frame->authority_known[local] = false;
+}
+
+static void cleanup_slice(Interpreter *interpreter, SolIrSlice cleanup) {
+    while (cleanup.count != 0) {
+        --cleanup.count;
+        cleanup_local(interpreter, interpreter->frame,
+            interpreter->request->ir->cleanup_locals[
+                cleanup.offset + cleanup.count]);
+    }
 }
 
 static bool value_equal(const SolInterpreterValue *left,
@@ -1052,12 +1081,15 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
             sizeof(*frame.authority_roots));
         frame.authority_known = calloc(ir->local_count,
             sizeof(*frame.authority_known));
+        frame.binding_order = malloc(ir->local_count * sizeof(*frame.binding_order));
         if (frame.locals == NULL || frame.bound == NULL
-            || frame.authority_roots == NULL || frame.authority_known == NULL) {
+            || frame.authority_roots == NULL || frame.authority_known == NULL
+            || frame.binding_order == NULL) {
             free(frame.locals);
             free(frame.bound);
             free(frame.authority_roots);
             free(frame.authority_known);
+            free(frame.binding_order);
             diagnostic(interpreter, SOL_INTERPRETER_INTERNAL_INVARIANT, span,
                 "frame allocation failed");
             return error;
@@ -1074,8 +1106,6 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
             diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT, span,
                 "callable receiver is missing");
             bound = false;
-        } else {
-            bound = bind_local(interpreter, &frame, callable->receiver, receiver, span);
         }
     }
     if (bound && callable->capability_source != SOL_IR_NONE) {
@@ -1084,9 +1114,6 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
             diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT, span,
                 "derived capability source is missing or malformed");
             bound = false;
-        } else {
-            bound = bind_local(interpreter, &frame, callable->capability_source,
-                receiver->as.capability.source, span);
         }
     }
     for (size_t index = 0; bound && index < argument_count; ++index) {
@@ -1098,9 +1125,18 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
                 ? SOL_INTERPRETER_INVALID_REQUEST : SOL_INTERPRETER_TYPE_INVARIANT,
                 span, "call argument does not match its substituted IR type");
             bound = false;
-        } else {
-            bound = bind_local(interpreter, &frame, local, &arguments[index], span);
         }
+    }
+    if (bound && callable->receiver != SOL_IR_NONE) {
+        bound = bind_local(interpreter, &frame, callable->receiver, receiver, span);
+    }
+    if (bound && callable->capability_source != SOL_IR_NONE) {
+        bound = bind_local(interpreter, &frame, callable->capability_source,
+            receiver->as.capability.source, span);
+    }
+    for (size_t index = 0; bound && index < argument_count; ++index) {
+        SolIrLocalId local = ir->roots[callable->parameters.offset + index];
+        bound = bind_local(interpreter, &frame, local, &arguments[index], span);
     }
     Flow result = error;
     if (bound && callable->body != SOL_IR_NONE) result = evaluate(interpreter, callable->body);
@@ -1119,13 +1155,15 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
         sol_interpreter_value_free(&result.value);
         result.kind = FLOW_ERROR;
     }
-    for (size_t index = 0; index < ir->local_count; ++index) {
-        if (frame.bound[index]) sol_interpreter_value_free(&frame.locals[index]);
+    while (frame.binding_count != 0) {
+        cleanup_local(interpreter, &frame,
+            frame.binding_order[--frame.binding_count]);
     }
     free(frame.locals);
     free(frame.bound);
     free(frame.authority_roots);
     free(frame.authority_known);
+    free(frame.binding_order);
     --interpreter->depth;
     interpreter->frame = frame.parent;
     if (result.kind == FLOW_RETURN) result.kind = FLOW_VALUE;
@@ -1381,18 +1419,20 @@ static Flow evaluate_block(Interpreter *interpreter,
     Flow last = flow_new(FLOW_VALUE);
     sol_interpreter_value_unit(&last.value);
     const SolIr *ir = interpreter->request->ir;
-    for (size_t index = 0; index < expression->as.block.count; ++index) {
+    for (size_t index = 0; index < expression->as.block.statements.count; ++index) {
         const SolIrStatement *statement = &ir->statements[ir->statement_ids[
-            expression->as.block.offset + index
+            expression->as.block.statements.offset + index
         ]];
         Flow value = evaluate(interpreter, statement->expression);
         if (value.kind != FLOW_VALUE) {
             sol_interpreter_value_free(&last.value);
+            cleanup_slice(interpreter, expression->as.block.cleanup);
             return value;
         }
         if (statement->kind == SOL_IR_STATEMENT_RETURN) {
             sol_interpreter_value_free(&last.value);
             value.kind = FLOW_RETURN;
+            cleanup_slice(interpreter, expression->as.block.cleanup);
             return value;
         }
         if (statement->kind == SOL_IR_STATEMENT_LET) {
@@ -1400,6 +1440,7 @@ static Flow evaluate_block(Interpreter *interpreter,
                 &value.value, statement->span)) {
                 sol_interpreter_value_free(&value.value);
                 sol_interpreter_value_free(&last.value);
+                cleanup_slice(interpreter, expression->as.block.cleanup);
                 return flow_new(FLOW_ERROR);
             }
             sol_interpreter_value_free(&value.value);
@@ -1408,6 +1449,7 @@ static Flow evaluate_block(Interpreter *interpreter,
             last = value;
         }
     }
+    cleanup_slice(interpreter, expression->as.block.cleanup);
     return last;
 }
 
@@ -1652,11 +1694,14 @@ static Flow evaluate(Interpreter *interpreter, SolIrExpressionId expression_id) 
                         ir->roots[arm->bindings.offset + binding],
                         &scrutinee.value.as.aggregate.fields[binding], arm->span)) {
                         sol_interpreter_value_free(&scrutinee.value);
+                        cleanup_slice(interpreter, arm->cleanup);
                         return flow_new(FLOW_ERROR);
                     }
                 }
                 sol_interpreter_value_free(&scrutinee.value);
-                return evaluate(interpreter, arm->value);
+                Flow value = evaluate(interpreter, arm->value);
+                cleanup_slice(interpreter, arm->cleanup);
+                return value;
             }
             sol_interpreter_value_free(&scrutinee.value);
             diagnostic(interpreter, SOL_INTERPRETER_NO_MATCH, expression->span,
@@ -1740,7 +1785,13 @@ static Flow evaluate(Interpreter *interpreter, SolIrExpressionId expression_id) 
 }
 
 static SolInterpreterLimits default_limits(void) {
-    return (SolInterpreterLimits){100000, 128, 100000, 1024 * 1024, 10000};
+    return (SolInterpreterLimits){
+        .steps = 100000,
+        .call_depth = 128,
+        .value_nodes = 100000,
+        .text_bytes = 1024 * 1024,
+        .host_calls = 10000,
+    };
 }
 
 bool sol_interpret(const SolInterpreterRequest *request, SolInterpreterResult *result) {

@@ -12,6 +12,7 @@ typedef struct {
     size_t *shared_loans;
     bool *exclusive_loans;
     SolIrDefinitionId owner;
+    size_t region_depth;
     bool validating;
 } Ownership;
 
@@ -457,27 +458,51 @@ call_complete:
         case SOL_IR_EXPR_MATCH:
             return analyze_match(analysis, expression, available, reachable);
         case SOL_IR_EXPR_BLOCK:
-            for (size_t index = 0; *reachable && index < expression->as.block.count;
+            for (size_t index = 0; *reachable
+                && index < expression->as.block.statements.count;
                 ++index) {
                 const SolIrStatement *statement = &analysis->ir->statements[
-                    analysis->ir->statement_ids[expression->as.block.offset + index]];
+                    analysis->ir->statement_ids[
+                        expression->as.block.statements.offset + index]];
+                if (statement->kind == SOL_IR_STATEMENT_REGION) {
+                    ++analysis->region_depth;
+                }
                 if (!analyze_expression(analysis, statement->expression,
-                    available, SOL_ACCESS_OWNED, reachable)) return false;
+                    available, SOL_ACCESS_OWNED, reachable)) {
+                    if (statement->kind == SOL_IR_STATEMENT_REGION) {
+                        --analysis->region_depth;
+                    }
+                    return false;
+                }
+                if (statement->kind == SOL_IR_STATEMENT_REGION) {
+                    --analysis->region_depth;
+                }
                 if (*reachable && statement->kind == SOL_IR_STATEMENT_LET) {
                     available[statement->local] = true;
                 } else if (*reachable && statement->kind == SOL_IR_STATEMENT_RETURN) {
+                    if (analysis->region_depth != 0
+                        && !type_is_copy(analysis,
+                            analysis->ir->expressions[statement->expression].type)) {
+                        return ownership_error_code(analysis, statement->span,
+                            "SOL-REGION-001",
+                            "an affine value cannot return from an explicit region");
+                    }
                     *reachable = false;
                 }
             }
-            for (size_t index = 0; index < expression->as.block.count; ++index) {
-                const SolIrStatement *statement = &analysis->ir->statements[
-                    analysis->ir->statement_ids[expression->as.block.offset + index]];
-                if (statement->kind == SOL_IR_STATEMENT_LET) {
-                    available[statement->local] = false;
-                }
+            for (size_t index = 0; index < expression->as.block.cleanup.count; ++index) {
+                available[analysis->ir->cleanup_locals[
+                    expression->as.block.cleanup.offset + index]] = false;
             }
             return true;
         case SOL_IR_EXPR_PROPAGATE:
+            if (analysis->region_depth != 0
+                && expression->as.propagate.kind == SOL_IR_PROPAGATE_RESULT
+                && !type_is_copy(analysis, expression->as.propagate.residual)) {
+                return ownership_error_code(analysis, expression->span,
+                    "SOL-REGION-001",
+                    "an affine propagation residual cannot leave an explicit region");
+            }
             return analyze_expression(analysis, expression->as.propagate.operand,
                 available, SOL_ACCESS_OWNED, reachable);
         case SOL_IR_EXPR_HANDLE:
@@ -511,6 +536,7 @@ static bool run_ownership(Ownership *analysis) {
         if (local_count != 0) memset(available, 0,
             local_count * sizeof(*available));
         analysis->owner = callable->owner;
+        analysis->region_depth = 0;
         for (size_t parameter = 0; parameter < callable->parameters.count; ++parameter) {
             available[analysis->ir->roots[callable->parameters.offset + parameter]] = true;
         }

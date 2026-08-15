@@ -610,8 +610,12 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         const SolStatement *statement = &syntax->statements[index];
         SolExprId value = statement->kind == SOL_STATEMENT_LET
             ? statement->as.let_statement.value
-            : statement->as.expression;
+            : statement->kind == SOL_STATEMENT_REGION
+                ? statement->as.region_statement.body : statement->as.expression;
         if (value >= syntax->expression_count
+            || statement->kind > SOL_STATEMENT_REGION
+            || (statement->kind == SOL_STATEMENT_REGION
+                && syntax->expressions[value].kind != SOL_EXPR_BLOCK)
             || (statement->next != SOL_AST_NONE && statement->next >= syntax->statement_count)) {
             sol_type_malformed(checker);
             return false;
@@ -4002,7 +4006,8 @@ static SolProvenanceId sol_type_block_origin(
         const SolStatement *statement = &checker->syntax->statements[statement_id];
         SolExprId value_id = statement->kind == SOL_STATEMENT_LET
             ? statement->as.let_statement.value
-            : statement->as.expression;
+            : statement->kind == SOL_STATEMENT_REGION
+                ? statement->as.region_statement.body : statement->as.expression;
         SolType value = checker->types->expressions[value_id];
         if (!terminated) {
             if (statement->kind == SOL_STATEMENT_EXPRESSION
@@ -4278,6 +4283,21 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
                     ? value
                     : (SolType){.kind = SOL_TYPE_UNIT};
                 terminated = value.kind == SOL_TYPE_NEVER;
+            }
+        } else if (statement->kind == SOL_STATEMENT_REGION) {
+            SolType body = sol_type_expression(checker,
+                statement->as.region_statement.body);
+            SolType unit = {.kind = SOL_TYPE_UNIT};
+            if (body.kind != SOL_TYPE_NEVER
+                && !sol_type_assignable(checker, unit, body,
+                    statement->as.region_statement.body)) {
+                sol_type_error(checker, "SOL-TYPE-002", statement->span,
+                    "a region statement body must have type Unit");
+            }
+            if (!terminated) {
+                result = body.kind == SOL_TYPE_NEVER
+                    ? body : (SolType){.kind = SOL_TYPE_UNIT};
+                terminated = body.kind == SOL_TYPE_NEVER;
             }
         } else {
             SolType value = statement->kind == SOL_STATEMENT_RETURN

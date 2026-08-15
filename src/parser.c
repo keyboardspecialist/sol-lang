@@ -1292,6 +1292,20 @@ static SolExprId sol_parser_match_expression(SolParser *parser) {
 
 static SolExprId sol_parser_primary_expression(SolParser *parser) {
     SolToken token = sol_parser_current(parser);
+    if (token.kind == SOL_TOKEN_REGION) {
+        sol_parser_error(parser,
+            parser->contract_context == SOL_PARSER_CONTRACT_NONE
+                ? "SOL-PARSE-011" : "SOL-PARSE-022",
+            token,
+            parser->contract_context == SOL_PARSER_CONTRACT_NONE
+                ? "a region is a statement and is not allowed in expression position"
+                : "region statements are not allowed in contract or refinement predicates");
+        sol_parser_advance(parser);
+        return sol_parser_add_expression(parser, (SolExpr){
+            .kind = SOL_EXPR_ERROR,
+            .span = token.span,
+        });
+    }
     if (token.kind == SOL_TOKEN_INTEGER) {
         sol_parser_advance(parser);
         return sol_parser_add_expression(parser, (SolExpr){
@@ -1674,6 +1688,19 @@ static SolStatementId sol_parser_statement(SolParser *parser) {
         statement.span = (SolSpan){
             .start = start.span.start,
             .end = value == SOL_AST_NONE ? start.span.end : parser->tree->expressions[value].span.end,
+        };
+    } else if (sol_parser_match(parser, SOL_TOKEN_REGION)) {
+        SolToken label = sol_parser_current(parser);
+        sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER,
+            "expected a region label after 'region'");
+        SolExprId body = sol_parser_block_expression(parser);
+        statement.kind = SOL_STATEMENT_REGION;
+        statement.as.region_statement.label = label.span;
+        statement.as.region_statement.body = body;
+        statement.span = (SolSpan){
+            .start = start.span.start,
+            .end = body == SOL_AST_NONE ? label.span.end
+                : parser->tree->expressions[body].span.end,
         };
     } else {
         SolExprId value = sol_parser_expression(parser, 1);

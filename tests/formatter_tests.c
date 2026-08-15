@@ -345,6 +345,22 @@ static void test_access_qualifiers(void) {
     sol_formatted_free(&formatted);
 }
 
+static void test_region_formatting(void) {
+    SolFormatted formatted;
+    SolDiagnostics diagnostics;
+    sol_formatted_init(&formatted);
+    sol_diagnostics_init(&diagnostics);
+    CHECK(format_text(
+        "module regions\nfunction f()->(){region outer{let a=1 region inner{}}}\n",
+        &formatted, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(strstr(formatted.text, "region outer {") != NULL);
+    CHECK(strstr(formatted.text, "region inner {") != NULL);
+    check_second_pass(&formatted);
+    sol_diagnostics_free(&diagnostics);
+    sol_formatted_free(&formatted);
+}
+
 int main(void) {
     test_golden_formatting();
     test_comments_and_preserved_bytes();
@@ -355,6 +371,7 @@ int main(void) {
     test_malformed_source_preserves_output();
     test_embedded_nul_is_rejected();
     test_access_qualifiers();
+    test_region_formatting();
 
     if (failures != 0) {
         fprintf(stderr, "%d formatter test(s) failed\n", failures);

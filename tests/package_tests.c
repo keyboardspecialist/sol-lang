@@ -187,9 +187,10 @@ static void test_type_declaration_relocation(void) {
     snprintf(first_path, sizeof(first_path), "%s/a.sol", directory);
     snprintf(second_path, sizeof(second_path), "%s/z.sol", directory);
     CHECK(write_text_file(first_path,
-        "module first\nfunction seed(value: Int64) -> Int64 { return value }\n"));
+        "module first\ntype Positive = refined Int64 where self > 0\n"));
     CHECK(write_text_file(second_path,
-        "module second\ntype Positive = refined Int64 where self > 0\n"));
+        "module second\nfunction seed(value: Int64) -> Int64 "
+        "{ region scratch { let copy = value } return value }\n"));
 
     SolPackage package;
     SolDiagnostics diagnostics;
@@ -200,12 +201,27 @@ static void test_type_declaration_relocation(void) {
     CHECK(!sol_diagnostics_has_errors(&diagnostics));
     CHECK(package.file_count == 2);
     CHECK(package.syntax.item_count == 2);
+    if (package.syntax.item_count >= 2) {
+        SolExprId body = package.syntax.items[1].body;
+        CHECK(body < package.syntax.expression_count);
+        if (body < package.syntax.expression_count) {
+            SolStatementId region
+                = package.syntax.expressions[body].as.block.first_statement;
+            CHECK(region < package.syntax.statement_count);
+            if (region < package.syntax.statement_count) {
+                CHECK(package.syntax.statements[region].kind == SOL_STATEMENT_REGION);
+                CHECK(span_text_equal(&package.source,
+                    package.syntax.statements[region].as.region_statement.label,
+                    "scratch"));
+            }
+        }
+    }
     if (package.syntax.item_count == 2) {
-        const SolSyntaxItem *type = &package.syntax.items[1];
+        const SolSyntaxItem *type = &package.syntax.items[0];
         CHECK(type->kind == SOL_ITEM_TYPE);
         CHECK(type->representation_type != SOL_AST_NONE);
         CHECK(type->representation_type < package.syntax.type_count);
-        CHECK(package.syntax.types[type->representation_type].owner_item == 1);
+        CHECK(package.syntax.types[type->representation_type].owner_item == 0);
         CHECK(span_text_equal(&package.source,
             package.syntax.types[type->representation_type].name, "Int64"));
         CHECK(type->first_contract != SOL_AST_NONE);
@@ -213,7 +229,7 @@ static void test_type_declaration_relocation(void) {
             const SolContractClause *clause
                 = &package.syntax.contract_clauses[type->first_contract];
             CHECK(clause->owner_kind == SOL_CONTRACT_OWNER_TYPE);
-            CHECK(clause->owner == 1);
+            CHECK(clause->owner == 0);
         }
     }
     CHECK(sol_syntax_contracts_validate(&package.source, &package.syntax));

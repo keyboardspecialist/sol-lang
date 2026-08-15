@@ -100,6 +100,7 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
         || left->statement_id_count != right->statement_id_count
         || left->arm_count != right->arm_count
         || left->arm_id_count != right->arm_id_count
+        || left->cleanup_local_count != right->cleanup_local_count
         || left->operand_count != right->operand_count
         || left->root_count != right->root_count
         || left->effect_count != right->effect_count
@@ -121,6 +122,8 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
             left->statement_id_count * sizeof(*left->statement_ids)) != 0
         || memcmp(left->arm_ids, right->arm_ids,
             left->arm_id_count * sizeof(*left->arm_ids)) != 0
+        || memcmp(left->cleanup_locals, right->cleanup_locals,
+            left->cleanup_local_count * sizeof(*left->cleanup_locals)) != 0
         || memcmp(left->roots, right->roots,
             left->root_count * sizeof(*left->roots)) != 0) return false;
     for (size_t index = 0; index < left->definition_count; ++index) {
@@ -143,7 +146,34 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
                 != right->expressions[index].local_use
             || left->expressions[index].type != right->expressions[index].type
             || left->expressions[index].span.start != right->expressions[index].span.start
-            || left->expressions[index].span.end != right->expressions[index].span.end) {
+            || left->expressions[index].span.end != right->expressions[index].span.end
+            || (left->expressions[index].kind == SOL_IR_EXPR_BLOCK
+                && (left->expressions[index].as.block.statements.offset
+                        != right->expressions[index].as.block.statements.offset
+                    || left->expressions[index].as.block.statements.count
+                        != right->expressions[index].as.block.statements.count
+                    || left->expressions[index].as.block.cleanup.offset
+                        != right->expressions[index].as.block.cleanup.offset
+                    || left->expressions[index].as.block.cleanup.count
+                        != right->expressions[index].as.block.cleanup.count))) {
+            return false;
+        }
+    }
+    for (size_t index = 0; index < left->statement_count; ++index) {
+        const SolIrStatement *a = &left->statements[index];
+        const SolIrStatement *b = &right->statements[index];
+        if (a->kind != b->kind || a->local != b->local
+            || a->expression != b->expression || a->span.start != b->span.start
+            || a->span.end != b->span.end
+            || a->region_label_span.start != b->region_label_span.start
+            || a->region_label_span.end != b->region_label_span.end
+            || ((a->region_label == NULL) != (b->region_label == NULL))
+            || (a->region_label != NULL
+                && strcmp(a->region_label, b->region_label) != 0)) return false;
+    }
+    for (size_t index = 0; index < left->arm_count; ++index) {
+        if (left->arms[index].cleanup.offset != right->arms[index].cleanup.offset
+            || left->arms[index].cleanup.count != right->arms[index].cleanup.count) {
             return false;
         }
     }
@@ -322,8 +352,9 @@ static void test_variants_nested_arenas_and_evidence(void) {
             && expression->as.call.kind == SOL_IR_CALL_METHOD
             && expression->as.call.evidence.count != 0);
         nested = nested || (expression->kind == SOL_IR_EXPR_BLOCK
-            && expression->as.block.count != 0
-            && expression->as.block.offset < compilation.ir.statement_id_count);
+            && expression->as.block.statements.count != 0
+            && expression->as.block.statements.offset
+                < compilation.ir.statement_id_count);
         if (expression->kind == SOL_IR_EXPR_MATCH) {
             CHECK(expression->as.match_expr.arms.offset
                 + expression->as.match_expr.arms.count <= compilation.ir.arm_id_count);
@@ -1445,6 +1476,75 @@ static void test_affine_ownership(void) {
     free_compilation(&compilation);
 }
 
+static void test_region_cleanup_metadata(void) {
+    TestCompilation compilation;
+    CHECK(compile_ir(&compilation,
+        "module region_ir\n"
+        "enum Payload { item(value: Text) }\n"
+        "function first(input: Text, payload: Payload) -> () { "
+        "region outer { let a = input region inner { let b = input } } "
+        "match payload { item(text) => () } }\n"
+        "function second() -> () { let foreign = \"x\" }\n"));
+    SolIrExpression *block = NULL;
+    SolIrStatement *region = NULL;
+    SolIrArm *arm = NULL;
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        SolIrExpression *candidate = &compilation.ir.expressions[index];
+        if (candidate->kind == SOL_IR_EXPR_BLOCK
+            && candidate->as.block.cleanup.count == 1 && block == NULL) block = candidate;
+    }
+    for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
+        if (compilation.ir.statements[index].kind == SOL_IR_STATEMENT_REGION) {
+            region = &compilation.ir.statements[index];
+            break;
+        }
+    }
+    for (size_t index = 0; index < compilation.ir.arm_count; ++index) {
+        if (compilation.ir.arms[index].cleanup.count != 0) {
+            arm = &compilation.ir.arms[index];
+            break;
+        }
+    }
+    CHECK(block != NULL && region != NULL && arm != NULL);
+    if (block != NULL) {
+        SolIrLocalId saved = compilation.ir.cleanup_locals[
+            block->as.block.cleanup.offset];
+        compilation.ir.cleanup_locals[block->as.block.cleanup.offset] = SOL_IR_NONE;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        compilation.ir.cleanup_locals[block->as.block.cleanup.offset] = saved;
+        SolIrSlice saved_slice = block->as.block.cleanup;
+        block->as.block.cleanup.count = 0;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        block->as.block.cleanup = saved_slice;
+    }
+    if (arm != NULL) {
+        SolIrLocalId saved = compilation.ir.cleanup_locals[arm->cleanup.offset];
+        compilation.ir.cleanup_locals[arm->cleanup.offset] = SOL_IR_NONE;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        compilation.ir.cleanup_locals[arm->cleanup.offset] = saved;
+    }
+    if (region != NULL) {
+        char *saved_label = region->region_label;
+        region->region_label = NULL;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        region->region_label = saved_label;
+        SolIrExpressionId saved_body = region->expression;
+        region->expression = 0;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        region->expression = saved_body;
+    }
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+    free_compilation(&compilation);
+
+    CHECK(compile_ir(&compilation,
+        "module region_result_propagation\n"
+        "capability Token {}\n"
+        "function pass(value: Result<capability Token, Text>) "
+        "-> Result<Int64, Text> { region temporary { let token = value? } "
+        "return ok(1) }\n"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_geometric_growth();
     test_complete_ir_and_lifetime();
@@ -1460,6 +1560,7 @@ int main(void) {
     test_release_gate_domains();
     test_exact_member_table_ownership();
     test_affine_ownership();
+    test_region_cleanup_metadata();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }
