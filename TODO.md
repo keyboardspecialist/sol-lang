@@ -43,6 +43,31 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 - [x] Initialized mutable whole-local bindings, checked statement assignment,
       ownership UPDATE metadata, replacement cleanup, and region-safe reinitialization.
 
+## Construct Coverage
+
+This ledger accounts for every current syntax category and the target-language
+families already described by the README and design specification. Adding a new
+surface form requires either a prioritized row below or an explicit deferral here.
+
+| Surface | Implemented bootstrap coverage | Accounted remaining work |
+| --- | --- | --- |
+| Top-level structures | Edition-2027 modules/imports; records; enums; distinct/refined types; capabilities; functions; traits/implementations; tests; contracts; effects; stable annotations | Constants and associated constants (31); package manifests/features/visibility/re-exports/dependencies (40); versioned schemas/migrations (41); FFI declarations (46); `spec`/property declarations (51); public semantic IR (54); protocols/transactions/workflows (59); typed derives/reflection (60) |
+| Statements | `let`; initialized `var`; direct-local assignment; `return`; expression statements; lexical `region` | General places and projected mutation (20-22); loops and loop exits (23-24); `require`/panic/unreachable termination (25); allocator-bearing regions and `using` resource scopes (37); lexical unsafe blocks (44); protocol `emit` and concurrency control forms (59) |
+| Expressions | Bootstrap primitive/unit/path literals; unary/binary operators; calls and type applications; fields/method calls; records/variants; `if`; `match`; blocks; `?`; exact handlers; contract `result`/`old` | Index/dereference places (20); richer termination forms (25); tuples (26); closures/method values (28-29); fixed arrays/indexing (34); refined construction/validation (50); unsafe pointer operations (44); async/protocol expressions (59); general resumptive handlers (61) |
+| Patterns | Wildcard; Boolean; flat enum-variant bindings; exhaustive `Bool`/closed-enum matching | Nested record/enum/tuple patterns and pure guards (27); refined patterns (50); protocol-state patterns (59) |
+| Types and callable structure | `Int64`, `Bool`, `Text`, `Unit`, and `Never`; nominal applications; `Option`/`Result`; capability and structural function types; bounded type/effect parameters; one trait bound; `borrow`/`inout` parameters | Richer traits/generic methods and required associated items (30); constants and constrained const parameters (31, 33); remaining numeric/byte/rune primitives and units/dimensions (32); arrays/collections (34, 38); lifetime relationships/views (35); resource/allocator and cost types/clauses (36-38); general effect rows/aliases (42); raw pointers/ABI types (44, 46); concurrency traits/types (59) |
+| Cross-cutting representation | Every successful-program AST statement/expression/pattern kind is parsed, structurally traversed, semantically analyzed, relocated, lowered, and executable or explicitly non-runtime | Exhaustive discriminant/span/type validation and per-kind package/inspection/formatter/malformed-input coverage (19); ownership/effect/contract integration for later forms (43); control-flow MIR and runtime lowering (45, 48) |
+
+Unchecked exceptions and `throw`/`catch` are not planned; recoverable failure remains
+typed through `Result`, and cancellation remains typed. Unrestricted token/text macros
+remain a non-goal. Mutable globals and top-level initialization remain deferred until
+an explicit authority, initialization-order, and concurrency model is approved.
+Higher-kinded types, arbitrary variance, specialization, polymorphic recursion, and
+general dependent typing remain deferred unless a concrete row below requires and
+bounds them. Generic capabilities/members, trait defaults/contracts/authority clauses,
+associated effects, inheritance, trait objects, and dependent method effects remain
+deferred until a concrete core API requires their smallest coherent subset.
+
 ## Prioritized Work
 
 | Done | Order | Task | Impact | Complexity | Primary dependency |
@@ -56,7 +81,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [x] | 7 | Close authority gaps for static and unparameterized effects | 5 | 4 | Capability model |
 | [x] | 8 | Add distinct and refined types with checked predicates | 4 | 4 | Generics and contracts |
 | [x] | 9 | Define stable semantic IDs, references, and rename identity | 5 | 5 | Modules and packages |
-| [x] | 10 | Define a canonical typed Sol IR | 5 | 5 | Types, traits, and IDs |
+| [x] | 10 | Define an owning deterministic compiler-internal typed IR | 5 | 5 | Types, traits, and IDs |
 | [x] | 11 | Implement an interpreter for language conformance tests | 5 | 4 | Typed IR |
 | [x] | 12 | Add deterministic `sol test` and authored Boolean unit tests | 4 | 3 | Interpreter |
 | [x] | 13 | Add `sol effects` authority and call-graph inspection | 3 | 2 | Effect tables |
@@ -65,19 +90,49 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [x] | 16 | Implement lexical shared and exclusive borrows | 5 | 5 | Affine ownership |
 | [x] | 17 | Track regions, deterministic cleanup, and resource lifetimes | 5 | 5 | Borrow checking |
 | [x] | 18 | Add mutable local bindings, assignment, and checked whole-place updates | 5 | 5 | Exclusive borrows and cleanup |
-| [ ] | 19 | Add `loop`, `while`, `break`, and `continue` with ownership fixed points and exact unwinding | 5 | 5 | Mutable places and regions |
-| [ ] | 20 | Define iterator traits and add protocol-based `for` loops | 4 | 4 | Traits and core loops |
-| [ ] | 21 | Add explicit unsafe boundaries and initial FFI rules | 4 | 4 | Ownership and effects |
-| [ ] | 22 | Integrate ownership facts with effects, contracts, and diagnostics | 5 | 5 | Ownership pipeline |
-| [ ] | 23 | Generate runtime contract checks and normalized proof obligations | 5 | 5 | IR and ownership |
-| [ ] | 24 | Add examples, authored/generated properties, boundary generation, shrinking, seeds, and ghost state | 4 | 4 | Interpreter and obligations |
-| [ ] | 25 | Integrate SMT proof policies, solver execution, and caching | 4 | 5 | Logical obligation IR |
-| [ ] | 26 | Select and integrate an established native or WebAssembly backend | 5 | 5 | IR and ownership |
-| [ ] | 27 | Implement package entry points and `sol build` / `sol run` | 5 | 4 | Modules and backend |
-| [ ] | 28 | Expose semantic information through a language server | 4 | 5 | Stable schemas and IDs |
-| [ ] | 29 | Implement semantic patches and patch validation | 4 | 5 | Stable IDs and public IR |
-| [ ] | 30 | Produce API compatibility and semantic change reports | 4 | 5 | Public IR and patches |
-| [ ] | 31 | Generate bounded context bundles for editor and agent workflows | 3 | 4 | Semantic graph |
+| [ ] | 19 | Make syntax and owning-IR validation exhaustive for every kind, span, owner, type relation, and callable result; add per-kind relocation, inspection, formatter, and malformed-input tests | 5 | 4 | Current executable baseline |
+| [ ] | 20 | Define canonical place/access-path IR for locals, fields, indices, and dereferences | 5 | 5 | Whole-local mutation |
+| [ ] | 21 | Implement projected loans, partial moves, projected mutation, `inout` caller writeback, and exact replacement cleanup | 5 | 5 | Place representation |
+| [ ] | 22 | Add definite initialization, uninitialized `var`, compound assignment, and explicit `modify` scopes | 4 | 4 | Projected mutation |
+| [ ] | 23 | Add `loop`, `while`, `break`, and `continue` with ownership fixed points and exact cleanup on every edge | 5 | 5 | Places and regions |
+| [ ] | 24 | Integrate loop invariants, `decreases`, divergence, and loop diagnostics with contract templates | 5 | 4 | Core loops and contracts |
+| [ ] | 25 | Define executable `panic`, proof-backed `unreachable`, and `require condition else` termination semantics | 4 | 4 | Control-flow effects and IR |
+| [ ] | 26 | Add structural tuples as the minimum local product form for patterns, iterators, and protocols | 4 | 4 | Type interning |
+| [ ] | 27 | Expand patterns to nested record/enum/tuple destructuring and pure guards | 4 | 4 | Tuples and exhaustiveness checking |
+| [ ] | 28 | Define lambda syntax, capture classification, capture authority/effects, borrow escape, and closure ownership | 5 | 5 | Places, loans, and regions |
+| [ ] | 29 | Implement nonescaping and owned closures plus method values across AST, HIR, IR, ownership, and interpreter | 5 | 5 | Closure semantics |
+| [ ] | 30 | Add the bounded richer trait/generic subset required by core APIs: multiple bounds where needed, associated types, generic methods/implementations, and deterministic evidence | 5 | 5 | Existing traits and generics |
+| [ ] | 31 | Add immutable top-level and associated constants with bounded constant evaluation; continue rejecting mutable statics and top-level initialization | 4 | 4 | Interpreter and type checking |
+| [ ] | 32 | Define the remaining sized/unsigned/large integer, floating, decimal, byte, and rune primitives plus unit/dimension/currency types with checked conversions and arithmetic | 4 | 5 | Constants and nominal types |
+| [ ] | 33 | Add only the constrained const parameters required for fixed array lengths and compile-time natural values | 4 | 5 | Constants and generics |
+| [ ] | 34 | Add fixed arrays, array literals, indexing expressions/places, and structural ownership/equality | 4 | 4 | Const naturals and places |
+| [ ] | 35 | Define lifetime parameters and borrow-escape relationships required by `View` and `Slice`, while continuing to infer ordinary local lifetimes | 5 | 5 | Partial loans and generics |
+| [ ] | 36 | Define user resource traits and deterministic `Drop`/fallible `close`, including effect restrictions and cleanup precedence | 5 | 5 | Places, loops, and ownership |
+| [ ] | 37 | Add allocator capabilities, allocator-bearing regions, `using` resource scopes, allocation effects, callable cost/resource clauses, and runtime/allocation profiles | 5 | 5 | Lifetimes and resource cleanup |
+| [ ] | 38 | Implement the core collection layer required by examples: `Vector`, persistent `List`, explicit map variants, `View`, and `Slice` | 4 | 5 | Arrays, allocators, and lifetimes |
+| [ ] | 39 | Define iterator traits and add protocol-based `for` loops | 4 | 4 | Richer traits, collections, and loops |
+| [ ] | 40 | Complete package manifests, features/edition policy, dependencies/locks, visibility, aliases/re-exports, sandboxed build execution, host wiring, and dependency-qualified semantic IDs | 5 | 5 | Existing package resolution |
+| [ ] | 41 | Add versioned schema declarations, canonical schema identities, checked migration declarations, and deterministic migration planning | 4 | 5 | Constants, records, and packages |
+| [ ] | 42 | Add bounded general effect-row polymorphism and effect aliases, including explicit/multiple/result-position arguments and authority capture | 5 | 5 | Existing effect parameters and closures |
+| [ ] | 43 | Integrate place, ownership, resource, and control-flow facts with effects, contracts, inspection, and structured diagnostics | 5 | 5 | Completed ownership surface |
+| [ ] | 44 | Define lexical unsafe blocks, assumptions/establishments, raw pointer primitives, audit records, and unsafe effects | 5 | 5 | Places, lifetimes, resources, and obligations |
+| [ ] | 45 | Introduce ownership-explicit control-flow MIR with blocks/SSA, moves, borrows, drops, regions, panic policy, generic lowering, and target-independent layout | 5 | 5 | Complete core control/resource semantics |
+| [ ] | 46 | Define C ABI layouts and FFI declarations with ownership, nullability, threading, blocking, error, and effect metadata | 5 | 5 | Unsafe boundaries, packages, and MIR layout |
+| [ ] | 47 | Select and integrate an established native or WebAssembly backend | 5 | 5 | Control-flow MIR |
+| [ ] | 48 | Implement runtime/host ABI support for allocation, cleanup, panic policy, capabilities, handlers, and FFI | 5 | 5 | Backend and MIR |
+| [ ] | 49 | Implement package entry points and `sol build` / `sol run` | 5 | 4 | Packages, backend, and runtime |
+| [ ] | 50 | Generate runtime contract/refinement checks, refined construction/projection/destructuring, refinement-aware exhaustiveness, cost/resource checks, and normalized logical obligations | 5 | 5 | IR, ownership, and resources |
+| [ ] | 51 | Add `spec` examples, authored/generated properties, boundary generation, shrinking, seeds, and ghost state | 4 | 4 | Runtime checks and interpreter |
+| [ ] | 52 | Integrate SMT proof policies, isolated solver execution, deterministic caching, counterexamples, cost proofs, and proof diagnostics | 4 | 5 | Logical obligation IR |
+| [ ] | 53 | Complete formatter width reflow, trailing-comma policy, sorting, comment reflow, and syntax-category fixtures without semantic reordering | 3 | 3 | Grammar implemented through the current milestone |
+| [ ] | 54 | Define the versioned public semantic graph and canonical serialized Sol IR separately from internal interpreter IR and MIR | 5 | 5 | Stable IDs and mature semantics |
+| [ ] | 55 | Expose semantic information through a language server | 4 | 5 | Public schemas and graph |
+| [ ] | 56 | Implement intent/semantic patch declarations and patch validation | 4 | 5 | Public IR |
+| [ ] | 57 | Produce schema/API compatibility and semantic change reports, including migration requirements | 4 | 5 | Public IR, schemas, and patches |
+| [ ] | 58 | Generate bounded context bundles for editor and agent workflows | 3 | 4 | Semantic graph |
+| [ ] | 59 | Stage structured async/concurrency, `Send`/`Share`, cancellation, actors/channels, protocol-state patterns and `emit`, transactions, and workflows | 5 | 5 | Closures, resources, MIR, and runtime |
+| [ ] | 60 | Stage typed derives, sandboxed build transforms, and opt-in reflection without unrestricted macros | 3 | 5 | Package sandboxing and public IR |
+| [ ] | 61 | Generalize handlers after defining ownership across suspension and resumptions, multiple operations, dynamic authority matching, and row transformation | 5 | 5 | Effect polymorphism, concurrency, and runtime |
 
 ## Milestone Discipline
 

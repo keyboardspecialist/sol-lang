@@ -583,7 +583,7 @@ effects { pure } {
   ([Form], [Meaning]),
   (
     ([`borrow T` parameter], [Bootstrap shared callable access; any number coexist and the operand is a direct local.]),
-    ([`inout T` parameter], [Bootstrap exclusive callable access; mutation is not implemented yet.]),
+    ([`inout T` parameter], [Bootstrap exclusive callable access; caller writeback and projected mutation are not implemented yet.]),
     ([`Owned T`], [Callee receives responsibility for destruction or transfer.]),
     ([`shared T`], [Explicit reference-counted/runtime ownership; traits govern task safety.]),
     ([`handle<Resource>`], [Opaque capability-bearing resource with protocol operations and deterministic close.]),
@@ -937,7 +937,7 @@ Top-level `test "label" expression` declarations are private, zero-parameter, no
 
 #status("IMPLEMENTED", [`sol test [--diagnostic-format=human|json]` compiles a file or directory package exactly as `sol check`, renders compilation diagnostics while package source remains alive, then frees all frontend/package state. It discovers dedicated owning-IR TEST definitions and exact callable IDs in deterministic package-path then declaration order. Each test receives fresh default interpreter limits, ignored contracts, no host callback, and no ambient capability. Execution continues through all false and runtime failures and emits no timing. Exit status is zero exactly when compilation and every test pass, one otherwise, and two for usage. Successful JSON uses schema `sol.test-results`, version 1, with ordered entries containing path, decoded label, status (`passed`, `false`, or `runtime_error`), and nullable runtime diagnostic, plus total/passed/failed summary counts. Compilation failures retain `sol check` diagnostic JSON. Load and infrastructure errors use the versioned `sol.cli-error/1` object. JSON serializers preserve valid UTF-8 semantics by emitting valid sequences unchanged, escape syntax and controls normally, and render each invalid byte as a deterministic `\u00XX` Unicode-scalar marker; invalid bytes are not claimed to round-trip through JSON scalar semantics. Human labels display valid UTF-8 and safely escape invalid bytes. Human runtime failures report both declaration identity and the owning diagnostic file/aggregate offset.])
 
-#status("FUTURE WORK", [`spec` examples, authored and generated properties, boundary generation, shrinking, seed control, and ghost state are roadmap item 21. `spec` blocks will compile those forms into tests and obligations. Boundary values derive from refinements and mutation operators; generated coverage is reported separately.])
+#status("FUTURE WORK", [`spec` examples, authored and generated properties, boundary generation, shrinking, seed control, and ghost state remain roadmap work. `spec` blocks will compile those forms into tests and obligations. Boundary values derive from refinements and mutation operators; generated coverage is reported separately.])
 
 #listing([Executable examples and universal properties.], ```sol
 spec normalize_username {
@@ -1553,8 +1553,9 @@ The current C17 bootstrap provides:
 - Versioned 128-bit top-level semantic IDs, package-local explicit evolution tokens, collision validation, and resolved declaration/import/expression/type/trait occurrence records.
 - Structural bootstrap copies, whole-local affine moves, callable-scoped shared/exclusive loans, use-after-move/conflict/escape diagnostics, structured control-flow joins, validated access/local-use IR metadata, and ownership-aware interpretation.
 - Statement-only nested lexical regions; exact block-let and match-binding cleanup metadata; affine region-escape diagnostics; and reverse deterministic interpreter storage cleanup on every flow.
+- Initialized mutable whole-local bindings; fixed-type direct-local assignment; UPDATE ownership metadata; replacement cleanup; moved-slot reinitialization; and region-safe affine updates.
 
-It is not a production compiler. In particular, general row constraints and explicit/multiple/recursive or authority-capturing effect parameters, refined construction/validation/assumptions, richer traits and constrained or higher-order generics, first-class/partial/field borrows, mutation, first-class/allocator regions, lifetime generics, user-defined Drop/destructors/finalizers/close protocols, unsafe/FFI authority gates, general algebraic handlers, static/unparameterized or runtime-dynamic handler matching, runtime contract checks, call-site contract/refinement use, logical normalization, SMT/proof discharge, concurrency, package manifests/host wiring/dependencies, member/local stable identities, width-based and declaration-reordering formatting, stable public schemas/IR, semantic patches, backend cleanup behavior, and code generation are not implemented.
+It is not a production compiler. In particular, general row constraints and explicit/multiple/recursive or authority-capturing effect parameters, refined construction/validation/assumptions, richer traits and constrained or higher-order generics, first-class/partial/field borrows, projected/compound mutation and caller writeback, first-class/allocator regions, lifetime generics, user-defined Drop/destructors/finalizers/close protocols, unsafe/FFI authority gates, general algebraic handlers, static/unparameterized or runtime-dynamic handler matching, runtime contract checks, call-site contract/refinement use, logical normalization, SMT/proof discharge, concurrency, package manifests/host wiring/dependencies, member/local stable identities, width-based and declaration-reordering formatting, stable public schemas/IR, semantic patches, backend cleanup behavior, and code generation are not implemented.
 
 == Phased Roadmap
 
