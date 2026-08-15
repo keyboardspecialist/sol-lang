@@ -1402,9 +1402,15 @@ static void sol_effect_expression(SolEffectChecker *checker, SolExprId expressio
                 }
                 const SolStatement *statement = &checker->syntax->statements[statement_id];
                 SolExprId value = statement->kind == SOL_STATEMENT_LET
+                        || statement->kind == SOL_STATEMENT_VAR
                     ? statement->as.let_statement.value
+                    : statement->kind == SOL_STATEMENT_ASSIGNMENT
+                        ? statement->as.assignment.value
                     : statement->kind == SOL_STATEMENT_REGION
                         ? statement->as.region_statement.body : statement->as.expression;
+                if (statement->kind == SOL_STATEMENT_ASSIGNMENT) {
+                    sol_effect_expression(checker, statement->as.assignment.target);
+                }
                 sol_effect_expression(checker, value);
                 statement_id = statement->next;
             }
@@ -1519,7 +1525,8 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
         const SolStatement *statement = &syntax->statements[index];
         if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_REGION
             || !sol_effect_span_valid(source, statement->span)
-            || (statement->kind == SOL_STATEMENT_LET
+            || ((statement->kind == SOL_STATEMENT_LET
+                    || statement->kind == SOL_STATEMENT_VAR)
                 && !sol_effect_span_valid(source, statement->as.let_statement.name))
             || (statement->kind == SOL_STATEMENT_REGION
                 && (!sol_effect_span_valid(source,
@@ -1531,10 +1538,15 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
             return false;
         }
         SolExprId value = statement->kind == SOL_STATEMENT_LET
+                || statement->kind == SOL_STATEMENT_VAR
             ? statement->as.let_statement.value
+            : statement->kind == SOL_STATEMENT_ASSIGNMENT
+                ? statement->as.assignment.value
             : statement->kind == SOL_STATEMENT_REGION
                 ? statement->as.region_statement.body : statement->as.expression;
         if (value >= syntax->expression_count
+            || (statement->kind == SOL_STATEMENT_ASSIGNMENT
+                && statement->as.assignment.target >= syntax->expression_count)
             || (statement->kind == SOL_STATEMENT_REGION
                 && syntax->expressions[value].kind != SOL_EXPR_BLOCK)) return false;
     }
@@ -2100,11 +2112,19 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
                         statement_owners[statement] = expression_id;
                         const SolStatement *current = &checker->syntax->statements[statement];
                         SolExprId value = current->kind == SOL_STATEMENT_LET
+                                || current->kind == SOL_STATEMENT_VAR
                             ? current->as.let_statement.value
+                            : current->kind == SOL_STATEMENT_ASSIGNMENT
+                                ? current->as.assignment.value
                             : current->kind == SOL_STATEMENT_REGION
                                 ? current->as.region_statement.body
                                 : current->as.expression;
-                        valid = sol_effect_schedule_owned_expression(
+                        if (current->kind == SOL_STATEMENT_ASSIGNMENT) {
+                            valid = sol_effect_schedule_owned_expression(
+                                checker, owner, current->as.assignment.target,
+                                states, stack, &stack_count);
+                        }
+                        valid = valid && sol_effect_schedule_owned_expression(
                             checker,
                             owner,
                             value,
@@ -2203,7 +2223,10 @@ static SolProvenanceId sol_effect_block_origin(
     while (statement != SOL_AST_NONE && traversed++ < checker->syntax->statement_count) {
         const SolStatement *current = &checker->syntax->statements[statement];
         SolExprId value_id = current->kind == SOL_STATEMENT_LET
+                || current->kind == SOL_STATEMENT_VAR
             ? current->as.let_statement.value
+            : current->kind == SOL_STATEMENT_ASSIGNMENT
+                ? current->as.assignment.value
             : current->kind == SOL_STATEMENT_REGION
                 ? current->as.region_statement.body : current->as.expression;
         SolType value = checker->types->expressions[value_id];
@@ -2535,7 +2558,8 @@ static bool sol_effect_validate_local_resolutions(const SolEffectChecker *checke
         } else if (local->kind == SOL_LOCAL_BINDING) {
             if (local->syntax_id >= checker->syntax->statement_count) return false;
             const SolStatement *statement = &checker->syntax->statements[local->syntax_id];
-            if (statement->kind != SOL_STATEMENT_LET
+            if ((statement->kind != SOL_STATEMENT_LET
+                    && statement->kind != SOL_STATEMENT_VAR)
                 || statement->span.end > expression->span.start
                 || !sol_effect_span_equal(
                     checker->source,
@@ -2594,7 +2618,10 @@ static void sol_effect_push_expression_provenance_dependencies(
         while (statement != SOL_AST_NONE) {
             const SolStatement *current = &checker->syntax->statements[statement];
             SolExprId value = current->kind == SOL_STATEMENT_LET
+                    || current->kind == SOL_STATEMENT_VAR
                 ? current->as.let_statement.value
+                : current->kind == SOL_STATEMENT_ASSIGNMENT
+                    ? current->as.assignment.value
                 : current->kind == SOL_STATEMENT_REGION
                     ? current->as.region_statement.body : current->as.expression;
             sol_effect_push_provenance_dependency(stack, stack_count, value);
@@ -3767,7 +3794,11 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
                     || local->name.end != syntax->parameters[local->syntax_id].name.end))
             || (local->kind == SOL_LOCAL_BINDING
                 && (local->syntax_id >= syntax->statement_count
-                    || syntax->statements[local->syntax_id].kind != SOL_STATEMENT_LET
+                    || (syntax->statements[local->syntax_id].kind != SOL_STATEMENT_LET
+                        && syntax->statements[local->syntax_id].kind
+                            != SOL_STATEMENT_VAR)
+                    || local->mutable != (syntax->statements[
+                        local->syntax_id].kind == SOL_STATEMENT_VAR)
                     || local->name.start
                         != syntax->statements[
                             local->syntax_id
@@ -3776,6 +3807,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
                         != syntax->statements[
                             local->syntax_id
                         ].as.let_statement.name.end))
+            || (local->kind != SOL_LOCAL_BINDING && local->mutable)
             || (local->kind == SOL_LOCAL_PATTERN
                 && local->syntax_id >= syntax->pattern_binding_count)) {
             return false;

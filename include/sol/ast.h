@@ -120,6 +120,8 @@ typedef struct {
 
 typedef enum {
     SOL_STATEMENT_LET,
+    SOL_STATEMENT_VAR,
+    SOL_STATEMENT_ASSIGNMENT,
     SOL_STATEMENT_RETURN,
     SOL_STATEMENT_EXPRESSION,
     SOL_STATEMENT_REGION,
@@ -134,6 +136,10 @@ typedef struct {
             SolSpan name;
             SolExprId value;
         } let_statement;
+        struct {
+            SolExprId target;
+            SolExprId value;
+        } assignment;
         struct {
             SolSpan label;
             SolExprId body;

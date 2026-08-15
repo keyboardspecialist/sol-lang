@@ -20,6 +20,7 @@ struct Frame {
     Frame *parent;
     SolInterpreterValue *locals;
     bool *bound;
+    bool *registered;
     void **authority_roots;
     bool *authority_known;
     SolIrLocalId *binding_order;
@@ -504,13 +505,14 @@ static SolInterpreterValue *lookup_local(Interpreter *interpreter,
 
 static bool bind_local(Interpreter *interpreter, Frame *frame,
     SolIrLocalId local, const SolInterpreterValue *value, SolSpan span) {
-    if (local >= interpreter->request->ir->local_count || frame->bound[local]) {
+    if (local >= interpreter->request->ir->local_count || frame->registered[local]) {
         diagnostic(interpreter, SOL_INTERPRETER_INTERNAL_INVARIANT, span,
             "invalid or duplicate local binding");
         return false;
     }
     if (!clone_runtime(interpreter, span, &frame->locals[local], value)) return false;
     frame->bound[local] = true;
+    frame->registered[local] = true;
     frame->binding_order[frame->binding_count++] = local;
     if (value->kind == SOL_INTERPRETER_VALUE_CAPABILITY) {
         frame->authority_roots[local] = value->as.capability.root;
@@ -543,6 +545,28 @@ static void cleanup_slice(Interpreter *interpreter, SolIrSlice cleanup) {
             interpreter->request->ir->cleanup_locals[
                 cleanup.offset + cleanup.count]);
     }
+}
+
+static bool update_local(Interpreter *interpreter, SolIrLocalId local,
+    SolInterpreterValue *value, SolSpan span) {
+    Frame *frame = interpreter->frame;
+    if (frame == NULL || local >= interpreter->request->ir->local_count
+        || !frame->registered[local]) {
+        diagnostic(interpreter, SOL_INTERPRETER_INTERNAL_INVARIANT, span,
+            "assignment local is unavailable in the current frame");
+        return false;
+    }
+    if (frame->bound[local]) cleanup_local(interpreter, frame, local);
+    frame->locals[local] = *value;
+    sol_interpreter_value_init(value);
+    frame->bound[local] = true;
+    frame->authority_roots[local] = NULL;
+    frame->authority_known[local] = false;
+    if (frame->locals[local].kind == SOL_INTERPRETER_VALUE_CAPABILITY) {
+        frame->authority_roots[local] = frame->locals[local].as.capability.root;
+        frame->authority_known[local] = true;
+    }
+    return true;
 }
 
 static bool value_equal(const SolInterpreterValue *left,
@@ -1077,16 +1101,18 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
     if (ir->local_count != 0) {
         frame.locals = calloc(ir->local_count, sizeof(*frame.locals));
         frame.bound = calloc(ir->local_count, sizeof(*frame.bound));
+        frame.registered = calloc(ir->local_count, sizeof(*frame.registered));
         frame.authority_roots = calloc(ir->local_count,
             sizeof(*frame.authority_roots));
         frame.authority_known = calloc(ir->local_count,
             sizeof(*frame.authority_known));
         frame.binding_order = malloc(ir->local_count * sizeof(*frame.binding_order));
-        if (frame.locals == NULL || frame.bound == NULL
+        if (frame.locals == NULL || frame.bound == NULL || frame.registered == NULL
             || frame.authority_roots == NULL || frame.authority_known == NULL
             || frame.binding_order == NULL) {
             free(frame.locals);
             free(frame.bound);
+            free(frame.registered);
             free(frame.authority_roots);
             free(frame.authority_known);
             free(frame.binding_order);
@@ -1161,6 +1187,7 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
     }
     free(frame.locals);
     free(frame.bound);
+    free(frame.registered);
     free(frame.authority_roots);
     free(frame.authority_known);
     free(frame.binding_order);
@@ -1444,6 +1471,17 @@ static Flow evaluate_block(Interpreter *interpreter,
                 return flow_new(FLOW_ERROR);
             }
             sol_interpreter_value_free(&value.value);
+        } else if (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT) {
+            if (!update_local(interpreter, statement->local, &value.value,
+                statement->span)) {
+                sol_interpreter_value_free(&value.value);
+                sol_interpreter_value_free(&last.value);
+                cleanup_slice(interpreter, expression->as.block.cleanup);
+                return flow_new(FLOW_ERROR);
+            }
+            sol_interpreter_value_free(&last.value);
+            last = flow_new(FLOW_VALUE);
+            sol_interpreter_value_unit(&last.value);
         } else {
             sol_interpreter_value_free(&last.value);
             last = value;

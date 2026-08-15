@@ -65,7 +65,10 @@ static bool sol_structure_statements(
             || (current->kind == SOL_STATEMENT_REGION
                 && context != SOL_EXPRESSION_CONTEXT_BODY)) return false;
         SolExprId value = current->kind == SOL_STATEMENT_LET
+                || current->kind == SOL_STATEMENT_VAR
             ? current->as.let_statement.value
+            : current->kind == SOL_STATEMENT_ASSIGNMENT
+                ? current->as.assignment.value
             : current->kind == SOL_STATEMENT_REGION
                 ? current->as.region_statement.body : current->as.expression;
         if (current->kind == SOL_STATEMENT_REGION
@@ -77,6 +80,9 @@ static bool sol_structure_statements(
                 || validator->tree->expressions[value].kind != SOL_EXPR_BLOCK)) {
             return false;
         }
+        if (current->kind == SOL_STATEMENT_ASSIGNMENT
+            && !sol_structure_expression(validator, current->as.assignment.target,
+                context, depth)) return false;
         if (!sol_structure_expression(validator, value, context, depth)) return false;
         statement = current->next;
     }

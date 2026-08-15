@@ -33,7 +33,8 @@ static bool compile_fixture(TestCompilation *compilation) {
     static const char source[] =
         "module fixture\n"
         "function checked(value: Int64) -> Int64 "
-        "ensures { result == old(value) } { return value }\n";
+        "ensures { result == old(value) } { var local = value local = value "
+        "return local }\n";
     memset(compilation, 0, sizeof(*compilation));
     compilation->package.path = "fixture.sol";
     sol_tokens_init(&compilation->tokens);
@@ -206,6 +207,31 @@ static void test_windows_basename(TestCompilation *compilation) {
     }
 }
 
+static void test_mutable_projection(TestCompilation *compilation) {
+    FILE *stream = tmpfile();
+    CHECK(stream != NULL);
+    if (stream != NULL) {
+        CHECK(sol_inspection_render(stream, &compilation->package,
+            &compilation->hir, &compilation->types, &compilation->effects,
+            &compilation->contracts, &compilation->diagnostics));
+        rewind(stream);
+        char output[16384];
+        size_t length = fread(output, 1, sizeof(output) - 1, stream);
+        output[length] = '\0';
+        CHECK(strstr(output, "\"mutable\":true") != NULL);
+        fclose(stream);
+    }
+    size_t mutable_local = 0;
+    while (mutable_local < compilation->hir.local_count
+        && !compilation->hir.locals[mutable_local].mutable) ++mutable_local;
+    CHECK(mutable_local < compilation->hir.local_count);
+    if (mutable_local < compilation->hir.local_count) {
+        compilation->hir.locals[mutable_local].kind = SOL_LOCAL_PARAMETER;
+        check_rejected(compilation);
+        compilation->hir.locals[mutable_local].kind = SOL_LOCAL_BINDING;
+    }
+}
+
 static void test_windows_package_path(TestCompilation *compilation) {
     SolPackageFile file = {
         .path = "C:\\root\\services\\fixture.sol",
@@ -247,6 +273,7 @@ int main(void) {
         CHECK(length > 0);
         test_source_line_preflight(&compilation);
         test_contract_preflight(&compilation);
+        test_mutable_projection(&compilation);
         test_windows_basename(&compilation);
         test_windows_package_path(&compilation);
     }

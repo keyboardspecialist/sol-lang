@@ -1520,6 +1520,43 @@ static void test_nested_self_substitution_growth(void) {
     free_compilation(&compilation);
 }
 
+static void test_mutable_local_types_and_targets(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module mutable_types\n"
+        "function good(flag: Bool) -> Int64 { var value = 1 { var value = 2 "
+        "value = 3 } value = if flag { 2 } else { 3 } return value }\n"
+        "function contextual() -> Option<Int64> { var value = some(1) "
+        "value = none() return value }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    size_t mutable_count = 0;
+    for (size_t index = 0; index < compilation.hir.local_count; ++index) {
+        mutable_count += compilation.hir.locals[index].mutable;
+    }
+    CHECK(mutable_count == 3);
+    free_compilation(&compilation);
+
+    static const char *invalid[] = {
+        "module immutable\nfunction f() -> Int64 { let value = 1 value = 2 return value }\n",
+        "module parameter\nfunction f(value: Int64) -> Int64 { value = 2 return value }\n",
+        ("module field\nrecord Pair { left: Int64 }\nfunction f() -> Int64 { "
+            "var value = Pair { left = 1 } value.left = 2 return value.left }\n"),
+        "module mismatch\nfunction f() -> Int64 { var value = 1 value = true return value }\n",
+    };
+    for (size_t index = 0; index < sizeof(invalid) / sizeof(invalid[0]); ++index) {
+        CHECK(compile_source(&compilation, invalid[index]));
+        CHECK(has_diagnostic(&compilation, index == 3 ? "SOL-TYPE-002" : "SOL-TYPE-025"));
+        free_compilation(&compilation);
+    }
+
+    CHECK(compile_source(&compilation,
+        "module provenance\ncapability Token {}\n"
+        "function bad(left: capability Token, right: capability Token) -> Int64 "
+        "{ var value = left value = right return 0 }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
+    free_compilation(&compilation);
+}
+
 static void test_malformed_trait_method_links(void) {
     static const char text[] =
         "module malformed_traits\n"
@@ -1969,6 +2006,7 @@ int main(void) {
     test_runtime_identity_equality_rejected();
     test_access_modes_are_exact();
     test_region_types();
+    test_mutable_local_types_and_targets();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);
         return 1;

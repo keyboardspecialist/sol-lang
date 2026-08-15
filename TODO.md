@@ -40,6 +40,8 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
       use-after-move diagnostics, and ownership-explicit interpreter reads.
 - [x] Statement-only lexical regions, exact block/arm cleanup metadata,
       deterministic interpreter storage cleanup, and affine region-escape checks.
+- [x] Initialized mutable whole-local bindings, checked statement assignment,
+      ownership UPDATE metadata, replacement cleanup, and region-safe reinitialization.
 
 ## Prioritized Work
 
@@ -62,17 +64,20 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 | [x] | 15 | Define and check affine moves, copies, and use-after-move errors | 5 | 5 | Typed IR |
 | [x] | 16 | Implement lexical shared and exclusive borrows | 5 | 5 | Affine ownership |
 | [x] | 17 | Track regions, deterministic cleanup, and resource lifetimes | 5 | 5 | Borrow checking |
-| [ ] | 18 | Add explicit unsafe boundaries and initial FFI rules | 4 | 4 | Ownership and effects |
-| [ ] | 19 | Integrate ownership facts with effects, contracts, and diagnostics | 5 | 5 | Ownership pipeline |
-| [ ] | 20 | Generate runtime contract checks and normalized proof obligations | 5 | 5 | IR and ownership |
-| [ ] | 21 | Add examples, authored/generated properties, boundary generation, shrinking, seeds, and ghost state | 4 | 4 | Interpreter and obligations |
-| [ ] | 22 | Integrate SMT proof policies, solver execution, and caching | 4 | 5 | Logical obligation IR |
-| [ ] | 23 | Select and integrate an established native or WebAssembly backend | 5 | 5 | IR and ownership |
-| [ ] | 24 | Implement package entry points and `sol build` / `sol run` | 5 | 4 | Modules and backend |
-| [ ] | 25 | Expose semantic information through a language server | 4 | 5 | Stable schemas and IDs |
-| [ ] | 26 | Implement semantic patches and patch validation | 4 | 5 | Stable IDs and public IR |
-| [ ] | 27 | Produce API compatibility and semantic change reports | 4 | 5 | Public IR and patches |
-| [ ] | 28 | Generate bounded context bundles for editor and agent workflows | 3 | 4 | Semantic graph |
+| [x] | 18 | Add mutable local bindings, assignment, and checked whole-place updates | 5 | 5 | Exclusive borrows and cleanup |
+| [ ] | 19 | Add `loop`, `while`, `break`, and `continue` with ownership fixed points and exact unwinding | 5 | 5 | Mutable places and regions |
+| [ ] | 20 | Define iterator traits and add protocol-based `for` loops | 4 | 4 | Traits and core loops |
+| [ ] | 21 | Add explicit unsafe boundaries and initial FFI rules | 4 | 4 | Ownership and effects |
+| [ ] | 22 | Integrate ownership facts with effects, contracts, and diagnostics | 5 | 5 | Ownership pipeline |
+| [ ] | 23 | Generate runtime contract checks and normalized proof obligations | 5 | 5 | IR and ownership |
+| [ ] | 24 | Add examples, authored/generated properties, boundary generation, shrinking, seeds, and ghost state | 4 | 4 | Interpreter and obligations |
+| [ ] | 25 | Integrate SMT proof policies, solver execution, and caching | 4 | 5 | Logical obligation IR |
+| [ ] | 26 | Select and integrate an established native or WebAssembly backend | 5 | 5 | IR and ownership |
+| [ ] | 27 | Implement package entry points and `sol build` / `sol run` | 5 | 4 | Modules and backend |
+| [ ] | 28 | Expose semantic information through a language server | 4 | 5 | Stable schemas and IDs |
+| [ ] | 29 | Implement semantic patches and patch validation | 4 | 5 | Stable IDs and public IR |
+| [ ] | 30 | Produce API compatibility and semantic change reports | 4 | 5 | Public IR and patches |
+| [ ] | 31 | Generate bounded context bundles for editor and agent workflows | 3 | 4 | Semantic graph |
 
 ## Milestone Discipline
 

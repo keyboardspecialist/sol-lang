@@ -930,8 +930,20 @@ static void sol_contract_statements(
             sol_contract_error(lowerer, "SOL-CONTRACT-002", entry->span,
                 "region statements are not allowed in contract or refinement predicates");
         }
+        if (entry->kind == SOL_STATEMENT_ASSIGNMENT) {
+            sol_contract_error(lowerer, "SOL-CONTRACT-002", entry->span,
+                "assignment is not allowed in contract or refinement predicates");
+            sol_contract_expression(lowerer, entry->as.assignment.target, in_old);
+        }
+        if (entry->kind == SOL_STATEMENT_VAR) {
+            sol_contract_error(lowerer, "SOL-CONTRACT-002", entry->span,
+                "mutable bindings are not allowed in contract or refinement predicates");
+        }
         SolExprId value = entry->kind == SOL_STATEMENT_LET
+                || entry->kind == SOL_STATEMENT_VAR
             ? entry->as.let_statement.value
+            : entry->kind == SOL_STATEMENT_ASSIGNMENT
+                ? entry->as.assignment.value
             : entry->kind == SOL_STATEMENT_REGION
                 ? entry->as.region_statement.body : entry->as.expression;
         sol_contract_expression(lowerer, value, in_old);

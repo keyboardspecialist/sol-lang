@@ -70,6 +70,10 @@ if(NOT package_output MATCHES "\"kind\":\"directory\""
 endif()
 
 run_inspect(generic 0 "${GENERIC_FILE}" --require-generic)
+run_inspect(mutable 0 "${MUTABLE_FILE}")
+if(NOT mutable_output MATCHES "\"mutable\":true")
+    message(FATAL_ERROR "mutable HIR metadata is missing: ${mutable_output}")
+endif()
 
 run_inspect(compile_failure 1 "${INVALID_FILE}")
 if(NOT compile_failure_output MATCHES "\"schema\":\"sol.diagnostic/1\""

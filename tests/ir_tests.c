@@ -162,7 +162,7 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
     for (size_t index = 0; index < left->statement_count; ++index) {
         const SolIrStatement *a = &left->statements[index];
         const SolIrStatement *b = &right->statements[index];
-        if (a->kind != b->kind || a->local != b->local
+        if (a->kind != b->kind || a->local != b->local || a->target != b->target
             || a->expression != b->expression || a->span.start != b->span.start
             || a->span.end != b->span.end
             || a->region_label_span.start != b->region_label_span.start
@@ -170,6 +170,9 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
             || ((a->region_label == NULL) != (b->region_label == NULL))
             || (a->region_label != NULL
                 && strcmp(a->region_label, b->region_label) != 0)) return false;
+    }
+    for (size_t index = 0; index < left->local_count; ++index) {
+        if (left->locals[index].mutable != right->locals[index].mutable) return false;
     }
     for (size_t index = 0; index < left->arm_count; ++index) {
         if (left->arms[index].cleanup.offset != right->arms[index].cleanup.offset
@@ -1545,6 +1548,143 @@ static void test_region_cleanup_metadata(void) {
     free_compilation(&compilation);
 }
 
+static void test_mutable_assignment_ir_and_ownership(void) {
+    TestCompilation compilation;
+    CHECK(compile_ir(&compilation,
+        "module mutable_ir\n"
+        "capability Token {}\n"
+        "function update(flag: Bool) -> Int64 { var value = 1 "
+        "if flag { let moved = value } else { () } value = 2 return value }\n"
+        "function self_update(value: capability Token) -> Int64 { var slot = value "
+        "slot = slot return 0 }\n"
+        "function declaration_order() -> Int64 { var first = 1 first = 2 "
+        "var later = 3 return later }\n"));
+    SolIrStatement *assignment = NULL;
+    SolIrStatement *later_let = NULL;
+    SolIrStatement *later_return = NULL;
+    SolIrExpression *block = NULL;
+    SolIrExpression *order_block = NULL;
+    for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
+        SolIrStatement *statement = &compilation.ir.statements[index];
+        if (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT
+            && strcmp(compilation.ir.locals[statement->local].name, "first") == 0) {
+            assignment = statement;
+        } else if (statement->kind == SOL_IR_STATEMENT_LET
+            && strcmp(compilation.ir.locals[statement->local].name, "later") == 0) {
+            later_let = statement;
+        } else if (statement->kind == SOL_IR_STATEMENT_RETURN
+            && compilation.ir.expressions[statement->expression].kind == SOL_IR_EXPR_LOCAL
+            && strcmp(compilation.ir.locals[
+                compilation.ir.expressions[statement->expression].as.local].name,
+                "later") == 0) {
+            later_return = statement;
+        }
+    }
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        if (compilation.ir.expressions[index].kind == SOL_IR_EXPR_BLOCK
+            && compilation.ir.expressions[index].as.block.cleanup.count == 1) {
+            block = &compilation.ir.expressions[index];
+        }
+    }
+    for (size_t index = 0; assignment != NULL && index < compilation.ir.expression_count;
+        ++index) {
+        SolIrExpression *candidate = &compilation.ir.expressions[index];
+        if (candidate->kind != SOL_IR_EXPR_BLOCK) continue;
+        for (size_t statement = 0; statement < candidate->as.block.statements.count;
+            ++statement) {
+            SolIrStatementId id = compilation.ir.statement_ids[
+                candidate->as.block.statements.offset + statement];
+            if (&compilation.ir.statements[id] == assignment) order_block = candidate;
+        }
+    }
+    CHECK(assignment != NULL && block != NULL);
+    if (assignment != NULL) {
+        CHECK(compilation.ir.locals[assignment->local].mutable);
+        CHECK(compilation.ir.expressions[assignment->target].local_use
+            == SOL_IR_LOCAL_USE_UPDATE);
+        SolIrExpressionId saved = assignment->target;
+        assignment->target = assignment->expression;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        assignment->target = saved;
+        bool saved_mutable = compilation.ir.locals[assignment->local].mutable;
+        compilation.ir.locals[assignment->local].mutable = false;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        compilation.ir.locals[assignment->local].mutable = saved_mutable;
+    }
+    CHECK(assignment != NULL && later_let != NULL && later_return != NULL
+        && order_block != NULL);
+    if (assignment != NULL && later_let != NULL && later_return != NULL
+        && order_block != NULL) {
+        SolIrExpressionId saved_return = later_return->expression;
+        later_return->expression = assignment->target;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        later_return->expression = saved_return;
+
+        SolIrLocalId saved_local = assignment->local;
+        SolIrExpressionId saved_target = assignment->target;
+        assignment->local = later_let->local;
+        assignment->target = saved_return;
+        later_return->expression = saved_target;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+
+        size_t assignment_slot = SIZE_MAX;
+        size_t let_slot = SIZE_MAX;
+        size_t return_slot = SIZE_MAX;
+        for (size_t index = 0; index < order_block->as.block.statements.count; ++index) {
+            size_t slot = order_block->as.block.statements.offset + index;
+            SolIrStatement *statement
+                = &compilation.ir.statements[compilation.ir.statement_ids[slot]];
+            if (statement == assignment) assignment_slot = slot;
+            else if (statement == later_let) let_slot = slot;
+            else if (statement == later_return) return_slot = slot;
+        }
+        CHECK(assignment_slot != SIZE_MAX && let_slot != SIZE_MAX
+            && return_slot != SIZE_MAX);
+        if (assignment_slot != SIZE_MAX && let_slot != SIZE_MAX
+            && return_slot != SIZE_MAX) {
+            SolIrStatementId assignment_id = compilation.ir.statement_ids[assignment_slot];
+            SolIrStatementId let_id = compilation.ir.statement_ids[let_slot];
+            SolIrStatementId return_id = compilation.ir.statement_ids[return_slot];
+            compilation.ir.statement_ids[assignment_slot] = return_id;
+            compilation.ir.statement_ids[let_slot] = assignment_id;
+            compilation.ir.statement_ids[return_slot] = let_id;
+            CHECK(!sol_ir_validate(&compilation.ir, NULL));
+            compilation.ir.statement_ids[assignment_slot] = assignment_id;
+            compilation.ir.statement_ids[let_slot] = let_id;
+            compilation.ir.statement_ids[return_slot] = return_id;
+        }
+        assignment->local = saved_local;
+        assignment->target = saved_target;
+        later_return->expression = saved_return;
+
+        SolIrSlice saved_roots = compilation.ir.locals[assignment->local].capability_roots;
+        compilation.ir.locals[assignment->local].capability_roots
+            = (SolIrSlice){.offset = compilation.ir.root_count + 1, .count = 1};
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        compilation.ir.locals[assignment->local].capability_roots = saved_roots;
+    }
+    CHECK(block == NULL || block->as.block.cleanup.count == 1);
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+    free_compilation(&compilation);
+
+    CHECK(!compile_ir(&compilation,
+        "module region_update\ncapability Token {}\n"
+        "function bad(value: capability Token) -> Int64 { var slot = value "
+        "region deeper { slot = slot } return 0 }\n"));
+    CHECK(has_code(&compilation, "SOL-REGION-001"));
+    free_compilation(&compilation);
+
+    CHECK(!compile_ir(&compilation,
+        "module loan_update\n"
+        "capability Read { function read() -> Int64 effects { service.read<Self> } }\n"
+        "capability Mock { function read() -> Int64 effects { pure } }\n"
+        "function bad(source: capability Read, mock: capability Mock) -> Int64 "
+        "effects { pure } { var slot = source return handle service.read<slot> "
+        "with mock { slot = slot 1 } }\n"));
+    CHECK(has_code(&compilation, "SOL-OWNERSHIP-003"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_geometric_growth();
     test_complete_ir_and_lifetime();
@@ -1561,6 +1701,7 @@ int main(void) {
     test_exact_member_table_ownership();
     test_affine_ownership();
     test_region_cleanup_metadata();
+    test_mutable_assignment_ir_and_ownership();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

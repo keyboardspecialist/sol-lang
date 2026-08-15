@@ -259,6 +259,36 @@ static void test_primitives_control_and_lifetime(void) {
     sol_diagnostics_free(&compilation.diagnostics);
 }
 
+static void test_assignment_replacement_and_failure(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module assignment_runtime\n"
+        "function replaced() -> Int64 { var value = 1 value = 2 return value }\n"
+        "function failed() -> Int64 { var value = 1 value = 2 value = 1 / 0 "
+        "return value }\n"));
+    free_frontend(&compilation);
+    CleanupLog log;
+    SolInterpreterResult result;
+    memset(&log, 0, sizeof(log));
+    log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "replaced", NULL, 0, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_OK);
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 2);
+    CHECK(log.count == 2 && strcmp(log.names[0], "value") == 0
+        && strcmp(log.names[1], "value") == 0);
+    sol_interpreter_result_free(&result);
+
+    memset(&log, 0, sizeof(log));
+    log.ir = &compilation.ir;
+    CHECK(!run_observed(&compilation.ir, "failed", NULL, 0, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_DIVISION_BY_ZERO);
+    CHECK(log.count == 2);
+    sol_interpreter_result_free(&result);
+    sol_ir_free(&compilation.ir);
+    sol_diagnostics_free(&compilation.diagnostics);
+}
+
 static void test_data_callbacks_generics_and_traits(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -1495,6 +1525,7 @@ int main(void) {
     test_copy_and_move_reads();
     test_callable_borrow_execution();
     test_regions_and_deterministic_cleanup();
+    test_assignment_replacement_and_failure();
     if (failures != 0) fprintf(stderr, "%d interpreter test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

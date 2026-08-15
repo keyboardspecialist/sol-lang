@@ -170,6 +170,7 @@ typedef struct {
     SolAccessMode access;
     SolIrSlice capability_roots;
     SolIrSlice operation_roots;
+    bool mutable;
 } SolIrLocal;
 
 typedef struct {
@@ -215,6 +216,7 @@ typedef enum {
     SOL_IR_LOCAL_USE_MOVE,
     SOL_IR_LOCAL_USE_SHARED,
     SOL_IR_LOCAL_USE_EXCLUSIVE,
+    SOL_IR_LOCAL_USE_UPDATE,
 } SolIrLocalUse;
 
 typedef enum {
@@ -305,6 +307,7 @@ typedef struct {
 
 typedef enum {
     SOL_IR_STATEMENT_LET,
+    SOL_IR_STATEMENT_ASSIGNMENT,
     SOL_IR_STATEMENT_RETURN,
     SOL_IR_STATEMENT_EXPRESSION,
     SOL_IR_STATEMENT_REGION,
@@ -314,6 +317,7 @@ typedef struct {
     SolIrStatementKind kind;
     SolSpan span;
     SolIrLocalId local;
+    SolIrExpressionId target;
     SolIrExpressionId expression;
     char *region_label;
     SolSpan region_label_span;

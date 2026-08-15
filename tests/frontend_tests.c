@@ -112,8 +112,14 @@ static void check_ast_links(const SolSyntaxTree *tree) {
     for (size_t index = 0; index < tree->statement_count; ++index) {
         const SolStatement *statement = &tree->statements[index];
         CHECK(statement->next == SOL_AST_NONE || statement->next < tree->statement_count);
-        if (statement->kind == SOL_STATEMENT_LET) {
+        if (statement->kind == SOL_STATEMENT_LET
+            || statement->kind == SOL_STATEMENT_VAR) {
             CHECK(statement->as.let_statement.value < tree->expression_count);
+        } else if (statement->kind == SOL_STATEMENT_ASSIGNMENT) {
+            CHECK(statement->as.assignment.target < tree->expression_count);
+            CHECK(statement->as.assignment.value < tree->expression_count);
+        } else if (statement->kind == SOL_STATEMENT_REGION) {
+            CHECK(statement->as.region_statement.body < tree->expression_count);
         } else {
             CHECK(statement->as.expression < tree->expression_count);
         }
@@ -1737,6 +1743,39 @@ static void test_region_statement_syntax(void) {
     sol_source_free(&source);
 }
 
+static void test_mutable_statement_syntax(void) {
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "mutable.sol",
+        "module mutable\nrecord Pair { left: Int64, right: Int64 }\n"
+        "function named(value: Int64) -> Int64 { return value }\n"
+        "function f() -> Int64 { var value = Pair { left = 1, right = 2 } "
+        "let observed = named(value = value.left) value = Pair { left = observed, "
+        "right = 3 } return value.right }\n"));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    size_t variables = 0;
+    size_t assignments = 0;
+    for (size_t index = 0; index < tree.statement_count; ++index) {
+        variables += tree.statements[index].kind == SOL_STATEMENT_VAR;
+        assignments += tree.statements[index].kind == SOL_STATEMENT_ASSIGNMENT;
+    }
+    CHECK(variables == 1);
+    CHECK(assignments == 1);
+    CHECK(tree.argument_count == 5);
+    check_ast_links(&tree);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
 int main(void) {
     test_type_declaration_syntax();
     test_invalid_type_declarations_and_recovery();
@@ -1778,6 +1817,7 @@ int main(void) {
     test_malformed_trait_method_recovery();
     test_trait_method_authority_rejected();
     test_region_statement_syntax();
+    test_mutable_statement_syntax();
     if (failures != 0) {
         fprintf(stderr, "%d frontend test failure(s)\n", failures);
         return 1;

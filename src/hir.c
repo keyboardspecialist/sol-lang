@@ -935,14 +935,20 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             return false;
         }
         SolExprId value = statement->kind == SOL_STATEMENT_LET
+                || statement->kind == SOL_STATEMENT_VAR
             ? statement->as.let_statement.value
+            : statement->kind == SOL_STATEMENT_ASSIGNMENT
+                ? statement->as.assignment.value
             : statement->kind == SOL_STATEMENT_REGION
                 ? statement->as.region_statement.body : statement->as.expression;
         if (!sol_span_valid(resolver->source, statement->span)
             || value >= syntax->expression_count
             || (statement->next != SOL_AST_NONE && statement->next >= syntax->statement_count)
-            || (statement->kind == SOL_STATEMENT_LET
+            || ((statement->kind == SOL_STATEMENT_LET
+                    || statement->kind == SOL_STATEMENT_VAR)
                 && !sol_span_valid(resolver->source, statement->as.let_statement.name))
+            || (statement->kind == SOL_STATEMENT_ASSIGNMENT
+                && statement->as.assignment.target >= syntax->expression_count)
             || (statement->kind == SOL_STATEMENT_REGION
                 && (!sol_span_valid(resolver->source,
                         statement->as.region_statement.label)
@@ -1414,6 +1420,9 @@ static bool sol_resolver_add_binding(
             .syntax_id = syntax_id,
             .access = kind == SOL_LOCAL_PARAMETER
                 ? resolver->syntax->parameters[syntax_id].access : SOL_ACCESS_OWNED,
+            .mutable = kind == SOL_LOCAL_BINDING
+                && syntax_id < resolver->syntax->statement_count
+                && resolver->syntax->statements[syntax_id].kind == SOL_STATEMENT_VAR,
         };
     }
     resolver->bindings[resolver->binding_count++] = (SolBinding){
@@ -1488,7 +1497,8 @@ static void sol_resolver_block(SolResolver *resolver, const SolExpr *block) {
             break;
         }
         const SolStatement *statement = &resolver->syntax->statements[statement_id];
-        if (statement->kind == SOL_STATEMENT_LET) {
+        if (statement->kind == SOL_STATEMENT_LET
+            || statement->kind == SOL_STATEMENT_VAR) {
             sol_resolver_expression(resolver, statement->as.let_statement.value);
             sol_resolver_add_binding(
                 resolver,
@@ -1496,6 +1506,9 @@ static void sol_resolver_block(SolResolver *resolver, const SolExpr *block) {
                 SOL_LOCAL_BINDING,
                 statement_id
             );
+        } else if (statement->kind == SOL_STATEMENT_ASSIGNMENT) {
+            sol_resolver_expression(resolver, statement->as.assignment.target);
+            sol_resolver_expression(resolver, statement->as.assignment.value);
         } else if (statement->kind == SOL_STATEMENT_REGION) {
             sol_resolver_expression(resolver, statement->as.region_statement.body);
         } else {

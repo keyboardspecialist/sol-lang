@@ -465,11 +465,16 @@ static void sol_package_relocate_arenas(SolSyntaxTree *tree, SolArenaOffsets o, 
         SolStatement *entry = &tree->statements[i];
         entry->span = sol_relocate_span(entry->span, base);
         entry->next = sol_relocate_id(entry->next, o.statements);
-        if (entry->kind == SOL_STATEMENT_LET) {
+        if (entry->kind == SOL_STATEMENT_LET || entry->kind == SOL_STATEMENT_VAR) {
             entry->as.let_statement.name = sol_relocate_span(entry->as.let_statement.name, base);
             entry->as.let_statement.value = sol_relocate_id(
                 entry->as.let_statement.value, o.expressions
             );
+        } else if (entry->kind == SOL_STATEMENT_ASSIGNMENT) {
+            entry->as.assignment.target = sol_relocate_id(
+                entry->as.assignment.target, o.expressions);
+            entry->as.assignment.value = sol_relocate_id(
+                entry->as.assignment.value, o.expressions);
         } else if (entry->kind == SOL_STATEMENT_REGION) {
             entry->as.region_statement.label = sol_relocate_span(
                 entry->as.region_statement.label, base);

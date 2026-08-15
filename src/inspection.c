@@ -451,6 +451,7 @@ static void sol_inspection_hir(SolInspector *inspector) {
         sol_inspection_text(out, ",\"owner\":"); sol_inspection_semantic_id(inspector, local->owner);
         sol_inspection_text(out, ",\"access\":");
         sol_inspection_string(out, sol_inspection_access(local->access));
+        if (local->mutable) sol_inspection_text(out, ",\"mutable\":true");
         sol_inspection_text(out, "}");
     }
     sol_inspection_text(out, "],\"expressionResolutions\":[");
@@ -1047,6 +1048,8 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
             || hir->locals[index].access > SOL_ACCESS_EXCLUSIVE
             || (hir->locals[index].kind != SOL_LOCAL_PARAMETER
                 && hir->locals[index].access != SOL_ACCESS_OWNED)
+            || (hir->locals[index].kind != SOL_LOCAL_BINDING
+                && hir->locals[index].mutable)
             || hir->locals[index].owner >= hir->definition_count
             || !sol_inspection_span_valid(hir->locals[index].name, package->source.length)) {
             return false;

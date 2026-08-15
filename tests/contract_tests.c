@@ -887,6 +887,43 @@ static void test_regions_forbidden_in_predicates(void) {
     free_compilation(&compilation);
 }
 
+static void test_mutation_forbidden_in_predicates(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module mutable_contract\n"
+        "function bad() -> Bool requires { var value = true value = false value } "
+        "{ return true }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-PARSE-011"));
+    free_compilation(&compilation);
+    CHECK(compile_source(&compilation,
+        "module nested_mutable_contract\n"
+        "function bad() -> Bool requires { if true { let value = true value } "
+        "else { true } } { return true }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolStatement *nested = NULL;
+    for (size_t index = 0; index < compilation.syntax.statement_count; ++index) {
+        SolStatement *statement = &compilation.syntax.statements[index];
+        if (statement->kind == SOL_STATEMENT_LET && statement->next != SOL_AST_NONE) {
+            nested = statement;
+            break;
+        }
+    }
+    CHECK(nested != NULL);
+    if (nested != NULL) {
+        nested->kind = SOL_STATEMENT_VAR;
+        sol_contract_table_free(&compilation.contracts);
+        sol_contract_table_init(&compilation.contracts);
+        sol_diagnostics_free(&compilation.diagnostics);
+        sol_diagnostics_init(&compilation.diagnostics);
+        CHECK(sol_contract_lower(&compilation.source, &compilation.syntax,
+            &compilation.hir, &compilation.types, &compilation.effects,
+            &compilation.contracts, &compilation.diagnostics));
+        CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-002"));
+        nested->kind = SOL_STATEMENT_LET;
+    }
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_obligations_result_and_snapshots();
     test_member_contract_ownership();
@@ -900,6 +937,7 @@ int main(void) {
     test_refinement_contracts_and_distinct_construction();
     test_function_valued_distinct_construction();
     test_regions_forbidden_in_predicates();
+    test_mutation_forbidden_in_predicates();
     if (failures != 0) {
         fprintf(stderr, "%d contract test failure(s)\n", failures);
         return 1;

@@ -194,9 +194,14 @@ if(BUILD_TESTING)
     add_test(NAME inspection COMMAND sol_inspection_tests)
     add_test(NAME test_declarations COMMAND sol_test_declaration_tests)
     add_test(NAME cli_valid COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/valid.sol)
+    add_test(NAME cli_mutable COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/mutable.sol)
     add_test(
         NAME cli_package_valid
         COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/packages/valid
+    )
+    add_test(
+        NAME cli_package_mutable
+        COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/packages/mutable
     )
     add_test(
         NAME cli_package_private_import
@@ -325,6 +330,7 @@ if(BUILD_TESTING)
             -DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/valid.sol
             -DPACKAGE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/packages/valid
             -DGENERIC_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/inspection_cli/generic.sol
+            -DMUTABLE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/mutable.sol
             -DINVALID_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid.sol
             -DCLI_IO_HELPER=${SOL_CLI_IO_HELPER}
             -DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}

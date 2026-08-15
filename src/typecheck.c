@@ -609,11 +609,16 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     for (size_t index = 0; index < syntax->statement_count; ++index) {
         const SolStatement *statement = &syntax->statements[index];
         SolExprId value = statement->kind == SOL_STATEMENT_LET
+                || statement->kind == SOL_STATEMENT_VAR
             ? statement->as.let_statement.value
+            : statement->kind == SOL_STATEMENT_ASSIGNMENT
+                ? statement->as.assignment.value
             : statement->kind == SOL_STATEMENT_REGION
                 ? statement->as.region_statement.body : statement->as.expression;
         if (value >= syntax->expression_count
             || statement->kind > SOL_STATEMENT_REGION
+            || (statement->kind == SOL_STATEMENT_ASSIGNMENT
+                && statement->as.assignment.target >= syntax->expression_count)
             || (statement->kind == SOL_STATEMENT_REGION
                 && syntax->expressions[value].kind != SOL_EXPR_BLOCK)
             || (statement->next != SOL_AST_NONE && statement->next >= syntax->statement_count)) {
@@ -885,7 +890,13 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || (local->kind != SOL_LOCAL_PARAMETER
                 && local->access != SOL_ACCESS_OWNED)
             || (local->kind == SOL_LOCAL_BINDING
-                && local->syntax_id >= syntax->statement_count)
+                && (local->syntax_id >= syntax->statement_count
+                    || (syntax->statements[local->syntax_id].kind != SOL_STATEMENT_LET
+                        && syntax->statements[local->syntax_id].kind
+                            != SOL_STATEMENT_VAR)
+                    || local->mutable != (syntax->statements[
+                        local->syntax_id].kind == SOL_STATEMENT_VAR)))
+            || (local->kind != SOL_LOCAL_BINDING && local->mutable)
             || (local->kind == SOL_LOCAL_PATTERN
                 && local->syntax_id >= syntax->pattern_binding_count)) {
             sol_type_malformed(checker);
@@ -4005,7 +4016,10 @@ static SolProvenanceId sol_type_block_origin(
     while (statement_id != SOL_AST_NONE && traversed++ < checker->syntax->statement_count) {
         const SolStatement *statement = &checker->syntax->statements[statement_id];
         SolExprId value_id = statement->kind == SOL_STATEMENT_LET
+                || statement->kind == SOL_STATEMENT_VAR
             ? statement->as.let_statement.value
+            : statement->kind == SOL_STATEMENT_ASSIGNMENT
+                ? statement->as.assignment.value
             : statement->kind == SOL_STATEMENT_REGION
                 ? statement->as.region_statement.body : statement->as.expression;
         SolType value = checker->types->expressions[value_id];
@@ -4260,7 +4274,8 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
     size_t traversed = 0;
     while (statement_id != SOL_AST_NONE && traversed++ < checker->syntax->statement_count) {
         const SolStatement *statement = &checker->syntax->statements[statement_id];
-        if (statement->kind == SOL_STATEMENT_LET) {
+        if (statement->kind == SOL_STATEMENT_LET
+            || statement->kind == SOL_STATEMENT_VAR) {
             SolType value = sol_type_expression(checker, statement->as.let_statement.value);
             SolLocalId local = sol_type_find_local(
                 checker,
@@ -4282,6 +4297,47 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
                 result = value.kind == SOL_TYPE_NEVER
                     ? value
                     : (SolType){.kind = SOL_TYPE_UNIT};
+                terminated = value.kind == SOL_TYPE_NEVER;
+            }
+        } else if (statement->kind == SOL_STATEMENT_ASSIGNMENT) {
+            SolExprId target_id = statement->as.assignment.target;
+            SolExprId value_id = statement->as.assignment.value;
+            SolType target_type = sol_type_expression(checker, target_id);
+            SolResolution resolution = target_id < checker->hir->resolution_count
+                ? checker->hir->resolutions[target_id]
+                : (SolResolution){.kind = SOL_RESOLUTION_ERROR};
+            bool valid_target = target_id < checker->syntax->expression_count
+                && checker->syntax->expressions[target_id].kind == SOL_EXPR_PATH
+                && resolution.kind == SOL_RESOLUTION_LOCAL
+                && resolution.target < checker->hir->local_count
+                && checker->hir->locals[resolution.target].owner
+                    == checker->current_definition
+                && checker->hir->locals[resolution.target].kind == SOL_LOCAL_BINDING
+                && checker->hir->locals[resolution.target].mutable;
+            if (!valid_target) {
+                sol_type_error(checker, "SOL-TYPE-025", statement->span,
+                    "assignment target must be a direct mutable local binding");
+            }
+            SolType expected = valid_target && resolution.target < checker->types->local_count
+                ? checker->types->locals[resolution.target] : target_type;
+            SolType value = sol_type_expression_expected(checker, value_id, expected);
+            bool assignable = valid_target
+                && sol_type_assignable(checker, expected, value, value_id);
+            if (valid_target && !assignable) {
+                sol_type_error(checker, "SOL-TYPE-002", statement->span,
+                    "assignment value is not assignable to the mutable local's fixed type");
+            }
+            if (assignable && value.kind != SOL_TYPE_NEVER
+                && (checker->types->expression_capability_origins[value_id]
+                        != checker->types->local_capability_origins[resolution.target]
+                    || checker->types->expression_operation_origins[value_id]
+                        != checker->types->local_operation_origins[resolution.target])) {
+                sol_type_error(checker, "SOL-AUTHORITY-001", statement->span,
+                    "assignment changes the mutable local's authority provenance");
+            }
+            if (!terminated) {
+                result = value.kind == SOL_TYPE_NEVER
+                    ? value : (SolType){.kind = SOL_TYPE_UNIT};
                 terminated = value.kind == SOL_TYPE_NEVER;
             }
         } else if (statement->kind == SOL_STATEMENT_REGION) {
