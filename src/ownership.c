@@ -117,53 +117,70 @@ static bool analyze_child(Ownership *analysis, SolIrExpressionId id,
     return analyze_expression(analysis, id, available, access, reachable);
 }
 
+static const SolIrPlace *expression_place(
+    const SolIr *ir, SolIrExpressionId id
+) {
+    if (id >= ir->expression_count || ir->expressions[id].kind != SOL_IR_EXPR_PLACE
+        || ir->expressions[id].as.place >= ir->place_count) return NULL;
+    return &ir->places[ir->expressions[id].as.place];
+}
+
+static bool direct_local_place(
+    const SolIr *ir, SolIrExpressionId id, SolIrLocalId *local
+) {
+    const SolIrPlace *place = expression_place(ir, id);
+    if (place == NULL || place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+        || place->projections.count != 0 || place->local >= ir->local_count) return false;
+    if (local != NULL) *local = place->local;
+    return true;
+}
+
 static bool analyze_assignment(Ownership *analysis, const SolIrStatement *statement,
     bool *available, bool *reachable) {
-    if (statement->target >= analysis->ir->expression_count
-        || statement->local >= analysis->ir->local_count) {
+    SolIrLocalId target_local = SOL_IR_NONE;
+    if (!direct_local_place(analysis->ir, statement->target, &target_local)) {
         return ownership_internal(analysis, statement->span,
             "assignment target metadata is out of range");
     }
     const SolIrExpression *target = &analysis->ir->expressions[statement->target];
-    const SolIrLocal *local = &analysis->ir->locals[statement->local];
-    if (target->kind != SOL_IR_EXPR_LOCAL || target->as.local != statement->local
+    const SolIrLocal *local = &analysis->ir->locals[target_local];
+    if (target->kind != SOL_IR_EXPR_PLACE
         || local->owner != analysis->owner || local->kind != SOL_IR_LOCAL_BINDING
         || !local->mutable || local->access != SOL_ACCESS_OWNED) {
         return ownership_internal(analysis, statement->span,
             "assignment target is not its direct mutable owned local");
     }
-    if (!analysis->introduced[statement->local]) {
+    if (!analysis->introduced[target_local]) {
         return ownership_internal(analysis, statement->span,
             "assignment target has not been introduced in this scope");
     }
-    if (analysis->shared_loans[statement->local] != 0
-        || analysis->exclusive_loans[statement->local]) {
+    if (analysis->shared_loans[target_local] != 0
+        || analysis->exclusive_loans[target_local]) {
         return ownership_error_code(analysis, statement->span, "SOL-OWNERSHIP-003",
             "mutable local cannot be updated while it is borrowed");
     }
     analysis->uses[statement->target] = SOL_IR_LOCAL_USE_UPDATE;
     if (!analyze_expression(analysis, statement->expression, available,
         SOL_ACCESS_OWNED, reachable) || !*reachable) return *reachable == false;
-    if (analysis->region_depth > analysis->introduction_depths[statement->local]
+    if (analysis->region_depth > analysis->introduction_depths[target_local]
         && !type_is_copy(analysis,
             analysis->ir->expressions[statement->expression].type)) {
         return ownership_error_code(analysis, statement->span, "SOL-REGION-001",
             "an affine value from a deeper explicit region cannot update an outer local");
     }
-    available[statement->local] = true;
+    available[target_local] = true;
     return true;
 }
 
 static bool begin_loan(Ownership *analysis, SolIrExpressionId id,
     bool *available, SolAccessMode access, SolIrLocalId *local_out) {
-    if (id >= analysis->ir->expression_count
-        || analysis->ir->expressions[id].kind != SOL_IR_EXPR_LOCAL) {
+    SolIrLocalId local = SOL_IR_NONE;
+    if (!direct_local_place(analysis->ir, id, &local)) {
         return ownership_error_code(analysis, id < analysis->ir->expression_count
             ? analysis->ir->expressions[id].span : (SolSpan){0},
             "SOL-OWNERSHIP-004", "borrowed arguments must be direct local places");
     }
     const SolIrExpression *expression = &analysis->ir->expressions[id];
-    SolIrLocalId local = expression->as.local;
     if (local >= analysis->ir->local_count || !available[local]) {
         return ownership_error(analysis, expression->span,
             "borrowed local is used after it was moved");
@@ -199,8 +216,8 @@ static bool validate_borrow_places(Ownership *analysis) {
         if (expression->kind == SOL_IR_EXPR_CALL) {
             if (expression->as.call.kind == SOL_IR_CALL_METHOD
                 && expression->as.call.receiver_access != SOL_ACCESS_OWNED
-                && analysis->ir->expressions[expression->as.call.receiver].kind
-                    != SOL_IR_EXPR_LOCAL) {
+                && !direct_local_place(analysis->ir,
+                    expression->as.call.receiver, NULL)) {
                 return ownership_error_code(analysis, expression->span,
                     "SOL-OWNERSHIP-004", "borrowed receiver must be a direct local place");
             }
@@ -210,7 +227,7 @@ static bool validate_borrow_places(Ownership *analysis) {
                     == SOL_IR_EXPR_BOUND_OPERATION) {
                 SolIrExpressionId receiver = analysis->ir->expressions[
                     expression->as.call.callee].as.operation.receiver;
-                if (analysis->ir->expressions[receiver].kind != SOL_IR_EXPR_LOCAL) {
+                if (!direct_local_place(analysis->ir, receiver, NULL)) {
                     return ownership_error_code(analysis, expression->span,
                         "SOL-OWNERSHIP-004",
                         "borrowed capability receiver must be a direct local place");
@@ -221,18 +238,17 @@ static bool validate_borrow_places(Ownership *analysis) {
                 const SolIrOperand *entry = &analysis->ir->operands[
                     expression->as.call.operands.offset + operand];
                 if (entry->access != SOL_ACCESS_OWNED
-                    && analysis->ir->expressions[entry->value].kind
-                        != SOL_IR_EXPR_LOCAL) {
+                    && !direct_local_place(analysis->ir, entry->value, NULL)) {
                     return ownership_error_code(analysis, expression->span,
                         "SOL-OWNERSHIP-004",
                         "borrowed arguments must be direct local places");
                 }
             }
         } else if (expression->kind == SOL_IR_EXPR_HANDLE
-            && (analysis->ir->expressions[expression->as.handler.authority].kind
-                    != SOL_IR_EXPR_LOCAL
-                || analysis->ir->expressions[expression->as.handler.provider].kind
-                    != SOL_IR_EXPR_LOCAL)) {
+            && (!direct_local_place(analysis->ir,
+                    expression->as.handler.authority, NULL)
+                || !direct_local_place(analysis->ir,
+                    expression->as.handler.provider, NULL))) {
             return ownership_error_code(analysis, expression->span,
                 "SOL-OWNERSHIP-004",
                 "handler authority and provider must be direct local places");
@@ -334,11 +350,18 @@ static bool analyze_expression(Ownership *analysis, SolIrExpressionId id,
     if (!*reachable) return true;
     const SolIrExpression *expression = &analysis->ir->expressions[id];
     switch (expression->kind) {
-        case SOL_IR_EXPR_LOCAL: {
-            SolIrLocalId local = expression->as.local;
+        case SOL_IR_EXPR_PLACE: {
+            const SolIrPlace *place = expression_place(analysis->ir, id);
+            if (place == NULL) return ownership_internal(analysis, expression->span,
+                "place ownership metadata is malformed");
+            if (place->root_kind == SOL_IR_PLACE_ROOT_TEMPORARY) {
+                return analyze_expression(analysis, place->temporary, available,
+                    SOL_ACCESS_OWNED, reachable);
+            }
+            SolIrLocalId local = place->local;
             if (local >= analysis->ir->local_count
                 || analysis->ir->locals[local].owner != analysis->owner) {
-                return ownership_internal(analysis, expression->span,
+                return ownership_internal(analysis, place->root_span,
                     "local ownership is inconsistent with its callable");
             }
             if (access != SOL_ACCESS_OWNED) {
@@ -354,17 +377,17 @@ static bool analyze_expression(Ownership *analysis, SolIrExpressionId id,
                 int written = snprintf(message, sizeof(message),
                     "local '%s' is used after it was moved", name);
                 if (written < 0) return false;
-                return ownership_error(analysis, expression->span, message);
+                return ownership_error(analysis, place->root_span, message);
             }
             if (analysis->exclusive_loans[local]
                 || (analysis->shared_loans[local] != 0
                     && use == SOL_IR_LOCAL_USE_MOVE)) {
-                return ownership_error_code(analysis, expression->span,
+                return ownership_error_code(analysis, place->root_span,
                     "SOL-OWNERSHIP-003", "owned use or move occurs while local is borrowed");
             }
             if (analysis->ir->locals[local].access != SOL_ACCESS_OWNED
                 && use == SOL_IR_LOCAL_USE_MOVE) {
-                return ownership_error_code(analysis, expression->span,
+                return ownership_error_code(analysis, place->root_span,
                     "SOL-OWNERSHIP-004", "borrowed affine parameter cannot escape or be consumed");
             }
             if (use == SOL_IR_LOCAL_USE_MOVE) available[local] = false;
@@ -492,9 +515,6 @@ call_complete:
                     available, SOL_ACCESS_OWNED, reachable)) return false;
             }
             return true;
-        case SOL_IR_EXPR_FIELD:
-            return analyze_expression(analysis, expression->as.field.base,
-                available, SOL_ACCESS_OWNED, reachable);
         case SOL_IR_EXPR_IF:
             if (!analyze_expression(analysis, expression->as.if_expr.condition,
                 available, SOL_ACCESS_OWNED, reachable) || !*reachable) return *reachable == false;

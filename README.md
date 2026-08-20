@@ -147,6 +147,8 @@ Every executable block records its exact successfully introduced `let` or `var` 
 
 This cleanup is effect-free compiler/runtime storage reclamation only. Apart from the explicitly unstable observation hook described below, it invokes no Sol code, host operation, destructor, finalizer, resource `close`, or allocator action and is not a backend lifetime implementation. Field/index/dereference mutation, uninitialized `var`, compound assignment, inout caller writeback, loops, flow-sensitive authority provenance, lifetime generics, allocator/arena APIs, first-class region values, user `Drop`, fallible close protocols, unsafe, FFI, and backend behavior remain deferred.
 
+Owning IR represents every executable local or resolved-field access as one canonical typed place: a local or computed-value root followed by an exclusively owned root-to-leaf projection slice. Every root and field projection retains its exact source span, every projection records its instantiated result type, nested field chains are flattened, and independent validation rejects malformed, shared, orphaned, or ill-typed paths. Index and dereference projection kinds are reserved in the unstable representation but rejected until arrays and safe pointer/reference semantics exist. Current ownership remains whole-root: projected local reads copy or move the complete root, while assignment and shared/exclusive borrowing still require an unprojected local root. No external inspection schema changes.
+
 Unsafe operations are isolated, capability-gated, auditable, and excluded from ordinary safe code.
 
 ### Effects and capabilities

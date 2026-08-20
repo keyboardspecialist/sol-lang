@@ -96,6 +96,8 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
         || left->field_count != right->field_count
         || left->variant_count != right->variant_count
         || left->expression_count != right->expression_count
+        || left->place_count != right->place_count
+        || left->projection_count != right->projection_count
         || left->statement_count != right->statement_count
         || left->statement_id_count != right->statement_id_count
         || left->arm_count != right->arm_count
@@ -125,7 +127,11 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
         || memcmp(left->cleanup_locals, right->cleanup_locals,
             left->cleanup_local_count * sizeof(*left->cleanup_locals)) != 0
         || memcmp(left->roots, right->roots,
-            left->root_count * sizeof(*left->roots)) != 0) return false;
+            left->root_count * sizeof(*left->roots)) != 0
+        || memcmp(left->places, right->places,
+            left->place_count * sizeof(*left->places)) != 0
+        || memcmp(left->projections, right->projections,
+            left->projection_count * sizeof(*left->projections)) != 0) return false;
     for (size_t index = 0; index < left->definition_count; ++index) {
         if (left->definitions[index].semantic_id.high
                 != right->definitions[index].semantic_id.high
@@ -289,7 +295,8 @@ static void test_complete_ir_and_lifetime(void) {
     bool nested_none = false;
     for (size_t index = 0; index < left.ir.expression_count; ++index) {
         const SolIrExpression *expression = &left.ir.expressions[index];
-        field = field || expression->kind == SOL_IR_EXPR_FIELD;
+        field = field || (expression->kind == SOL_IR_EXPR_PLACE
+            && left.ir.places[expression->as.place].projections.count != 0);
         nested_none = nested_none || (expression->kind == SOL_IR_EXPR_CALL
             && expression->as.call.kind == SOL_IR_CALL_BUILTIN_NONE);
     }
@@ -1306,10 +1313,13 @@ static void test_affine_ownership(void) {
     CHECK(inner != SOL_IR_NONE && outer != SOL_IR_NONE);
     for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
         SolIrExpression *expression = &compilation.ir.expressions[index];
-        if (expression->kind != SOL_IR_EXPR_LOCAL || expression->as.local != outer) continue;
-        expression->as.local = inner;
+        if (expression->kind != SOL_IR_EXPR_PLACE
+            || compilation.ir.places[expression->as.place].root_kind
+                != SOL_IR_PLACE_ROOT_LOCAL
+            || compilation.ir.places[expression->as.place].local != outer) continue;
+        compilation.ir.places[expression->as.place].local = inner;
         CHECK(validate_rejected(&compilation.ir));
-        expression->as.local = outer;
+        compilation.ir.places[expression->as.place].local = outer;
         break;
     }
     for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
@@ -1583,15 +1593,18 @@ static void test_mutable_assignment_ir_and_ownership(void) {
     for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
         SolIrStatement *statement = &compilation.ir.statements[index];
         if (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT
-            && strcmp(compilation.ir.locals[statement->local].name, "first") == 0) {
+            && strcmp(compilation.ir.locals[compilation.ir.places[
+                compilation.ir.expressions[statement->target].as.place].local].name,
+                "first") == 0) {
             assignment = statement;
         } else if (statement->kind == SOL_IR_STATEMENT_LET
             && strcmp(compilation.ir.locals[statement->local].name, "later") == 0) {
             later_let = statement;
         } else if (statement->kind == SOL_IR_STATEMENT_RETURN
-            && compilation.ir.expressions[statement->expression].kind == SOL_IR_EXPR_LOCAL
+            && compilation.ir.expressions[statement->expression].kind == SOL_IR_EXPR_PLACE
             && strcmp(compilation.ir.locals[
-                compilation.ir.expressions[statement->expression].as.local].name,
+                compilation.ir.places[compilation.ir.expressions[
+                    statement->expression].as.place].local].name,
                 "later") == 0) {
             later_return = statement;
         }
@@ -1615,17 +1628,20 @@ static void test_mutable_assignment_ir_and_ownership(void) {
     }
     CHECK(assignment != NULL && block != NULL);
     if (assignment != NULL) {
-        CHECK(compilation.ir.locals[assignment->local].mutable);
+        SolIrLocalId target_local = compilation.ir.places[
+            compilation.ir.expressions[assignment->target].as.place].local;
+        CHECK(assignment->local == SOL_IR_NONE);
+        CHECK(compilation.ir.locals[target_local].mutable);
         CHECK(compilation.ir.expressions[assignment->target].local_use
             == SOL_IR_LOCAL_USE_UPDATE);
         SolIrExpressionId saved = assignment->target;
         assignment->target = assignment->expression;
         CHECK(!sol_ir_validate(&compilation.ir, NULL));
         assignment->target = saved;
-        bool saved_mutable = compilation.ir.locals[assignment->local].mutable;
-        compilation.ir.locals[assignment->local].mutable = false;
+        bool saved_mutable = compilation.ir.locals[target_local].mutable;
+        compilation.ir.locals[target_local].mutable = false;
         CHECK(!sol_ir_validate(&compilation.ir, NULL));
-        compilation.ir.locals[assignment->local].mutable = saved_mutable;
+        compilation.ir.locals[target_local].mutable = saved_mutable;
     }
     CHECK(assignment != NULL && later_let != NULL && later_return != NULL
         && order_block != NULL);
@@ -1636,9 +1652,7 @@ static void test_mutable_assignment_ir_and_ownership(void) {
         CHECK(!sol_ir_validate(&compilation.ir, NULL));
         later_return->expression = saved_return;
 
-        SolIrLocalId saved_local = assignment->local;
         SolIrExpressionId saved_target = assignment->target;
-        assignment->local = later_let->local;
         assignment->target = saved_return;
         later_return->expression = saved_target;
         CHECK(!sol_ir_validate(&compilation.ir, NULL));
@@ -1669,15 +1683,16 @@ static void test_mutable_assignment_ir_and_ownership(void) {
             compilation.ir.statement_ids[let_slot] = let_id;
             compilation.ir.statement_ids[return_slot] = return_id;
         }
-        assignment->local = saved_local;
         assignment->target = saved_target;
         later_return->expression = saved_return;
 
-        SolIrSlice saved_roots = compilation.ir.locals[assignment->local].capability_roots;
-        compilation.ir.locals[assignment->local].capability_roots
+        SolIrLocalId target_local = compilation.ir.places[
+            compilation.ir.expressions[assignment->target].as.place].local;
+        SolIrSlice saved_roots = compilation.ir.locals[target_local].capability_roots;
+        compilation.ir.locals[target_local].capability_roots
             = (SolIrSlice){.offset = compilation.ir.root_count + 1, .count = 1};
         CHECK(!sol_ir_validate(&compilation.ir, NULL));
-        compilation.ir.locals[assignment->local].capability_roots = saved_roots;
+        compilation.ir.locals[target_local].capability_roots = saved_roots;
     }
     CHECK(block == NULL || block->as.block.cleanup.count == 1);
     CHECK(sol_ir_validate(&compilation.ir, NULL));
@@ -1698,6 +1713,361 @@ static void test_mutable_assignment_ir_and_ownership(void) {
         "effects { pure } { var slot = source return handle service.read<slot> "
         "with mock { slot = slot 1 } }\n"));
     CHECK(has_code(&compilation, "SOL-OWNERSHIP-003"));
+    free_compilation(&compilation);
+}
+
+static void test_place_representation_and_validation(void) {
+    TestCompilation compilation;
+    CHECK(compile_ir(&compilation,
+        "module places\n"
+        "record Box<T> { value: T }\n"
+        "record Outer<T> { box: Box<T> }\n"
+        "enum Choice { yes(value: Int64) }\n"
+        "record One { value: Int64 }\n"
+        "function make() -> Outer<Int64> { return Outer<Int64> { "
+        "box = Box<Int64> { value = 7 } } }\n"
+        "function local(value: Outer<Int64>) -> Int64 { return value.box.value }\n"
+        "function generic<T>(value: Outer<T>) -> T { return value.box.value }\n"
+        "function computed() -> Int64 { return make().box.value }\n"
+        "function computed_if(flag: Bool) -> Int64 { return "
+        "(if flag { make() } else { make() }).box.value }\n"
+        "function one(value: One) -> Int64 { return value.value }\n"
+        "function update() -> Int64 { var value = 1 value = 2 return value }\n"));
+    SolIrExpressionId local = SOL_IR_NONE;
+    SolIrExpressionId local_field = SOL_IR_NONE;
+    SolIrExpressionId nested_local = SOL_IR_NONE;
+    SolIrExpressionId temporary = SOL_IR_NONE;
+    SolIrExpressionId temporary_if = SOL_IR_NONE;
+    bool generic_path = false;
+    bool root_kinds[SOL_IR_PLACE_ROOT_TEMPORARY + 1] = {false};
+    bool projection_kinds[SOL_IR_PROJECTION_DEREFERENCE + 1] = {false};
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        SolIrExpression *expression = &compilation.ir.expressions[index];
+        if (expression->kind != SOL_IR_EXPR_PLACE) continue;
+        SolIrPlace *place = &compilation.ir.places[expression->as.place];
+        CHECK((int)place->root_kind >= 0
+            && place->root_kind <= SOL_IR_PLACE_ROOT_TEMPORARY);
+        if ((int)place->root_kind >= 0
+            && place->root_kind <= SOL_IR_PLACE_ROOT_TEMPORARY) {
+            root_kinds[place->root_kind] = true;
+        }
+        for (size_t projection = 0; projection < place->projections.count; ++projection) {
+            SolIrProjectionKind kind = compilation.ir.projections[
+                place->projections.offset + projection].kind;
+            CHECK((int)kind >= 0 && kind <= SOL_IR_PROJECTION_DEREFERENCE);
+            if ((int)kind >= 0 && kind <= SOL_IR_PROJECTION_DEREFERENCE) {
+                projection_kinds[kind] = true;
+            }
+        }
+        if (place->root_kind == SOL_IR_PLACE_ROOT_LOCAL
+            && place->projections.count == 0 && local == SOL_IR_NONE) local = index;
+        if (place->root_kind == SOL_IR_PLACE_ROOT_LOCAL
+            && place->projections.count == 1) local_field = index;
+        if (place->root_kind == SOL_IR_PLACE_ROOT_LOCAL
+            && place->projections.count == 2) nested_local = index;
+        if (place->root_kind == SOL_IR_PLACE_ROOT_TEMPORARY
+            && place->projections.count == 2) {
+            temporary = index;
+            if (place->temporary < compilation.ir.expression_count
+                && compilation.ir.expressions[place->temporary].kind == SOL_IR_EXPR_IF) {
+                temporary_if = index;
+            }
+        }
+        if (place->projections.count == 2) {
+            const SolIrProjection *first
+                = &compilation.ir.projections[place->projections.offset];
+            const SolIrProjection *second
+                = &compilation.ir.projections[place->projections.offset + 1];
+            generic_path = generic_path
+                || (first->type < compilation.ir.type_count
+                    && compilation.ir.types[first->type].kind == SOL_IR_TYPE_NOMINAL
+                    && compilation.ir.types[first->type].argument_count == 1
+                    && second->type < compilation.ir.type_count
+                    && compilation.ir.types[second->type].kind
+                        == SOL_IR_TYPE_PARAMETER);
+        }
+    }
+    CHECK(local != SOL_IR_NONE && local_field != SOL_IR_NONE
+        && nested_local != SOL_IR_NONE && temporary != SOL_IR_NONE
+        && temporary_if != SOL_IR_NONE);
+    CHECK(generic_path);
+    CHECK(root_kinds[SOL_IR_PLACE_ROOT_LOCAL]);
+    CHECK(root_kinds[SOL_IR_PLACE_ROOT_TEMPORARY]);
+    CHECK(projection_kinds[SOL_IR_PROJECTION_FIELD]);
+    CHECK(!projection_kinds[SOL_IR_PROJECTION_INDEX]);
+    CHECK(!projection_kinds[SOL_IR_PROJECTION_DEREFERENCE]);
+    if (nested_local != SOL_IR_NONE) {
+        const SolIrPlace *place = &compilation.ir.places[
+            compilation.ir.expressions[nested_local].as.place];
+        CHECK(place->temporary == SOL_IR_NONE);
+        CHECK(place->type == compilation.ir.expressions[nested_local].type);
+        const SolIrProjection *first
+            = &compilation.ir.projections[place->projections.offset];
+        const SolIrProjection *second
+            = &compilation.ir.projections[place->projections.offset + 1];
+        CHECK(first->kind == SOL_IR_PROJECTION_FIELD && first->index == SOL_IR_NONE);
+        CHECK(second->kind == SOL_IR_PROJECTION_FIELD && second->index == SOL_IR_NONE);
+        CHECK(first->field < compilation.ir.field_count
+            && strcmp(compilation.ir.fields[first->field].name, "box") == 0);
+        CHECK(second->field < compilation.ir.field_count
+            && strcmp(compilation.ir.fields[second->field].name, "value") == 0);
+        CHECK(first->type < compilation.ir.type_count
+            && compilation.ir.types[first->type].kind == SOL_IR_TYPE_NOMINAL);
+        CHECK(second->type == place->type);
+        CHECK(compilation.ir.expressions[nested_local].local_use
+            == SOL_IR_LOCAL_USE_MOVE);
+    }
+    if (temporary != SOL_IR_NONE) {
+        const SolIrPlace *place = &compilation.ir.places[
+            compilation.ir.expressions[temporary].as.place];
+        CHECK(place->local == SOL_IR_NONE);
+        CHECK(place->temporary < compilation.ir.expression_count);
+        CHECK(compilation.ir.expressions[place->temporary].kind != SOL_IR_EXPR_PLACE);
+    }
+    SolIrStatement *assignment = NULL;
+    for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
+        if (compilation.ir.statements[index].kind == SOL_IR_STATEMENT_ASSIGNMENT) {
+            assignment = &compilation.ir.statements[index];
+            break;
+        }
+    }
+    CHECK(assignment != NULL);
+    if (assignment != NULL) {
+        CHECK(assignment->local == SOL_IR_NONE);
+        CHECK(compilation.ir.expressions[assignment->target].kind == SOL_IR_EXPR_PLACE);
+        CHECK(compilation.ir.expressions[assignment->target].local_use
+            == SOL_IR_LOCAL_USE_UPDATE);
+        SolIrLocalUse saved
+            = compilation.ir.expressions[assignment->target].local_use;
+        compilation.ir.expressions[assignment->target].local_use
+            = SOL_IR_LOCAL_USE_NONE;
+        CHECK(validate_rejected(&compilation.ir));
+        compilation.ir.expressions[assignment->target].local_use = saved;
+    }
+
+    SolIrDefinitionId enum_definition = SOL_IR_NONE;
+    SolIrDefinitionId one_definition = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.definition_count; ++index) {
+        if (compilation.ir.definitions[index].kind == SOL_IR_DEFINITION_ENUM) {
+            enum_definition = index;
+        }
+        if (compilation.ir.definitions[index].kind == SOL_IR_DEFINITION_FUNCTION
+            && strcmp(compilation.ir.definitions[index].name, "one") == 0) {
+            one_definition = index;
+        }
+    }
+    SolIrTypeId enum_type = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.type_count; ++index) {
+        if (compilation.ir.types[index].kind == SOL_IR_TYPE_NOMINAL
+            && compilation.ir.types[index].definition == enum_definition) enum_type = index;
+    }
+    SolIrLocalId one_local = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.local_count; ++index) {
+        if (compilation.ir.locals[index].owner == one_definition) one_local = index;
+    }
+    SolIrExpressionId one_root = SOL_IR_NONE;
+    SolIrExpressionId one_field = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        const SolIrExpression *expression = &compilation.ir.expressions[index];
+        if (expression->kind != SOL_IR_EXPR_PLACE) continue;
+        const SolIrPlace *place = &compilation.ir.places[expression->as.place];
+        if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL || place->local != one_local) continue;
+        if (place->projections.count == 0) one_root = index;
+        if (place->projections.count == 1) one_field = index;
+    }
+    CHECK(enum_definition != SOL_IR_NONE && enum_type != SOL_IR_NONE
+        && one_local != SOL_IR_NONE && one_root != SOL_IR_NONE
+        && one_field != SOL_IR_NONE);
+    if (enum_definition != SOL_IR_NONE && enum_type != SOL_IR_NONE
+        && one_local != SOL_IR_NONE && one_root != SOL_IR_NONE
+        && one_field != SOL_IR_NONE) {
+        SolIrSlice variants = compilation.ir.definitions[enum_definition].variants;
+        CHECK(variants.count == 1);
+        SolIrSlice payload = compilation.ir.variants[variants.offset].fields;
+        CHECK(payload.count == 1);
+        if (variants.count == 1 && payload.count == 1) {
+            SolIrFieldId enum_field = payload.offset;
+            SolIrTypeId result_type = compilation.ir.fields[enum_field].type;
+            SolIrPlace *root_place = &compilation.ir.places[
+                compilation.ir.expressions[one_root].as.place];
+            SolIrPlace *field_place = &compilation.ir.places[
+                compilation.ir.expressions[one_field].as.place];
+            SolIrProjection *field_projection = &compilation.ir.projections[
+                field_place->projections.offset];
+            SolIrTypeId saved_local_type = compilation.ir.locals[one_local].type;
+            SolIrTypeId saved_root_type = root_place->type;
+            SolIrTypeId saved_root_expression_type
+                = compilation.ir.expressions[one_root].type;
+            SolIrTypeId saved_field_type = field_place->type;
+            SolIrTypeId saved_field_expression_type
+                = compilation.ir.expressions[one_field].type;
+            SolIrProjection saved_projection = *field_projection;
+            compilation.ir.locals[one_local].type = enum_type;
+            root_place->type = enum_type;
+            compilation.ir.expressions[one_root].type = enum_type;
+            field_place->type = result_type;
+            compilation.ir.expressions[one_field].type = result_type;
+            field_projection->field = enum_field;
+            field_projection->type = result_type;
+            CHECK(validate_rejected(&compilation.ir));
+            compilation.ir.locals[one_local].type = saved_local_type;
+            root_place->type = saved_root_type;
+            compilation.ir.expressions[one_root].type = saved_root_expression_type;
+            field_place->type = saved_field_type;
+            compilation.ir.expressions[one_field].type = saved_field_expression_type;
+            *field_projection = saved_projection;
+        }
+    }
+
+    if (local != SOL_IR_NONE) {
+        SolIrPlace *place = &compilation.ir.places[
+            compilation.ir.expressions[local].as.place];
+        SolIrPlaceRootKind saved_kind = place->root_kind;
+        place->root_kind = (SolIrPlaceRootKind)-1;
+        CHECK(validate_rejected(&compilation.ir));
+        place->root_kind = saved_kind;
+        SolIrExpressionId saved_temporary = place->temporary;
+        place->temporary = 0;
+        CHECK(validate_rejected(&compilation.ir));
+        place->temporary = saved_temporary;
+        SolIrLocalId saved_local = place->local;
+        place->local = compilation.ir.local_count;
+        CHECK(validate_rejected(&compilation.ir));
+        place->local = saved_local;
+        SolIrTypeId saved_type = place->type;
+        place->type = compilation.ir.type_count;
+        CHECK(validate_rejected(&compilation.ir));
+        place->type = saved_type;
+        SolIrSlice saved_slice = place->projections;
+        place->projections = (SolIrSlice){compilation.ir.projection_count, 1};
+        CHECK(validate_rejected(&compilation.ir));
+        place->projections = saved_slice;
+        SolSpan saved_span = place->root_span;
+        place->root_span.end = compilation.ir.source_length + 1;
+        CHECK(validate_rejected(&compilation.ir));
+        place->root_span = saved_span;
+    }
+    if (temporary != SOL_IR_NONE && local != SOL_IR_NONE) {
+        SolIrPlace *place = &compilation.ir.places[
+            compilation.ir.expressions[temporary].as.place];
+        SolIrExpressionId saved = place->temporary;
+        SolIrLocalId saved_local = place->local;
+        place->local = 0;
+        CHECK(validate_rejected(&compilation.ir));
+        place->local = saved_local;
+        place->temporary = local;
+        CHECK(validate_rejected(&compilation.ir));
+        place->temporary = compilation.ir.expression_count;
+        CHECK(validate_rejected(&compilation.ir));
+        place->temporary = saved;
+    }
+    if (temporary_if != SOL_IR_NONE) {
+        SolIrPlace *place = &compilation.ir.places[
+            compilation.ir.expressions[temporary_if].as.place];
+        SolIrExpression *root = &compilation.ir.expressions[place->temporary];
+        CHECK(root->kind == SOL_IR_EXPR_IF);
+        if (root->kind == SOL_IR_EXPR_IF) {
+            SolIrExpressionId saved = root->as.if_expr.then_branch;
+            root->as.if_expr.then_branch = temporary_if;
+            CHECK(validate_rejected(&compilation.ir));
+            root->as.if_expr.then_branch = saved;
+        }
+    }
+    if (nested_local != SOL_IR_NONE) {
+        SolIrPlace *place = &compilation.ir.places[
+            compilation.ir.expressions[nested_local].as.place];
+        SolIrProjection *projection
+            = &compilation.ir.projections[place->projections.offset];
+        SolIrProjection saved = *projection;
+        projection->kind = (SolIrProjectionKind)-1;
+        CHECK(validate_rejected(&compilation.ir));
+        *projection = saved;
+        projection->kind = SOL_IR_PROJECTION_INDEX;
+        projection->field = SOL_IR_NONE;
+        projection->index = 0;
+        CHECK(validate_rejected(&compilation.ir));
+        *projection = saved;
+        projection->kind = SOL_IR_PROJECTION_DEREFERENCE;
+        projection->field = SOL_IR_NONE;
+        CHECK(validate_rejected(&compilation.ir));
+        *projection = saved;
+        projection->index = 0;
+        CHECK(validate_rejected(&compilation.ir));
+        *projection = saved;
+        projection->field = compilation.ir.field_count;
+        CHECK(validate_rejected(&compilation.ir));
+        *projection = saved;
+        projection->type = compilation.ir.type_count;
+        CHECK(validate_rejected(&compilation.ir));
+        *projection = saved;
+        projection->span.end = compilation.ir.source_length + 1;
+        CHECK(validate_rejected(&compilation.ir));
+        *projection = saved;
+        SolIrProjection *next
+            = &compilation.ir.projections[place->projections.offset + 1];
+        projection->type = next->type;
+        CHECK(validate_rejected(&compilation.ir));
+        *projection = saved;
+        SolIrTypeId saved_place_type = place->type;
+        place->type = projection->type;
+        CHECK(validate_rejected(&compilation.ir));
+        place->type = saved_place_type;
+        projection->field = next->field;
+        CHECK(validate_rejected(&compilation.ir));
+        *projection = saved;
+    }
+    if (local != SOL_IR_NONE && local_field != SOL_IR_NONE) {
+        SolIrPlaceId *place_id = &compilation.ir.expressions[local_field].as.place;
+        SolIrPlaceId saved = *place_id;
+        *place_id = compilation.ir.expressions[local].as.place;
+        CHECK(validate_rejected(&compilation.ir));
+        *place_id = compilation.ir.place_count;
+        CHECK(validate_rejected(&compilation.ir));
+        *place_id = saved;
+    }
+    if (local_field != SOL_IR_NONE && nested_local != SOL_IR_NONE) {
+        SolIrPlace *one = &compilation.ir.places[
+            compilation.ir.expressions[local_field].as.place];
+        const SolIrPlace *two = &compilation.ir.places[
+            compilation.ir.expressions[nested_local].as.place];
+        SolIrSlice saved = one->projections;
+        one->projections = (SolIrSlice){two->projections.offset, 1};
+        CHECK(validate_rejected(&compilation.ir));
+        one->projections = saved;
+    }
+    if (compilation.ir.place_count != 0) {
+        SolIr *ir = &compilation.ir;
+        SolIrPlace *saved = ir->places;
+        ir->places = NULL;
+        CHECK(validate_rejected(ir));
+        ir->places = saved;
+    }
+    if (compilation.ir.projection_count != 0) {
+        SolIr *ir = &compilation.ir;
+        SolIrProjection *saved = ir->projections;
+        ir->projections = NULL;
+        CHECK(validate_rejected(ir));
+        ir->projections = saved;
+    }
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+    free_compilation(&compilation);
+
+    CHECK(!frontend(&compilation,
+        "module projected_assignment\nrecord Pair { value: Int64 }\n"
+        "function bad() -> Int64 { var pair = Pair { value = 1 } "
+        "pair.value = 2 return pair.value }\n"));
+    CHECK(sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(has_code(&compilation, "SOL-TYPE-025"));
+    free_compilation(&compilation);
+
+    CHECK(frontend(&compilation,
+        "module projected_borrow\nrecord Pair { value: Text }\n"
+        "function inspect(value: borrow Text) -> Int64 { return 0 }\n"
+        "function bad(pair: Pair) -> Int64 { return inspect(pair.value) }\n"));
+    CHECK(!sol_ir_lower(&compilation.source, &compilation.syntax,
+        &compilation.hir, &compilation.types, &compilation.effects,
+        &compilation.contracts, &compilation.ir, &compilation.diagnostics));
+    CHECK(has_code(&compilation, "SOL-OWNERSHIP-004"));
     free_compilation(&compilation);
 }
 
@@ -1762,7 +2132,9 @@ static void test_exhaustive_validation_domains(void) {
     for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
         SolIrExpressionKind kind = compilation.ir.expressions[index].kind;
         if (integer == SOL_IR_NONE && kind == SOL_IR_EXPR_INTEGER) integer = index;
-        if (local == SOL_IR_NONE && kind == SOL_IR_EXPR_LOCAL) local = index;
+        if (local == SOL_IR_NONE && kind == SOL_IR_EXPR_PLACE
+            && compilation.ir.places[compilation.ir.expressions[index].as.place]
+                .root_kind == SOL_IR_PLACE_ROOT_LOCAL) local = index;
         if (unary == SOL_IR_NONE && kind == SOL_IR_EXPR_UNARY) unary = index;
         if (binary == SOL_IR_NONE && kind == SOL_IR_EXPR_BINARY) binary = index;
         if (call == SOL_IR_NONE && kind == SOL_IR_EXPR_CALL) call = index;
@@ -1987,7 +2359,8 @@ static void test_exhaustive_validation_domains(void) {
     CHECK_REJECTED_MUTATION(compilation.ir.definitions[0].span.end,
         size_t, compilation.ir.source_length + 1);
     if (local != SOL_IR_NONE) {
-        SolIrLocalId local_id = compilation.ir.expressions[local].as.local;
+        SolIrLocalId local_id = compilation.ir.places[
+            compilation.ir.expressions[local].as.place].local;
         SolIrSlice saved = compilation.ir.locals[local_id].capability_roots;
         compilation.ir.locals[local_id].capability_roots
             = (SolIrSlice){.offset = compilation.ir.root_count + 1,
@@ -2036,6 +2409,7 @@ int main(void) {
     test_affine_ownership();
     test_region_cleanup_metadata();
     test_mutable_assignment_ir_and_ownership();
+    test_place_representation_and_validation();
     test_exhaustive_validation_domains();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

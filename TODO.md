@@ -45,6 +45,8 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 - [x] Exhaustive syntax/owning-IR discriminant, span, arena-owner, executable-type,
       and callable-context validation, with per-kind censuses, composite relocation,
       inspection/formatter, and malformed-input fixtures.
+- [x] Canonical typed owning-IR places with local/computed roots, flattened field
+      projections, exact intermediate types/spans, and reserved index/dereference kinds.
 
 ## Construct Coverage
 
@@ -55,11 +57,11 @@ surface form requires either a prioritized row below or an explicit deferral her
 | Surface | Implemented bootstrap coverage | Accounted remaining work |
 | --- | --- | --- |
 | Top-level structures | Edition-2027 modules/imports; records; enums; distinct/refined types; capabilities; functions; traits/implementations; tests; contracts; effects; stable annotations | Constants and associated constants (31); package manifests/features/visibility/re-exports/dependencies (40); versioned schemas/migrations (41); FFI declarations (46); `spec`/property declarations (51); public semantic IR (54); protocols/transactions/workflows (59); typed derives/reflection (60) |
-| Statements | `let`; initialized `var`; direct-local assignment; `return`; expression statements; lexical `region` | General places and projected mutation (20-22); loops and loop exits (23-24); `require`/panic/unreachable termination (25); allocator-bearing regions and `using` resource scopes (37); lexical unsafe blocks (44); protocol `emit` and concurrency control forms (59) |
-| Expressions | Bootstrap primitive/unit/path literals; unary/binary operators; calls and type applications; fields/method calls; records/variants; `if`; `match`; blocks; `?`; exact handlers; contract `result`/`old` | Index/dereference places (20); richer termination forms (25); tuples (26); closures/method values (28-29); fixed arrays/indexing (34); refined construction/validation (50); unsafe pointer operations (44); async/protocol expressions (59); general resumptive handlers (61) |
+| Statements | `let`; initialized `var`; direct-local assignment through canonical root places; `return`; expression statements; lexical `region` | Projected mutation, partial moves, writeback, and initialization tracking (21-22); loops and loop exits (23-24); `require`/panic/unreachable termination (25); allocator-bearing regions and `using` resource scopes (37); lexical unsafe blocks (44); protocol `emit` and concurrency control forms (59) |
+| Expressions | Bootstrap primitive/unit/path literals; unary/binary operators; calls and type applications; fields/method calls; records/variants; `if`; `match`; blocks; `?`; exact handlers; contract `result`/`old`; canonical local/computed-root places with flattened field projections | Operational arrays/indexing (34); pointer/reference dereference (35, 44); richer termination forms (25); tuples (26); closures/method values (28-29); refined construction/validation (50); unsafe pointer operations (44); async/protocol expressions (59); general resumptive handlers (61) |
 | Patterns | Wildcard; Boolean; flat enum-variant bindings; exhaustive `Bool`/closed-enum matching | Nested record/enum/tuple patterns and pure guards (27); refined patterns (50); protocol-state patterns (59) |
 | Types and callable structure | `Int64`, `Bool`, `Text`, `Unit`, and `Never`; nominal applications; `Option`/`Result`; capability and structural function types; bounded type/effect parameters; one trait bound; `borrow`/`inout` parameters | Richer traits/generic methods and required associated items (30); constants and constrained const parameters (31, 33); remaining numeric/byte/rune primitives and units/dimensions (32); arrays/collections (34, 38); lifetime relationships/views (35); resource/allocator and cost types/clauses (36-38); general effect rows/aliases (42); raw pointers/ABI types (44, 46); concurrency traits/types (59) |
-| Cross-cutting representation | Every successful-program AST statement/expression/pattern kind is parsed, structurally traversed, semantically analyzed, relocated, lowered, and executable or explicitly non-runtime; discriminants, spans, linked-arena ownership, current executable type relations, callable context, per-kind censuses, and composite relocation fixtures are independently validated | Ownership/effect/contract integration for later forms (43); control-flow MIR and runtime lowering (45, 48) |
+| Cross-cutting representation | Every successful-program AST statement/expression/pattern kind is parsed, structurally traversed, semantically analyzed, relocated, lowered, and executable or explicitly non-runtime; discriminants, spans, linked-arena ownership, current executable type relations, callable context, canonical place/projection ownership, per-kind censuses, and composite relocation fixtures are independently validated | Ownership/effect/contract integration for later forms (43); control-flow MIR and runtime lowering (45, 48) |
 
 Unchecked exceptions and `throw`/`catch` are not planned; recoverable failure remains
 typed through `Result`, and cancellation remains typed. Unrestricted token/text macros
@@ -94,7 +96,7 @@ deferred until a concrete core API requires their smallest coherent subset.
 | [x] | 17 | Track regions, deterministic cleanup, and resource lifetimes | 5 | 5 | Borrow checking |
 | [x] | 18 | Add mutable local bindings, assignment, and checked whole-place updates | 5 | 5 | Exclusive borrows and cleanup |
 | [x] | 19 | Make syntax and owning-IR validation exhaustive for every kind, span, owner, type relation, and callable result; add per-kind relocation, inspection, formatter, and malformed-input tests | 5 | 4 | Current executable baseline |
-| [ ] | 20 | Define canonical place/access-path IR for locals, fields, indices, and dereferences | 5 | 5 | Whole-local mutation |
+| [x] | 20 | Define canonical place/access-path IR for locals, fields, indices, and dereferences | 5 | 5 | Whole-local mutation |
 | [ ] | 21 | Implement projected loans, partial moves, projected mutation, `inout` caller writeback, and exact replacement cleanup | 5 | 5 | Place representation |
 | [ ] | 22 | Add definite initialization, uninitialized `var`, compound assignment, and explicit `modify` scopes | 4 | 4 | Projected mutation |
 | [ ] | 23 | Add `loop`, `while`, `break`, and `continue` with ownership fixed points and exact cleanup on every edge | 5 | 5 | Places and regions |

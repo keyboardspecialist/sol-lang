@@ -815,6 +815,7 @@ static bool value_matches_type(Interpreter *interpreter,
 }
 
 static Flow evaluate(Interpreter *interpreter, SolIrExpressionId expression_id);
+
 static Flow invoke(Interpreter *interpreter, SolIrCallableId callable,
     const SolInterpreterValue *receiver, const SolInterpreterValue *arguments,
     size_t argument_count, const SolIrTypeId *type_arguments,
@@ -1472,7 +1473,9 @@ static Flow evaluate_block(Interpreter *interpreter,
             }
             sol_interpreter_value_free(&value.value);
         } else if (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT) {
-            if (!update_local(interpreter, statement->local, &value.value,
+            const SolIrExpression *target = &ir->expressions[statement->target];
+            const SolIrPlace *place = &ir->places[target->as.place];
+            if (!update_local(interpreter, place->local, &value.value,
                 statement->span)) {
                 sol_interpreter_value_free(&value.value);
                 sol_interpreter_value_free(&last.value);
@@ -1528,23 +1531,67 @@ static Flow evaluate(Interpreter *interpreter, SolIrExpressionId expression_id) 
             if (!new_value(interpreter, expression->span)) return flow_new(FLOW_ERROR);
             sol_interpreter_value_unit(&output.value);
             return output;
-        case SOL_IR_EXPR_LOCAL: {
-            Frame *owner = NULL;
-            SolInterpreterValue *value = lookup_local(
-                interpreter, expression->as.local, &owner);
-            bool copied = value != NULL && expression->local_use != SOL_IR_LOCAL_USE_MOVE
-                && clone_runtime(interpreter, expression->span, &output.value, value);
-            if (value != NULL && expression->local_use == SOL_IR_LOCAL_USE_MOVE) {
-                output.value = *value;
-                sol_interpreter_value_init(value);
-                owner->bound[expression->as.local] = false;
-                copied = true;
+        case SOL_IR_EXPR_PLACE: {
+            const SolIrPlace *place = &ir->places[expression->as.place];
+            size_t projection_steps = place->projections.count;
+            if (place->root_kind == SOL_IR_PLACE_ROOT_TEMPORARY) {
+                --projection_steps;
             }
-            if (!copied) {
-                if (value == NULL) diagnostic(interpreter,
-                    SOL_INTERPRETER_INTERNAL_INVARIANT, expression->span,
-                    "local is not bound in the active frame");
-                return flow_new(FLOW_ERROR);
+            for (size_t index = 0; index < projection_steps; ++index) {
+                SolSpan step_span = index + 1 < place->projections.count
+                    ? ir->projections[place->projections.offset
+                        + place->projections.count - index - 2].span
+                    : place->root_span;
+                if (!consume(interpreter, &interpreter->result->used.steps,
+                    interpreter->request->limits.steps, SOL_INTERPRETER_STEP_LIMIT,
+                    step_span, "step")) return flow_new(FLOW_ERROR);
+            }
+            if (place->root_kind == SOL_IR_PLACE_ROOT_TEMPORARY) {
+                output = evaluate(interpreter, place->temporary);
+                if (output.kind != FLOW_VALUE) return output;
+            } else {
+                Frame *owner = NULL;
+                SolInterpreterValue *value = lookup_local(interpreter, place->local, &owner);
+                bool move = expression->local_use == SOL_IR_LOCAL_USE_MOVE;
+                bool copied = value != NULL && !move
+                    && clone_runtime(interpreter, place->root_span, &output.value, value);
+                if (value != NULL && move) {
+                    output.value = *value;
+                    sol_interpreter_value_init(value);
+                    owner->bound[place->local] = false;
+                    copied = true;
+                }
+                if (!copied) {
+                    if (value == NULL) diagnostic(interpreter,
+                        SOL_INTERPRETER_INTERNAL_INVARIANT, place->root_span,
+                        "local is not bound in the active frame");
+                    return flow_new(FLOW_ERROR);
+                }
+            }
+            for (size_t index = 0; index < place->projections.count; ++index) {
+                const SolIrProjection *projection
+                    = &ir->projections[place->projections.offset + index];
+                if ((output.value.kind != SOL_INTERPRETER_VALUE_RECORD
+                        && output.value.kind != SOL_INTERPRETER_VALUE_ENUM)) {
+                    sol_interpreter_value_free(&output.value);
+                    if (interpreter->result->diagnostic.code == SOL_INTERPRETER_OK) {
+                        diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT,
+                            projection->span, "field projection base is invalid");
+                    }
+                    return flow_new(FLOW_ERROR);
+                }
+                SolIrSlice fields = output.value.kind == SOL_INTERPRETER_VALUE_RECORD
+                    ? ir->definitions[output.value.as.aggregate.definition].fields
+                    : ir->variants[output.value.as.aggregate.variant].fields;
+                size_t ordinal = projection->field - fields.offset;
+                SolInterpreterValue selected;
+                sol_interpreter_value_init(&selected);
+                bool cloned = ordinal < output.value.as.aggregate.field_count
+                    && clone_runtime(interpreter, projection->span, &selected,
+                        &output.value.as.aggregate.fields[ordinal]);
+                sol_interpreter_value_free(&output.value);
+                if (!cloned) return flow_new(FLOW_ERROR);
+                output.value = selected;
             }
             return output;
         }
@@ -1677,27 +1724,6 @@ static Flow evaluate(Interpreter *interpreter, SolIrExpressionId expression_id) 
                 = ir->variants[expression->as.variant.variant].owner;
             output.value.as.aggregate.variant = expression->as.variant.variant;
             return output;
-        case SOL_IR_EXPR_FIELD: {
-            Flow base = evaluate(interpreter, expression->as.field.base);
-            if (base.kind != FLOW_VALUE) return base;
-            if ((base.value.kind != SOL_INTERPRETER_VALUE_RECORD
-                    && base.value.kind != SOL_INTERPRETER_VALUE_ENUM)
-                || expression->as.field.field >= ir->field_count) {
-                sol_interpreter_value_free(&base.value);
-                diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT,
-                    expression->span, "field projection base is invalid");
-                return flow_new(FLOW_ERROR);
-            }
-            SolIrSlice fields = base.value.kind == SOL_INTERPRETER_VALUE_RECORD
-                ? ir->definitions[base.value.as.aggregate.definition].fields
-                : ir->variants[base.value.as.aggregate.variant].fields;
-            size_t ordinal = expression->as.field.field - fields.offset;
-            bool cloned = ordinal < base.value.as.aggregate.field_count
-                && clone_runtime(interpreter, expression->span, &output.value,
-                    &base.value.as.aggregate.fields[ordinal]);
-            sol_interpreter_value_free(&base.value);
-            return cloned ? output : flow_new(FLOW_ERROR);
-        }
         case SOL_IR_EXPR_IF: {
             Flow condition = evaluate(interpreter, expression->as.if_expr.condition);
             if (condition.kind != FLOW_VALUE) return condition;

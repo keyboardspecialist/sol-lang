@@ -15,6 +15,7 @@ typedef size_t SolIrLocalId;
 typedef size_t SolIrFieldId;
 typedef size_t SolIrVariantId;
 typedef size_t SolIrExpressionId;
+typedef size_t SolIrPlaceId;
 typedef size_t SolIrStatementId;
 typedef size_t SolIrArmId;
 typedef size_t SolIrSnapshotId;
@@ -186,11 +187,39 @@ typedef struct {
 } SolIrVariant;
 
 typedef enum {
+    SOL_IR_PLACE_ROOT_LOCAL,
+    SOL_IR_PLACE_ROOT_TEMPORARY,
+} SolIrPlaceRootKind;
+
+typedef enum {
+    SOL_IR_PROJECTION_FIELD,
+    SOL_IR_PROJECTION_INDEX,
+    SOL_IR_PROJECTION_DEREFERENCE,
+} SolIrProjectionKind;
+
+typedef struct {
+    SolIrProjectionKind kind;
+    SolIrTypeId type;
+    SolIrFieldId field;
+    SolIrExpressionId index;
+    SolSpan span;
+} SolIrProjection;
+
+typedef struct {
+    SolIrPlaceRootKind root_kind;
+    SolIrLocalId local;
+    SolIrExpressionId temporary;
+    SolIrTypeId type;
+    SolIrSlice projections;
+    SolSpan root_span;
+} SolIrPlace;
+
+typedef enum {
     SOL_IR_EXPR_INTEGER,
     SOL_IR_EXPR_STRING,
     SOL_IR_EXPR_BOOL,
     SOL_IR_EXPR_UNIT,
-    SOL_IR_EXPR_LOCAL,
+    SOL_IR_EXPR_PLACE,
     SOL_IR_EXPR_DEFINITION,
     SOL_IR_EXPR_REFINEMENT_SELF,
     SOL_IR_EXPR_UNARY,
@@ -198,7 +227,6 @@ typedef enum {
     SOL_IR_EXPR_CALL,
     SOL_IR_EXPR_RECORD,
     SOL_IR_EXPR_VARIANT,
-    SOL_IR_EXPR_FIELD,
     SOL_IR_EXPR_IF,
     SOL_IR_EXPR_MATCH,
     SOL_IR_EXPR_BLOCK,
@@ -254,7 +282,7 @@ typedef struct {
         int64_t integer;
         char *string;
         bool boolean;
-        SolIrLocalId local;
+        SolIrPlaceId place;
         SolIrDefinitionId definition;
         struct { SolTokenKind operator_kind; SolIrExpressionId operand; } unary;
         struct {
@@ -278,7 +306,6 @@ typedef struct {
         } call;
         struct { SolIrDefinitionId definition; SolIrSlice fields; } record;
         struct { SolIrVariantId variant; } variant;
-        struct { SolIrExpressionId base; SolIrFieldId field; } field;
         struct { SolIrExpressionId receiver; SolIrCallableId callable; } operation;
         struct {
             SolIrExpressionId condition;
@@ -391,6 +418,10 @@ typedef struct {
     size_t variant_count;
     SolIrExpression *expressions;
     size_t expression_count;
+    SolIrPlace *places;
+    size_t place_count;
+    SolIrProjection *projections;
+    size_t projection_count;
     SolIrStatement *statements;
     size_t statement_count;
     SolIrStatementId *statement_ids;

@@ -36,6 +36,8 @@ typedef struct {
     size_t statement_id_capacity;
     size_t arm_id_capacity;
     size_t operand_capacity;
+    size_t place_capacity;
+    size_t projection_capacity;
     size_t root_capacity;
     size_t cleanup_local_capacity;
     size_t effect_capacity;
@@ -102,6 +104,8 @@ void sol_ir_free(SolIr *ir) {
     free(ir->fields);
     free(ir->variants);
     free(ir->expressions);
+    free(ir->places);
+    free(ir->projections);
     free(ir->statements);
     free(ir->statement_ids);
     free(ir->arms);
@@ -206,6 +210,27 @@ static bool sol_ir_grow(
     memset((unsigned char *)*items + old * size, 0, additional * size);
     *count = next;
     if (first != NULL) *first = (unsigned char *)*items + old * size;
+    return true;
+}
+
+static bool sol_ir_append_place(SolIrLowerer *lowerer, SolIrPlace place,
+    SolIrPlaceId *id) {
+    SolIrPlace *entry = NULL;
+    if (!sol_ir_grow((void **)&lowerer->ir->places, &lowerer->ir->place_count,
+        &lowerer->place_capacity, 1, sizeof(*entry), (void **)&entry)) return false;
+    *entry = place;
+    *id = lowerer->ir->place_count - 1;
+    return true;
+}
+
+static bool sol_ir_append_projection(
+    SolIrLowerer *lowerer, SolIrProjection projection
+) {
+    SolIrProjection *entry = NULL;
+    if (!sol_ir_grow((void **)&lowerer->ir->projections,
+        &lowerer->ir->projection_count, &lowerer->projection_capacity, 1,
+        sizeof(*entry), (void **)&entry)) return false;
+    *entry = projection;
     return true;
 }
 
@@ -1898,6 +1923,7 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
     for (size_t id = 0; id < count; ++id) {
         const SolExpr *source = &lowerer->syntax->expressions[id];
         SolIrExpression *output = &lowerer->ir->expressions[id];
+        output->as.place = SOL_IR_NONE;
         output->span = source->span;
         output->type = SOL_IR_NONE;
         SolType frontend_type = lowerer->types->expressions[id];
@@ -1940,10 +1966,20 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
                 SolResolution resolution = lowerer->hir->resolutions[id];
                 if (resolution.kind == SOL_RESOLUTION_LOCAL) {
                     if (resolution.target >= lowerer->ir->local_count) return false;
-                    output->kind = SOL_IR_EXPR_LOCAL;
-                    output->as.local = resolution.target;
+                    output->kind = SOL_IR_EXPR_PLACE;
                     if (output->type == SOL_IR_NONE) {
                         output->type = lowerer->ir->locals[resolution.target].type;
+                    }
+                    SolIrPlace place = {
+                        .root_kind = SOL_IR_PLACE_ROOT_LOCAL,
+                        .local = resolution.target,
+                        .temporary = SOL_IR_NONE,
+                        .type = output->type,
+                        .projections = {lowerer->ir->projection_count, 0},
+                        .root_span = source->span,
+                    };
+                    if (!sol_ir_append_place(lowerer, place, &output->as.place)) {
+                        return false;
                     }
                 } else if (resolution.kind == SOL_RESOLUTION_REFINEMENT_SELF) {
                     output->kind = SOL_IR_EXPR_REFINEMENT_SELF;
@@ -1994,11 +2030,67 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
                 {
                 SolCapabilityMemberId bound_member = sol_ir_bound_member(lowerer, source);
                 if (lowerer->types->field_resolutions[id] != SOL_AST_NONE) {
-                    SolFieldId field = lowerer->types->field_resolutions[id];
-                    if (field >= lowerer->syntax->field_count) return false;
-                    output->kind = SOL_IR_EXPR_FIELD;
-                    output->as.field.base = source->as.field.base;
-                    output->as.field.field = field;
+                    size_t chain_count = 0;
+                    SolExprId current = id;
+                    SolExprId *chain = lowerer->syntax->expression_count == 0 ? NULL
+                        : sol_ir_allocate(lowerer->syntax->expression_count,
+                            sizeof(*chain), false);
+                    if (chain == NULL) return false;
+                    while (current < lowerer->syntax->expression_count
+                        && lowerer->syntax->expressions[current].kind == SOL_EXPR_FIELD
+                        && lowerer->types->field_resolutions[current] != SOL_AST_NONE) {
+                        if (chain_count >= lowerer->syntax->expression_count) {
+                            free(chain);
+                            return false;
+                        }
+                        chain[chain_count++] = current;
+                        current = lowerer->syntax->expressions[current].as.field.base;
+                    }
+                    if (current >= lowerer->syntax->expression_count) {
+                        free(chain);
+                        return false;
+                    }
+                    SolIrPlace place = {
+                        .root_kind = SOL_IR_PLACE_ROOT_TEMPORARY,
+                        .local = SOL_IR_NONE,
+                        .temporary = current,
+                        .type = output->type,
+                        .projections = {lowerer->ir->projection_count, chain_count},
+                        .root_span = lowerer->syntax->expressions[current].span,
+                    };
+                    if (current < lowerer->syntax->expression_count
+                        && lowerer->syntax->expressions[current].kind == SOL_EXPR_PATH) {
+                        SolResolution root = lowerer->hir->resolutions[current];
+                        if (root.kind == SOL_RESOLUTION_LOCAL
+                            && root.target < lowerer->ir->local_count) {
+                            place.root_kind = SOL_IR_PLACE_ROOT_LOCAL;
+                            place.local = root.target;
+                            place.temporary = SOL_IR_NONE;
+                        }
+                    }
+                    for (size_t projection = chain_count; projection != 0; --projection) {
+                        SolExprId field_expression = chain[projection - 1];
+                        SolIrFieldId field
+                            = lowerer->types->field_resolutions[field_expression];
+                        SolIrTypeId type = sol_ir_type(lowerer,
+                            lowerer->types->expressions[field_expression]);
+                        if (field >= lowerer->syntax->field_count || type == SOL_IR_NONE
+                            || !sol_ir_append_projection(lowerer, (SolIrProjection){
+                                .kind = SOL_IR_PROJECTION_FIELD,
+                                .type = type,
+                                .field = field,
+                                .index = SOL_IR_NONE,
+                                .span = lowerer->syntax->expressions[field_expression].span,
+                            })) {
+                            free(chain);
+                            return false;
+                        }
+                    }
+                    free(chain);
+                    output->kind = SOL_IR_EXPR_PLACE;
+                    if (!sol_ir_append_place(lowerer, place, &output->as.place)) {
+                        return false;
+                    }
                 } else if (lowerer->types->variant_resolutions[id] != SOL_AST_NONE
                     && lowerer->types->variant_resolutions[id]
                         < lowerer->syntax->variant_count
@@ -2179,10 +2271,6 @@ static bool sol_ir_lower_statements_arms(SolIrLowerer *lowerer) {
             output->kind = SOL_IR_STATEMENT_ASSIGNMENT;
             output->target = source->as.assignment.target;
             output->expression = source->as.assignment.value;
-            SolResolution resolution = lowerer->hir->resolutions[output->target];
-            if (resolution.kind != SOL_RESOLUTION_LOCAL
-                || resolution.target >= lowerer->hir->local_count) return false;
-            output->local = resolution.target;
         } else if (source->kind == SOL_STATEMENT_REGION) {
             output->kind = SOL_IR_STATEMENT_REGION;
             output->expression = source->as.region_statement.body;
@@ -2709,6 +2797,70 @@ static bool sol_ir_roots_equal(const SolIr *ir, SolIrSlice left, SolIrSlice righ
     return true;
 }
 
+static const SolIrPlace *sol_ir_expression_place(
+    const SolIr *ir, SolIrExpressionId expression
+) {
+    if (expression >= ir->expression_count
+        || ir->expressions[expression].kind != SOL_IR_EXPR_PLACE
+        || ir->expressions[expression].as.place >= ir->place_count) return NULL;
+    return &ir->places[ir->expressions[expression].as.place];
+}
+
+static bool sol_ir_direct_local_place(
+    const SolIr *ir, SolIrExpressionId expression, SolIrLocalId *local
+) {
+    const SolIrPlace *place = sol_ir_expression_place(ir, expression);
+    if (place == NULL || place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+        || place->projections.count != 0 || place->local >= ir->local_count) return false;
+    if (local != NULL) *local = place->local;
+    return true;
+}
+
+static bool sol_ir_place_types_valid(
+    const SolIr *ir, SolIrExpressionId expression_id
+) {
+    const SolIrExpression *expression = &ir->expressions[expression_id];
+    const SolIrPlace *place = sol_ir_expression_place(ir, expression_id);
+    if (place == NULL || place->type >= ir->type_count
+        || place->type != expression->type
+        || !sol_ir_slice_valid(place->projections, ir->projection_count)
+        || (int)place->root_kind < 0
+        || place->root_kind > SOL_IR_PLACE_ROOT_TEMPORARY) return false;
+    SolIrTypeId current = SOL_IR_NONE;
+    if (place->root_kind == SOL_IR_PLACE_ROOT_LOCAL) {
+        if (place->local >= ir->local_count || place->temporary != SOL_IR_NONE) return false;
+        current = ir->locals[place->local].type;
+    } else {
+        if (place->local != SOL_IR_NONE || place->temporary >= ir->expression_count
+            || place->temporary == expression_id || place->projections.count == 0
+            || ir->expressions[place->temporary].kind == SOL_IR_EXPR_PLACE) return false;
+        current = ir->expressions[place->temporary].type;
+    }
+    for (size_t index = 0; index < place->projections.count; ++index) {
+        const SolIrProjection *projection
+            = &ir->projections[place->projections.offset + index];
+        if ((int)projection->kind < 0
+            || projection->kind > SOL_IR_PROJECTION_DEREFERENCE
+            || projection->type >= ir->type_count) return false;
+        if (projection->kind != SOL_IR_PROJECTION_FIELD
+            || projection->index != SOL_IR_NONE
+            || projection->field >= ir->field_count) return false;
+        const SolIrField *field = &ir->fields[projection->field];
+        if (field->owner >= ir->definition_count
+            || ir->definitions[field->owner].kind != SOL_IR_DEFINITION_RECORD
+            || !sol_ir_nominal_type(ir, current, field->owner)) return false;
+        const SolIrType *base = &ir->types[current];
+        const SolIrDefinition *definition = &ir->definitions[field->owner];
+        if (!sol_ir_type_matches_instantiation(ir, projection->type, field->type,
+            definition->generic_parameters,
+            (SolIrSlice){base->argument_offset, base->argument_count}, SOL_IR_NONE, 0)) {
+            return false;
+        }
+        current = projection->type;
+    }
+    return current == place->type;
+}
+
 static bool sol_ir_call_types_valid(const SolIr *ir, const SolIrExpression *expression) {
     const SolIrSlice operands = expression->as.call.operands;
     SolIrSlice generic_parameters = {0};
@@ -2832,11 +2984,14 @@ static bool sol_ir_expression_types_valid(
             return sol_ir_type_is(ir, expression->type, SOL_IR_TYPE_UNIT)
                 && expression->capability_roots.count == 0
                 && expression->operation_roots.count == 0;
-        case SOL_IR_EXPR_LOCAL: {
-            if (expression->as.local >= ir->local_count) return false;
-            const SolIrLocal *local = &ir->locals[expression->as.local];
-            return expression->type == local->type
-                && sol_ir_roots_equal(ir, expression->capability_roots,
+        case SOL_IR_EXPR_PLACE: {
+            if (!sol_ir_place_types_valid(ir, id)) return false;
+            const SolIrPlace *place = sol_ir_expression_place(ir, id);
+            if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL) {
+                return expression->local_use == SOL_IR_LOCAL_USE_NONE;
+            }
+            const SolIrLocal *local = &ir->locals[place->local];
+            return sol_ir_roots_equal(ir, expression->capability_roots,
                     local->capability_roots)
                 && sol_ir_roots_equal(ir, expression->operation_roots,
                     local->operation_roots);
@@ -2931,19 +3086,6 @@ static bool sol_ir_expression_types_valid(
                     == SOL_IR_DEFINITION_ENUM
                 && sol_ir_nominal_type(ir, expression->type,
                     ir->variants[expression->as.variant.variant].owner);
-        case SOL_IR_EXPR_FIELD: {
-            if (expression->as.field.base >= ir->expression_count
-                || expression->as.field.field >= ir->field_count) return false;
-            const SolIrField *field = &ir->fields[expression->as.field.field];
-            SolIrTypeId base_id = ir->expressions[expression->as.field.base].type;
-            if (field->owner >= ir->definition_count
-                || !sol_ir_nominal_type(ir, base_id, field->owner)) return false;
-            const SolIrType *base = &ir->types[base_id];
-            const SolIrDefinition *definition = &ir->definitions[field->owner];
-            return sol_ir_type_matches_instantiation(ir, expression->type, field->type,
-                definition->generic_parameters,
-                (SolIrSlice){base->argument_offset, base->argument_count}, SOL_IR_NONE, 0);
-        }
         case SOL_IR_EXPR_IF:
             return expression->as.if_expr.condition < ir->expression_count
                 && expression->as.if_expr.then_branch < ir->expression_count
@@ -3072,10 +3214,17 @@ static bool sol_ir_executable_expression(
             if (!sol_ir_definition_expression_valid(ir, id)) return false;
             break;
         }
-        case SOL_IR_EXPR_LOCAL:
-            if (expression->as.local >= ir->local_count
-                || ir->locals[expression->as.local].owner != owner) return false;
+        case SOL_IR_EXPR_PLACE: {
+            const SolIrPlace *place = sol_ir_expression_place(ir, id);
+            if (place == NULL) return false;
+            if (place->root_kind == SOL_IR_PLACE_ROOT_LOCAL) {
+                if (place->local >= ir->local_count
+                    || ir->locals[place->local].owner != owner) return false;
+            } else {
+                SOL_IR_EXEC(place->temporary);
+            }
             break;
+        }
         case SOL_IR_EXPR_BOUND_OPERATION:
             SOL_IR_EXEC(expression->as.operation.receiver);
             break;
@@ -3110,9 +3259,6 @@ static bool sol_ir_executable_expression(
             for (size_t index = 0; index < expression->as.record.fields.count; ++index) {
                 SOL_IR_EXEC(ir->operands[expression->as.record.fields.offset + index].value);
             }
-            break;
-        case SOL_IR_EXPR_FIELD:
-            SOL_IR_EXEC(expression->as.field.base);
             break;
         case SOL_IR_EXPR_IF:
             SOL_IR_EXEC(expression->as.if_expr.condition);
@@ -3150,9 +3296,11 @@ static bool sol_ir_executable_expression(
                     && (statement->local >= ir->local_count
                         || ir->locals[statement->local].owner != owner)) return false;
                 if (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT) {
-                    if (statement->local >= ir->local_count
-                        || !introduced[statement->local]
-                        || ir->locals[statement->local].owner != owner) return false;
+                    SolIrLocalId target_local = SOL_IR_NONE;
+                    if (!sol_ir_direct_local_place(ir, statement->target,
+                            &target_local)
+                        || !introduced[target_local]
+                        || ir->locals[target_local].owner != owner) return false;
                     SOL_IR_EXEC(statement->target);
                 }
                 SOL_IR_EXEC(statement->expression);
@@ -3250,18 +3398,35 @@ static bool sol_ir_validate_arena_ownership(
         : calloc(ir->arm_count, sizeof(*arms));
     size_t *cleanups = ir->cleanup_local_count == 0 ? NULL
         : calloc(ir->cleanup_local_count, sizeof(*cleanups));
+    size_t *places = ir->place_count == 0 ? NULL
+        : calloc(ir->place_count, sizeof(*places));
+    size_t *projections = ir->projection_count == 0 ? NULL
+        : calloc(ir->projection_count, sizeof(*projections));
     if ((ir->statement_id_count != 0 && statement_slots == NULL)
         || (ir->statement_count != 0 && statements == NULL)
         || (ir->arm_id_count != 0 && arm_slots == NULL)
         || (ir->arm_count != 0 && arms == NULL)
-        || (ir->cleanup_local_count != 0 && cleanups == NULL)) {
+        || (ir->cleanup_local_count != 0 && cleanups == NULL)
+        || (ir->place_count != 0 && places == NULL)
+        || (ir->projection_count != 0 && projections == NULL)) {
         free(statement_slots); free(statements); free(arm_slots); free(arms);
-        free(cleanups);
+        free(cleanups); free(places); free(projections);
         return sol_ir_error(diagnostics, "IR arena ownership allocation failed");
     }
     for (size_t index = 0; index < ir->expression_count; ++index) {
         const SolIrExpression *expression = &ir->expressions[index];
-        if (expression->kind == SOL_IR_EXPR_BLOCK) {
+        if (expression->kind == SOL_IR_EXPR_PLACE) {
+            if (expression->as.place >= ir->place_count) {
+                free(statement_slots); free(statements); free(arm_slots); free(arms);
+                free(cleanups); free(places); free(projections);
+                return sol_ir_error(diagnostics, "IR place ID is out of range");
+            }
+            const SolIrPlace *place = &ir->places[expression->as.place];
+            ++places[expression->as.place];
+            for (size_t slot = 0; slot < place->projections.count; ++slot) {
+                ++projections[place->projections.offset + slot];
+            }
+        } else if (expression->kind == SOL_IR_EXPR_BLOCK) {
             for (size_t slot = 0; slot < expression->as.block.statements.count; ++slot) {
                 size_t position = expression->as.block.statements.offset + slot;
                 ++statement_slots[position];
@@ -3299,10 +3464,16 @@ static bool sol_ir_validate_arena_ownership(
     for (size_t index = 0; valid && index < ir->cleanup_local_count; ++index) {
         valid = cleanups[index] == 1;
     }
+    for (size_t index = 0; valid && index < ir->place_count; ++index) {
+        valid = places[index] == 1;
+    }
+    for (size_t index = 0; valid && index < ir->projection_count; ++index) {
+        valid = projections[index] == 1;
+    }
     free(statement_slots); free(statements); free(arm_slots); free(arms);
-    free(cleanups);
+    free(cleanups); free(places); free(projections);
     return valid || sol_ir_error(diagnostics,
-        "IR statement, arm, or cleanup arena entry is orphaned or shared");
+        "IR statement, arm, cleanup, place, or projection entry is orphaned or shared");
 }
 
 static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
@@ -3322,6 +3493,8 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
         || (ir->field_count != 0 && ir->fields == NULL)
         || (ir->variant_count != 0 && ir->variants == NULL)
         || (ir->expression_count != 0 && ir->expressions == NULL)
+        || (ir->place_count != 0 && ir->places == NULL)
+        || (ir->projection_count != 0 && ir->projections == NULL)
         || (ir->statement_count != 0 && ir->statements == NULL)
         || (ir->statement_id_count != 0 && ir->statement_ids == NULL)
         || (ir->arm_count != 0 && ir->arms == NULL)
@@ -3768,6 +3941,62 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             }
         }
     }
+    for (size_t index = 0; index < ir->projection_count; ++index) {
+        const SolIrProjection *projection = &ir->projections[index];
+        if ((int)projection->kind < 0
+            || projection->kind > SOL_IR_PROJECTION_DEREFERENCE
+            || projection->type >= ir->type_count
+            || projection->span.start > projection->span.end
+            || projection->span.end > ir->source_length) {
+            return sol_ir_error(diagnostics, "malformed canonical IR projection");
+        }
+        if (projection->kind == SOL_IR_PROJECTION_FIELD) {
+            if (projection->field >= ir->field_count
+                || projection->index != SOL_IR_NONE) {
+                return sol_ir_error(diagnostics,
+                    "malformed canonical IR field projection");
+            }
+        } else if (projection->kind == SOL_IR_PROJECTION_INDEX) {
+            if (projection->field != SOL_IR_NONE
+                || projection->index >= ir->expression_count) {
+                return sol_ir_error(diagnostics,
+                    "malformed canonical IR index projection");
+            }
+            return sol_ir_error(diagnostics,
+                "index projections are not canonical in the current IR");
+        } else {
+            if (projection->field != SOL_IR_NONE
+                || projection->index != SOL_IR_NONE) {
+                return sol_ir_error(diagnostics,
+                    "malformed canonical IR dereference projection");
+            }
+            return sol_ir_error(diagnostics,
+                "dereference projections are not canonical in the current IR");
+        }
+    }
+    for (size_t index = 0; index < ir->place_count; ++index) {
+        const SolIrPlace *place = &ir->places[index];
+        if ((int)place->root_kind < 0
+            || place->root_kind > SOL_IR_PLACE_ROOT_TEMPORARY
+            || place->type >= ir->type_count
+            || !sol_ir_slice_valid(place->projections, ir->projection_count)
+            || place->root_span.start > place->root_span.end
+            || place->root_span.end > ir->source_length) {
+            return sol_ir_error(diagnostics, "malformed canonical IR place");
+        }
+        if (place->root_kind == SOL_IR_PLACE_ROOT_LOCAL) {
+            if (place->local >= ir->local_count || place->temporary != SOL_IR_NONE) {
+                return sol_ir_error(diagnostics,
+                    "malformed canonical IR local place root");
+            }
+        } else if (place->local != SOL_IR_NONE
+            || place->temporary >= ir->expression_count
+            || place->projections.count == 0
+            || ir->expressions[place->temporary].kind == SOL_IR_EXPR_PLACE) {
+            return sol_ir_error(diagnostics,
+                "malformed canonical IR temporary place root");
+        }
+    }
     for (size_t index = 0; index < ir->expression_count; ++index) {
         const SolIrExpression *expression = &ir->expressions[index];
         if ((int)expression->kind < 0 || expression->kind > SOL_IR_EXPR_BOUND_OPERATION
@@ -3950,8 +4179,8 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             }
             if (validate_ownership && expression->as.call.kind == SOL_IR_CALL_METHOD
                 && expression->as.call.receiver_access != SOL_ACCESS_OWNED
-                && ir->expressions[expression->as.call.receiver].kind
-                    != SOL_IR_EXPR_LOCAL) {
+                && !sol_ir_direct_local_place(ir,
+                    expression->as.call.receiver, NULL)) {
                 return sol_ir_error(diagnostics,
                     "borrowed IR method receiver is not a direct local");
             }
@@ -3979,7 +4208,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                 SolIrExpressionId receiver = ir->expressions[
                     expression->as.call.callee].as.operation.receiver;
                 if (receiver >= ir->expression_count
-                    || ir->expressions[receiver].kind != SOL_IR_EXPR_LOCAL) {
+                    || !sol_ir_direct_local_place(ir, receiver, NULL)) {
                     return sol_ir_error(diagnostics,
                         "borrowed capability receiver is not a direct local");
                 }
@@ -4031,7 +4260,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                         "IR call operand access does not match its formal");
                 }
                 if (validate_ownership && entry->access != SOL_ACCESS_OWNED
-                    && ir->expressions[entry->value].kind != SOL_IR_EXPR_LOCAL) {
+                    && !sol_ir_direct_local_place(ir, entry->value, NULL)) {
                     return sol_ir_error(diagnostics,
                         "borrowed IR operand is not a direct local");
                 }
@@ -4040,10 +4269,6 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             && (expression->as.variant.variant >= ir->variant_count
                 || ir->variants[expression->as.variant.variant].fields.count != 0)) {
             return sol_ir_error(diagnostics, "malformed payloadless IR variant");
-        } else if (expression->kind == SOL_IR_EXPR_FIELD
-            && (expression->as.field.base >= ir->expression_count
-                || expression->as.field.field >= ir->field_count)) {
-            return sol_ir_error(diagnostics, "malformed canonical IR field projection");
         } else if (expression->kind == SOL_IR_EXPR_BOUND_OPERATION) {
             SolIrDefinitionId receiver_definition = SOL_IR_NONE;
             if (expression->as.operation.receiver >= ir->expression_count
@@ -4089,9 +4314,6 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             && (!sol_ir_slice_valid(expression->as.match_expr.arms, ir->arm_id_count)
                 || expression->as.match_expr.scrutinee >= ir->expression_count)) {
             return sol_ir_error(diagnostics, "IR match arm slice is malformed");
-        } else if (expression->kind == SOL_IR_EXPR_LOCAL
-            && expression->as.local >= ir->local_count) {
-            return sol_ir_error(diagnostics, "IR local expression is out of range");
         } else if (expression->kind == SOL_IR_EXPR_DEFINITION
             && (expression->as.definition >= ir->definition_count
                 || ir->definitions[expression->as.definition].kind
@@ -4170,10 +4392,10 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                 || expression->as.handler.provider_callable >= ir->callable_count
                 || expression->as.handler.root >= ir->local_count
                 || (validate_ownership
-                    && (ir->expressions[expression->as.handler.authority].kind
-                            != SOL_IR_EXPR_LOCAL
-                        || ir->expressions[expression->as.handler.provider].kind
-                            != SOL_IR_EXPR_LOCAL))
+                    && (!sol_ir_direct_local_place(ir,
+                            expression->as.handler.authority, NULL)
+                        || !sol_ir_direct_local_place(ir,
+                            expression->as.handler.provider, NULL)))
                 || ir->callables[expression->as.handler.source].kind
                     != SOL_IR_CALLABLE_CAPABILITY
                 || ir->callables[expression->as.handler.provider_callable].kind
@@ -4297,8 +4519,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             || statement->span.start > statement->span.end
             || statement->span.end > ir->source_length
             || statement->expression >= ir->expression_count
-            || ((statement->kind == SOL_IR_STATEMENT_LET
-                    || statement->kind == SOL_IR_STATEMENT_ASSIGNMENT)
+            || (statement->kind == SOL_IR_STATEMENT_LET
                 ? statement->local >= ir->local_count
                 : statement->local != SOL_IR_NONE)
             || (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT
@@ -4332,16 +4553,20 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                 }
             }
         } else if (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT) {
-            const SolIrLocal *local = &ir->locals[statement->local];
             const SolIrExpression *target = &ir->expressions[statement->target];
             const SolIrExpression *value = &ir->expressions[statement->expression];
+            SolIrLocalId local_id = SOL_IR_NONE;
+            if (!sol_ir_direct_local_place(ir, statement->target, &local_id)) {
+                return sol_ir_error(diagnostics,
+                    "IR assignment target is not a direct local place");
+            }
+            const SolIrLocal *local = &ir->locals[local_id];
             if (statement->target == statement->expression
                 || !sol_ir_slice_valid(local->capability_roots, ir->root_count)
                 || !sol_ir_slice_valid(local->operation_roots, ir->root_count)
                 || local->kind != SOL_IR_LOCAL_BINDING || !local->mutable
                 || local->access != SOL_ACCESS_OWNED
-                || target->kind != SOL_IR_EXPR_LOCAL
-                || target->as.local != statement->local
+                || target->kind != SOL_IR_EXPR_PLACE
                 || target->type != local->type
                 || (value->type != local->type
                     && ir->types[value->type].kind != SOL_IR_TYPE_NEVER)

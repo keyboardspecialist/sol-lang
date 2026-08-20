@@ -141,6 +141,20 @@ static bool run_observed(const SolIr *ir, const char *name,
     return sol_interpret(&request, result);
 }
 
+static bool run_observed_limits(const SolIr *ir, const char *name,
+    SolInterpreterLimits limits, CleanupLog *log, SolInterpreterResult *result) {
+    SolInterpreterRequest request;
+    memset(&request, 0, sizeof(request));
+    request.ir = ir;
+    request.callable = callable(ir, name);
+    request.definition = SOL_IR_NONE;
+    request.contracts = SOL_INTERPRETER_CONTRACTS_IGNORE;
+    request.limits = limits;
+    request.cleanup_observer = observe_cleanup;
+    request.cleanup_context = log;
+    return sol_interpret(&request, result);
+}
+
 static void test_primitives_control_and_lifetime(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -257,6 +271,70 @@ static void test_primitives_control_and_lifetime(void) {
     }
     sol_ir_free(&compilation.ir);
     sol_diagnostics_free(&compilation.diagnostics);
+}
+
+static void test_place_projection_execution(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module place_runtime\n"
+        "record Box<T> { value: T }\n"
+        "record Outer<T> { box: Box<T> }\n"
+        "function make() -> Outer<Int64> { return Outer<Int64> { "
+        "box = Box<Int64> { value = 17 } } }\n"
+        "function computed() -> Int64 { return make().box.value }\n"
+        "function local() -> Int64 { let value = make() return value.box.value }\n"
+        "record Inner { value: Int64 }\n"
+        "record CopyOuter { inner: Inner }\n"
+        "function repeated() -> Int64 { let value = CopyOuter { inner = Inner { value = 8 } } "
+        "let first = value.inner.value return first + value.inner.value }\n"));
+    SolInterpreterResult result;
+    CHECK(run(&compilation.ir, "computed", NULL, 0,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 17);
+    sol_interpreter_result_free(&result);
+    CHECK(run(&compilation.ir, "local", NULL, 0,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 17);
+    size_t local_steps = result.used.steps;
+    sol_interpreter_result_free(&result);
+    CHECK(run(&compilation.ir, "repeated", NULL, 0,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 16);
+    sol_interpreter_result_free(&result);
+    CHECK(local_steps > 2);
+    SolSpan expected_limit_span = {0};
+    for (size_t index = 0; index < compilation.ir.place_count; ++index) {
+        const SolIrPlace *place = &compilation.ir.places[index];
+        if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+            || place->local >= compilation.ir.local_count
+            || place->projections.count != 2) continue;
+        SolIrDefinitionId owner = compilation.ir.locals[place->local].owner;
+        if (owner < compilation.ir.definition_count
+            && strcmp(compilation.ir.definitions[owner].name, "local") == 0) {
+            expected_limit_span
+                = compilation.ir.projections[place->projections.offset].span;
+        }
+    }
+    CHECK(expected_limit_span.end > expected_limit_span.start);
+    CleanupLog log;
+    memset(&log, 0, sizeof(log));
+    log.ir = &compilation.ir;
+    CHECK(!run_observed_limits(&compilation.ir, "local",
+        (SolInterpreterLimits){local_steps - 2, SIZE_MAX, SIZE_MAX, SIZE_MAX,
+            SIZE_MAX}, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_STEP_LIMIT);
+    CHECK(result.diagnostic.span.start == expected_limit_span.start
+        && result.diagnostic.span.end == expected_limit_span.end);
+    CHECK(result.used.steps == local_steps - 2);
+    CHECK(log.count == 1 && strcmp(log.names[0], "value") == 0);
+    sol_interpreter_result_free(&result);
+    free_compilation(&compilation);
 }
 
 static void test_assignment_replacement_and_failure(void) {
@@ -1588,6 +1666,7 @@ static void test_regions_and_deterministic_cleanup(void) {
 
 int main(void) {
     test_primitives_control_and_lifetime();
+    test_place_projection_execution();
     test_data_callbacks_generics_and_traits();
     test_exact_generic_evidence_bindings();
     test_borrowed_host_results();
