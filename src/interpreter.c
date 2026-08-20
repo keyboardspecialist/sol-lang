@@ -55,7 +55,7 @@ static void value_clear(SolInterpreterValue *value) {
 
 static bool value_shape_valid_recursive(const SolInterpreterValue *value,
     const SolInterpreterValue **ancestors, size_t depth) {
-    if (value == NULL || depth >= 256
+    if (value == NULL || depth >= 256 || (int)value->kind < 0
         || value->kind > SOL_INTERPRETER_VALUE_BOUND_OPERATION) return false;
     for (size_t index = 0; index < depth; ++index) {
         if (ancestors[index] == value) return false;

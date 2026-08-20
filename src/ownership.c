@@ -676,7 +676,8 @@ bool sol_ir_validate_ownership(const SolIr *ir, SolDiagnostics *diagnostics) {
     if (!ownership_prepare(ir, diagnostics, true, &analysis)) return false;
     bool valid = run_ownership(&analysis);
     for (size_t index = 0; valid && index < ir->expression_count; ++index) {
-        if (ir->expressions[index].local_use > SOL_IR_LOCAL_USE_UPDATE
+        if ((int)ir->expressions[index].local_use < 0
+            || ir->expressions[index].local_use > SOL_IR_LOCAL_USE_UPDATE
             || ir->expressions[index].local_use != analysis.uses[index]) {
             valid = ownership_error(&analysis, ir->expressions[index].span,
                 "IR local-use ownership metadata is inconsistent");

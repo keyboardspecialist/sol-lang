@@ -357,7 +357,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         if (!sol_type_span_valid(checker->source, parameter->name)
             || !sol_type_span_valid(checker->source, parameter->type)
             || parameter->type_id >= syntax->type_count
-            || parameter->access > SOL_ACCESS_EXCLUSIVE
+            || (int)parameter->access < 0 || parameter->access > SOL_ACCESS_EXCLUSIVE
             || (parameter->next != SOL_AST_NONE && parameter->next >= syntax->parameter_count)) {
             sol_type_malformed(checker);
             return false;
@@ -417,7 +417,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     for (size_t index = 0; index < syntax->type_argument_count; ++index) {
         const SolTypeArgument *argument = &syntax->type_arguments[index];
         if (argument->type >= syntax->type_count
-            || argument->access > SOL_ACCESS_EXCLUSIVE
+            || (int)argument->access < 0 || argument->access > SOL_ACCESS_EXCLUSIVE
             || (argument->next != SOL_AST_NONE
                 && argument->next >= syntax->type_argument_count)) {
             sol_type_malformed(checker);
@@ -501,7 +501,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || !sol_type_span_valid(checker->source, effect->span)
             || (effect->next != SOL_AST_NONE && effect->next >= syntax->effect_count)
             || (int)effect->owner_kind < 0
-            || effect->owner_kind > SOL_EFFECT_OWNER_TYPE
+            || (int)effect->owner_kind < 0 || effect->owner_kind > SOL_EFFECT_OWNER_TYPE
             || (effect->owner_kind == SOL_EFFECT_OWNER_ITEM
                 && (effect->owner >= syntax->item_count
                     || syntax->items[effect->owner].kind != SOL_ITEM_FUNCTION))
@@ -608,6 +608,10 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     }
     for (size_t index = 0; index < syntax->statement_count; ++index) {
         const SolStatement *statement = &syntax->statements[index];
+        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_REGION) {
+            sol_type_malformed(checker);
+            return false;
+        }
         SolExprId value = statement->kind == SOL_STATEMENT_LET
                 || statement->kind == SOL_STATEMENT_VAR
             ? statement->as.let_statement.value
@@ -616,7 +620,6 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             : statement->kind == SOL_STATEMENT_REGION
                 ? statement->as.region_statement.body : statement->as.expression;
         if (value >= syntax->expression_count
-            || statement->kind > SOL_STATEMENT_REGION
             || (statement->kind == SOL_STATEMENT_ASSIGNMENT
                 && statement->as.assignment.target >= syntax->expression_count)
             || (statement->kind == SOL_STATEMENT_REGION
@@ -883,7 +886,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         const SolHirLocal *local = &hir->locals[index];
         if ((int)local->kind < 0 || local->kind > SOL_LOCAL_PATTERN
             || local->owner >= hir->definition_count
-            || local->access > SOL_ACCESS_EXCLUSIVE
+            || (int)local->access < 0 || local->access > SOL_ACCESS_EXCLUSIVE
             || (local->kind == SOL_LOCAL_PARAMETER
                 && (local->syntax_id >= syntax->parameter_count
                     || local->access != syntax->parameters[local->syntax_id].access))
@@ -1061,6 +1064,7 @@ const SolTypeRepresentation *sol_type_representation(
     if ((representation->flavor != SOL_TYPE_DECLARATION_DISTINCT
             && representation->flavor != SOL_TYPE_DECLARATION_REFINED)
         || (int)representation->representation.kind < 0
+        || (int)representation->representation.kind < 0
         || representation->representation.kind > SOL_TYPE_TRAIT_METHOD
         || representation->representation.kind == SOL_TYPE_UNKNOWN
         || representation->representation.kind == SOL_TYPE_ERROR
@@ -1086,6 +1090,7 @@ const SolTypeConstruction *sol_type_construction(
         || representation->flavor != SOL_TYPE_DECLARATION_DISTINCT
         || (construction->result.kind != SOL_TYPE_NOMINAL
             && construction->result.kind != SOL_TYPE_APPLICATION)
+        || (int)construction->representation.kind < 0
         || (int)construction->representation.kind < 0
         || construction->representation.kind > SOL_TYPE_TRAIT_METHOD
         || construction->representation.kind == SOL_TYPE_UNKNOWN

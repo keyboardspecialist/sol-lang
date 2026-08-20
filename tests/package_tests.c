@@ -18,6 +18,8 @@ static int failures = 0;
     } while (0)
 
 #define VALID_DIRECTORY SOL_TEST_SOURCE_DIR "/tests/packages/valid"
+#define RELOCATION_DIRECTORY SOL_TEST_SOURCE_DIR "/tests/packages/relocation"
+#define RELOCATION_SEED SOL_TEST_SOURCE_DIR "/tests/packages/relocation/a.sol"
 #define SINGLE_FILE SOL_TEST_SOURCE_DIR "/tests/valid.sol"
 
 typedef struct {
@@ -241,10 +243,197 @@ static void test_type_declaration_relocation(void) {
     CHECK(rmdir(directory) == 0);
 }
 
+static void test_composite_relocation(void) {
+    SolPackage package;
+    SolPackage seed;
+    SolDiagnostics diagnostics;
+    SolDiagnostics seed_diagnostics;
+    char error[256];
+    sol_package_init(&package);
+    sol_package_init(&seed);
+    sol_diagnostics_init(&diagnostics);
+    sol_diagnostics_init(&seed_diagnostics);
+
+    bool seed_loaded = sol_package_load(&seed, RELOCATION_SEED,
+        &seed_diagnostics, error, sizeof(error));
+    CHECK(seed_loaded);
+    CHECK(!sol_diagnostics_has_errors(&seed_diagnostics));
+    if (!seed_loaded) {
+        sol_diagnostics_free(&seed_diagnostics);
+        sol_diagnostics_free(&diagnostics);
+        sol_package_free(&seed);
+        sol_package_free(&package);
+        return;
+    }
+
+    bool loaded = sol_package_load(&package, RELOCATION_DIRECTORY,
+        &diagnostics, error, sizeof(error));
+    CHECK(loaded);
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(package.file_count == 2);
+    if (!loaded || package.file_count != 2) {
+        sol_diagnostics_free(&seed_diagnostics);
+        sol_diagnostics_free(&diagnostics);
+        sol_package_free(&seed);
+        sol_package_free(&package);
+        return;
+    }
+    CHECK(package.files[1].aggregate_start != 0);
+    CHECK(sol_syntax_contracts_validate(&package.source, &package.syntax));
+
+    bool kinds[SOL_EXPR_TYPE_APPLICATION + 1] = {false};
+    size_t second_file_expressions = 0;
+    CHECK(package.syntax.expression_count > seed.syntax.expression_count);
+    for (size_t index = seed.syntax.expression_count;
+        index < package.syntax.expression_count; ++index) {
+        const SolExpr *expression = &package.syntax.expressions[index];
+        CHECK(expression->span.start >= package.files[1].aggregate_start);
+        CHECK(expression->span.end <= package.files[1].aggregate_end);
+        CHECK((size_t)expression->kind <= SOL_EXPR_TYPE_APPLICATION);
+        if ((size_t)expression->kind <= SOL_EXPR_TYPE_APPLICATION) {
+            kinds[expression->kind] = true;
+        }
+        SolExprId children[3] = {SOL_AST_NONE, SOL_AST_NONE, SOL_AST_NONE};
+        if (expression->kind == SOL_EXPR_UNARY) {
+            children[0] = expression->as.unary.operand;
+        } else if (expression->kind == SOL_EXPR_BINARY) {
+            children[0] = expression->as.binary.left;
+            children[1] = expression->as.binary.right;
+        } else if (expression->kind == SOL_EXPR_CALL) {
+            children[0] = expression->as.call.callee;
+            if (expression->as.call.first_argument != SOL_AST_NONE) {
+                CHECK(expression->as.call.first_argument != 0);
+            }
+        } else if (expression->kind == SOL_EXPR_TYPE_APPLICATION) {
+            children[0] = expression->as.type_application.base;
+            CHECK(expression->as.type_application.first_argument != SOL_AST_NONE
+                && expression->as.type_application.first_argument != 0);
+        } else if (expression->kind == SOL_EXPR_FIELD) {
+            children[0] = expression->as.field.base;
+        } else if (expression->kind == SOL_EXPR_RECORD) {
+            children[0] = expression->as.record.type;
+            CHECK(expression->as.record.first_field != SOL_AST_NONE
+                && expression->as.record.first_field != 0);
+        } else if (expression->kind == SOL_EXPR_IF) {
+            children[0] = expression->as.if_expr.condition;
+            children[1] = expression->as.if_expr.then_branch;
+            children[2] = expression->as.if_expr.else_branch;
+        } else if (expression->kind == SOL_EXPR_MATCH) {
+            children[0] = expression->as.match_expr.scrutinee;
+            CHECK(expression->as.match_expr.first_arm != SOL_AST_NONE
+                && expression->as.match_expr.first_arm != 0);
+        } else if (expression->kind == SOL_EXPR_BLOCK) {
+            if (expression->as.block.first_statement != SOL_AST_NONE) {
+                CHECK(expression->as.block.first_statement != 0);
+            }
+        } else if (expression->kind == SOL_EXPR_PROPAGATE) {
+            children[0] = expression->as.propagated;
+        } else if (expression->kind == SOL_EXPR_HANDLE) {
+            children[0] = expression->as.handle.authority;
+            children[1] = expression->as.handle.provider;
+            children[2] = expression->as.handle.body;
+        } else if (expression->kind == SOL_EXPR_OLD) {
+            children[0] = expression->as.old_expression;
+        }
+        for (size_t child = 0; child < 3; ++child) {
+            if (children[child] == SOL_AST_NONE) continue;
+            CHECK(children[child] < package.syntax.expression_count);
+            if (children[child] < package.syntax.expression_count) {
+                CHECK(children[child] >= seed.syntax.expression_count);
+            }
+        }
+        ++second_file_expressions;
+    }
+    CHECK(second_file_expressions != 0);
+    CHECK(kinds[SOL_EXPR_UNARY]);
+    CHECK(kinds[SOL_EXPR_BINARY]);
+    CHECK(kinds[SOL_EXPR_CALL]);
+    CHECK(kinds[SOL_EXPR_TYPE_APPLICATION]);
+    CHECK(kinds[SOL_EXPR_FIELD]);
+    CHECK(kinds[SOL_EXPR_RECORD]);
+    CHECK(kinds[SOL_EXPR_IF]);
+    CHECK(kinds[SOL_EXPR_MATCH]);
+    CHECK(kinds[SOL_EXPR_BLOCK]);
+    CHECK(kinds[SOL_EXPR_PROPAGATE]);
+    CHECK(kinds[SOL_EXPR_HANDLE]);
+    CHECK(kinds[SOL_EXPR_RESULT]);
+    CHECK(kinds[SOL_EXPR_OLD]);
+
+    CHECK(package.syntax.argument_count > seed.syntax.argument_count);
+    for (size_t index = seed.syntax.argument_count;
+        index < package.syntax.argument_count; ++index) {
+        const SolArgument *argument = &package.syntax.arguments[index];
+        CHECK(argument->value >= seed.syntax.expression_count);
+        CHECK(argument->next == SOL_AST_NONE || argument->next >= seed.syntax.argument_count);
+    }
+    CHECK(package.syntax.statement_count > seed.syntax.statement_count);
+    for (size_t index = seed.syntax.statement_count;
+        index < package.syntax.statement_count; ++index) {
+        const SolStatement *statement = &package.syntax.statements[index];
+        CHECK(statement->span.start >= package.files[1].aggregate_start);
+        CHECK(statement->span.end <= package.files[1].aggregate_end);
+        CHECK(statement->next == SOL_AST_NONE || statement->next >= seed.syntax.statement_count);
+    }
+    CHECK(package.syntax.type_argument_count > seed.syntax.type_argument_count);
+    for (size_t index = seed.syntax.type_argument_count;
+        index < package.syntax.type_argument_count; ++index) {
+        const SolTypeArgument *argument = &package.syntax.type_arguments[index];
+        CHECK(argument->type >= seed.syntax.type_count);
+        CHECK(argument->next == SOL_AST_NONE
+            || argument->next >= seed.syntax.type_argument_count);
+    }
+    CHECK(package.syntax.match_arm_count > seed.syntax.match_arm_count);
+    for (size_t index = seed.syntax.match_arm_count;
+        index < package.syntax.match_arm_count; ++index) {
+        const SolMatchArm *arm = &package.syntax.match_arms[index];
+        CHECK(arm->span.start >= package.files[1].aggregate_start);
+        CHECK(arm->pattern >= seed.syntax.pattern_count);
+        CHECK(arm->value >= seed.syntax.expression_count);
+        CHECK(arm->next == SOL_AST_NONE || arm->next >= seed.syntax.match_arm_count);
+    }
+    CHECK(package.syntax.pattern_count > seed.syntax.pattern_count);
+    for (size_t index = seed.syntax.pattern_count;
+        index < package.syntax.pattern_count; ++index) {
+        const SolPattern *pattern = &package.syntax.patterns[index];
+        CHECK(pattern->span.start >= package.files[1].aggregate_start);
+        CHECK(pattern->first_binding == SOL_AST_NONE
+            || pattern->first_binding >= seed.syntax.pattern_binding_count);
+    }
+    CHECK(package.syntax.effect_count > seed.syntax.effect_count);
+    for (size_t index = seed.syntax.effect_count;
+        index < package.syntax.effect_count; ++index) {
+        const SolEffect *effect = &package.syntax.effects[index];
+        CHECK(effect->span.start >= package.files[1].aggregate_start);
+        CHECK(effect->next == SOL_AST_NONE || effect->next >= seed.syntax.effect_count);
+    }
+    CHECK(package.syntax.contract_condition_count > seed.syntax.contract_condition_count);
+    for (size_t index = seed.syntax.contract_condition_count;
+        index < package.syntax.contract_condition_count; ++index) {
+        const SolContractCondition *condition = &package.syntax.contract_conditions[index];
+        CHECK(condition->span.start >= package.files[1].aggregate_start);
+        CHECK(condition->expression >= seed.syntax.expression_count);
+        CHECK(condition->owner_clause >= seed.syntax.contract_clause_count);
+    }
+
+    CHECK(package.files[0].item_count != 0);
+    CHECK(package.files[1].item_start >= package.files[0].item_count);
+    for (size_t index = package.files[1].item_start;
+        index < package.files[1].item_start + package.files[1].item_count; ++index) {
+        CHECK(package.syntax.items[index].span.start
+            >= package.files[1].aggregate_start);
+    }
+
+    sol_diagnostics_free(&seed_diagnostics);
+    sol_diagnostics_free(&diagnostics);
+    sol_package_free(&seed);
+    sol_package_free(&package);
+}
+
 int main(void) {
     test_directory_load_and_boundaries();
     test_package_reuse();
     test_type_declaration_relocation();
+    test_composite_relocation();
     if (failures != 0) {
         fprintf(stderr, "%d package test failure(s)\n", failures);
         return 1;

@@ -1637,6 +1637,137 @@ static void test_type_refinement_structure_rejections(void) {
     sol_source_free(&source);
 }
 
+static void test_malformed_syntax_structure_rejections(void) {
+    static const char text[] =
+        "module malformed_structure\n"
+        "enum Choice { yes(value: Int64), no }\n"
+        "record Box<T> { value: T }\n"
+        "function identity<T>(value: T) -> T { return value }\n"
+        "function choose(choice: Choice, value: Int64) -> Int64 effects { panic } {\n"
+        "    let boxed = Box<Int64> { value = identity<Int64>(value) }\n"
+        "    let fallback = boxed.value + 1\n"
+        "    return match choice { yes(item) => -item no => fallback }\n"
+        "}\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "malformed_structure.sol", text));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+
+    SolExprId path = SOL_AST_NONE;
+    SolExprId unary = SOL_AST_NONE;
+    SolExprId binary = SOL_AST_NONE;
+    for (size_t index = 0; index < tree.expression_count; ++index) {
+        if (path == SOL_AST_NONE && tree.expressions[index].kind == SOL_EXPR_PATH) path = index;
+        if (tree.expressions[index].kind == SOL_EXPR_UNARY) unary = index;
+        if (tree.expressions[index].kind == SOL_EXPR_BINARY) binary = index;
+    }
+    CHECK(path != SOL_AST_NONE);
+    CHECK(unary != SOL_AST_NONE);
+    CHECK(binary != SOL_AST_NONE);
+    CHECK(tree.statement_count != 0);
+    CHECK(tree.pattern_count != 0);
+    CHECK(tree.match_arm_count != 0);
+    CHECK(tree.item_count != 0);
+    CHECK(tree.type_argument_count != 0);
+    CHECK(tree.effect_count != 0);
+
+    SolSpan module_name = tree.module_name;
+    tree.module_name.end = source.length + 1;
+    CHECK(!sol_syntax_contracts_validate(&source, &tree));
+    tree.module_name = module_name;
+
+    if (tree.item_count != 0) {
+        SolItemKind kind = tree.items[0].kind;
+        tree.items[0].kind = (SolItemKind)-1;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.items[0].kind = (SolItemKind)(SOL_ITEM_TEST + 1);
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.items[0].kind = kind;
+    }
+    for (size_t index = 0; index < tree.item_count; ++index) {
+        if (tree.items[index].return_type_id == SOL_AST_NONE) continue;
+        SolSpan return_type = tree.items[index].return_type;
+        tree.items[index].return_type.end = source.length + 1;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.items[index].return_type = return_type;
+        break;
+    }
+    if (tree.type_argument_count != 0) {
+        SolTypeArgumentId next = tree.type_arguments[0].next;
+        tree.type_arguments[0].next = 0;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.type_arguments[0].next = next;
+    }
+    if (tree.effect_count != 0) {
+        SolEffect *effects = tree.effects;
+        tree.effects = NULL;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.effects = effects;
+    }
+
+    if (path != SOL_AST_NONE) {
+        SolExprKind kind = tree.expressions[path].kind;
+        tree.expressions[path].kind = (SolExprKind)-1;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.expressions[path].kind = (SolExprKind)(SOL_EXPR_TYPE_APPLICATION + 1);
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.expressions[path].kind = kind;
+
+        SolSpan name = tree.expressions[path].as.name;
+        tree.expressions[path].as.name.end = source.length + 1;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.expressions[path].as.name = name;
+    }
+    if (unary != SOL_AST_NONE) {
+        SolTokenKind operator_kind = tree.expressions[unary].as.unary.operator_kind;
+        tree.expressions[unary].as.unary.operator_kind = SOL_TOKEN_PLUS;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.expressions[unary].as.unary.operator_kind = operator_kind;
+    }
+    if (binary != SOL_AST_NONE) {
+        SolTokenKind operator_kind = tree.expressions[binary].as.binary.operator_kind;
+        tree.expressions[binary].as.binary.operator_kind = SOL_TOKEN_ARROW;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.expressions[binary].as.binary.operator_kind = operator_kind;
+    }
+    if (tree.statement_count != 0) {
+        SolStatementKind kind = tree.statements[0].kind;
+        tree.statements[0].kind = (SolStatementKind)-1;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.statements[0].kind = (SolStatementKind)(SOL_STATEMENT_REGION + 1);
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.statements[0].kind = kind;
+    }
+    if (tree.pattern_count != 0) {
+        SolPatternKind kind = tree.patterns[0].kind;
+        tree.patterns[0].kind = (SolPatternKind)-1;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.patterns[0].kind = (SolPatternKind)(SOL_PATTERN_BOOL + 1);
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.patterns[0].kind = kind;
+    }
+    if (tree.match_arm_count != 0) {
+        SolPatternId pattern = tree.match_arms[0].pattern;
+        tree.match_arms[0].pattern = tree.pattern_count;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.match_arms[0].pattern = pattern;
+    }
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
 static void test_callable_access_syntax(void) {
     static const char valid[] =
         "module access\n"
@@ -1780,6 +1911,7 @@ int main(void) {
     test_type_declaration_syntax();
     test_invalid_type_declarations_and_recovery();
     test_type_refinement_structure_rejections();
+    test_malformed_syntax_structure_rejections();
     test_callable_access_syntax();
     test_valid_declarations();
     test_retained_imports();

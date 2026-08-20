@@ -402,7 +402,7 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         if (!sol_contract_type_valid(lowerer, types->expressions[index])) return false;
         SolResolution resolution = hir->resolutions[index];
         if ((int)resolution.kind < 0
-            || resolution.kind > SOL_RESOLUTION_REFINEMENT_SELF
+            || (int)resolution.kind < 0 || resolution.kind > SOL_RESOLUTION_REFINEMENT_SELF
             || (resolution.kind == SOL_RESOLUTION_DEFINITION
                 && resolution.target >= hir->definition_count)
             || (resolution.kind == SOL_RESOLUTION_LOCAL
@@ -711,6 +711,7 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
             || row->effect_parameter != SOL_AST_NONE) return false;
         for (size_t atom = 0; atom < row->count; ++atom) {
             if ((int)row->atoms[atom].argument_kind < 0
+                || (int)row->atoms[atom].argument_kind < 0
                 || row->atoms[atom].argument_kind > SOL_EFFECT_ATOM_STATIC_PATH
                 || row->atoms[atom].parameter != SOL_AST_NONE
                 || !sol_contract_span_valid(lowerer->source, row->atoms[atom].name)
@@ -778,6 +779,7 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         }
         for (size_t atom = 0; atom < row_count; ++atom) {
             if ((int)row[atom].argument_kind < 0
+                || (int)row[atom].argument_kind < 0
                 || row[atom].argument_kind > SOL_EFFECT_ATOM_SELF) return false;
             for (size_t previous = 0; previous < atom; ++previous) {
                 bool same = row[previous].argument_kind == row[atom].argument_kind

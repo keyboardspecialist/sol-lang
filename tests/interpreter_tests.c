@@ -289,6 +289,79 @@ static void test_assignment_replacement_and_failure(void) {
     sol_diagnostics_free(&compilation.diagnostics);
 }
 
+static void check_invalid_request(const SolInterpreterRequest *request) {
+    SolInterpreterResult result;
+    CHECK(!sol_interpret(request, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_INVALID_REQUEST);
+    CHECK(result.diagnostic.message[0] != '\0');
+    sol_interpreter_result_free(&result);
+}
+
+static void test_malformed_top_level_requests(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module malformed_requests\n"
+        "function value() -> Int64 { return 1 }\n"
+        "test \"truth\" true\n"));
+    SolIrCallableId function = callable(&compilation.ir, "value");
+    SolIrCallableId test = SOL_IR_NONE;
+    SolIrDefinitionId function_definition = SOL_IR_NONE;
+    SolIrDefinitionId test_definition = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.callable_count; ++index) {
+        if (compilation.ir.callables[index].kind == SOL_IR_CALLABLE_TEST) test = index;
+    }
+    for (size_t index = 0; index < compilation.ir.definition_count; ++index) {
+        if (compilation.ir.definitions[index].kind == SOL_IR_DEFINITION_FUNCTION) {
+            function_definition = index;
+        } else if (compilation.ir.definitions[index].kind == SOL_IR_DEFINITION_TEST) {
+            test_definition = index;
+        }
+    }
+    CHECK(function != SOL_IR_NONE && test != SOL_IR_NONE);
+    CHECK(function_definition != SOL_IR_NONE && test_definition != SOL_IR_NONE);
+
+    SolInterpreterResult result;
+    CHECK(!sol_interpret(NULL, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_INVALID_REQUEST);
+    sol_interpreter_result_free(&result);
+    SolInterpreterRequest request;
+    memset(&request, 0, sizeof(request));
+    request.callable = SOL_IR_NONE;
+    request.definition = SOL_IR_NONE;
+    check_invalid_request(&request);
+    request.ir = &compilation.ir;
+    check_invalid_request(&request);
+
+    request.callable = compilation.ir.callable_count;
+    request.definition = SOL_IR_NONE;
+    check_invalid_request(&request);
+    request.callable = function;
+    request.argument_count = 1;
+    check_invalid_request(&request);
+    request.argument_count = 0;
+    request.type_argument_count = 1;
+    check_invalid_request(&request);
+    request.type_argument_count = 0;
+    request.evidence.count = 1;
+    check_invalid_request(&request);
+    request.evidence.count = 0;
+
+    request.callable = test;
+    check_invalid_request(&request);
+    request.callable = function;
+    request.test_entry = true;
+    check_invalid_request(&request);
+    request.callable = SOL_IR_NONE;
+    request.definition = function_definition;
+    check_invalid_request(&request);
+    request.test_entry = false;
+    request.definition = test_definition;
+    check_invalid_request(&request);
+    CHECK(!sol_interpret(&request, NULL));
+
+    free_compilation(&compilation);
+}
+
 static void test_data_callbacks_generics_and_traits(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -1526,6 +1599,7 @@ int main(void) {
     test_callable_borrow_execution();
     test_regions_and_deterministic_cleanup();
     test_assignment_replacement_and_failure();
+    test_malformed_top_level_requests();
     if (failures != 0) fprintf(stderr, "%d interpreter test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

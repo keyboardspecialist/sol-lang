@@ -1,4 +1,5 @@
 #include "sol/inspection.h"
+#include "sol/parser.h"
 
 #include <stdarg.h>
 #include <stdint.h>
@@ -933,7 +934,7 @@ static bool sol_inspection_type_valid(const SolInspector *inspector, SolType typ
         case SOL_TYPE_CAPABILITY_OPERATION:
             return type.definition < inspector->syntax->capability_member_count;
         case SOL_TYPE_VARIANT:
-            return type.definition < inspector->syntax->variant_count;
+            return type.definition < inspector->types->variant_constructor_count;
         case SOL_TYPE_PARAMETER:
             return type.definition < inspector->syntax->type_parameter_count;
         case SOL_TYPE_TRAIT_METHOD:
@@ -945,7 +946,8 @@ static bool sol_inspection_type_valid(const SolInspector *inspector, SolType typ
 static bool sol_inspection_atom_valid(
     const SolInspector *inspector, const SolEffectAtom *atom
 ) {
-    return atom->argument_kind <= SOL_EFFECT_ATOM_SELF
+    return (int)atom->argument_kind >= 0
+        && atom->argument_kind <= SOL_EFFECT_ATOM_SELF
         && sol_inspection_span_valid(atom->name, inspector->source->length)
         && (atom->argument_kind != SOL_EFFECT_ATOM_PARAMETER
             || atom->parameter < inspector->syntax->parameter_count);
@@ -1011,7 +1013,8 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
             }
         }
     }
-    if (!sol_inspection_span_valid(syntax->module_name, package->source.length)) return false;
+    if (!sol_inspection_span_valid(syntax->module_name, package->source.length)
+        || !sol_syntax_contracts_validate(&package->source, syntax)) return false;
     if (hir->definition_count != syntax->item_count
         || hir->resolution_count != syntax->expression_count
         || hir->type_resolution_count != syntax->type_count
@@ -1027,7 +1030,9 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
         || (hir->type_effect_resolution_count != 0 && hir->type_effect_resolutions == NULL)
         || (hir->semantic_reference_count != 0 && hir->semantic_references == NULL)) return false;
     for (size_t index = 0; index < hir->definition_count; ++index) {
-        if (syntax->items[index].kind > SOL_ITEM_TEST
+        if ((int)syntax->items[index].kind < 0
+            || syntax->items[index].kind > SOL_ITEM_TEST
+            || (int)hir->definitions[index].kind < 0
             || hir->definitions[index].kind > SOL_ITEM_TEST
             || hir->definitions[index].syntax_item >= syntax->item_count
             || !sol_inspection_span_valid(hir->definitions[index].name, package->source.length)
@@ -1037,14 +1042,17 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
                 package->source.length)) return false;
     }
     for (size_t index = 0; index < syntax->expression_count; ++index) {
-        if (syntax->expressions[index].kind > SOL_EXPR_TYPE_APPLICATION
+        if ((int)syntax->expressions[index].kind < 0
+            || syntax->expressions[index].kind > SOL_EXPR_TYPE_APPLICATION
             || !sol_inspection_span_valid(syntax->expressions[index].span,
                 package->source.length)) {
             return false;
         }
     }
     for (size_t index = 0; index < hir->local_count; ++index) {
-        if (hir->locals[index].kind > SOL_LOCAL_PATTERN
+        if ((int)hir->locals[index].kind < 0
+            || hir->locals[index].kind > SOL_LOCAL_PATTERN
+            || (int)hir->locals[index].access < 0
             || hir->locals[index].access > SOL_ACCESS_EXCLUSIVE
             || (hir->locals[index].kind != SOL_LOCAL_PARAMETER
                 && hir->locals[index].access != SOL_ACCESS_OWNED)
@@ -1056,12 +1064,14 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
         }
     }
     for (size_t index = 0; index < hir->semantic_reference_count; ++index) {
-        if (!sol_inspection_span_valid(hir->semantic_references[index].span,
+        if ((int)hir->semantic_references[index].kind < 0
+            || hir->semantic_references[index].kind > SOL_SEMANTIC_REFERENCE_BOUND
+            || !sol_inspection_span_valid(hir->semantic_references[index].span,
                 package->source.length)) return false;
     }
     for (size_t index = 0; index < hir->resolution_count; ++index) {
         SolResolution resolution = hir->resolutions[index];
-        if (resolution.kind > SOL_RESOLUTION_REFINEMENT_SELF
+        if ((int)resolution.kind < 0 || resolution.kind > SOL_RESOLUTION_REFINEMENT_SELF
             || (resolution.kind == SOL_RESOLUTION_DEFINITION
                 && resolution.target >= hir->definition_count)
             || (resolution.kind == SOL_RESOLUTION_LOCAL
@@ -1071,7 +1081,7 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
     }
     for (size_t index = 0; index < hir->type_resolution_count; ++index) {
         SolTypeResolution resolution = hir->type_resolutions[index];
-        if (resolution.kind > SOL_TYPE_RESOLUTION_SELF
+        if ((int)resolution.kind < 0 || resolution.kind > SOL_TYPE_RESOLUTION_SELF
             || (resolution.kind == SOL_TYPE_RESOLUTION_DEFINITION
                 && resolution.target >= hir->definition_count)
             || (resolution.kind == SOL_TYPE_RESOLUTION_PARAMETER
@@ -1088,7 +1098,7 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
     for (size_t group = 0; group < 2; ++group) {
         for (size_t index = 0; index < effect_resolution_counts[group]; ++index) {
             SolEffectResolution resolution = effect_resolution_groups[group][index];
-            if (resolution.kind > SOL_EFFECT_RESOLUTION_ERROR
+            if ((int)resolution.kind < 0 || resolution.kind > SOL_EFFECT_RESOLUTION_ERROR
                 || (resolution.kind == SOL_EFFECT_RESOLUTION_PARAMETER
                     && resolution.target >= syntax->effect_parameter_count)) return false;
         }
@@ -1166,7 +1176,7 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
         types->implementation_target_count);
     for (size_t index = 0; index < types->type_application_count; ++index) {
         const SolTypeApplication *entry = &types->type_applications[index];
-        if (entry->constructor > SOL_TYPE_CONSTRUCTOR_USER
+        if ((int)entry->constructor < 0 || entry->constructor > SOL_TYPE_CONSTRUCTOR_USER
             || (entry->constructor == SOL_TYPE_CONSTRUCTOR_USER
                 && entry->definition >= hir->definition_count)
             || !sol_inspection_slice(entry->argument_offset, entry->argument_count,
@@ -1183,7 +1193,8 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
                 entry->effects.count)) return false;
         SOL_INSPECTION_CHECK_TYPES(entry->parameters, entry->parameter_count);
         for (size_t parameter = 0; parameter < entry->parameter_count; ++parameter) {
-            if (entry->accesses[parameter] > SOL_ACCESS_EXCLUSIVE) return false;
+            if ((int)entry->accesses[parameter] < 0
+                || entry->accesses[parameter] > SOL_ACCESS_EXCLUSIVE) return false;
         }
     }
 #undef SOL_INSPECTION_CHECK_TYPES
@@ -1231,7 +1242,7 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
     }
     for (size_t index = 0; index < types->method_resolution_count; ++index) {
         const SolMethodResolution *entry = &types->method_resolutions[index];
-        if (entry->kind > SOL_METHOD_RESOLUTION_IMPLEMENTATION
+        if ((int)entry->kind < 0 || entry->kind > SOL_METHOD_RESOLUTION_IMPLEMENTATION
             || (entry->kind != SOL_METHOD_RESOLUTION_NONE
                 && (entry->trait >= hir->definition_count
                     || (entry->kind == SOL_METHOD_RESOLUTION_IMPLEMENTATION
@@ -1254,7 +1265,8 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
             && types->argument_field_resolutions[index] >= syntax->field_count) return false;
     }
     for (size_t index = 0; index < types->representation_count; ++index) {
-        if (types->representations[index].flavor > SOL_TYPE_DECLARATION_REFINED
+        if ((int)types->representations[index].flavor < 0
+            || types->representations[index].flavor > SOL_TYPE_DECLARATION_REFINED
             || (types->representations[index].flavor != SOL_TYPE_DECLARATION_NONE
                 && syntax->items[index].kind != SOL_ITEM_TYPE)
             || !sol_inspection_type_valid(inspector,
@@ -1376,7 +1388,8 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
                 || contracts->snapshots[snapshot].old_expression != index)) return false;
     }
     for (size_t index = 0; index < diagnostics->count; ++index) {
-        if (diagnostics->items[index].severity > SOL_SEVERITY_WARNING
+        if ((int)diagnostics->items[index].severity < 0
+            || diagnostics->items[index].severity > SOL_SEVERITY_WARNING
             || memchr(diagnostics->items[index].code, '\0',
                 sizeof(diagnostics->items[index].code)) == NULL
             || memchr(diagnostics->items[index].message, '\0',

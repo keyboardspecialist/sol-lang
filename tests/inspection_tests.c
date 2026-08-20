@@ -32,6 +32,19 @@ typedef struct {
 static bool compile_fixture(TestCompilation *compilation) {
     static const char source[] =
         "module fixture\n"
+        "record Pair { left: Int64, right: Int64 }\n"
+        "enum Choice { yes(value: Int64), no }\n"
+        "capability Read { function read() -> Int64 effects { service.read<Self> } }\n"
+        "capability Mock { function read() -> Int64 effects { pure } }\n"
+        "function identity<T>(value: T) -> T { return value }\n"
+        "function propagated(value: Option<Int64>) -> Option<Int64> "
+        "{ let item = value? return some(item) }\n"
+        "function expressions(source: capability Read, mock: capability Mock) -> Int64 "
+        "effects { pure } { let text = \"fixture\" let unit = () "
+        "let pair = Pair { left = 1, right = 2 } "
+        "let selected = if true { match false { true => 1 false => -pair.left } } "
+        "else { 0 } return identity<Int64>(handle service.read<source> with mock "
+        "{ source.read() }) + selected }\n"
         "function checked(value: Int64) -> Int64 "
         "ensures { result == old(value) } { var local = value local = value "
         "return local }\n";
@@ -61,6 +74,46 @@ static bool compile_fixture(TestCompilation *compilation) {
             &compilation->hir, &compilation->types, &compilation->effects,
             &compilation->contracts, &compilation->diagnostics)
         && !sol_diagnostics_has_errors(&compilation->diagnostics);
+}
+
+static void test_expression_kind_spellings(TestCompilation *compilation) {
+    static const char *const spellings[] = {
+        "error", "integer", "string", "bool", "unit", "path", "unary",
+        "binary", "call", "field", "record", "if", "match", "block",
+        "propagate", "handle", "result", "old", "type_application",
+    };
+    size_t census[sizeof(spellings) / sizeof(spellings[0])] = {0};
+    for (size_t index = 0; index < compilation->package.syntax.expression_count; ++index) {
+        SolExprKind kind = compilation->package.syntax.expressions[index].kind;
+        CHECK((size_t)kind < sizeof(census) / sizeof(census[0]));
+        if ((size_t)kind < sizeof(census) / sizeof(census[0])) ++census[kind];
+    }
+    CHECK(census[SOL_EXPR_ERROR] == 0);
+    for (size_t kind = SOL_EXPR_INTEGER; kind <= SOL_EXPR_TYPE_APPLICATION; ++kind) {
+        CHECK(census[kind] != 0);
+    }
+
+    FILE *stream = tmpfile();
+    CHECK(stream != NULL);
+    if (stream == NULL) return;
+    CHECK(sol_inspection_render(stream, &compilation->package,
+        &compilation->hir, &compilation->types, &compilation->effects,
+        &compilation->contracts, &compilation->diagnostics));
+    long length = ftell(stream);
+    CHECK(length > 0);
+    rewind(stream);
+    char output[32768];
+    size_t read = fread(output, 1, sizeof(output) - 1, stream);
+    output[read] = '\0';
+    CHECK(length >= 0 && (size_t)length == read);
+    for (size_t kind = SOL_EXPR_INTEGER; kind <= SOL_EXPR_TYPE_APPLICATION; ++kind) {
+        char expected[64];
+        int written = snprintf(expected, sizeof(expected),
+            "\"kind\":\"%s\"", spellings[kind]);
+        CHECK(written > 0 && (size_t)written < sizeof(expected));
+        CHECK(strstr(output, expected) != NULL);
+    }
+    fclose(stream);
 }
 
 static void free_fixture(TestCompilation *compilation) {
@@ -271,6 +324,7 @@ int main(void) {
         long length = 0;
         CHECK(render(&compilation, &length));
         CHECK(length > 0);
+        test_expression_kind_spellings(&compilation);
         test_source_line_preflight(&compilation);
         test_contract_preflight(&compilation);
         test_mutable_projection(&compilation);

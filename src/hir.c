@@ -425,7 +425,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         const SolSyntaxItem *item = &syntax->items[index];
         if ((int)item->kind < 0 || item->kind > SOL_ITEM_TEST
             || (int)item->flavor < 0
-            || item->flavor > SOL_TYPE_DECLARATION_REFINED
+            || (int)item->flavor < 0 || item->flavor > SOL_TYPE_DECLARATION_REFINED
             || !sol_span_valid(resolver->source, item->name)
             || !sol_span_valid(resolver->source, item->span)
             || !sol_span_valid(resolver->source, item->stable_identity)
@@ -588,7 +588,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
         if (!sol_span_valid(resolver->source, parameter->name)
             || !sol_span_valid(resolver->source, parameter->type)
             || parameter->type_id >= syntax->type_count
-            || parameter->access > SOL_ACCESS_EXCLUSIVE
+            || (int)parameter->access < 0 || parameter->access > SOL_ACCESS_EXCLUSIVE
             || (parameter->next != SOL_AST_NONE && parameter->next >= syntax->parameter_count)) {
             sol_resolver_malformed(resolver);
             return false;
@@ -648,7 +648,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     for (size_t index = 0; index < syntax->type_argument_count; ++index) {
         const SolTypeArgument *argument = &syntax->type_arguments[index];
         if (argument->type >= syntax->type_count
-            || argument->access > SOL_ACCESS_EXCLUSIVE
+            || (int)argument->access < 0 || argument->access > SOL_ACCESS_EXCLUSIVE
             || (argument->next != SOL_AST_NONE
                 && argument->next >= syntax->type_argument_count)) {
             sol_resolver_malformed(resolver);
@@ -809,7 +809,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || !sol_span_valid(resolver->source, effect->span)
             || (effect->next != SOL_AST_NONE && effect->next >= syntax->effect_count)
             || (int)effect->owner_kind < 0
-            || effect->owner_kind > SOL_EFFECT_OWNER_TYPE
+            || (int)effect->owner_kind < 0 || effect->owner_kind > SOL_EFFECT_OWNER_TYPE
             || (effect->owner_kind == SOL_EFFECT_OWNER_ITEM
                 && (effect->owner >= syntax->item_count
                     || syntax->items[effect->owner].kind != SOL_ITEM_FUNCTION))
@@ -845,7 +845,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     for (size_t index = 0; index < syntax->contract_clause_count; ++index) {
         const SolContractClause *clause = &syntax->contract_clauses[index];
         if ((int)clause->owner_kind < 0
-            || clause->owner_kind > SOL_CONTRACT_OWNER_TYPE
+            || (int)clause->owner_kind < 0 || clause->owner_kind > SOL_CONTRACT_OWNER_TYPE
             || (clause->owner_kind == SOL_CONTRACT_OWNER_ITEM
                 && clause->owner >= syntax->item_count)
             || (clause->owner_kind == SOL_CONTRACT_OWNER_CAPABILITY_MEMBER

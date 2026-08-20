@@ -361,6 +361,51 @@ static void test_region_formatting(void) {
     sol_formatted_free(&formatted);
 }
 
+static void test_construct_golden_formatting(void) {
+    static const char source_text[] =
+        "module constructs\n"
+        "record Pair{left:Int64,right:Int64}\n"
+        "enum Choice{yes(value:Int64),no}\n"
+        "function update(value:Option<Int64>,choice:Choice)->Option<Int64> "
+        "ensures{result==old(result)}{\n"
+        "var current=0\n"
+        "current=value?\n"
+        "let pair=Pair{left=current,right=1}\n"
+        "return match choice{\n"
+        "yes(item)=>some(pair.left+item)\n"
+        "no=>none()\n"
+        "_=>none()\n"
+        "}\n"
+        "}\n"
+        "test \"boolean patterns\" match true{true=>true false=>false}\n";
+    static const char expected[] =
+        "module constructs\n"
+        "record Pair { left: Int64, right: Int64 }\n"
+        "enum Choice { yes(value: Int64), no }\n"
+        "function update(value: Option<Int64>, choice: Choice) -> Option<Int64> "
+        "ensures { result == old(result) } {\n"
+        "    var current = 0\n"
+        "    current = value?\n"
+        "    let pair = Pair { left = current, right = 1 }\n"
+        "    return match choice {\n"
+        "        yes(item) => some(pair.left + item)\n"
+        "        no => none()\n"
+        "        _ => none()\n"
+        "    }\n"
+        "}\n"
+        "test \"boolean patterns\" match true { true => true false => false }\n";
+    SolFormatted formatted;
+    SolDiagnostics diagnostics;
+    sol_formatted_init(&formatted);
+    sol_diagnostics_init(&diagnostics);
+    CHECK(format_text(source_text, &formatted, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    check_output(&formatted, expected);
+    check_second_pass(&formatted);
+    sol_diagnostics_free(&diagnostics);
+    sol_formatted_free(&formatted);
+}
+
 int main(void) {
     test_golden_formatting();
     test_comments_and_preserved_bytes();
@@ -372,6 +417,7 @@ int main(void) {
     test_embedded_nul_is_rejected();
     test_access_qualifiers();
     test_region_formatting();
+    test_construct_golden_formatting();
 
     if (failures != 0) {
         fprintf(stderr, "%d formatter test(s) failed\n", failures);

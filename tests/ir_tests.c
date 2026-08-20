@@ -1081,6 +1081,22 @@ static void test_exact_validation_findings(void) {
         compilation.syntax.arguments[named].name = (SolSpan){2, 1};
         CHECK(lower_rejected(&compilation));
         compilation.syntax.arguments[named].name = saved;
+        compilation.syntax.arguments[named].is_named = false;
+        CHECK(lower_rejected(&compilation));
+        compilation.syntax.arguments[named].is_named = true;
+    }
+    SolArgumentId positional = SOL_AST_NONE;
+    for (size_t index = 0; index < compilation.syntax.argument_count; ++index) {
+        if (!compilation.syntax.arguments[index].is_named) {
+            positional = index;
+            break;
+        }
+    }
+    CHECK(positional != SOL_AST_NONE);
+    if (positional != SOL_AST_NONE) {
+        compilation.syntax.arguments[positional].name = (SolSpan){1, 2};
+        CHECK(lower_rejected(&compilation));
+        compilation.syntax.arguments[positional].name = (SolSpan){0};
     }
     free_compilation(&compilation);
 }
@@ -1685,6 +1701,324 @@ static void test_mutable_assignment_ir_and_ownership(void) {
     free_compilation(&compilation);
 }
 
+static void test_exhaustive_validation_domains(void) {
+    TestCompilation compilation;
+    bool compiled = compile_ir(&compilation,
+        "module exhaustive_validation\n"
+        "record Pair { left: Int64, right: Int64 }\n"
+        "enum Choice<T> { yes(value: T), no }\n"
+        "type Positive = refined Int64 where self > 0\n"
+        "capability Read { function read() -> Int64 effects { service.read<Self> } }\n"
+        "capability Mock { function read() -> Int64 effects { pure } }\n"
+        "trait Display { function display(self: Self) -> Text effects { pure } "
+        "function count(self: Self) -> Int64 effects { pure } }\n"
+        "implementation Display for Int64 { "
+        "function display(self: Self) -> Text effects { pure } { return \"shown\" } "
+        "function count(self: Self) -> Int64 effects { pure } { return self } }\n"
+        "function identity<T>(value: T) -> T { return value }\n"
+        "function plain(value: Int64) -> Int64 effects { pure } { return value }\n"
+        "function apply(callback: function(Int64) -> Int64 effects { pure }) "
+        "-> Int64 effects { pure } { return callback(1) }\n"
+        "function callback_use() -> Int64 effects { pure } { return apply(plain) }\n"
+        "function empty() -> Choice<Int64> { return Choice<Int64>.no }\n"
+        "function displayed(value: Int64) -> Text effects { pure } "
+        "{ return value.display() }\n"
+        "function retained(value: capability Read, ignored: Int64) -> capability Read "
+        "authority { result derives_from value } { return value }\n"
+        "function operation(source: capability Read) -> Int64 "
+        "{ let bound = source.read return 0 }\n"
+        "function contracted(value: Int64) -> Int64 "
+        "ensures { result == old(value) } { return value }\n"
+        "function metadata(value: Int64, source: capability Read, mock: capability Mock) "
+        "-> Int64 effects { pure } "
+        "{ let text = \"metadata\" let unit = () 1 "
+        "return handle service.read<source> with mock { source.read() } }\n"
+        "function cover(flag: Bool) -> Int64 effects { panic } { var value = 1 "
+        "value = identity(-value + 2) let pair = Pair { left = value, right = 3 } "
+        "let selected = if true { pair.left } else { 0 } "
+        "region scratch { let scoped = selected } "
+        "return match Choice<Int64>.yes(selected) { yes(item) => item _ => 0 } }\n"
+        "function propagated(value: Option<Int64>) -> Option<Int64> "
+        "{ let item = value? return some(item) }\n"
+        "function boolean(value: Bool) -> Int64 { return match value "
+        "{ true => 1 false => 0 } }\n");
+    CHECK(compiled);
+    if (!compiled) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+        free_compilation(&compilation);
+        return;
+    }
+    SolIrExpressionId integer = SOL_IR_NONE;
+    SolIrExpressionId local = SOL_IR_NONE;
+    SolIrExpressionId unary = SOL_IR_NONE;
+    SolIrExpressionId binary = SOL_IR_NONE;
+    SolIrExpressionId call = SOL_IR_NONE;
+    SolIrExpressionId record = SOL_IR_NONE;
+    SolIrExpressionId if_expression = SOL_IR_NONE;
+    SolIrExpressionId propagation = SOL_IR_NONE;
+    SolIrExpressionId generic_call = SOL_IR_NONE;
+    SolIrExpressionId builtin_call = SOL_IR_NONE;
+    SolIrExpressionId method_call = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        SolIrExpressionKind kind = compilation.ir.expressions[index].kind;
+        if (integer == SOL_IR_NONE && kind == SOL_IR_EXPR_INTEGER) integer = index;
+        if (local == SOL_IR_NONE && kind == SOL_IR_EXPR_LOCAL) local = index;
+        if (unary == SOL_IR_NONE && kind == SOL_IR_EXPR_UNARY) unary = index;
+        if (binary == SOL_IR_NONE && kind == SOL_IR_EXPR_BINARY) binary = index;
+        if (call == SOL_IR_NONE && kind == SOL_IR_EXPR_CALL) call = index;
+        if (kind == SOL_IR_EXPR_CALL) {
+            const SolIrExpression *expression = &compilation.ir.expressions[index];
+            if (expression->as.call.kind == SOL_IR_CALL_FUNCTION
+                && expression->as.call.callable < compilation.ir.callable_count
+                && compilation.ir.callables[expression->as.call.callable]
+                    .generic_parameters.count != 0) generic_call = index;
+            if (expression->as.call.kind == SOL_IR_CALL_BUILTIN_SOME) builtin_call = index;
+            if (expression->as.call.kind == SOL_IR_CALL_METHOD) method_call = index;
+        }
+        if (record == SOL_IR_NONE && kind == SOL_IR_EXPR_RECORD) record = index;
+        if (if_expression == SOL_IR_NONE && kind == SOL_IR_EXPR_IF) if_expression = index;
+        if (propagation == SOL_IR_NONE && kind == SOL_IR_EXPR_PROPAGATE) {
+            propagation = index;
+        }
+    }
+    SolIrTypeId bool_type = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.type_count; ++index) {
+        if (compilation.ir.types[index].kind == SOL_IR_TYPE_BOOL) bool_type = index;
+    }
+    CHECK(integer != SOL_IR_NONE && local != SOL_IR_NONE && unary != SOL_IR_NONE
+        && binary != SOL_IR_NONE && call != SOL_IR_NONE && record != SOL_IR_NONE
+        && if_expression != SOL_IR_NONE && propagation != SOL_IR_NONE
+        && bool_type != SOL_IR_NONE && compilation.ir.statement_count != 0
+        && compilation.ir.arm_count != 0 && compilation.ir.callable_count != 0
+        && compilation.ir.local_count != 0 && compilation.ir.type_count != 0
+        && compilation.ir.effect_count != 0 && compilation.ir.access_count != 0);
+    CHECK(generic_call != SOL_IR_NONE && builtin_call != SOL_IR_NONE
+        && method_call != SOL_IR_NONE);
+    bool expression_kinds[SOL_IR_EXPR_BOUND_OPERATION + 1] = {false};
+    bool statement_kinds[SOL_IR_STATEMENT_REGION + 1] = {false};
+    bool pattern_kinds[SOL_IR_PATTERN_VARIANT + 1] = {false};
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        SolIrExpressionKind kind = compilation.ir.expressions[index].kind;
+        CHECK((int)kind >= 0 && kind <= SOL_IR_EXPR_BOUND_OPERATION);
+        if ((int)kind >= 0 && kind <= SOL_IR_EXPR_BOUND_OPERATION) {
+            expression_kinds[kind] = true;
+        }
+    }
+    for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
+        SolIrStatementKind kind = compilation.ir.statements[index].kind;
+        CHECK((int)kind >= 0 && kind <= SOL_IR_STATEMENT_REGION);
+        if ((int)kind >= 0 && kind <= SOL_IR_STATEMENT_REGION) statement_kinds[kind] = true;
+    }
+    for (size_t index = 0; index < compilation.ir.arm_count; ++index) {
+        SolIrPatternKind kind = compilation.ir.arms[index].kind;
+        CHECK((int)kind >= 0 && kind <= SOL_IR_PATTERN_VARIANT);
+        if ((int)kind >= 0 && kind <= SOL_IR_PATTERN_VARIANT) pattern_kinds[kind] = true;
+    }
+    for (size_t kind = 0; kind <= SOL_IR_EXPR_BOUND_OPERATION; ++kind) {
+        CHECK(expression_kinds[kind]);
+    }
+    for (size_t kind = 0; kind <= SOL_IR_STATEMENT_REGION; ++kind) {
+        CHECK(statement_kinds[kind]);
+    }
+    for (size_t kind = 0; kind <= SOL_IR_PATTERN_VARIANT; ++kind) {
+        CHECK(pattern_kinds[kind]);
+    }
+
+#define CHECK_REJECTED_MUTATION(place, type, value) \
+    do { \
+        type saved_value = (place); \
+        (place) = (value); \
+        CHECK(!sol_ir_validate(&compilation.ir, NULL)); \
+        (place) = saved_value; \
+    } while (0)
+
+    if (integer != SOL_IR_NONE) {
+        CHECK_REJECTED_MUTATION(compilation.ir.expressions[integer].kind,
+            SolIrExpressionKind,
+            (SolIrExpressionKind)-1);
+        CHECK_REJECTED_MUTATION(compilation.ir.expressions[integer].type,
+            SolIrTypeId, bool_type);
+    }
+    if (local != SOL_IR_NONE) {
+        CHECK_REJECTED_MUTATION(compilation.ir.expressions[local].local_use,
+            SolIrLocalUse,
+            (SolIrLocalUse)-1);
+        if (compilation.ir.expressions[local].type != bool_type) {
+            CHECK_REJECTED_MUTATION(compilation.ir.expressions[local].type,
+                SolIrTypeId, bool_type);
+        }
+    }
+    if (unary != SOL_IR_NONE) {
+        CHECK_REJECTED_MUTATION(compilation.ir.expressions[unary].as.unary.operator_kind,
+            SolTokenKind, SOL_TOKEN_ARROW);
+    }
+    if (binary != SOL_IR_NONE) {
+        CHECK_REJECTED_MUTATION(compilation.ir.expressions[binary].as.binary.operator_kind,
+            SolTokenKind, SOL_TOKEN_MODULE);
+    }
+    if (call != SOL_IR_NONE) {
+        CHECK_REJECTED_MUTATION(compilation.ir.expressions[call].as.call.kind,
+            SolIrCallKind,
+            (SolIrCallKind)-1);
+        CHECK_REJECTED_MUTATION(compilation.ir.expressions[call].type,
+            SolIrTypeId, bool_type);
+    }
+    if (generic_call != SOL_IR_NONE) {
+        SolIrCallableId target
+            = compilation.ir.expressions[generic_call].as.call.callable;
+        CHECK_REJECTED_MUTATION(compilation.ir.expressions[generic_call].type,
+            SolIrTypeId, compilation.ir.callables[target].result);
+    }
+    if (builtin_call != SOL_IR_NONE && compilation.ir.type_id_count != 0) {
+        SolIrSlice saved = compilation.ir.expressions[builtin_call].as.call.type_arguments;
+        compilation.ir.expressions[builtin_call].as.call.type_arguments
+            = (SolIrSlice){.offset = 0, .count = 1};
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        compilation.ir.expressions[builtin_call].as.call.type_arguments = saved;
+    }
+    if (method_call != SOL_IR_NONE) {
+        SolIrExpression *method = &compilation.ir.expressions[method_call];
+        CHECK(method->as.call.evidence.count == 1);
+        if (method->as.call.evidence.count == 1) {
+            SolIrDispatchEvidence *entry
+                = &compilation.ir.evidence[method->as.call.evidence.offset];
+            SolIrCallableId other_requirement = SOL_IR_NONE;
+            SolIrCallableId other_method = SOL_IR_NONE;
+            SolIrSlice requirements = compilation.ir.definitions[entry->trait].members;
+            SolIrSlice implementations
+                = compilation.ir.definitions[entry->implementation].members;
+            for (size_t index = 0; index < requirements.count; ++index) {
+                SolIrCallableId candidate
+                    = compilation.ir.members[requirements.offset + index].callable;
+                if (candidate != entry->requirement) other_requirement = candidate;
+            }
+            for (size_t index = 0; index < implementations.count; ++index) {
+                SolIrCallableId candidate
+                    = compilation.ir.members[implementations.offset + index].callable;
+                if (candidate != entry->method) other_method = candidate;
+            }
+            CHECK(other_requirement != SOL_IR_NONE && other_method != SOL_IR_NONE);
+            if (other_requirement != SOL_IR_NONE) {
+                CHECK_REJECTED_MUTATION(entry->requirement, SolIrCallableId,
+                    other_requirement);
+            }
+            if (other_method != SOL_IR_NONE) {
+                CHECK_REJECTED_MUTATION(entry->method, SolIrCallableId, other_method);
+            }
+            SolIrCallable *implementation
+                = &compilation.ir.callables[entry->method];
+            CHECK(implementation->receiver < compilation.ir.local_count);
+            if (implementation->receiver < compilation.ir.local_count) {
+                CHECK_REJECTED_MUTATION(
+                    compilation.ir.locals[implementation->receiver].type,
+                    SolIrTypeId, bool_type);
+                SolIrCallable *requirement
+                    = &compilation.ir.callables[entry->requirement];
+                CHECK(requirement->receiver < compilation.ir.local_count);
+                if (requirement->receiver < compilation.ir.local_count) {
+                    SolIrTypeId saved_implementation
+                        = compilation.ir.locals[implementation->receiver].type;
+                    SolIrTypeId saved_requirement
+                        = compilation.ir.locals[requirement->receiver].type;
+                    compilation.ir.locals[implementation->receiver].type = bool_type;
+                    compilation.ir.locals[requirement->receiver].type = bool_type;
+                    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+                    compilation.ir.locals[implementation->receiver].type
+                        = saved_implementation;
+                    compilation.ir.locals[requirement->receiver].type
+                        = saved_requirement;
+                }
+            }
+            SolIrSlice malformed = implementation->parameters;
+            implementation->parameters
+                = (SolIrSlice){.offset = compilation.ir.root_count + 1, .count = 1};
+            CHECK(!sol_ir_validate(&compilation.ir, NULL));
+            implementation->parameters = malformed;
+        }
+    }
+    if (record != SOL_IR_NONE) {
+        CHECK_REJECTED_MUTATION(compilation.ir.expressions[record].type,
+            SolIrTypeId, bool_type);
+    }
+    if (if_expression != SOL_IR_NONE) {
+        SolIrExpressionId condition
+            = compilation.ir.expressions[if_expression].as.if_expr.condition;
+        CHECK_REJECTED_MUTATION(compilation.ir.expressions[condition].type,
+            SolIrTypeId, compilation.ir.expressions[if_expression].type);
+    }
+    if (propagation != SOL_IR_NONE) {
+        CHECK_REJECTED_MUTATION(
+            compilation.ir.expressions[propagation].as.propagate.kind,
+            SolIrPropagationKind,
+            (SolIrPropagationKind)-1);
+    }
+    CHECK_REJECTED_MUTATION(compilation.ir.statements[0].kind,
+        SolIrStatementKind,
+        (SolIrStatementKind)-1);
+    CHECK_REJECTED_MUTATION(compilation.ir.arms[0].kind, SolIrPatternKind,
+        (SolIrPatternKind)-1);
+    CHECK_REJECTED_MUTATION(compilation.ir.callables[0].kind, SolIrCallableKind,
+        (SolIrCallableKind)-1);
+    CHECK_REJECTED_MUTATION(compilation.ir.callables[0].result, SolIrTypeId, bool_type);
+    CHECK_REJECTED_MUTATION(compilation.ir.callables[0].span.end,
+        size_t, compilation.ir.source_length + 1);
+    for (size_t index = 0; index < compilation.ir.callable_count; ++index) {
+        SolIrCallable *callable = &compilation.ir.callables[index];
+        if (callable->result_authority_kind != SOL_IR_AUTHORITY_LOCAL
+            || callable->parameters.count < 2) continue;
+        SolIrLocalId non_capability
+            = compilation.ir.roots[callable->parameters.offset + 1];
+        CHECK_REJECTED_MUTATION(callable->result_authority, SolIrLocalId,
+            non_capability);
+        break;
+    }
+    CHECK_REJECTED_MUTATION(compilation.ir.locals[0].kind, SolIrLocalKind,
+        (SolIrLocalKind)-1);
+    CHECK_REJECTED_MUTATION(compilation.ir.types[0].kind, SolIrTypeKind,
+        (SolIrTypeKind)-1);
+    CHECK_REJECTED_MUTATION(compilation.ir.effects[0].authority_kind,
+        SolIrAuthorityKind,
+        (SolIrAuthorityKind)-1);
+    CHECK_REJECTED_MUTATION(compilation.ir.accesses[0], SolAccessMode,
+        (SolAccessMode)-1);
+    CHECK_REJECTED_MUTATION(compilation.ir.definitions[0].kind,
+        SolIrDefinitionKind,
+        (SolIrDefinitionKind)-1);
+    CHECK_REJECTED_MUTATION(compilation.ir.definitions[0].span.end,
+        size_t, compilation.ir.source_length + 1);
+    if (local != SOL_IR_NONE) {
+        SolIrLocalId local_id = compilation.ir.expressions[local].as.local;
+        SolIrSlice saved = compilation.ir.locals[local_id].capability_roots;
+        compilation.ir.locals[local_id].capability_roots
+            = (SolIrSlice){.offset = compilation.ir.root_count + 1,
+                .count = compilation.ir.expressions[local].capability_roots.count};
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        compilation.ir.locals[local_id].capability_roots = saved;
+    }
+    if (compilation.ir.variant_count != 0) {
+        CHECK_REJECTED_MUTATION(compilation.ir.variants[0].owner,
+            SolIrDefinitionId, compilation.ir.definition_count);
+        SolIrDefinitionId wrong_owner = SOL_IR_NONE;
+        for (size_t definition = 0; definition < compilation.ir.definition_count;
+            ++definition) {
+            if (compilation.ir.definitions[definition].kind
+                == SOL_IR_DEFINITION_RECORD) wrong_owner = definition;
+        }
+        if (wrong_owner != SOL_IR_NONE) {
+            CHECK_REJECTED_MUTATION(compilation.ir.variants[0].owner,
+                SolIrDefinitionId, wrong_owner);
+        }
+    }
+    if (compilation.ir.field_count != 0) {
+        CHECK_REJECTED_MUTATION(compilation.ir.fields[0].owner,
+            SolIrDefinitionId, compilation.ir.definition_count);
+    }
+#undef CHECK_REJECTED_MUTATION
+
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_geometric_growth();
     test_complete_ir_and_lifetime();
@@ -1702,6 +2036,7 @@ int main(void) {
     test_affine_ownership();
     test_region_cleanup_metadata();
     test_mutable_assignment_ir_and_ownership();
+    test_exhaustive_validation_domains();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

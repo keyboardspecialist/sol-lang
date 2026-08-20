@@ -3529,6 +3529,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         for (size_t atom = 0; atom < function->effects.count; ++atom) {
             const SolEffectAtom *effect = &function->effects.atoms[atom];
             if ((int)effect->argument_kind < 0
+                || (int)effect->argument_kind < 0
                 || effect->argument_kind > SOL_EFFECT_ATOM_STATIC_PATH
                 || !sol_effect_span_valid(source, effect->name)
                 || !sol_effect_span_valid(source, effect->argument)
@@ -3777,7 +3778,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
     for (size_t index = 0; index < hir->local_count; ++index) {
         const SolHirLocal *local = &hir->locals[index];
         if ((int)local->kind < 0 || local->kind > SOL_LOCAL_PATTERN
-            || local->access > SOL_ACCESS_EXCLUSIVE
+            || (int)local->access < 0 || local->access > SOL_ACCESS_EXCLUSIVE
             || (local->kind != SOL_LOCAL_PARAMETER
                 && local->access != SOL_ACCESS_OWNED)
             || !sol_effect_span_valid(source, local->name)
@@ -3834,7 +3835,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || !sol_effect_span_valid(source, effect->span)
             || (effect->next != SOL_AST_NONE && effect->next >= syntax->effect_count)
             || (int)effect->owner_kind < 0
-            || effect->owner_kind > SOL_EFFECT_OWNER_TYPE
+            || (int)effect->owner_kind < 0 || effect->owner_kind > SOL_EFFECT_OWNER_TYPE
             || (effect->owner_kind == SOL_EFFECT_OWNER_ITEM
                 && effect->owner >= syntax->item_count)
             || (effect->owner_kind == SOL_EFFECT_OWNER_CAPABILITY_MEMBER
@@ -3844,7 +3845,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || (effect->owner_kind == SOL_EFFECT_OWNER_TYPE
                 && effect->owner >= syntax->type_count)
             || (int)resolution.kind < 0
-            || resolution.kind > SOL_EFFECT_RESOLUTION_ERROR
+            || (int)resolution.kind < 0 || resolution.kind > SOL_EFFECT_RESOLUTION_ERROR
             || (resolution.kind == SOL_EFFECT_RESOLUTION_PARAMETER
                 && (resolution.target >= syntax->effect_parameter_count
                     || syntax->effect_parameters[resolution.target].owner_item
