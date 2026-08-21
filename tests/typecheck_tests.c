@@ -1247,6 +1247,45 @@ static void test_invalid_return_authority_contract(void) {
     CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
     free_compilation(&compilation);
 
+    CHECK(compile_source(&compilation,
+        "module nested_function_authority\n"
+        "record Holder { callback: function() -> Int64 effects { pure } }\n"
+        "function replace(target: inout Holder, source: Holder) -> () { "
+        "target = source }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module whole_function_authority\n"
+        "function callback() -> Int64 effects { pure } { return 1 }\n"
+        "function run() -> Int64 effects { pure } { var value = callback "
+        "value = callback return value() }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module whole_generic_authority\n"
+        "function replace<T>(target: inout T, source: T) -> () { target = source }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module modify_inout_authority\ncapability Token {}\n"
+        "record Box<T> { value: T }\n"
+        "function replace(target: inout Box<capability Token>, "
+        "source: Box<capability Token>) -> () { target = source }\n"
+        "function swap(left: Box<capability Token>, right: Box<capability Token>) "
+        "-> Box<capability Token> { modify left { replace(left, right) } return left }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module modify_authority\ncapability Token {}\nrecord Box<T> { value: T }\n"
+        "function swap(left: Box<capability Token>, right: Box<capability Token>) "
+        "-> Box<capability Token> { modify left { left = right } return left }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
+    free_compilation(&compilation);
+
     static const char mixed_text[] =
         "module mixed_return_authority\n"
         "capability Root {}\n"
@@ -1992,6 +2031,41 @@ static void test_region_types(void) {
     free_compilation(&compilation);
 }
 
+static void test_bounded_mutation_types(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module bounded_mutation\n"
+        "function local() -> Int64 { var pending: Int64 pending = 1 pending += 2 "
+        "let value = pending modify value { value *= 3 } return value }\n"
+        "function parameter(value: Int64) -> Int64 { modify value { value -= 1 } "
+        "return value }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module bad_compound\n"
+        "function bad() -> Bool { var value: Bool value = true value += false "
+        "return value }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-002"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module bad_uninitialized\n"
+        "capability Clock {}\n"
+        "function bad<T>() -> () { var callback: function() -> () effects { pure } "
+        "var authority: capability Clock var generic: T () }\n"));
+    CHECK(diagnostic_count(&compilation, "SOL-TYPE-028") == 3);
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module bad_modify\n"
+        "record Pair { value: Int64, }\n"
+        "function bad() -> () { let pair = Pair { value = 1, } "
+        "modify pair.value { pair.value = 2 } }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-025"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -2053,6 +2127,7 @@ int main(void) {
     test_runtime_identity_equality_rejected();
     test_access_modes_are_exact();
     test_region_types();
+    test_bounded_mutation_types();
     test_mutable_local_types_and_targets();
     if (failures != 0) {
         fprintf(stderr, "%d type-checking test failure(s)\n", failures);

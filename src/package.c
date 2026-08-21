@@ -466,10 +466,13 @@ static void sol_package_relocate_arenas(SolSyntaxTree *tree, SolArenaOffsets o, 
         entry->span = sol_relocate_span(entry->span, base);
         entry->next = sol_relocate_id(entry->next, o.statements);
         if (entry->kind == SOL_STATEMENT_LET || entry->kind == SOL_STATEMENT_VAR) {
-            entry->as.let_statement.name = sol_relocate_span(entry->as.let_statement.name, base);
+            entry->as.let_statement.name = sol_relocate_span(
+                entry->as.let_statement.name, base);
             entry->as.let_statement.value = sol_relocate_id(
                 entry->as.let_statement.value, o.expressions
             );
+            entry->as.let_statement.type_id = sol_relocate_id(
+                entry->as.let_statement.type_id, o.types);
         } else if (entry->kind == SOL_STATEMENT_ASSIGNMENT) {
             entry->as.assignment.target = sol_relocate_id(
                 entry->as.assignment.target, o.expressions);
@@ -480,6 +483,11 @@ static void sol_package_relocate_arenas(SolSyntaxTree *tree, SolArenaOffsets o, 
                 entry->as.region_statement.label, base);
             entry->as.region_statement.body = sol_relocate_id(
                 entry->as.region_statement.body, o.expressions);
+        } else if (entry->kind == SOL_STATEMENT_MODIFY) {
+            entry->as.modify.target = sol_relocate_id(
+                entry->as.modify.target, o.expressions);
+            entry->as.modify.body = sol_relocate_id(
+                entry->as.modify.body, o.expressions);
         } else {
             entry->as.expression = sol_relocate_id(entry->as.expression, o.expressions);
         }

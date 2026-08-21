@@ -934,12 +934,22 @@ static void sol_contract_statements(
         }
         if (entry->kind == SOL_STATEMENT_ASSIGNMENT) {
             sol_contract_error(lowerer, "SOL-CONTRACT-002", entry->span,
-                "assignment is not allowed in contract or refinement predicates");
+                entry->as.assignment.operator_kind == SOL_TOKEN_EQUAL
+                    ? "assignment is not allowed in contract or refinement predicates"
+                    : "compound assignment is not allowed in contract or refinement predicates");
             sol_contract_expression(lowerer, entry->as.assignment.target, in_old);
+        }
+        if (entry->kind == SOL_STATEMENT_MODIFY) {
+            sol_contract_error(lowerer, "SOL-CONTRACT-002", entry->span,
+                "modify is not allowed in contract or refinement predicates");
+            sol_contract_expression(
+                lowerer, entry->as.modify.target, in_old);
         }
         if (entry->kind == SOL_STATEMENT_VAR) {
             sol_contract_error(lowerer, "SOL-CONTRACT-002", entry->span,
-                "mutable bindings are not allowed in contract or refinement predicates");
+                entry->as.let_statement.value == SOL_AST_NONE
+                    ? "uninitialized bindings are not allowed in contract or refinement predicates"
+                    : "mutable bindings are not allowed in contract or refinement predicates");
         }
         SolExprId value = entry->kind == SOL_STATEMENT_LET
                 || entry->kind == SOL_STATEMENT_VAR
@@ -947,8 +957,10 @@ static void sol_contract_statements(
             : entry->kind == SOL_STATEMENT_ASSIGNMENT
                 ? entry->as.assignment.value
             : entry->kind == SOL_STATEMENT_REGION
-                ? entry->as.region_statement.body : entry->as.expression;
-        sol_contract_expression(lowerer, value, in_old);
+                ? entry->as.region_statement.body
+            : entry->kind == SOL_STATEMENT_MODIFY
+                ? entry->as.modify.body : entry->as.expression;
+        if (value != SOL_AST_NONE) sol_contract_expression(lowerer, value, in_old);
         statement = entry->next;
     }
 }

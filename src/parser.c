@@ -1664,6 +1664,12 @@ static void sol_parser_check_multiline_record(SolParser *parser, SolExprId value
     }
 }
 
+static bool sol_parser_assignment_operator(SolTokenKind kind) {
+    return kind == SOL_TOKEN_EQUAL || kind == SOL_TOKEN_PLUS_EQUAL
+        || kind == SOL_TOKEN_MINUS_EQUAL || kind == SOL_TOKEN_STAR_EQUAL
+        || kind == SOL_TOKEN_SLASH_EQUAL || kind == SOL_TOKEN_PERCENT_EQUAL;
+}
+
 static SolStatementId sol_parser_statement(SolParser *parser) {
     SolToken start = sol_parser_current(parser);
     SolStatement statement = {.next = SOL_AST_NONE};
@@ -1675,15 +1681,31 @@ static SolStatementId sol_parser_statement(SolParser *parser) {
         sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER,
             mutable ? "expected a binding name after 'var'"
                     : "expected a binding name after 'let'");
-        sol_parser_expect(parser, SOL_TOKEN_EQUAL, "expected '=' after binding name");
-        SolExprId value = sol_parser_expression(parser, 1);
-        sol_parser_check_multiline_record(parser, value);
+        SolExprId value = SOL_AST_NONE;
+        SolTypeId type_id = SOL_AST_NONE;
+        SolSpan type_span = {0};
+        if (mutable && sol_parser_match(parser, SOL_TOKEN_COLON)) {
+            sol_parser_type(parser, &type_span, &type_id);
+            if (sol_parser_match(parser, SOL_TOKEN_EQUAL)) {
+                sol_parser_error(parser, "SOL-PARSE-001", sol_parser_current(parser),
+                    "typed 'var' declarations cannot have an initializer");
+                SolExprId rejected = sol_parser_expression(parser, 1);
+                sol_parser_check_multiline_record(parser, rejected);
+            }
+        } else {
+            sol_parser_expect(parser, SOL_TOKEN_EQUAL, "expected '=' after binding name");
+            value = sol_parser_expression(parser, 1);
+            sol_parser_check_multiline_record(parser, value);
+        }
         statement.kind = mutable ? SOL_STATEMENT_VAR : SOL_STATEMENT_LET;
         statement.as.let_statement.name = name.span;
         statement.as.let_statement.value = value;
+        statement.as.let_statement.type_id = type_id;
         statement.span = (SolSpan){
             .start = start.span.start,
-            .end = value == SOL_AST_NONE ? name.span.end : parser->tree->expressions[value].span.end,
+            .end = type_id != SOL_AST_NONE ? type_span.end
+                : value == SOL_AST_NONE ? name.span.end
+                : parser->tree->expressions[value].span.end,
         };
     } else if (sol_parser_match(parser, SOL_TOKEN_RETURN)) {
         SolExprId value = sol_parser_expression(parser, 1);
@@ -1707,15 +1729,32 @@ static SolStatementId sol_parser_statement(SolParser *parser) {
             .end = body == SOL_AST_NONE ? label.span.end
                 : parser->tree->expressions[body].span.end,
         };
+    } else if (sol_parser_match(parser, SOL_TOKEN_MODIFY)) {
+        bool previous_suppression = parser->suppress_record_literal;
+        parser->suppress_record_literal = true;
+        SolExprId target = sol_parser_expression(parser, 1);
+        parser->suppress_record_literal = previous_suppression;
+        SolExprId body = sol_parser_block_expression(parser);
+        statement.kind = SOL_STATEMENT_MODIFY;
+        statement.as.modify.target = target;
+        statement.as.modify.body = body;
+        statement.span = (SolSpan){
+            .start = start.span.start,
+            .end = body == SOL_AST_NONE ? start.span.end
+                : parser->tree->expressions[body].span.end,
+        };
     } else {
         SolExprId value = sol_parser_expression(parser, 1);
         sol_parser_check_multiline_record(parser, value);
-        if (sol_parser_match(parser, SOL_TOKEN_EQUAL)) {
+        SolTokenKind operator_kind = sol_parser_kind(parser);
+        if (sol_parser_assignment_operator(operator_kind)) {
+            sol_parser_advance(parser);
             SolExprId rhs = sol_parser_expression(parser, 1);
             sol_parser_check_multiline_record(parser, rhs);
             statement.kind = SOL_STATEMENT_ASSIGNMENT;
             statement.as.assignment.target = value;
             statement.as.assignment.value = rhs;
+            statement.as.assignment.operator_kind = operator_kind;
             statement.span = (SolSpan){
                 .start = value == SOL_AST_NONE ? start.span.start
                     : parser->tree->expressions[value].span.start,

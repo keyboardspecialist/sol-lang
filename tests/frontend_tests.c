@@ -114,12 +114,18 @@ static void check_ast_links(const SolSyntaxTree *tree) {
         CHECK(statement->next == SOL_AST_NONE || statement->next < tree->statement_count);
         if (statement->kind == SOL_STATEMENT_LET
             || statement->kind == SOL_STATEMENT_VAR) {
-            CHECK(statement->as.let_statement.value < tree->expression_count);
+            CHECK(statement->as.let_statement.value == SOL_AST_NONE
+                || statement->as.let_statement.value < tree->expression_count);
+            CHECK(statement->as.let_statement.type_id == SOL_AST_NONE
+                || statement->as.let_statement.type_id < tree->type_count);
         } else if (statement->kind == SOL_STATEMENT_ASSIGNMENT) {
             CHECK(statement->as.assignment.target < tree->expression_count);
             CHECK(statement->as.assignment.value < tree->expression_count);
         } else if (statement->kind == SOL_STATEMENT_REGION) {
             CHECK(statement->as.region_statement.body < tree->expression_count);
+        } else if (statement->kind == SOL_STATEMENT_MODIFY) {
+            CHECK(statement->as.modify.target < tree->expression_count);
+            CHECK(statement->as.modify.body < tree->expression_count);
         } else {
             CHECK(statement->as.expression < tree->expression_count);
         }
@@ -1742,7 +1748,7 @@ static void test_malformed_syntax_structure_rejections(void) {
         SolStatementKind kind = tree.statements[0].kind;
         tree.statements[0].kind = (SolStatementKind)-1;
         CHECK(!sol_syntax_contracts_validate(&source, &tree));
-        tree.statements[0].kind = (SolStatementKind)(SOL_STATEMENT_REGION + 1);
+        tree.statements[0].kind = (SolStatementKind)(SOL_STATEMENT_MODIFY + 1);
         CHECK(!sol_syntax_contracts_validate(&source, &tree));
         tree.statements[0].kind = kind;
     }
@@ -1907,6 +1913,102 @@ static void test_mutable_statement_syntax(void) {
     sol_source_free(&source);
 }
 
+static void test_projected_mutation_frontend(void) {
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    static const char valid[] =
+        "module mutation\nfunction f() -> Int64 { "
+        "var pending: Int64 var value = 1 value += 2 value -= 3 value *= 4 "
+        "value /= 5 value %= 6 modify value { value = 7 } return value }\n";
+    CHECK(sol_source_from_text(&source, "mutation.sol", valid));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    size_t compound_tokens = 0;
+    size_t modify_tokens = 0;
+    for (size_t index = 0; index < tokens.count; ++index) {
+        SolTokenKind kind = tokens.items[index].kind;
+        compound_tokens += kind == SOL_TOKEN_PLUS_EQUAL || kind == SOL_TOKEN_MINUS_EQUAL
+            || kind == SOL_TOKEN_STAR_EQUAL || kind == SOL_TOKEN_SLASH_EQUAL
+            || kind == SOL_TOKEN_PERCENT_EQUAL;
+        modify_tokens += kind == SOL_TOKEN_MODIFY;
+    }
+    CHECK(compound_tokens == 5);
+    CHECK(modify_tokens == 1);
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+    size_t typed_vars = 0;
+    size_t initialized_vars = 0;
+    size_t assignments = 0;
+    size_t modifies = 0;
+    bool saw_compounds[5] = {false};
+    for (size_t index = 0; index < tree.statement_count; ++index) {
+        const SolStatement *statement = &tree.statements[index];
+        if (statement->kind == SOL_STATEMENT_VAR) {
+            if (statement->as.let_statement.type_id != SOL_AST_NONE) {
+                ++typed_vars;
+                CHECK(statement->as.let_statement.value == SOL_AST_NONE);
+            } else {
+                ++initialized_vars;
+                CHECK(statement->as.let_statement.value != SOL_AST_NONE);
+            }
+        } else if (statement->kind == SOL_STATEMENT_ASSIGNMENT) {
+            ++assignments;
+            if (statement->as.assignment.operator_kind >= SOL_TOKEN_PLUS_EQUAL
+                && statement->as.assignment.operator_kind <= SOL_TOKEN_PERCENT_EQUAL) {
+                saw_compounds[statement->as.assignment.operator_kind
+                    - SOL_TOKEN_PLUS_EQUAL] = true;
+            }
+        } else if (statement->kind == SOL_STATEMENT_MODIFY) {
+            ++modifies;
+            CHECK(tree.expressions[statement->as.modify.target].kind == SOL_EXPR_PATH);
+            CHECK(tree.expressions[statement->as.modify.body].kind == SOL_EXPR_BLOCK);
+        }
+    }
+    CHECK(typed_vars == 1);
+    CHECK(initialized_vars == 1);
+    CHECK(assignments == 6);
+    CHECK(modifies == 1);
+    for (size_t index = 0; index < 5; ++index) CHECK(saw_compounds[index]);
+    check_ast_links(&tree);
+
+    for (size_t index = 0; index < tree.statement_count; ++index) {
+        if (tree.statements[index].kind != SOL_STATEMENT_ASSIGNMENT) continue;
+        SolTokenKind operator_kind = tree.statements[index].as.assignment.operator_kind;
+        tree.statements[index].as.assignment.operator_kind = SOL_TOKEN_PLUS;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.statements[index].as.assignment.operator_kind = operator_kind;
+        break;
+    }
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+
+    static const char malformed[] =
+        "module bad\n"
+        "function annotated() -> () { let value: Int64 = 1 }\n"
+        "function initialized() -> () { var value: Int64 = 1 }\n"
+        "function missing() -> () { var value }\n"
+        "function bad_modify() -> () { modify { } }\n"
+        "function expression_modify() -> () { return modify value { } }\n";
+    CHECK(sol_source_from_text(&source, "bad_mutation.sol", malformed));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
 int main(void) {
     test_type_declaration_syntax();
     test_invalid_type_declarations_and_recovery();
@@ -1950,6 +2052,7 @@ int main(void) {
     test_trait_method_authority_rejected();
     test_region_statement_syntax();
     test_mutable_statement_syntax();
+    test_projected_mutation_frontend();
     if (failures != 0) {
         fprintf(stderr, "%d frontend test failure(s)\n", failures);
         return 1;

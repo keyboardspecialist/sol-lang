@@ -32,6 +32,7 @@ static const SolKeyword SOL_KEYWORDS[] = {
     {"inout", SOL_TOKEN_INOUT},
     {"test", SOL_TOKEN_TEST},
     {"region", SOL_TOKEN_REGION},
+    {"modify", SOL_TOKEN_MODIFY},
     {"effects", SOL_TOKEN_EFFECTS},
     {"requires", SOL_TOKEN_REQUIRES},
     {"ensures", SOL_TOKEN_ENSURES},
@@ -284,18 +285,44 @@ bool sol_lex(
             case '}': SOL_ADD_SINGLE(SOL_TOKEN_RIGHT_BRACE); break;
             case '[': SOL_ADD_SINGLE(SOL_TOKEN_LEFT_BRACKET); break;
             case ']': SOL_ADD_SINGLE(SOL_TOKEN_RIGHT_BRACKET); break;
-            case '+': SOL_ADD_SINGLE(SOL_TOKEN_PLUS); break;
-            case '*': SOL_ADD_SINGLE(SOL_TOKEN_STAR); break;
-            case '%': SOL_ADD_SINGLE(SOL_TOKEN_PERCENT); break;
+            case '+':
+                if (cursor + 1 < source->length && source->text[cursor + 1] == '=') {
+                    SOL_ADD_DOUBLE(SOL_TOKEN_PLUS_EQUAL);
+                } else {
+                    SOL_ADD_SINGLE(SOL_TOKEN_PLUS);
+                }
+                break;
+            case '*':
+                if (cursor + 1 < source->length && source->text[cursor + 1] == '=') {
+                    SOL_ADD_DOUBLE(SOL_TOKEN_STAR_EQUAL);
+                } else {
+                    SOL_ADD_SINGLE(SOL_TOKEN_STAR);
+                }
+                break;
+            case '%':
+                if (cursor + 1 < source->length && source->text[cursor + 1] == '=') {
+                    SOL_ADD_DOUBLE(SOL_TOKEN_PERCENT_EQUAL);
+                } else {
+                    SOL_ADD_SINGLE(SOL_TOKEN_PERCENT);
+                }
+                break;
             case '.': SOL_ADD_SINGLE(SOL_TOKEN_DOT); break;
             case ',': SOL_ADD_SINGLE(SOL_TOKEN_COMMA); break;
             case ':': SOL_ADD_SINGLE(SOL_TOKEN_COLON); break;
             case '@': SOL_ADD_SINGLE(SOL_TOKEN_AT); break;
             case '?': SOL_ADD_SINGLE(SOL_TOKEN_QUESTION); break;
-            case '/': SOL_ADD_SINGLE(SOL_TOKEN_SLASH); break;
+            case '/':
+                if (cursor + 1 < source->length && source->text[cursor + 1] == '=') {
+                    SOL_ADD_DOUBLE(SOL_TOKEN_SLASH_EQUAL);
+                } else {
+                    SOL_ADD_SINGLE(SOL_TOKEN_SLASH);
+                }
+                break;
             case '-':
                 if (cursor + 1 < source->length && source->text[cursor + 1] == '>') {
                     SOL_ADD_DOUBLE(SOL_TOKEN_ARROW);
+                } else if (cursor + 1 < source->length && source->text[cursor + 1] == '=') {
+                    SOL_ADD_DOUBLE(SOL_TOKEN_MINUS_EQUAL);
                 } else {
                     SOL_ADD_SINGLE(SOL_TOKEN_MINUS);
                 }
@@ -372,10 +399,10 @@ const char *sol_token_kind_name(SolTokenKind kind) {
         "end of file", "invalid token", "whitespace", "newline", "line comment",
         "block comment", "identifier", "integer", "string", "module", "edition",
         "use", "public", "private", "record", "enum", "type", "distinct", "refined", "where", "open", "capability",
-        "trait", "implementation", "for", "function", "borrow", "inout", "test", "effects", "requires", "ensures", "pure", "let", "var", "return", "region",
+        "trait", "implementation", "for", "function", "borrow", "inout", "test", "effects", "requires", "ensures", "pure", "let", "var", "return", "region", "modify",
         "if", "else", "match", "handle", "with", "true", "false", "(", ")", "{", "}", "[",
         "]", "<", ">", "<=", ">=", "=", "==", "!", "!=", "+", "-", "*",
-        "/", "%", "&&", "||", ".", ",", ":", "@", "?", "->", "=>",
+        "/", "%", "+=", "-=", "*=", "/=", "%=", "&&", "||", ".", ",", ":", "@", "?", "->", "=>",
     };
     size_t count = sizeof(names) / sizeof(names[0]);
     size_t index = (size_t)kind;

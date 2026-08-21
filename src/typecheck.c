@@ -23,6 +23,8 @@ typedef struct {
     SolContractClauseKind contract_kind;
     SolContractOutcomeKind contract_outcome;
     SolType contract_result;
+    SolLocalId modify_roots[256];
+    size_t modify_root_count;
     bool in_contract;
     bool in_old;
     bool allocation_failed;
@@ -608,7 +610,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     }
     for (size_t index = 0; index < syntax->statement_count; ++index) {
         const SolStatement *statement = &syntax->statements[index];
-        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_REGION) {
+        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_MODIFY) {
             sol_type_malformed(checker);
             return false;
         }
@@ -618,12 +620,35 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             : statement->kind == SOL_STATEMENT_ASSIGNMENT
                 ? statement->as.assignment.value
             : statement->kind == SOL_STATEMENT_REGION
-                ? statement->as.region_statement.body : statement->as.expression;
-        if (value >= syntax->expression_count
+                ? statement->as.region_statement.body
+            : statement->kind == SOL_STATEMENT_MODIFY
+                ? statement->as.modify.body : statement->as.expression;
+        bool binding = statement->kind == SOL_STATEMENT_LET
+            || statement->kind == SOL_STATEMENT_VAR;
+        bool uninitialized = binding && value == SOL_AST_NONE;
+        if ((!uninitialized && value >= syntax->expression_count)
+            || (binding && (uninitialized
+                    ? statement->as.let_statement.type_id >= syntax->type_count
+                    : statement->as.let_statement.type_id != SOL_AST_NONE))
+            || (uninitialized && statement->kind != SOL_STATEMENT_VAR)
             || (statement->kind == SOL_STATEMENT_ASSIGNMENT
-                && statement->as.assignment.target >= syntax->expression_count)
+                && (statement->as.assignment.target >= syntax->expression_count
+                    || (statement->as.assignment.operator_kind != SOL_TOKEN_EQUAL
+                        && statement->as.assignment.operator_kind
+                            != SOL_TOKEN_PLUS_EQUAL
+                        && statement->as.assignment.operator_kind
+                            != SOL_TOKEN_MINUS_EQUAL
+                        && statement->as.assignment.operator_kind
+                            != SOL_TOKEN_STAR_EQUAL
+                        && statement->as.assignment.operator_kind
+                            != SOL_TOKEN_SLASH_EQUAL
+                        && statement->as.assignment.operator_kind
+                            != SOL_TOKEN_PERCENT_EQUAL)))
             || (statement->kind == SOL_STATEMENT_REGION
                 && syntax->expressions[value].kind != SOL_EXPR_BLOCK)
+            || (statement->kind == SOL_STATEMENT_MODIFY
+                && (statement->as.modify.target >= syntax->expression_count
+                    || syntax->expressions[value].kind != SOL_EXPR_BLOCK))
             || (statement->next != SOL_AST_NONE && statement->next >= syntax->statement_count)) {
             sol_type_malformed(checker);
             return false;
@@ -3460,6 +3485,7 @@ static bool sol_type_representation_has_capability(
 ) {
     if (depth >= 256) return true;
     if (type.kind == SOL_TYPE_PARAMETER) return unresolved_parameters;
+    if (type.kind == SOL_TYPE_FUNCTION_SIGNATURE && !function_shapes) return true;
     SolDefId definition = sol_type_nominal_definition(checker, type);
     const SolTypeApplication *application = NULL;
     const SolType *arguments = NULL;
@@ -4035,7 +4061,14 @@ static SolProvenanceId sol_type_block_origin(
             : statement->kind == SOL_STATEMENT_ASSIGNMENT
                 ? statement->as.assignment.value
             : statement->kind == SOL_STATEMENT_REGION
-                ? statement->as.region_statement.body : statement->as.expression;
+                ? statement->as.region_statement.body
+            : statement->kind == SOL_STATEMENT_MODIFY
+                ? statement->as.modify.body : statement->as.expression;
+        if (value_id == SOL_AST_NONE) {
+            if (!terminated) result = SOL_PROVENANCE_NONE;
+            statement_id = statement->next;
+            continue;
+        }
         SolType value = checker->types->expressions[value_id];
         if (!terminated) {
             if (statement->kind == SOL_STATEMENT_EXPRESSION
@@ -4299,11 +4332,22 @@ static bool sol_type_assignment_root(SolTypeChecker *checker, SolExprId expressi
         && resolution->target < checker->hir->local_count;
 }
 
+static bool sol_type_modify_root_active(
+    const SolTypeChecker *checker,
+    SolLocalId local
+) {
+    for (size_t index = checker->modify_root_count; index > 0; --index) {
+        if (checker->modify_roots[index - 1] == local) return true;
+    }
+    return false;
+}
+
 static bool sol_type_projected_assignment_has_authority(
     SolTypeChecker *checker, SolType type
 ) {
-    if (type.kind == SOL_TYPE_SELF || type.kind == SOL_TYPE_CAPABILITY_OPERATION) return true;
-    if (type.kind == SOL_TYPE_FUNCTION_SIGNATURE) return true;
+    if (type.kind == SOL_TYPE_SELF || type.kind == SOL_TYPE_CAPABILITY_OPERATION
+        || type.kind == SOL_TYPE_FUNCTION
+        || type.kind == SOL_TYPE_FUNCTION_SIGNATURE) return true;
     SolType expanded[256] = {0};
     return sol_type_representation_has_capability(
         checker, type, 0, expanded, true, false);
@@ -4318,7 +4362,10 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
         const SolStatement *statement = &checker->syntax->statements[statement_id];
         if (statement->kind == SOL_STATEMENT_LET
             || statement->kind == SOL_STATEMENT_VAR) {
-            SolType value = sol_type_expression(checker, statement->as.let_statement.value);
+            SolExprId initializer = statement->as.let_statement.value;
+            SolType value = initializer == SOL_AST_NONE
+                ? sol_type_from_id(checker, statement->as.let_statement.type_id)
+                : sol_type_expression(checker, initializer);
             SolLocalId local = sol_type_find_local(
                 checker,
                 SOL_LOCAL_BINDING,
@@ -4326,14 +4373,25 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
             );
             if (local != SOL_AST_NONE) {
                 checker->types->locals[local] = value;
-                checker->types->local_capability_origins[local]
-                    = checker->types->expression_capability_origins[
-                        statement->as.let_statement.value
-                    ];
-                checker->types->local_operation_origins[local]
-                    = checker->types->expression_operation_origins[
-                        statement->as.let_statement.value
-                    ];
+                checker->types->local_capability_origins[local] = initializer == SOL_AST_NONE
+                    ? SOL_PROVENANCE_NONE
+                    : checker->types->expression_capability_origins[initializer];
+                checker->types->local_operation_origins[local] = initializer == SOL_AST_NONE
+                    ? SOL_PROVENANCE_NONE
+                    : checker->types->expression_operation_origins[initializer];
+            }
+            if (initializer == SOL_AST_NONE) {
+                SolType expanded[256] = {0};
+                bool forbidden = value.kind == SOL_TYPE_FUNCTION
+                    || value.kind == SOL_TYPE_FUNCTION_SIGNATURE
+                    || value.kind == SOL_TYPE_SELF
+                    || value.kind == SOL_TYPE_PARAMETER
+                    || sol_type_representation_has_capability(
+                        checker, value, 0, expanded, true, true);
+                if (forbidden) {
+                    sol_type_error(checker, "SOL-TYPE-028", statement->span,
+                        "an uninitialized local requires a concrete authority-free value type");
+                }
             }
             if (!terminated) {
                 result = value.kind == SOL_TYPE_NEVER
@@ -4357,22 +4415,45 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
             bool exclusive_parameter = root != NULL
                 && root->kind == SOL_LOCAL_PARAMETER
                 && root->access == SOL_ACCESS_EXCLUSIVE;
+            bool modify_writable = root != NULL
+                && root->access == SOL_ACCESS_OWNED
+                && sol_type_modify_root_active(checker, resolution.target);
             bool valid_target = root != NULL
                 && root->owner == checker->current_definition
-                && (mutable_binding || exclusive_parameter);
+                && (mutable_binding || exclusive_parameter || modify_writable);
             if (!valid_target) {
                 sol_type_error(checker, "SOL-TYPE-025", statement->span,
                     "assignment target must be a mutable local or inout parameter place");
             }
-            SolType expected = target_type;
+            bool compound = statement->as.assignment.operator_kind != SOL_TOKEN_EQUAL;
+            SolType expected = compound
+                ? (SolType){.kind = SOL_TYPE_INT64} : target_type;
             SolType value = sol_type_expression_expected(checker, value_id, expected);
             bool assignable = valid_target
+                && (!compound || target_type.kind == SOL_TYPE_INT64)
+                && (!compound || value.kind == SOL_TYPE_INT64
+                    || value.kind == SOL_TYPE_NEVER
+                    || value.kind == SOL_TYPE_ERROR)
                 && sol_type_assignable(checker, expected, value, value_id);
             if (valid_target && !assignable) {
                 sol_type_error(checker, "SOL-TYPE-002", statement->span,
                     "assignment value is not assignable to the mutable local's fixed type");
             }
-            if (assignable && projected && value.kind != SOL_TYPE_NEVER
+            if (assignable && !projected
+                && value.kind != SOL_TYPE_NEVER
+                && (sol_type_projected_assignment_has_authority(checker, target_type)
+                    || sol_type_projected_assignment_has_authority(checker, value))
+                && checker->types->expression_capability_origins[target_id]
+                    == SOL_PROVENANCE_NONE
+                && checker->types->expression_operation_origins[target_id]
+                    == SOL_PROVENANCE_NONE
+                && checker->types->expression_capability_origins[value_id]
+                    == SOL_PROVENANCE_NONE
+                && checker->types->expression_operation_origins[value_id]
+                    == SOL_PROVENANCE_NONE) {
+                sol_type_error(checker, "SOL-AUTHORITY-001", statement->span,
+                    "whole assignment cannot replace untracked nested authority");
+            } else if (assignable && projected && value.kind != SOL_TYPE_NEVER
                 && (sol_type_projected_assignment_has_authority(checker, target_type)
                     || sol_type_projected_assignment_has_authority(checker, value)
                     || checker->types->expression_capability_origins[target_id]
@@ -4397,6 +4478,46 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
                 result = value.kind == SOL_TYPE_NEVER
                     ? value : (SolType){.kind = SOL_TYPE_UNIT};
                 terminated = value.kind == SOL_TYPE_NEVER;
+            }
+        } else if (statement->kind == SOL_STATEMENT_MODIFY) {
+            SolExprId target_id = statement->as.modify.target;
+            SolResolution resolution = {.kind = SOL_RESOLUTION_ERROR};
+            bool projected = false;
+            sol_type_expression(checker, target_id);
+            bool has_root = sol_type_assignment_root(
+                checker, target_id, &resolution, &projected);
+            const SolHirLocal *root = has_root
+                ? &checker->hir->locals[resolution.target] : NULL;
+            bool valid_target = root != NULL && !projected
+                && root->owner == checker->current_definition
+                && root->access == SOL_ACCESS_OWNED
+                && ((root->kind == SOL_LOCAL_BINDING && !root->mutable)
+                    || root->kind == SOL_LOCAL_PARAMETER);
+            if (!valid_target) {
+                sol_type_error(checker, "SOL-TYPE-025", statement->span,
+                    "modify target must be an immutable owned whole local or owned parameter");
+            }
+            bool pushed = valid_target && checker->modify_root_count < 256;
+            if (pushed) {
+                checker->modify_roots[checker->modify_root_count++] = resolution.target;
+            } else if (valid_target) {
+                sol_type_error(checker, "SOL-TYPE-007", statement->span,
+                    "nested modify scopes exceed the limit of 256");
+            }
+            SolType body = sol_type_expression(
+                checker, statement->as.modify.body);
+            if (pushed) {
+                --checker->modify_root_count;
+            }
+            if (body.kind != SOL_TYPE_UNIT && body.kind != SOL_TYPE_NEVER
+                && body.kind != SOL_TYPE_ERROR) {
+                sol_type_error(checker, "SOL-TYPE-002", statement->span,
+                    "a modify body must have type Unit");
+            }
+            if (!terminated) {
+                result = body.kind == SOL_TYPE_NEVER
+                    ? body : (SolType){.kind = SOL_TYPE_UNIT};
+                terminated = body.kind == SOL_TYPE_NEVER;
             }
         } else if (statement->kind == SOL_STATEMENT_REGION) {
             SolType body = sol_type_expression(checker,

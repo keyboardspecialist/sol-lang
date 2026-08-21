@@ -521,6 +521,18 @@ static bool bind_local(Interpreter *interpreter, Frame *frame,
     return true;
 }
 
+static bool declare_local(Interpreter *interpreter, Frame *frame,
+    SolIrLocalId local, SolSpan span) {
+    if (local >= interpreter->request->ir->local_count || frame->registered[local]) {
+        diagnostic(interpreter, SOL_INTERPRETER_INTERNAL_INVARIANT, span,
+            "invalid or duplicate local declaration");
+        return false;
+    }
+    frame->registered[local] = true;
+    frame->binding_order[frame->binding_count++] = local;
+    return true;
+}
+
 static void cleanup_local(Interpreter *interpreter, Frame *frame,
     SolIrLocalId local) {
     if (local >= interpreter->request->ir->local_count || !frame->bound[local]) return;
@@ -1422,6 +1434,52 @@ static Flow evaluate_binary(Interpreter *interpreter,
     return output;
 }
 
+static bool compound_integer(Interpreter *interpreter, SolTokenKind operator_kind,
+    int64_t left, int64_t right, SolSpan span, int64_t *result) {
+    bool valid = true;
+    switch (operator_kind) {
+        case SOL_TOKEN_PLUS_EQUAL:
+            valid = !((right > 0 && left > INT64_MAX - right)
+                || (right < 0 && left < INT64_MIN - right));
+            if (valid) *result = left + right;
+            break;
+        case SOL_TOKEN_MINUS_EQUAL:
+            valid = !((right < 0 && left > INT64_MAX + right)
+                || (right > 0 && left < INT64_MIN + right));
+            if (valid) *result = left - right;
+            break;
+        case SOL_TOKEN_STAR_EQUAL:
+            if (left == 0 || right == 0) *result = 0;
+            else if (left == -1) valid = right != INT64_MIN,
+                *result = valid ? -right : 0;
+            else if (right == -1) valid = left != INT64_MIN,
+                *result = valid ? -left : 0;
+            else {
+                valid = !((left > 0 && right > 0 && left > INT64_MAX / right)
+                    || (left > 0 && right < 0 && right < INT64_MIN / left)
+                    || (left < 0 && right > 0 && left < INT64_MIN / right)
+                    || (left < 0 && right < 0 && left < INT64_MAX / right));
+                if (valid) *result = left * right;
+            }
+            break;
+        case SOL_TOKEN_SLASH_EQUAL:
+        case SOL_TOKEN_PERCENT_EQUAL:
+            if (right == 0) {
+                diagnostic(interpreter, SOL_INTERPRETER_DIVISION_BY_ZERO, span,
+                    "integer division by zero");
+                return false;
+            }
+            valid = left != INT64_MIN || right != -1;
+            if (valid) *result = operator_kind == SOL_TOKEN_SLASH_EQUAL
+                ? left / right : left % right;
+            break;
+        default: return false;
+    }
+    if (!valid) diagnostic(interpreter, SOL_INTERPRETER_INTEGER_OVERFLOW, span,
+        "checked Int64 arithmetic overflow");
+    return valid;
+}
+
 static Flow evaluate_call(Interpreter *interpreter,
     const SolIrExpression *expression) {
     const SolIr *ir = interpreter->request->ir;
@@ -1643,7 +1701,68 @@ static Flow evaluate_block(Interpreter *interpreter,
         const SolIrStatement *statement = &ir->statements[ir->statement_ids[
             expression->as.block.statements.offset + index
         ]];
-        Flow value = evaluate(interpreter, statement->expression);
+        if (statement->kind == SOL_IR_STATEMENT_DECLARE) {
+            if (!declare_local(interpreter, interpreter->frame, statement->local,
+                    statement->span)) {
+                sol_interpreter_value_free(&last.value);
+                cleanup_slice(interpreter, expression->as.block.cleanup);
+                return flow_new(FLOW_ERROR);
+            }
+            continue;
+        }
+        if (statement->kind == SOL_IR_STATEMENT_MODIFY) {
+            Flow body = evaluate(interpreter, statement->expression);
+            if (body.kind != FLOW_VALUE) {
+                sol_interpreter_value_free(&last.value);
+                cleanup_slice(interpreter, expression->as.block.cleanup);
+                return body;
+            }
+            sol_interpreter_value_free(&body.value);
+            sol_interpreter_value_free(&last.value);
+            last = flow_new(FLOW_VALUE);
+            sol_interpreter_value_unit(&last.value);
+            continue;
+        }
+        Flow value;
+        if (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT
+            && statement->operator_kind != SOL_TOKEN_EQUAL) {
+            const SolIrExpression *target = &ir->expressions[statement->target];
+            const SolIrPlace *place = &ir->places[target->as.place];
+            if (!charge_place_update(interpreter, place, statement->span)) {
+                sol_interpreter_value_free(&last.value);
+                cleanup_slice(interpreter, expression->as.block.cleanup);
+                return flow_new(FLOW_ERROR);
+            }
+            SolInterpreterValue *slot = local_place_slot(interpreter, place, NULL);
+            if (slot == NULL || slot->kind != SOL_INTERPRETER_VALUE_INT64) {
+                diagnostic(interpreter, SOL_INTERPRETER_INTERNAL_INVARIANT,
+                    statement->span, "compound assignment target is unbound");
+                sol_interpreter_value_free(&last.value);
+                cleanup_slice(interpreter, expression->as.block.cleanup);
+                return flow_new(FLOW_ERROR);
+            }
+            int64_t old = slot->as.integer;
+            value = evaluate(interpreter, statement->expression);
+            if (value.kind != FLOW_VALUE) {
+                sol_interpreter_value_free(&last.value);
+                cleanup_slice(interpreter, expression->as.block.cleanup);
+                return value;
+            }
+            int64_t result = 0;
+            if (value.value.kind != SOL_INTERPRETER_VALUE_INT64
+                || !compound_integer(interpreter, statement->operator_kind, old,
+                    value.value.as.integer, statement->span, &result)
+                || !charge_place_update(interpreter, place, statement->span)) {
+                sol_interpreter_value_free(&value.value);
+                sol_interpreter_value_free(&last.value);
+                cleanup_slice(interpreter, expression->as.block.cleanup);
+                return flow_new(FLOW_ERROR);
+            }
+            sol_interpreter_value_free(&value.value);
+            sol_interpreter_value_int64(&value.value, result);
+        } else {
+            value = evaluate(interpreter, statement->expression);
+        }
         if (value.kind != FLOW_VALUE) {
             sol_interpreter_value_free(&last.value);
             cleanup_slice(interpreter, expression->as.block.cleanup);
@@ -1667,7 +1786,8 @@ static Flow evaluate_block(Interpreter *interpreter,
         } else if (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT) {
             const SolIrExpression *target = &ir->expressions[statement->target];
             const SolIrPlace *place = &ir->places[target->as.place];
-            if (!charge_place_update(interpreter, place, statement->span)
+            if ((statement->operator_kind == SOL_TOKEN_EQUAL
+                    && !charge_place_update(interpreter, place, statement->span))
                 || !update_place(interpreter, place, &value.value,
                 statement->span)) {
                 sol_interpreter_value_free(&value.value);

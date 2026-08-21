@@ -67,6 +67,12 @@ static bool sol_structure_binary_operator_valid(SolTokenKind kind) {
     }
 }
 
+static bool sol_structure_assignment_operator_valid(SolTokenKind kind) {
+    return kind == SOL_TOKEN_EQUAL || kind == SOL_TOKEN_PLUS_EQUAL
+        || kind == SOL_TOKEN_MINUS_EQUAL || kind == SOL_TOKEN_STAR_EQUAL
+        || kind == SOL_TOKEN_SLASH_EQUAL || kind == SOL_TOKEN_PERCENT_EQUAL;
+}
+
 static bool sol_structure_expression(
     SolStructureValidator *validator,
     SolExprId expression_id,
@@ -257,13 +263,22 @@ static bool sol_structure_statements(
         }
         validator->statements[statement] = 1;
         const SolStatement *current = &validator->tree->statements[statement];
-        if ((int)current->kind < 0 || current->kind > SOL_STATEMENT_REGION
+        if ((int)current->kind < 0 || current->kind > SOL_STATEMENT_MODIFY
             || !sol_structure_span_valid(validator, current->span)
-            || (current->kind == SOL_STATEMENT_REGION
+            || ((current->kind == SOL_STATEMENT_REGION
+                    || current->kind == SOL_STATEMENT_MODIFY)
                 && context != SOL_EXPRESSION_CONTEXT_BODY)) return false;
         if ((current->kind == SOL_STATEMENT_LET
                 || current->kind == SOL_STATEMENT_VAR)
-            && !sol_structure_name_valid(validator, current->as.let_statement.name)) {
+            && (!sol_structure_name_valid(validator, current->as.let_statement.name)
+                || (current->kind == SOL_STATEMENT_LET
+                    && (current->as.let_statement.value == SOL_AST_NONE
+                        || current->as.let_statement.type_id != SOL_AST_NONE))
+                || (current->kind == SOL_STATEMENT_VAR
+                    && ((current->as.let_statement.value == SOL_AST_NONE)
+                        == (current->as.let_statement.type_id == SOL_AST_NONE)))
+                || (current->as.let_statement.type_id != SOL_AST_NONE
+                    && current->as.let_statement.type_id >= validator->tree->type_count))) {
             return false;
         }
         SolExprId value = current->kind == SOL_STATEMENT_LET
@@ -272,7 +287,9 @@ static bool sol_structure_statements(
             : current->kind == SOL_STATEMENT_ASSIGNMENT
                 ? current->as.assignment.value
             : current->kind == SOL_STATEMENT_REGION
-                ? current->as.region_statement.body : current->as.expression;
+                ? current->as.region_statement.body
+            : current->kind == SOL_STATEMENT_MODIFY
+                ? current->as.modify.body : current->as.expression;
         if (current->kind == SOL_STATEMENT_REGION
             && (!sol_structure_span_valid(validator,
                     current->as.region_statement.label)
@@ -283,9 +300,18 @@ static bool sol_structure_statements(
             return false;
         }
         if (current->kind == SOL_STATEMENT_ASSIGNMENT
-            && !sol_structure_expression(validator, current->as.assignment.target,
-                context, depth)) return false;
-        if (!sol_structure_expression(validator, value, context, depth)) return false;
+            && (!sol_structure_assignment_operator_valid(
+                    current->as.assignment.operator_kind)
+                || !sol_structure_expression(validator, current->as.assignment.target,
+                    context, depth))) return false;
+        if (current->kind == SOL_STATEMENT_MODIFY
+            && (current->as.modify.body >= validator->tree->expression_count
+                || validator->tree->expressions[current->as.modify.body].kind
+                    != SOL_EXPR_BLOCK
+                || !sol_structure_expression(validator, current->as.modify.target,
+                    context, depth))) return false;
+        if (value != SOL_AST_NONE
+            && !sol_structure_expression(validator, value, context, depth)) return false;
         statement = current->next;
     }
     return true;

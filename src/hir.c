@@ -930,7 +930,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     }
     for (size_t index = 0; index < syntax->statement_count; ++index) {
         const SolStatement *statement = &syntax->statements[index];
-        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_REGION) {
+        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_MODIFY) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -940,20 +940,42 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             : statement->kind == SOL_STATEMENT_ASSIGNMENT
                 ? statement->as.assignment.value
             : statement->kind == SOL_STATEMENT_REGION
-                ? statement->as.region_statement.body : statement->as.expression;
+                ? statement->as.region_statement.body
+            : statement->kind == SOL_STATEMENT_MODIFY
+                ? statement->as.modify.body : statement->as.expression;
+        bool binding = statement->kind == SOL_STATEMENT_LET
+            || statement->kind == SOL_STATEMENT_VAR;
+        bool uninitialized = binding && value == SOL_AST_NONE;
         if (!sol_span_valid(resolver->source, statement->span)
-            || value >= syntax->expression_count
+            || (!uninitialized && value >= syntax->expression_count)
             || (statement->next != SOL_AST_NONE && statement->next >= syntax->statement_count)
-            || ((statement->kind == SOL_STATEMENT_LET
-                    || statement->kind == SOL_STATEMENT_VAR)
+            || (binding
                 && !sol_span_valid(resolver->source, statement->as.let_statement.name))
+            || (binding && (uninitialized
+                    ? statement->as.let_statement.type_id >= syntax->type_count
+                    : statement->as.let_statement.type_id != SOL_AST_NONE))
+            || (uninitialized && statement->kind != SOL_STATEMENT_VAR)
             || (statement->kind == SOL_STATEMENT_ASSIGNMENT
-                && statement->as.assignment.target >= syntax->expression_count)
+                && (statement->as.assignment.target >= syntax->expression_count
+                    || (statement->as.assignment.operator_kind != SOL_TOKEN_EQUAL
+                        && statement->as.assignment.operator_kind
+                            != SOL_TOKEN_PLUS_EQUAL
+                        && statement->as.assignment.operator_kind
+                            != SOL_TOKEN_MINUS_EQUAL
+                        && statement->as.assignment.operator_kind
+                            != SOL_TOKEN_STAR_EQUAL
+                        && statement->as.assignment.operator_kind
+                            != SOL_TOKEN_SLASH_EQUAL
+                        && statement->as.assignment.operator_kind
+                            != SOL_TOKEN_PERCENT_EQUAL)))
             || (statement->kind == SOL_STATEMENT_REGION
                 && (!sol_span_valid(resolver->source,
                         statement->as.region_statement.label)
                     || statement->as.region_statement.label.start
                         == statement->as.region_statement.label.end
+                    || syntax->expressions[value].kind != SOL_EXPR_BLOCK))
+            || (statement->kind == SOL_STATEMENT_MODIFY
+                && (statement->as.modify.target >= syntax->expression_count
                     || syntax->expressions[value].kind != SOL_EXPR_BLOCK))) {
             sol_resolver_malformed(resolver);
             return false;
@@ -1499,7 +1521,9 @@ static void sol_resolver_block(SolResolver *resolver, const SolExpr *block) {
         const SolStatement *statement = &resolver->syntax->statements[statement_id];
         if (statement->kind == SOL_STATEMENT_LET
             || statement->kind == SOL_STATEMENT_VAR) {
-            sol_resolver_expression(resolver, statement->as.let_statement.value);
+            if (statement->as.let_statement.value != SOL_AST_NONE) {
+                sol_resolver_expression(resolver, statement->as.let_statement.value);
+            }
             sol_resolver_add_binding(
                 resolver,
                 statement->as.let_statement.name,
@@ -1511,6 +1535,9 @@ static void sol_resolver_block(SolResolver *resolver, const SolExpr *block) {
             sol_resolver_expression(resolver, statement->as.assignment.value);
         } else if (statement->kind == SOL_STATEMENT_REGION) {
             sol_resolver_expression(resolver, statement->as.region_statement.body);
+        } else if (statement->kind == SOL_STATEMENT_MODIFY) {
+            sol_resolver_expression(resolver, statement->as.modify.target);
+            sol_resolver_expression(resolver, statement->as.modify.body);
         } else {
             sol_resolver_expression(resolver, statement->as.expression);
         }

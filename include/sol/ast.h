@@ -125,6 +125,7 @@ typedef enum {
     SOL_STATEMENT_RETURN,
     SOL_STATEMENT_EXPRESSION,
     SOL_STATEMENT_REGION,
+    SOL_STATEMENT_MODIFY,
 } SolStatementKind;
 
 typedef struct {
@@ -135,15 +136,21 @@ typedef struct {
         struct {
             SolSpan name;
             SolExprId value;
+            SolTypeId type_id;
         } let_statement;
         struct {
             SolExprId target;
             SolExprId value;
+            SolTokenKind operator_kind;
         } assignment;
         struct {
             SolSpan label;
             SolExprId body;
         } region_statement;
+        struct {
+            SolExprId target;
+            SolExprId body;
+        } modify;
         SolExprId expression;
     } as;
 } SolStatement;

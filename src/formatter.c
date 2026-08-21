@@ -108,6 +108,11 @@ static bool sol_format_is_binary(SolTokenKind kind) {
         case SOL_TOKEN_STAR:
         case SOL_TOKEN_SLASH:
         case SOL_TOKEN_PERCENT:
+        case SOL_TOKEN_PLUS_EQUAL:
+        case SOL_TOKEN_MINUS_EQUAL:
+        case SOL_TOKEN_STAR_EQUAL:
+        case SOL_TOKEN_SLASH_EQUAL:
+        case SOL_TOKEN_PERCENT_EQUAL:
         case SOL_TOKEN_AMP_AMP:
         case SOL_TOKEN_PIPE_PIPE:
         case SOL_TOKEN_ARROW:
@@ -190,6 +195,7 @@ static bool sol_format_needs_space(
     if (current == SOL_TOKEN_RIGHT_BRACE) {
         return previous != SOL_TOKEN_LEFT_BRACE;
     }
+    if (previous == SOL_TOKEN_RIGHT_BRACE && sol_format_is_word(current)) return true;
     if (previous == SOL_TOKEN_RIGHT_BRACE && current == SOL_TOKEN_ELSE) return true;
     if (current == SOL_TOKEN_LEFT_BRACE) return true;
     if (sol_format_is_word(previous) && sol_format_is_word(current)) return true;

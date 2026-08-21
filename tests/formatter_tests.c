@@ -361,6 +361,27 @@ static void test_region_formatting(void) {
     sol_formatted_free(&formatted);
 }
 
+static void test_projected_mutation_formatting(void) {
+    static const char source[] =
+        "module mutation\nfunction f()->Int64{var pending:Int64 var value=1 "
+        "modify value{value+=2 value-=3 value*=4 value/=5 value%=6}return value}\n";
+    static const char expected[] =
+        "module mutation\n"
+        "function f() -> Int64 { var pending: Int64 var value = 1 "
+        "modify value { value += 2 value -= 3 value *= 4 value /= 5 value %= 6 } "
+        "return value }\n";
+    SolFormatted formatted;
+    SolDiagnostics diagnostics;
+    sol_formatted_init(&formatted);
+    sol_diagnostics_init(&diagnostics);
+    CHECK(format_text(source, &formatted, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    check_output(&formatted, expected);
+    check_second_pass(&formatted);
+    sol_diagnostics_free(&diagnostics);
+    sol_formatted_free(&formatted);
+}
+
 static void test_construct_golden_formatting(void) {
     static const char source_text[] =
         "module constructs\n"
@@ -417,6 +438,7 @@ int main(void) {
     test_embedded_nul_is_rejected();
     test_access_qualifiers();
     test_region_formatting();
+    test_projected_mutation_formatting();
     test_construct_golden_formatting();
 
     if (failures != 0) {

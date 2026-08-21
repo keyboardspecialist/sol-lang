@@ -2541,6 +2541,25 @@ static void test_assignment_rhs_effects(void) {
     free_compilation(&compilation);
 }
 
+static void test_bounded_mutation_effects(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module bounded_effects\n"
+        "function source() -> Int64 effects { panic } { return 2 }\n"
+        "function good() -> Int64 effects { panic } { let value = 1 "
+        "modify value { value += source() } return value }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module bounded_effect_error\n"
+        "function source() -> Int64 effects { panic } { return 2 }\n"
+        "function bad() -> Int64 effects { pure } { let value = 1 "
+        "modify value { value += source() } return value }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-002"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_private_pure_inference();
     test_generic_closed_effect_rows();
@@ -2600,6 +2619,7 @@ int main(void) {
     test_distinct_borrowed_function_signatures();
     test_region_effects();
     test_assignment_rhs_effects();
+    test_bounded_mutation_effects();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;

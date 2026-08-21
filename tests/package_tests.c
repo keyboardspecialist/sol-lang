@@ -192,7 +192,8 @@ static void test_type_declaration_relocation(void) {
         "module first\ntype Positive = refined Int64 where self > 0\n"));
     CHECK(write_text_file(second_path,
         "module second\nfunction seed(value: Int64) -> Int64 "
-        "{ region scratch { let copy = value } return value }\n"));
+        "{ var pending: Int64 var copy = value modify copy { copy += 1 } "
+        "region scratch { let observed = copy } return copy }\n"));
 
     SolPackage package;
     SolDiagnostics diagnostics;
@@ -207,8 +208,11 @@ static void test_type_declaration_relocation(void) {
         SolExprId body = package.syntax.items[1].body;
         CHECK(body < package.syntax.expression_count);
         if (body < package.syntax.expression_count) {
-            SolStatementId region
-                = package.syntax.expressions[body].as.block.first_statement;
+            SolStatementId region = package.syntax.expressions[body].as.block.first_statement;
+            while (region < package.syntax.statement_count
+                && package.syntax.statements[region].kind != SOL_STATEMENT_REGION) {
+                region = package.syntax.statements[region].next;
+            }
             CHECK(region < package.syntax.statement_count);
             if (region < package.syntax.statement_count) {
                 CHECK(package.syntax.statements[region].kind == SOL_STATEMENT_REGION);
@@ -235,6 +239,30 @@ static void test_type_declaration_relocation(void) {
         }
     }
     CHECK(sol_syntax_contracts_validate(&package.source, &package.syntax));
+    size_t typed_vars = 0;
+    size_t compound_assignments = 0;
+    size_t modifies = 0;
+    for (size_t index = 0; index < package.syntax.statement_count; ++index) {
+        const SolStatement *statement = &package.syntax.statements[index];
+        if (statement->kind == SOL_STATEMENT_VAR
+            && statement->as.let_statement.type_id != SOL_AST_NONE) {
+            ++typed_vars;
+            CHECK(statement->as.let_statement.value == SOL_AST_NONE);
+            CHECK(statement->as.let_statement.type_id < package.syntax.type_count);
+            CHECK(span_text_equal(&package.source,
+                statement->as.let_statement.name, "pending"));
+        } else if (statement->kind == SOL_STATEMENT_ASSIGNMENT
+            && statement->as.assignment.operator_kind == SOL_TOKEN_PLUS_EQUAL) {
+            ++compound_assignments;
+        } else if (statement->kind == SOL_STATEMENT_MODIFY) {
+            ++modifies;
+            CHECK(statement->as.modify.target < package.syntax.expression_count);
+            CHECK(statement->as.modify.body < package.syntax.expression_count);
+        }
+    }
+    CHECK(typed_vars == 1);
+    CHECK(compound_assignments == 1);
+    CHECK(modifies == 1);
 
     sol_diagnostics_free(&diagnostics);
     sol_package_free(&package);

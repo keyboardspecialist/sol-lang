@@ -334,10 +334,12 @@ typedef struct {
 
 typedef enum {
     SOL_IR_STATEMENT_LET,
+    SOL_IR_STATEMENT_DECLARE,
     SOL_IR_STATEMENT_ASSIGNMENT,
     SOL_IR_STATEMENT_RETURN,
     SOL_IR_STATEMENT_EXPRESSION,
     SOL_IR_STATEMENT_REGION,
+    SOL_IR_STATEMENT_MODIFY,
 } SolIrStatementKind;
 
 typedef struct {
@@ -346,6 +348,7 @@ typedef struct {
     SolIrLocalId local;
     SolIrExpressionId target;
     SolIrExpressionId expression;
+    SolTokenKind operator_kind;
     char *region_label;
     SolSpan region_label_span;
 } SolIrStatement;

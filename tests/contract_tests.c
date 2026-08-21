@@ -922,6 +922,13 @@ static void test_mutation_forbidden_in_predicates(void) {
         nested->kind = SOL_STATEMENT_LET;
     }
     free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module bounded_contract\n"
+        "function bad() -> Bool requires { var value: Bool value = true "
+        "value += true modify value { value = false } value } { return true }\n"));
+    CHECK(sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
 }
 
 int main(void) {

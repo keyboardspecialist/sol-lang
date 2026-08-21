@@ -167,7 +167,9 @@ static bool sol_effects_collect_callable(
                     SolIrStatementId statement
                         = ir->statement_ids[
                             expression->as.block.statements.offset + index];
-                    PUSH(ir->statements[statement].expression);
+                    if (ir->statements[statement].kind != SOL_IR_STATEMENT_DECLARE) {
+                        PUSH(ir->statements[statement].expression);
+                    }
                 }
                 break;
             case SOL_IR_EXPR_PROPAGATE: PUSH(expression->as.propagate.operand); break;

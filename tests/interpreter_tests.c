@@ -367,6 +367,85 @@ static void test_assignment_replacement_and_failure(void) {
     sol_diagnostics_free(&compilation.diagnostics);
 }
 
+static void test_declaration_modify_and_compound_runtime(void) {
+    Compilation compilation;
+    bool compiled = compile(&compilation,
+        "module compound_runtime\n"
+        "record Pair { value: Int64 }\n"
+        "function direct() -> Int64 { var value: Int64 value = 20 value += 5 "
+        "value -= 3 value *= 2 value /= 4 value %= 9 return value }\n"
+        "function projected() -> Int64 { var pair = Pair { value = 7 } "
+        "pair.value *= 6 pair.value %= 10 return pair.value }\n"
+        "function modified() -> Int64 { let value = 1 modify value { value += 4 } "
+        "return value }\n"
+        "function set(value: inout Int64) -> () { value = 9 }\n"
+        "function modified_call() -> Int64 { let value = 1 modify value { set(value) } "
+        "return value }\n"
+        "function returned() -> Int64 { var value = 1 value += { return 7 } }\n"
+        "function unbound() -> () { var value: Int64 }\n"
+        "function bound() -> () { var value: Int64 value = 1 }\n"
+        "function projected_only() -> () { var pair = Pair { value = 7 } "
+        "pair.value += 2 }\n"
+        "function overflow() -> Int64 { var value = 9223372036854775807 "
+        "value += 1 return value }\n"
+        "function zero() -> Int64 { var value = 8 value /= 0 return value }\n");
+    if (!compiled) sol_diagnostics_render_human(
+        stderr, &compilation.source, &compilation.diagnostics);
+    CHECK(compiled);
+    free_frontend(&compilation);
+    SolInterpreterResult result;
+    const struct { const char *name; int64_t expected; } values[] = {
+        {"direct", 2}, {"projected", 2}, {"modified", 5},
+        {"modified_call", 9}, {"returned", 7},
+    };
+    for (size_t index = 0; index < sizeof(values) / sizeof(values[0]); ++index) {
+        CHECK(run(&compilation.ir, values[index].name, NULL, 0,
+            SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+            NULL, NULL, &result));
+        CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+            && result.value.as.integer == values[index].expected);
+        sol_interpreter_result_free(&result);
+    }
+    CHECK(!run(&compilation.ir, "overflow", NULL, 0,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_INTEGER_OVERFLOW);
+    sol_interpreter_result_free(&result);
+    CHECK(!run(&compilation.ir, "zero", NULL, 0,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_DIVISION_BY_ZERO);
+    sol_interpreter_result_free(&result);
+    CleanupLog log;
+    memset(&log, 0, sizeof(log));
+    log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "unbound", NULL, 0, &log, &result));
+    CHECK(log.count == 0);
+    sol_interpreter_result_free(&result);
+    memset(&log, 0, sizeof(log));
+    log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "bound", NULL, 0, &log, &result));
+    CHECK(log.count == 1 && strcmp(log.names[0], "value") == 0);
+    sol_interpreter_result_free(&result);
+    memset(&log, 0, sizeof(log));
+    log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "projected_only", NULL, 0, &log, &result));
+    CHECK(log.count == 2 && strcmp(log.names[0], "pair") == 0
+        && strcmp(log.names[1], "pair") == 0);
+    size_t projected_steps = result.used.steps;
+    sol_interpreter_result_free(&result);
+    memset(&log, 0, sizeof(log));
+    log.ir = &compilation.ir;
+    CHECK(!run_observed_limits(&compilation.ir, "projected_only",
+        (SolInterpreterLimits){projected_steps - 1, SIZE_MAX, SIZE_MAX, SIZE_MAX,
+            SIZE_MAX}, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_STEP_LIMIT);
+    CHECK(log.count == 1 && strcmp(log.names[0], "pair") == 0);
+    sol_interpreter_result_free(&result);
+    sol_ir_free(&compilation.ir);
+    sol_diagnostics_free(&compilation.diagnostics);
+}
+
 static void test_projected_moves_assignments_and_inout(void) {
     Compilation compilation;
     bool compiled = compile(&compilation,
@@ -1827,6 +1906,7 @@ int main(void) {
     test_callable_borrow_execution();
     test_regions_and_deterministic_cleanup();
     test_assignment_replacement_and_failure();
+    test_declaration_modify_and_compound_runtime();
     test_projected_moves_assignments_and_inout();
     test_malformed_top_level_requests();
     if (failures != 0) fprintf(stderr, "%d interpreter test failure(s)\n", failures);

@@ -108,6 +108,32 @@ static SolSemanticId definition_id(const TestCompilation *compilation, const cha
     return (SolSemanticId){0};
 }
 
+static void test_bounded_statement_resolution(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module bounded_resolution\n"
+        "function update() -> Int64 { var pending: Int64 pending = 1 "
+        "let fixed = pending modify fixed { fixed += 1 } return fixed }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.hir.local_count == 2);
+    if (compilation.hir.local_count == 2) {
+        CHECK(compilation.hir.locals[0].mutable);
+        CHECK(!compilation.hir.locals[1].mutable);
+    }
+    size_t fixed_uses = 0;
+    for (SolExprId expression = 0; expression < compilation.syntax.expression_count;
+        ++expression) {
+        if (compilation.syntax.expressions[expression].kind == SOL_EXPR_PATH
+            && span_text_equal(&compilation.source,
+                compilation.syntax.expressions[expression].as.name, "fixed")) {
+            CHECK(compilation.hir.resolutions[expression].kind == SOL_RESOLUTION_LOCAL);
+            ++fixed_uses;
+        }
+    }
+    CHECK(fixed_uses == 3);
+    free_compilation(&compilation);
+}
+
 static void test_successful_resolution(void) {
     static const char text[] =
         "module resolution\n"
@@ -1070,6 +1096,7 @@ static void test_malformed_implementation_trait_span(void) {
 }
 
 int main(void) {
+    test_bounded_statement_resolution();
     test_successful_resolution();
     test_unresolved_name();
     test_duplicate_declaration();

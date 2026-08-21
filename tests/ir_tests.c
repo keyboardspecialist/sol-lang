@@ -1717,6 +1717,62 @@ static void test_mutable_assignment_ir_and_ownership(void) {
     free_compilation(&compilation);
 }
 
+static void test_initialization_modify_and_compound_ir(void) {
+    TestCompilation compilation;
+    CHECK(compile_ir(&compilation,
+        "module initialization_ir\n"
+        "function direct() -> Int64 { var value: Int64 value = 1 return value }\n"
+        "function branches(flag: Bool) -> Int64 { var value: Int64 "
+        "if flag { value = 1 } else { value = 2 } return value }\n"
+        "function terminating(flag: Bool) -> Int64 { var value: Int64 "
+        "if flag { value = 3 } else { return 4 } return value }\n"
+        "function matched(flag: Bool) -> Int64 { var value: Int64 match flag "
+        "{ true => { value = 5 } false => { value = 6 } } return value }\n"
+        "function local() -> Int64 { let value = 10 modify value { value += 2 "
+        "value -= 1 value *= 3 value /= 2 value %= 8 } return value }\n"
+        "function parameter(value: Int64) -> Int64 { modify value { value = 7 } "
+        "return value }\n"
+        "function set(value: inout Int64) -> () { value = 9 }\n"
+        "function exclusive() -> Int64 { let value = 1 modify value { set(value) } "
+        "return value }\n"
+        "function terminating_match(flag: Bool) -> Int64 { var value: Int64 "
+        "match flag { true => { value = 8 } false => { return 9 } } return value }\n"));
+    size_t declarations = 0;
+    size_t modifies = 0;
+    size_t compounds = 0;
+    for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
+        const SolIrStatement *statement = &compilation.ir.statements[index];
+        declarations += statement->kind == SOL_IR_STATEMENT_DECLARE;
+        modifies += statement->kind == SOL_IR_STATEMENT_MODIFY;
+        compounds += statement->kind == SOL_IR_STATEMENT_ASSIGNMENT
+            && statement->operator_kind != SOL_TOKEN_EQUAL;
+    }
+    CHECK(declarations == 5 && modifies == 3 && compounds == 5);
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+    free_compilation(&compilation);
+
+    const char *invalid[] = {
+        "function bad() -> Int64 { var value: Int64 return value }",
+        "function bad() -> Int64 { var value: Int64 value += 1 return value }",
+        "record Pair { value: Int64 } function bad() -> () { var pair: Pair "
+            "pair.value = 1 }",
+        "function bad(flag: Bool) -> Int64 { var value: Int64 if flag "
+            "{ value = 1 } else { () } return value }",
+        "function bad(flag: Bool) -> Int64 { var value: Int64 "
+            "let used = flag && { value = 1 true } return value }",
+        "function bad(flag: Bool) -> Int64 { var value: Int64 "
+            "let used = flag || { value = 1 false } return value }",
+    };
+    for (size_t index = 0; index < sizeof(invalid) / sizeof(invalid[0]); ++index) {
+        char source[512];
+        snprintf(source, sizeof(source), "module initialization_bad_%zu\n%s\n",
+            index, invalid[index]);
+        CHECK(!compile_ir(&compilation, source));
+        CHECK(has_code(&compilation, "SOL-INITIALIZATION-001"));
+        free_compilation(&compilation);
+    }
+}
+
 static void test_place_representation_and_validation(void) {
     TestCompilation compilation;
     CHECK(compile_ir(&compilation,
@@ -2250,6 +2306,7 @@ static void test_exhaustive_validation_domains(void) {
         "{ let text = \"metadata\" let unit = () 1 "
         "return handle service.read<source> with mock { source.read() } }\n"
         "function cover(flag: Bool) -> Int64 effects { panic } { var value = 1 "
+        "var pending: Int64 pending = 0 let fixed = 4 modify fixed { fixed += 1 } "
         "value = identity(-value + 2) let pair = Pair { left = value, right = 3 } "
         "let selected = if true { pair.left } else { 0 } "
         "region scratch { let scoped = selected } "
@@ -2313,7 +2370,7 @@ static void test_exhaustive_validation_domains(void) {
     CHECK(generic_call != SOL_IR_NONE && builtin_call != SOL_IR_NONE
         && method_call != SOL_IR_NONE);
     bool expression_kinds[SOL_IR_EXPR_BOUND_OPERATION + 1] = {false};
-    bool statement_kinds[SOL_IR_STATEMENT_REGION + 1] = {false};
+    bool statement_kinds[SOL_IR_STATEMENT_MODIFY + 1] = {false};
     bool pattern_kinds[SOL_IR_PATTERN_VARIANT + 1] = {false};
     for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
         SolIrExpressionKind kind = compilation.ir.expressions[index].kind;
@@ -2324,8 +2381,8 @@ static void test_exhaustive_validation_domains(void) {
     }
     for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
         SolIrStatementKind kind = compilation.ir.statements[index].kind;
-        CHECK((int)kind >= 0 && kind <= SOL_IR_STATEMENT_REGION);
-        if ((int)kind >= 0 && kind <= SOL_IR_STATEMENT_REGION) statement_kinds[kind] = true;
+        CHECK((int)kind >= 0 && kind <= SOL_IR_STATEMENT_MODIFY);
+        if ((int)kind >= 0 && kind <= SOL_IR_STATEMENT_MODIFY) statement_kinds[kind] = true;
     }
     for (size_t index = 0; index < compilation.ir.arm_count; ++index) {
         SolIrPatternKind kind = compilation.ir.arms[index].kind;
@@ -2335,7 +2392,7 @@ static void test_exhaustive_validation_domains(void) {
     for (size_t kind = 0; kind <= SOL_IR_EXPR_BOUND_OPERATION; ++kind) {
         CHECK(expression_kinds[kind]);
     }
-    for (size_t kind = 0; kind <= SOL_IR_STATEMENT_REGION; ++kind) {
+    for (size_t kind = 0; kind <= SOL_IR_STATEMENT_MODIFY; ++kind) {
         CHECK(statement_kinds[kind]);
     }
     for (size_t kind = 0; kind <= SOL_IR_PATTERN_VARIANT; ++kind) {
@@ -2349,6 +2406,35 @@ static void test_exhaustive_validation_domains(void) {
         CHECK(!sol_ir_validate(&compilation.ir, NULL)); \
         (place) = saved_value; \
     } while (0)
+
+    SolIrStatement *declaration = NULL;
+    SolIrStatement *compound = NULL;
+    SolIrStatement *modify = NULL;
+    for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
+        SolIrStatement *statement = &compilation.ir.statements[index];
+        if (statement->kind == SOL_IR_STATEMENT_DECLARE) declaration = statement;
+        if (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT
+            && statement->operator_kind != SOL_TOKEN_EQUAL) compound = statement;
+        if (statement->kind == SOL_IR_STATEMENT_MODIFY) modify = statement;
+    }
+    CHECK(declaration != NULL && compound != NULL && modify != NULL);
+    if (declaration != NULL) {
+        CHECK_REJECTED_MUTATION(declaration->expression, SolIrExpressionId, 0);
+        CHECK_REJECTED_MUTATION(declaration->operator_kind, SolTokenKind,
+            SOL_TOKEN_EQUAL);
+    }
+    if (compound != NULL) {
+        CHECK_REJECTED_MUTATION(compound->operator_kind, SolTokenKind,
+            SOL_TOKEN_EQUAL_EQUAL);
+        CHECK_REJECTED_MUTATION(compound->local, SolIrLocalId, 0);
+    }
+    if (modify != NULL) {
+        CHECK_REJECTED_MUTATION(modify->operator_kind, SolTokenKind,
+            SOL_TOKEN_EQUAL);
+        CHECK_REJECTED_MUTATION(modify->local, SolIrLocalId, 0);
+        CHECK_REJECTED_MUTATION(modify->expression, SolIrExpressionId,
+            modify->target);
+    }
 
     if (integer != SOL_IR_NONE) {
         CHECK_REJECTED_MUTATION(compilation.ir.expressions[integer].kind,
@@ -2555,6 +2641,7 @@ int main(void) {
     test_affine_ownership();
     test_region_cleanup_metadata();
     test_mutable_assignment_ir_and_ownership();
+    test_initialization_modify_and_compound_ir();
     test_place_representation_and_validation();
     test_projected_ownership();
     test_exhaustive_validation_domains();
