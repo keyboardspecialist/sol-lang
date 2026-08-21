@@ -1004,6 +1004,16 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             return false;
         }
     }
+    for (size_t index = 0; index < syntax->loop_invariant_count; ++index) {
+        const SolLoopInvariant *invariant = &syntax->loop_invariants[index];
+        if (invariant->expression >= syntax->expression_count
+            || !sol_span_valid(resolver->source, invariant->span)
+            || (invariant->next != SOL_AST_NONE
+                && invariant->next >= syntax->loop_invariant_count)) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+    }
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         const SolExpr *expression = &syntax->expressions[index];
         bool valid = (int)expression->kind >= 0
@@ -1549,6 +1559,24 @@ static void sol_resolver_block(SolResolver *resolver, const SolExpr *block) {
                 sol_resolver_expression(
                     resolver, statement->as.loop_statement.condition
                 );
+            }
+            SolLoopInvariantId invariant
+                = statement->as.loop_statement.first_invariant;
+            size_t invariant_count = 0;
+            while (invariant != SOL_AST_NONE) {
+                if (invariant >= resolver->syntax->loop_invariant_count
+                    || invariant_count++ >= resolver->syntax->loop_invariant_count) {
+                    sol_resolver_malformed(resolver);
+                    break;
+                }
+                const SolLoopInvariant *entry
+                    = &resolver->syntax->loop_invariants[invariant];
+                sol_resolver_expression(resolver, entry->expression);
+                invariant = entry->next;
+            }
+            if (statement->as.loop_statement.decreases != SOL_AST_NONE) {
+                sol_resolver_expression(
+                    resolver, statement->as.loop_statement.decreases);
             }
             sol_resolver_expression(resolver, statement->as.loop_statement.body);
             --resolver->loop_depth;

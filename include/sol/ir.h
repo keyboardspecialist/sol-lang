@@ -356,6 +356,7 @@ typedef struct {
     SolTokenKind operator_kind;
     char *region_label;
     SolSpan region_label_span;
+    SolIrSlice loop_obligations;
 } SolIrStatement;
 
 typedef enum {
@@ -393,6 +394,16 @@ typedef struct {
     SolIrExpressionId operand;
     SolIrTypeId type;
 } SolIrSnapshot;
+
+typedef struct {
+    size_t id;
+    SolLoopObligationKind kind;
+    SolIrStatementId loop_statement;
+    SolIrCallableId callable;
+    SolIrExpressionId expression;
+    SolIrTypeId expression_type;
+    SolSpan span;
+} SolIrLoopObligation;
 
 typedef struct {
     char *path;
@@ -454,6 +465,8 @@ typedef struct {
     size_t obligation_count;
     SolIrSnapshot *snapshots;
     size_t snapshot_count;
+    SolIrLoopObligation *loop_obligations;
+    size_t loop_obligation_count;
     SolIrSourceFile *files;
     size_t file_count;
 } SolIr;

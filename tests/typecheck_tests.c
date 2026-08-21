@@ -2073,6 +2073,58 @@ static void test_loop_types_and_reachability(void) {
     free_compilation(&compilation);
 }
 
+static void test_loop_specification_types_scope_and_facts(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module loop_specs\n"
+        "function run(flag: Bool) -> () { let outer = 1 while flag "
+        "invariant { flag, outer == 1 } decreases { outer } "
+        "{ if flag { break } else { continue } } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolStatementId loop = SOL_AST_NONE;
+    for (SolStatementId index = 0; index < compilation.syntax.statement_count; ++index) {
+        if (compilation.syntax.statements[index].kind == SOL_STATEMENT_WHILE) loop = index;
+    }
+    CHECK(loop != SOL_AST_NONE);
+    if (loop != SOL_AST_NONE) {
+        CHECK(compilation.types.loop_fact_count == compilation.syntax.statement_count);
+        CHECK(compilation.types.loop_facts[loop].is_loop);
+        CHECK(compilation.types.loop_facts[loop].reachable_backedge);
+        CHECK(compilation.types.loop_facts[loop].reachable_break);
+    }
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module loop_member_owner\n"
+        "trait Marker { function mark(self: Self) -> () effects { pure } }\n"
+        "implementation Marker for Int64 { function mark(self: Self) -> () "
+            "effects { pure } { () } }\n"
+        "capability Root { function read(path: Text) -> Text effects { pure } }\n"
+        "capability Wrapped derives_from source: capability Root { "
+            "function read(path: Text) -> Text effects { pure } { "
+            "while false decreases { 1 } {} return source.read(path) } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    for (SolStatementId index = 0; index < compilation.syntax.statement_count; ++index) {
+        if (!compilation.types.loop_facts[index].is_loop) continue;
+        CHECK(compilation.types.loop_facts[index].owner_member != SOL_AST_NONE);
+        CHECK(compilation.types.loop_facts[index].owner_trait_method == SOL_AST_NONE);
+    }
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module bad_loop_specs\n"
+        "function scope(flag: Bool) -> () { while flag invariant { hidden } "
+        "{ let hidden = true break } }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-RESOLVE-002"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module bad_loop_types\n"
+        "function run() -> () { loop invariant { 1 } decreases { true } { break } }\n"));
+    CHECK(diagnostic_count(&compilation, "SOL-CONTRACT-001") == 2);
+    free_compilation(&compilation);
+}
+
 static void test_bounded_mutation_types(void) {
     TestCompilation compilation;
     CHECK(compile_source(&compilation,
@@ -2170,6 +2222,7 @@ int main(void) {
     test_access_modes_are_exact();
     test_region_types();
     test_loop_types_and_reachability();
+    test_loop_specification_types_scope_and_facts();
     test_bounded_mutation_types();
     test_mutable_local_types_and_targets();
     if (failures != 0) {

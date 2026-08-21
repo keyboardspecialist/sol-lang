@@ -1,4 +1,5 @@
 #include "sol/interpreter.h"
+#include "sol/effects.h"
 #include "sol/lexer.h"
 
 #include <stdio.h>
@@ -1896,8 +1897,12 @@ static void test_loop_execution_and_cleanup(void) {
     Compilation compilation;
     bool compiled = compile(&compilation,
         "module loop_runtime\n"
-        "function count() -> Int64 { var n = 0 while n < 4 { n += 1 } return n }\n"
-        "function continued() -> Int64 { var n = 0 var total = 0 while n < 4 { "
+        "function proof_bool() -> Bool { return false }\n"
+        "function proof_int() -> Int64 { return 1 }\n"
+        "function count() -> Int64 { var n = 0 while n < 4 decreases { 4 - n } "
+            "{ n += 1 } return n }\n"
+        "function continued() -> Int64 { var n = 0 var total = 0 while n < 4 "
+            "decreases { 4 - n } { "
             "n += 1 if n == 2 { continue } else { () } total += n } return total }\n"
         "function nested() -> Int64 { var n = 0 loop { loop { break } n += 1 break } "
             "return n }\n"
@@ -1906,15 +1911,23 @@ static void test_loop_execution_and_cleanup(void) {
         "function condition_break(flag: Bool) -> Int64 { var n = 0 "
             "while if flag { { break } } else { false } {} n = 1 return n }\n"
         "function direct_condition_break() -> Int64 { while { break } {} return 6 }\n"
-        "function fallthrough_cleanup() -> Int64 { var n = 0 while n < 3 { "
+        "function fallthrough_cleanup() -> Int64 { var n = 0 while n < 3 "
+            "decreases { 3 - n } { "
             "let item = \"x\" n += 1 } return n }\n"
-        "function continue_cleanup() -> Int64 { var n = 0 while n < 3 { "
+        "function continue_cleanup() -> Int64 { var n = 0 while n < 3 "
+            "decreases { 3 - n } { "
             "let item = \"x\" n += 1 continue } return n }\n"
         "function break_cleanup() -> Int64 { loop { let item = \"x\" break } return 1 }\n"
         "function return_cleanup() -> Int64 { loop { let item = \"x\" return 2 } }\n"
         "function error_cleanup() -> Int64 { loop { let item = \"x\" return 1 / 0 } }\n"
-        "function declarations() -> Int64 { var n = 0 while n < 3 { "
+        "function declarations() -> Int64 { var n = 0 while n < 3 "
+            "decreases { 3 - n } { "
             "var item: Int64 item = n n += 1 } return n }\n"
+        "function erased_proofs() -> Int64 { var n = 0 while n < 1 "
+            "invariant { false && proof_bool() } "
+            "decreases { 1 / 0 + proof_int() } { n += 1 } return n }\n"
+        "function plain_loop() -> Int64 { var n = 0 while n < 1 "
+            "invariant { true } decreases { 1 } { n += 1 } return n }\n"
         "function endless() -> () effects { diverge } { loop {} }\n");
     CHECK(compiled);
     if (!compiled) {
@@ -1977,6 +1990,35 @@ static void test_loop_execution_and_cleanup(void) {
     CHECK(result.diagnostic.code == SOL_INTERPRETER_DIVISION_BY_ZERO);
     CHECK(log.count == 1);
     sol_interpreter_result_free(&result);
+
+    CHECK(run(&compilation.ir, "plain_loop", NULL, 0,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    size_t plain_steps = result.used.steps;
+    size_t plain_host_calls = result.used.host_calls;
+    size_t plain_cleanups = result.cleanup_actions;
+    sol_interpreter_result_free(&result);
+    CHECK(run(&compilation.ir, "erased_proofs", NULL, 0,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 1);
+    CHECK(result.used.steps == plain_steps);
+    CHECK(result.used.host_calls == plain_host_calls);
+    CHECK(result.cleanup_actions == plain_cleanups);
+    sol_interpreter_result_free(&result);
+
+    FILE *effects = tmpfile();
+    CHECK(effects != NULL);
+    if (effects != NULL) {
+        CHECK(sol_effects_render(effects, &compilation.ir, false));
+        rewind(effects);
+        char output[16384];
+        size_t length = fread(output, 1, sizeof(output) - 1, effects);
+        output[length] = '\0';
+        CHECK(strstr(output, "  call ") == NULL);
+        fclose(effects);
+    }
 
     memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
     CHECK(!run_observed_limits(&compilation.ir, "endless",

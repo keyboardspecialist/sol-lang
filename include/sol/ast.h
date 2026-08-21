@@ -26,6 +26,7 @@ typedef size_t SolCapabilityMemberId;
 typedef size_t SolTraitMethodId;
 typedef size_t SolContractClauseId;
 typedef size_t SolContractConditionId;
+typedef size_t SolLoopInvariantId;
 
 #define SOL_AST_NONE SIZE_MAX
 
@@ -157,11 +158,23 @@ typedef struct {
         } modify;
         struct {
             SolExprId condition;
+            /* Source-order linked list; SOL_AST_NONE when no invariant clause exists. */
+            SolLoopInvariantId first_invariant;
+            /* Full clause spans, or {0, 0} when the corresponding clause is absent. */
+            SolSpan invariant_span;
+            SolExprId decreases;
+            SolSpan decreases_span;
             SolExprId body;
         } loop_statement;
         SolExprId expression;
     } as;
 } SolStatement;
+
+typedef struct {
+    SolExprId expression;
+    SolSpan span;
+    SolLoopInvariantId next;
+} SolLoopInvariant;
 
 typedef struct {
     SolSpan name;

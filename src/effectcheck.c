@@ -2197,6 +2197,33 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
                                 current->as.loop_statement.condition,
                                 states, stack, &stack_count);
                         }
+                        if (valid && (current->kind == SOL_STATEMENT_LOOP
+                                || current->kind == SOL_STATEMENT_WHILE)) {
+                            SolLoopInvariantId invariant
+                                = current->as.loop_statement.first_invariant;
+                            size_t invariant_count = 0;
+                            while (valid && invariant != SOL_AST_NONE) {
+                                if (invariant >= checker->syntax->loop_invariant_count
+                                    || invariant_count++
+                                        >= checker->syntax->loop_invariant_count) {
+                                    valid = false;
+                                    break;
+                                }
+                                const SolLoopInvariant *invariant_entry
+                                    = &checker->syntax->loop_invariants[invariant];
+                                valid = sol_effect_schedule_owned_expression(
+                                    checker, owner, invariant_entry->expression,
+                                    states, stack, &stack_count);
+                                invariant = invariant_entry->next;
+                            }
+                            SolExprId decreases
+                                = current->as.loop_statement.decreases;
+                            if (valid && decreases != SOL_AST_NONE) {
+                                valid = sol_effect_schedule_owned_expression(
+                                    checker, owner, decreases,
+                                    states, stack, &stack_count);
+                            }
+                        }
                         valid = valid && (value == SOL_AST_NONE
                             || sol_effect_schedule_owned_expression(
                             checker,
@@ -3243,6 +3270,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || syntax->parameter_count > syntax->parameter_capacity
         || syntax->argument_count > syntax->argument_capacity
         || syntax->statement_count > syntax->statement_capacity
+        || syntax->loop_invariant_count > syntax->loop_invariant_capacity
         || syntax->type_count > syntax->type_capacity
         || syntax->type_argument_count > syntax->type_argument_capacity
         || syntax->type_parameter_count > syntax->type_parameter_capacity
@@ -3258,6 +3286,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (syntax->parameter_count != 0 && syntax->parameters == NULL)
         || (syntax->argument_count != 0 && syntax->arguments == NULL)
         || (syntax->statement_count != 0 && syntax->statements == NULL)
+        || (syntax->loop_invariant_count != 0 && syntax->loop_invariants == NULL)
         || (syntax->type_count != 0 && syntax->types == NULL)
         || (syntax->type_argument_count != 0 && syntax->type_arguments == NULL)
         || (syntax->type_parameter_count != 0 && syntax->type_parameters == NULL)
@@ -3325,6 +3354,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || types->implementation_target_count != syntax->item_count
         || types->representation_count != syntax->item_count
         || types->construction_count != syntax->expression_count
+        || types->loop_fact_count != syntax->statement_count
         || ((types->function_coercion_count == 0)
             != (types->function_coercion_capacity == 0))
         || (types->expression_count != 0 && types->expressions == NULL)
@@ -3360,7 +3390,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (types->implementation_target_count != 0
             && types->implementation_targets == NULL)
         || (types->representation_count != 0 && types->representations == NULL)
-        || (types->construction_count != 0 && types->constructions == NULL)) {
+        || (types->construction_count != 0 && types->constructions == NULL)
+        || (types->loop_fact_count != 0 && types->loop_facts == NULL)) {
         return false;
     }
     if (!sol_syntax_contracts_validate(source, syntax)

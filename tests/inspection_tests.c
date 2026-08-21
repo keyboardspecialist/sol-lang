@@ -47,7 +47,9 @@ static bool compile_fixture(TestCompilation *compilation) {
         "{ source.read() }) + selected }\n"
         "function checked(value: Int64) -> Int64 "
         "ensures { result == old(value) } { var local = value local = value "
-        "return local }\n";
+        "return local }\n"
+        "function looped() -> Int64 { var n = 0 while n < 1 "
+        "invariant { false } decreases { 1 / 0 } { n += 1 } return n }\n";
     memset(compilation, 0, sizeof(*compilation));
     compilation->package.path = "fixture.sol";
     sol_tokens_init(&compilation->tokens);
@@ -102,7 +104,7 @@ static void test_expression_kind_spellings(TestCompilation *compilation) {
     long length = ftell(stream);
     CHECK(length > 0);
     rewind(stream);
-    char output[32768];
+    char output[65536];
     size_t read = fread(output, 1, sizeof(output) - 1, stream);
     output[read] = '\0';
     CHECK(length >= 0 && (size_t)length == read);
@@ -113,6 +115,8 @@ static void test_expression_kind_spellings(TestCompilation *compilation) {
         CHECK(written > 0 && (size_t)written < sizeof(expected));
         CHECK(strstr(output, expected) != NULL);
     }
+    CHECK(compilation->contracts.loop_obligation_count == 4);
+    CHECK(strstr(output, "\"loopObligations\"") == NULL);
     fclose(stream);
 }
 

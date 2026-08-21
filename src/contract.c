@@ -17,6 +17,7 @@ typedef struct {
     bool malformed;
     bool allocation_failed;
     bool depth_reported;
+    bool in_loop_specification;
 } SolContractLowerer;
 
 void sol_contract_table_init(SolContractTable *table) {
@@ -27,6 +28,7 @@ void sol_contract_table_free(SolContractTable *table) {
     free(table->obligations);
     free(table->snapshots);
     free(table->expression_snapshots);
+    free(table->loop_obligations);
     memset(table, 0, sizeof(*table));
 }
 
@@ -284,6 +286,7 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || types->implementation_target_count != syntax->item_count
         || types->representation_count != syntax->item_count
         || types->construction_count != syntax->expression_count
+        || types->loop_fact_count != syntax->statement_count
         || effects->function_count != syntax->item_count
         || effects->capability_member_count != syntax->capability_member_count
         || effects->trait_method_count != syntax->trait_method_count
@@ -330,6 +333,7 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
             && types->implementation_targets == NULL)
         || (types->representation_count != 0 && types->representations == NULL)
         || (types->construction_count != 0 && types->constructions == NULL)
+        || (types->loop_fact_count != 0 && types->loop_facts == NULL)
         || (effects->function_count != 0 && effects->functions == NULL)
         || (effects->capability_member_count != 0
             && effects->capability_members == NULL)
@@ -341,8 +345,59 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || contracts->obligations != NULL || contracts->obligation_count != 0
         || contracts->snapshots != NULL || contracts->snapshot_count != 0
         || contracts->snapshot_capacity != 0 || contracts->expression_snapshots != NULL
-        || contracts->expression_count != 0) {
+        || contracts->expression_count != 0 || contracts->loop_obligations != NULL
+        || contracts->loop_obligation_count != 0
+        || contracts->loop_obligation_capacity != 0) {
         return false;
+    }
+    for (size_t statement = 0; statement < syntax->statement_count; ++statement) {
+        const SolLoopFact *fact = &types->loop_facts[statement];
+        bool loop = syntax->statements[statement].kind == SOL_STATEMENT_LOOP
+            || syntax->statements[statement].kind == SOL_STATEMENT_WHILE;
+        bool member_owner = loop && fact->owner < syntax->item_count
+            && fact->owner_member < syntax->capability_member_count
+            && syntax->capability_members[fact->owner_member].owner_item == fact->owner;
+        bool method_owner = loop && fact->owner < syntax->item_count
+            && fact->owner_trait_method < syntax->trait_method_count
+            && syntax->trait_methods[fact->owner_trait_method].owner_item == fact->owner;
+        bool item_owner = loop && fact->owner < syntax->item_count
+            && fact->owner_member == SOL_AST_NONE
+            && fact->owner_trait_method == SOL_AST_NONE
+            && (syntax->items[fact->owner].kind == SOL_ITEM_FUNCTION
+                || syntax->items[fact->owner].kind == SOL_ITEM_TEST);
+        SolExprId owner_body = member_owner
+            ? syntax->capability_members[fact->owner_member].body
+            : method_owner
+                ? syntax->trait_methods[fact->owner_trait_method].body
+                : item_owner ? syntax->items[fact->owner].body : SOL_AST_NONE;
+        SolSpan loop_span = syntax->statements[statement].span;
+        bool body_contains_loop = owner_body < syntax->expression_count
+            && syntax->expressions[owner_body].span.start <= loop_span.start
+            && syntax->expressions[owner_body].span.end >= loop_span.end;
+        bool predicate_contains_loop = false;
+        for (size_t condition = 0;
+            !predicate_contains_loop && condition < syntax->contract_condition_count;
+            ++condition) {
+            SolExprId expression = syntax->contract_conditions[condition].expression;
+            predicate_contains_loop = expression < syntax->expression_count
+                && syntax->expressions[expression].span.start <= loop_span.start
+                && syntax->expressions[expression].span.end >= loop_span.end;
+        }
+        if (fact->is_loop != loop
+            || (!loop && (fact->reachable_backedge || fact->reachable_break
+                    || fact->owner != 0 || fact->owner_member != 0
+                    || fact->owner_trait_method != 0))
+            || (loop && (fact->owner >= syntax->item_count
+                    || (fact->owner_member != SOL_AST_NONE
+                        && fact->owner_member >= syntax->capability_member_count)
+                    || (fact->owner_trait_method != SOL_AST_NONE
+                        && fact->owner_trait_method >= syntax->trait_method_count)
+                    || (fact->owner_member != SOL_AST_NONE
+                        && fact->owner_trait_method != SOL_AST_NONE)
+                    || (!member_owner && !method_owner && !item_owner)
+                    || (!body_contains_loop && !predicate_contains_loop)))) {
+            return false;
+        }
     }
     if (!sol_type_resolution_metadata_valid(syntax, types)) return false;
     for (size_t index = 0; index < syntax->effect_parameter_count; ++index) {
@@ -836,6 +891,48 @@ static bool sol_contract_append_snapshot(
     return true;
 }
 
+static bool sol_contract_append_loop_obligation(
+    SolContractLowerer *lowerer,
+    SolLoopObligationKind kind,
+    SolStatementId statement,
+    const SolLoopFact *fact,
+    SolExprId expression,
+    SolSpan span
+) {
+    SolContractTable *table = lowerer->contracts;
+    if (table->loop_obligation_count == table->loop_obligation_capacity) {
+        size_t capacity = table->loop_obligation_capacity == 0
+            ? 8 : table->loop_obligation_capacity * 2;
+        if (capacity < table->loop_obligation_capacity
+            || capacity > SIZE_MAX / sizeof(*table->loop_obligations)) {
+            lowerer->allocation_failed = true;
+            return false;
+        }
+        SolLoopObligation *grown = realloc(
+            table->loop_obligations,
+            capacity * sizeof(*table->loop_obligations));
+        if (grown == NULL) {
+            lowerer->allocation_failed = true;
+            return false;
+        }
+        table->loop_obligations = grown;
+        table->loop_obligation_capacity = capacity;
+    }
+    size_t id = table->loop_obligation_count++;
+    table->loop_obligations[id] = (SolLoopObligation){
+        .id = id,
+        .kind = kind,
+        .loop_statement = statement,
+        .owner = fact->owner,
+        .owner_member = fact->owner_member,
+        .owner_trait_method = fact->owner_trait_method,
+        .expression = expression,
+        .expression_type = lowerer->types->expressions[expression],
+        .span = span,
+    };
+    return true;
+}
+
 static void sol_contract_expression(
     SolContractLowerer *lowerer,
     SolExprId expression_id,
@@ -1121,7 +1218,10 @@ static void sol_contract_expression(
             sol_contract_expression(lowerer, expression->as.handle.body, in_old);
             break;
         case SOL_EXPR_RESULT:
-            if (lowerer->obligation->owner_kind == SOL_CONTRACT_OWNER_TYPE) {
+            if (lowerer->in_loop_specification) {
+                sol_contract_error(lowerer, "SOL-CONTRACT-003", expression->span,
+                    "result is unavailable in a loop specification");
+            } else if (lowerer->obligation->owner_kind == SOL_CONTRACT_OWNER_TYPE) {
                 sol_contract_error(
                     lowerer,
                     "SOL-CONTRACT-003",
@@ -1138,6 +1238,12 @@ static void sol_contract_expression(
             }
             break;
         case SOL_EXPR_OLD:
+            if (lowerer->in_loop_specification) {
+                sol_contract_error(lowerer, "SOL-CONTRACT-003", expression->span,
+                    "old is unavailable in a loop specification");
+                sol_contract_expression(lowerer, expression->as.old_expression, true);
+                break;
+            }
             if (lowerer->obligation->owner_kind == SOL_CONTRACT_OWNER_TYPE) {
                 sol_contract_error(
                     lowerer,
@@ -1216,6 +1322,122 @@ static SolResultBinding sol_contract_result_binding(
         binding.type = arguments[0];
     }
     return binding;
+}
+
+static bool sol_contract_effect_row_total(
+    const SolContractLowerer *lowerer,
+    const SolEffectRow *row
+) {
+    if (row == NULL) return false;
+    for (size_t index = 0; index < row->count; ++index) {
+        const SolEffectAtom *atom = &row->atoms[index];
+        if (atom->argument_kind == SOL_EFFECT_ATOM_NO_ARGUMENT
+            && sol_contract_span_text_equal(lowerer->source, atom->name, "diverge")) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool sol_contract_loop_owner_total(
+    const SolContractLowerer *lowerer,
+    const SolLoopFact *fact
+) {
+    if (fact->owner_member != SOL_AST_NONE) {
+        return sol_contract_effect_row_total(
+            lowerer, &lowerer->effects->capability_members[fact->owner_member]);
+    }
+    if (fact->owner_trait_method != SOL_AST_NONE) {
+        return sol_contract_effect_row_total(
+            lowerer, &lowerer->effects->trait_methods[fact->owner_trait_method]);
+    }
+    return sol_contract_effect_row_total(
+        lowerer, &lowerer->effects->functions[fact->owner]);
+}
+
+static int sol_contract_loop_obligation_compare(const void *left, const void *right) {
+    const SolLoopObligation *a = left;
+    const SolLoopObligation *b = right;
+    if (a->span.start != b->span.start) return a->span.start < b->span.start ? -1 : 1;
+    if (a->span.end != b->span.end) return a->span.end < b->span.end ? -1 : 1;
+    if (a->loop_statement != b->loop_statement) {
+        return a->loop_statement < b->loop_statement ? -1 : 1;
+    }
+    return (int)a->kind - (int)b->kind;
+}
+
+static void sol_contract_lower_loops(SolContractLowerer *lowerer) {
+    lowerer->in_loop_specification = true;
+    lowerer->obligation = NULL;
+    for (SolStatementId statement = 0;
+        statement < lowerer->syntax->statement_count;
+        ++statement) {
+        const SolStatement *loop = &lowerer->syntax->statements[statement];
+        if (loop->kind != SOL_STATEMENT_LOOP && loop->kind != SOL_STATEMENT_WHILE) continue;
+        bool in_predicate = false;
+        for (size_t condition = 0; !in_predicate
+            && condition < lowerer->syntax->contract_condition_count; ++condition) {
+            SolExprId expression
+                = lowerer->syntax->contract_conditions[condition].expression;
+            in_predicate = expression < lowerer->syntax->expression_count
+                && lowerer->syntax->expressions[expression].span.start <= loop->span.start
+                && lowerer->syntax->expressions[expression].span.end >= loop->span.end;
+        }
+        if (in_predicate) continue;
+        const SolLoopFact *fact = &lowerer->types->loop_facts[statement];
+        if (fact->reachable_backedge
+            && loop->as.loop_statement.decreases == SOL_AST_NONE
+            && sol_contract_loop_owner_total(lowerer, fact)) {
+            sol_contract_error(lowerer, "SOL-CONTRACT-006", loop->span,
+                "a total callable loop with a reachable backedge requires decreases");
+        }
+        SolLoopInvariantId invariant = loop->as.loop_statement.first_invariant;
+        size_t traversed = 0;
+        while (invariant != SOL_AST_NONE) {
+            if (invariant >= lowerer->syntax->loop_invariant_count
+                || traversed++ >= lowerer->syntax->loop_invariant_count) {
+                lowerer->malformed = true;
+                break;
+            }
+            const SolLoopInvariant *entry
+                = &lowerer->syntax->loop_invariants[invariant];
+            SolSpan span = lowerer->syntax->expressions[entry->expression].span;
+            lowerer->depth = 0;
+            lowerer->depth_reported = false;
+            sol_contract_expression(lowerer, entry->expression, false);
+            sol_contract_append_loop_obligation(lowerer,
+                SOL_LOOP_OBLIGATION_INVARIANT_ENTRY,
+                statement, fact, entry->expression, span);
+            sol_contract_append_loop_obligation(lowerer,
+                SOL_LOOP_OBLIGATION_INVARIANT_PRESERVATION,
+                statement, fact, entry->expression, span);
+            invariant = entry->next;
+        }
+        SolExprId decreases = loop->as.loop_statement.decreases;
+        if (decreases != SOL_AST_NONE) {
+            SolSpan span = lowerer->syntax->expressions[decreases].span;
+            lowerer->depth = 0;
+            lowerer->depth_reported = false;
+            sol_contract_expression(lowerer, decreases, false);
+            sol_contract_append_loop_obligation(lowerer,
+                SOL_LOOP_OBLIGATION_DECREASES_NONNEGATIVE,
+                statement, fact, decreases, span);
+            sol_contract_append_loop_obligation(lowerer,
+                SOL_LOOP_OBLIGATION_DECREASES_STRICT,
+                statement, fact, decreases, span);
+        }
+        if (lowerer->malformed || lowerer->allocation_failed) break;
+    }
+    if (!lowerer->allocation_failed && lowerer->contracts->loop_obligation_count > 1) {
+        qsort(lowerer->contracts->loop_obligations,
+            lowerer->contracts->loop_obligation_count,
+            sizeof(*lowerer->contracts->loop_obligations),
+            sol_contract_loop_obligation_compare);
+        for (size_t index = 0;
+            index < lowerer->contracts->loop_obligation_count;
+            ++index) lowerer->contracts->loop_obligations[index].id = index;
+    }
+    lowerer->in_loop_specification = false;
 }
 
 bool sol_contract_lower(
@@ -1312,6 +1534,9 @@ bool sol_contract_lower(
             }
             sol_contract_expression(&lowerer, obligation->predicate, false);
             if (lowerer.malformed || lowerer.allocation_failed) break;
+        }
+        if (!lowerer.malformed && !lowerer.allocation_failed) {
+            sol_contract_lower_loops(&lowerer);
         }
     }
     if (lowerer.allocation_failed) diagnostics->allocation_failed = true;

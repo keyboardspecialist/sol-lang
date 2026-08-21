@@ -33,6 +33,15 @@ typedef struct {
     SolDefId definition;
 } SolType;
 
+typedef struct {
+    bool is_loop;
+    bool reachable_backedge;
+    bool reachable_break;
+    SolDefId owner;
+    SolCapabilityMemberId owner_member;
+    SolTraitMethodId owner_trait_method;
+} SolLoopFact;
+
 typedef enum {
     SOL_TYPE_CONSTRUCTOR_OPTION,
     SOL_TYPE_CONSTRUCTOR_RESULT,
@@ -187,6 +196,9 @@ typedef struct {
     /* Indexed by SolExprId; non-construction entries have definition == SOL_AST_NONE. */
     SolTypeConstruction *constructions;
     size_t construction_count;
+    /* Indexed by SolStatementId; non-loop entries have is_loop == false. */
+    SolLoopFact *loop_facts;
+    size_t loop_fact_count;
 } SolTypeTable;
 
 const SolMethodResolution *sol_type_method_resolution(

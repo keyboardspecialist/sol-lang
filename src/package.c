@@ -22,6 +22,7 @@ typedef struct {
     size_t items;
     size_t expressions;
     size_t statements;
+    size_t loop_invariants;
     size_t arguments;
     size_t parameters;
     size_t types;
@@ -243,6 +244,7 @@ static SolArenaOffsets sol_package_offsets(const SolSyntaxTree *tree) {
         .items = tree->item_count,
         .expressions = tree->expression_count,
         .statements = tree->statement_count,
+        .loop_invariants = tree->loop_invariant_count,
         .arguments = tree->argument_count,
         .parameters = tree->parameter_count,
         .types = tree->type_count,
@@ -267,6 +269,7 @@ static bool sol_package_append_tree(SolSyntaxTree *target, const SolSyntaxTree *
         && SOL_APPEND_ARENA(target, local, items, item_count, item_capacity)
         && SOL_APPEND_ARENA(target, local, expressions, expression_count, expression_capacity)
         && SOL_APPEND_ARENA(target, local, statements, statement_count, statement_capacity)
+        && SOL_APPEND_ARENA(target, local, loop_invariants, loop_invariant_count, loop_invariant_capacity)
         && SOL_APPEND_ARENA(target, local, arguments, argument_count, argument_capacity)
         && SOL_APPEND_ARENA(target, local, parameters, parameter_count, parameter_capacity)
         && SOL_APPEND_ARENA(target, local, types, type_count, type_capacity)
@@ -492,6 +495,14 @@ static void sol_package_relocate_arenas(SolSyntaxTree *tree, SolArenaOffsets o, 
             || entry->kind == SOL_STATEMENT_WHILE) {
             entry->as.loop_statement.condition = sol_relocate_id(
                 entry->as.loop_statement.condition, o.expressions);
+            entry->as.loop_statement.first_invariant = sol_relocate_id(
+                entry->as.loop_statement.first_invariant, o.loop_invariants);
+            entry->as.loop_statement.invariant_span = sol_relocate_optional_span(
+                entry->as.loop_statement.invariant_span, base);
+            entry->as.loop_statement.decreases = sol_relocate_id(
+                entry->as.loop_statement.decreases, o.expressions);
+            entry->as.loop_statement.decreases_span = sol_relocate_optional_span(
+                entry->as.loop_statement.decreases_span, base);
             entry->as.loop_statement.body = sol_relocate_id(
                 entry->as.loop_statement.body, o.expressions);
         } else if (entry->kind == SOL_STATEMENT_BREAK
@@ -500,6 +511,14 @@ static void sol_package_relocate_arenas(SolSyntaxTree *tree, SolArenaOffsets o, 
         } else {
             entry->as.expression = sol_relocate_id(entry->as.expression, o.expressions);
         }
+    }
+    for (size_t i = o.loop_invariants; i < tree->loop_invariant_count; ++i) {
+        tree->loop_invariants[i].expression = sol_relocate_id(
+            tree->loop_invariants[i].expression, o.expressions);
+        tree->loop_invariants[i].span = sol_relocate_span(
+            tree->loop_invariants[i].span, base);
+        tree->loop_invariants[i].next = sol_relocate_id(
+            tree->loop_invariants[i].next, o.loop_invariants);
     }
     for (size_t i = o.parameters; i < tree->parameter_count; ++i) {
         tree->parameters[i].name = sol_relocate_span(tree->parameters[i].name, base);

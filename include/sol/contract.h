@@ -41,6 +41,25 @@ typedef struct {
     SolType type;
 } SolSnapshot;
 
+typedef enum {
+    SOL_LOOP_OBLIGATION_INVARIANT_ENTRY,
+    SOL_LOOP_OBLIGATION_INVARIANT_PRESERVATION,
+    SOL_LOOP_OBLIGATION_DECREASES_NONNEGATIVE,
+    SOL_LOOP_OBLIGATION_DECREASES_STRICT,
+} SolLoopObligationKind;
+
+typedef struct {
+    size_t id;
+    SolLoopObligationKind kind;
+    SolStatementId loop_statement;
+    SolDefId owner;
+    SolCapabilityMemberId owner_member;
+    SolTraitMethodId owner_trait_method;
+    SolExprId expression;
+    SolType expression_type;
+    SolSpan span;
+} SolLoopObligation;
+
 typedef struct {
     SolObligation *obligations;
     size_t obligation_count;
@@ -50,6 +69,9 @@ typedef struct {
     /* Indexed by SolExprId; SOL_AST_NONE means the expression is not old(...). */
     SolSnapshotId *expression_snapshots;
     size_t expression_count;
+    SolLoopObligation *loop_obligations;
+    size_t loop_obligation_count;
+    size_t loop_obligation_capacity;
 } SolContractTable;
 
 void sol_contract_table_init(SolContractTable *table);

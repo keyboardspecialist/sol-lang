@@ -108,6 +108,7 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
         || left->effect_count != right->effect_count
         || left->obligation_count != right->obligation_count
         || left->snapshot_count != right->snapshot_count
+        || left->loop_obligation_count != right->loop_obligation_count
         || left->file_count != right->file_count) return false;
     if (memcmp(left->types, right->types, left->type_count * sizeof(*left->types)) != 0
         || memcmp(left->type_ids, right->type_ids,
@@ -131,7 +132,11 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
         || memcmp(left->places, right->places,
             left->place_count * sizeof(*left->places)) != 0
         || memcmp(left->projections, right->projections,
-            left->projection_count * sizeof(*left->projections)) != 0) return false;
+            left->projection_count * sizeof(*left->projections)) != 0
+        || memcmp(left->loop_obligations, right->loop_obligations,
+            left->loop_obligation_count * sizeof(*left->loop_obligations)) != 0) {
+        return false;
+    }
     for (size_t index = 0; index < left->definition_count; ++index) {
         if (left->definitions[index].semantic_id.high
                 != right->definitions[index].semantic_id.high
@@ -174,6 +179,8 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
             || a->span.end != b->span.end
             || a->region_label_span.start != b->region_label_span.start
             || a->region_label_span.end != b->region_label_span.end
+            || a->loop_obligations.offset != b->loop_obligations.offset
+            || a->loop_obligations.count != b->loop_obligations.count
             || ((a->region_label == NULL) != (b->region_label == NULL))
             || (a->region_label != NULL
                 && strcmp(a->region_label, b->region_label) != 0)) return false;
@@ -2316,7 +2323,8 @@ static void test_exhaustive_validation_domains(void) {
         "{ let item = value? return some(item) }\n"
         "function boolean(value: Bool) -> Int64 { return match value "
         "{ true => 1 false => 0 } }\n"
-        "function loops(flag: Bool) -> () { while flag { continue } loop { break } }\n");
+        "function loops(flag: Bool) -> () { while flag decreases { 1 } "
+            "{ continue } loop { break } }\n");
     CHECK(compiled);
     if (!compiled) {
         sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
@@ -2632,7 +2640,8 @@ static void test_loop_ir_and_ownership(void) {
     TestCompilation compilation;
     CHECK(compile_ir(&compilation,
         "module loop_ir\n"
-        "function count() -> Int64 { var n = 0 while n < 3 { n += 1 } return n }\n"
+        "function count() -> Int64 { var n = 0 while n < 3 decreases { 3 - n } "
+            "{ n += 1 } return n }\n"
         "function initialized() -> Int64 { var value: Int64 loop { value = 7 break } "
             "return value }\n"
         "function nested() -> Int64 { var value = 0 loop { loop { break } "
@@ -2692,7 +2701,7 @@ static void test_loop_ir_and_ownership(void) {
     CHECK(!compile_ir(&compilation,
         "module zero_iteration\n"
         "function bad(flag: Bool) -> Int64 { var value: Int64 "
-            "while flag { value = 1 } return value }\n"));
+            "while flag decreases { 1 } { value = 1 } return value }\n"));
     CHECK(has_code(&compilation, "SOL-INITIALIZATION-001"));
     free_compilation(&compilation);
 
@@ -2707,8 +2716,207 @@ static void test_loop_ir_and_ownership(void) {
         "module loop_restore\ncapability Token {}\n"
         "function keep(value: capability Token) -> capability Token "
             "authority { result derives_from value } { var slot = value "
-            "loop { slot = slot if true { break } else { continue } } return slot }\n"));
+            "loop decreases { 1 } { slot = slot if true { break } else { continue } } "
+            "return slot }\n"));
     free_compilation(&compilation);
+}
+
+static void test_loop_obligation_ir(void) {
+    TestCompilation compilation;
+    CHECK(compile_ir(&compilation,
+        "module loop_obligation_ir\n"
+        "function valid(value: Int64) -> Bool effects { pure } { return value >= 0 }\n"
+        "function noisy(value: Int64) -> Bool effects { panic } { return value >= 0 }\n"
+        "function count() -> Int64 requires { true } { var n = 0 while n < 2 "
+            "invariant { valid(n), n <= 2 } decreases { 2 - n } "
+            "{ n += 1 } return n }\n"
+        "function other() -> () { () }\n"));
+    CHECK(compilation.ir.loop_obligation_count == 6);
+    SolIrStatementId loop_id = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
+        if (compilation.ir.statements[index].kind == SOL_IR_STATEMENT_WHILE) {
+            loop_id = index;
+            break;
+        }
+    }
+    CHECK(loop_id != SOL_IR_NONE);
+    if (loop_id == SOL_IR_NONE || compilation.ir.loop_obligation_count != 6) {
+        free_compilation(&compilation);
+        return;
+    }
+    SolIrStatement *loop = &compilation.ir.statements[loop_id];
+    CHECK(loop->loop_obligations.count == 6);
+    const SolLoopObligationKind expected[] = {
+        SOL_LOOP_OBLIGATION_INVARIANT_ENTRY,
+        SOL_LOOP_OBLIGATION_INVARIANT_PRESERVATION,
+        SOL_LOOP_OBLIGATION_INVARIANT_ENTRY,
+        SOL_LOOP_OBLIGATION_INVARIANT_PRESERVATION,
+        SOL_LOOP_OBLIGATION_DECREASES_NONNEGATIVE,
+        SOL_LOOP_OBLIGATION_DECREASES_STRICT,
+    };
+    for (size_t index = 0; index < 6; ++index) {
+        const SolIrLoopObligation *obligation
+            = &compilation.ir.loop_obligations[loop->loop_obligations.offset + index];
+        CHECK(obligation->kind == expected[index]);
+        CHECK(obligation->loop_statement == loop_id);
+        CHECK(obligation->callable < compilation.ir.callable_count);
+        CHECK(obligation->expression_type
+            == compilation.ir.expressions[obligation->expression].type);
+        CHECK(compilation.ir.types[obligation->expression_type].kind
+            == (index < 4 ? SOL_IR_TYPE_BOOL : SOL_IR_TYPE_INT64));
+    }
+    SolIrExpressionId copied_expression = compilation.ir.loop_obligations[0].expression;
+    compilation.contracts.loop_obligations[0].expression
+        = compilation.syntax.expression_count;
+    CHECK(compilation.ir.loop_obligations[0].expression == copied_expression);
+    free_frontend(&compilation);
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+        CHECK(memcmp(compilation.ir.source_bytes
+                + compilation.ir.loop_obligations[0].span.start,
+            "valid(n)", strlen("valid(n)")) == 0);
+
+    SolIrLoopObligation *first
+        = &compilation.ir.loop_obligations[loop->loop_obligations.offset];
+    size_t saved_id = first->id;
+    first->id = compilation.ir.loop_obligation_count;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    first->id = saved_id;
+    SolLoopObligationKind saved_kind = first->kind;
+    first->kind = (SolLoopObligationKind)99;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    first->kind = saved_kind;
+    first->kind = SOL_LOOP_OBLIGATION_DECREASES_NONNEGATIVE;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    first->kind = saved_kind;
+    SolIrStatementId saved_owner = first->loop_statement;
+    first->loop_statement = compilation.ir.statement_count;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    first->loop_statement = saved_owner;
+    SolIrTypeId saved_type = first->expression_type;
+    first->expression_type = compilation.ir.type_count;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    first->expression_type = saved_type;
+    first->expression_type = compilation.ir.loop_obligations[
+        loop->loop_obligations.offset + 4].expression_type;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    first->expression_type = saved_type;
+    SolSpan saved_span = first->span;
+    first->span.end = first->span.start;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    first->span = saved_span;
+    size_t saved_count = loop->loop_obligations.count;
+    --loop->loop_obligations.count;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    loop->loop_obligations.count = saved_count;
+    SolIrLoopObligation *saved_obligations = compilation.ir.loop_obligations;
+    compilation.ir.loop_obligations = NULL;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    compilation.ir.loop_obligations = saved_obligations;
+
+    SolIrLoopObligation *second = first + 1;
+    SolIrExpressionId saved_expression = second->expression;
+    second->expression = compilation.ir.loop_obligations[
+        loop->loop_obligations.offset + 2].expression;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    second->expression = saved_expression;
+
+    CHECK(compilation.ir.expressions[first->expression].kind == SOL_IR_EXPR_CALL);
+    SolIrCallableId noisy = SOL_IR_NONE;
+    for (SolIrCallableId index = 0; index < compilation.ir.callable_count; ++index) {
+        if (strcmp(compilation.ir.callables[index].name, "noisy") == 0) noisy = index;
+    }
+    CHECK(noisy != SOL_IR_NONE);
+    if (noisy != SOL_IR_NONE
+        && compilation.ir.expressions[first->expression].kind == SOL_IR_EXPR_CALL) {
+        SolIrCallableId pure = compilation.ir.expressions[
+            first->expression].as.call.callable;
+        compilation.ir.expressions[first->expression].as.call.callable = noisy;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        compilation.ir.expressions[first->expression].as.call.callable = pure;
+    }
+
+    CHECK(compilation.ir.obligation_count == 1);
+    if (compilation.ir.obligation_count == 1) {
+        SolIrExpressionId predicate = compilation.ir.obligations[0].predicate;
+        SolIrExpressionId original_first = first->expression;
+        SolIrExpressionId original_second = second->expression;
+        SolIrTypeId original_first_type = first->expression_type;
+        SolIrTypeId original_second_type = second->expression_type;
+        SolSpan original_first_span = first->span;
+        SolSpan original_second_span = second->span;
+        first->expression = predicate;
+        second->expression = predicate;
+        first->expression_type = compilation.ir.expressions[predicate].type;
+        second->expression_type = first->expression_type;
+        first->span = compilation.ir.expressions[predicate].span;
+        second->span = first->span;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        first->expression = original_first;
+        second->expression = original_second;
+        first->expression_type = original_first_type;
+        second->expression_type = original_second_type;
+        first->span = original_first_span;
+        second->span = original_second_span;
+    }
+
+    SolIrCallableId saved_callable = first->callable;
+    SolIrCallableId other_callable = SOL_IR_NONE;
+    for (SolIrCallableId index = 0; index < compilation.ir.callable_count; ++index) {
+        if (index != saved_callable) other_callable = index;
+    }
+    CHECK(other_callable != SOL_IR_NONE);
+    if (other_callable != SOL_IR_NONE) {
+        first->callable = other_callable;
+        second->callable = other_callable;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        first->callable = saved_callable;
+        second->callable = saved_callable;
+    }
+
+    SolIrLoopObligation *third = first + 2;
+    SolIrLoopObligation *fourth = first + 3;
+    SolIrExpressionId duplicate_first_expression = first->expression;
+    SolIrExpressionId duplicate_second_expression = second->expression;
+    SolIrTypeId duplicate_first_type = first->expression_type;
+    SolIrTypeId duplicate_second_type = second->expression_type;
+    SolSpan duplicate_first_span = first->span;
+    SolSpan duplicate_second_span = second->span;
+    first->expression = third->expression;
+    second->expression = fourth->expression;
+    first->expression_type = third->expression_type;
+    second->expression_type = fourth->expression_type;
+    first->span = third->span;
+    second->span = fourth->span;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    first->expression = duplicate_first_expression;
+    second->expression = duplicate_second_expression;
+    first->expression_type = duplicate_first_type;
+    second->expression_type = duplicate_second_type;
+    first->span = duplicate_first_span;
+    second->span = duplicate_second_span;
+
+    SolIrExpressionId first_expression = first->expression;
+    SolIrExpressionId second_expression = second->expression;
+    SolIrTypeId first_type = first->expression_type;
+    SolIrTypeId second_type = second->expression_type;
+    SolSpan first_span = first->span;
+    SolSpan second_span = second->span;
+    first->expression = loop->condition;
+    second->expression = loop->condition;
+    first->expression_type = compilation.ir.expressions[loop->condition].type;
+    second->expression_type = first->expression_type;
+    first->span = compilation.ir.expressions[loop->condition].span;
+    second->span = first->span;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    first->expression = first_expression;
+    second->expression = second_expression;
+    first->expression_type = first_type;
+    second->expression_type = second_type;
+    first->span = first_span;
+    second->span = second_span;
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+    sol_ir_free(&compilation.ir);
+    sol_diagnostics_free(&compilation.diagnostics);
 }
 
 int main(void) {
@@ -2733,6 +2941,7 @@ int main(void) {
     test_projected_ownership();
     test_exhaustive_validation_domains();
     test_loop_ir_and_ownership();
+    test_loop_obligation_ir();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

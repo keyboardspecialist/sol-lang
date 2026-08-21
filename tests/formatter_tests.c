@@ -385,14 +385,16 @@ static void test_projected_mutation_formatting(void) {
 static void test_loop_formatting(void) {
     static const char source[] =
         "module loops\nfunction run(ready:Bool)->(){\n"
-        "while ready{\ncontinue\n}\nloop{\nwhile ready{break}\nbreak\n}\n}\n";
+        "while ready invariant{ready,\nready==true}decreases{1}{\ncontinue\n}\n"
+        "loop invariant{ready}{\nwhile ready{break}\nbreak\n}\n}\n";
     static const char expected[] =
         "module loops\n"
         "function run(ready: Bool) -> () {\n"
-        "    while ready {\n"
+        "    while ready invariant { ready,\n"
+        "        ready == true } decreases { 1 } {\n"
         "        continue\n"
         "    }\n"
-        "    loop {\n"
+        "    loop invariant { ready } {\n"
         "        while ready { break }\n"
         "        break\n"
         "    }\n"

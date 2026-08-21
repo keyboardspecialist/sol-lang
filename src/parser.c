@@ -33,6 +33,7 @@ void sol_syntax_tree_free(SolSyntaxTree *tree) {
     free(tree->items);
     free(tree->expressions);
     free(tree->statements);
+    free(tree->loop_invariants);
     free(tree->arguments);
     free(tree->parameters);
     free(tree->types);
@@ -239,6 +240,25 @@ static SolStatementId sol_parser_add_statement(SolParser *parser, SolStatement s
     }
     SolStatementId id = parser->tree->statement_count++;
     parser->tree->statements[id] = statement;
+    return id;
+}
+
+static SolLoopInvariantId sol_parser_add_loop_invariant(
+    SolParser *parser,
+    SolLoopInvariant invariant
+) {
+    if (parser->tree->loop_invariant_count == parser->tree->loop_invariant_capacity) {
+        SolLoopInvariant *invariants = sol_parser_grow(
+            parser,
+            parser->tree->loop_invariants,
+            &parser->tree->loop_invariant_capacity,
+            sizeof(*parser->tree->loop_invariants)
+        );
+        if (invariants == NULL) return SOL_AST_NONE;
+        parser->tree->loop_invariants = invariants;
+    }
+    SolLoopInvariantId id = parser->tree->loop_invariant_count++;
+    parser->tree->loop_invariants[id] = invariant;
     return id;
 }
 
@@ -1671,6 +1691,113 @@ static bool sol_parser_assignment_operator(SolTokenKind kind) {
         || kind == SOL_TOKEN_SLASH_EQUAL || kind == SOL_TOKEN_PERCENT_EQUAL;
 }
 
+static SolSpan sol_parser_loop_invariant_clause(
+    SolParser *parser,
+    SolToken keyword,
+    SolLoopInvariantId *first_invariant
+) {
+    SolToken opening = sol_parser_current(parser);
+    if (!sol_parser_expect(parser, SOL_TOKEN_LEFT_BRACE,
+            "expected an invariant block")) {
+        return (SolSpan){.start = keyword.span.start, .end = keyword.span.end};
+    }
+    SolLoopInvariantId last = SOL_AST_NONE;
+    while (sol_parser_kind(parser) != SOL_TOKEN_RIGHT_BRACE
+        && sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+        if (sol_parser_match(parser, SOL_TOKEN_COMMA)) {
+            sol_parser_error(parser, "SOL-PARSE-020",
+                parser->tokens->items[parser->cursor - 1],
+                "expected an invariant expression before ','");
+            continue;
+        }
+        size_t before = sol_parser_significant_index(parser);
+        bool previous_suppression = parser->suppress_record_literal;
+        parser->suppress_record_literal = true;
+        SolExprId expression = sol_parser_expression(parser, 1);
+        parser->suppress_record_literal = previous_suppression;
+        if (expression == SOL_AST_NONE) break;
+        SolSpan expression_span = parser->tree->expressions[expression].span;
+        SolLoopInvariantId invariant = sol_parser_add_loop_invariant(
+            parser,
+            (SolLoopInvariant){
+                .expression = expression,
+                .span = expression_span,
+                .next = SOL_AST_NONE,
+            }
+        );
+        if (invariant == SOL_AST_NONE) break;
+        if (*first_invariant == SOL_AST_NONE) *first_invariant = invariant;
+        else parser->tree->loop_invariants[last].next = invariant;
+        last = invariant;
+
+        SolToken next = sol_parser_current(parser);
+        if (next.kind == SOL_TOKEN_RIGHT_BRACE || next.kind == SOL_TOKEN_EOF) continue;
+        if (sol_parser_match(parser, SOL_TOKEN_COMMA)) {
+            if (sol_parser_kind(parser) == SOL_TOKEN_RIGHT_BRACE) {
+                sol_parser_error(parser, "SOL-PARSE-020", sol_parser_current(parser),
+                    "expected an invariant expression after ','");
+            }
+            continue;
+        }
+        if (!sol_parser_has_line_break(parser, expression_span.end, next.span.start)) {
+            sol_parser_error(parser, "SOL-PARSE-020", next,
+                "expected a newline or ',' between invariant expressions");
+        }
+        if (sol_parser_significant_index(parser) <= before
+            && sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+            sol_parser_advance(parser);
+        }
+    }
+    SolToken closing = sol_parser_current(parser);
+    if (*first_invariant == SOL_AST_NONE) {
+        sol_parser_error(parser, "SOL-PARSE-020", closing,
+            "an invariant block requires at least one expression");
+    }
+    sol_parser_expect(parser, SOL_TOKEN_RIGHT_BRACE,
+        "expected '}' after invariant expressions");
+    return (SolSpan){
+        .start = keyword.span.start,
+        .end = closing.kind == SOL_TOKEN_RIGHT_BRACE ? closing.span.end : opening.span.end,
+    };
+}
+
+static SolSpan sol_parser_loop_decreases_clause(
+    SolParser *parser,
+    SolToken keyword,
+    SolExprId *decreases
+) {
+    SolToken opening = sol_parser_current(parser);
+    if (!sol_parser_expect(parser, SOL_TOKEN_LEFT_BRACE,
+            "expected a decreases block")) {
+        return (SolSpan){.start = keyword.span.start, .end = keyword.span.end};
+    }
+    if (sol_parser_kind(parser) == SOL_TOKEN_RIGHT_BRACE) {
+        sol_parser_error(parser, "SOL-PARSE-020", sol_parser_current(parser),
+            "a decreases block requires exactly one expression");
+    } else if (sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+        bool previous_suppression = parser->suppress_record_literal;
+        parser->suppress_record_literal = true;
+        *decreases = sol_parser_expression(parser, 1);
+        parser->suppress_record_literal = previous_suppression;
+    }
+    if (sol_parser_kind(parser) != SOL_TOKEN_RIGHT_BRACE
+        && sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+        sol_parser_error(parser, "SOL-PARSE-020", sol_parser_current(parser),
+            "a decreases block contains exactly one expression");
+        while (sol_parser_kind(parser) != SOL_TOKEN_RIGHT_BRACE
+            && sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+            sol_parser_advance(parser);
+        }
+    }
+    SolToken closing = sol_parser_current(parser);
+    sol_parser_expect(parser, SOL_TOKEN_RIGHT_BRACE,
+        "expected '}' after decreases expression");
+    return (SolSpan){
+        .start = keyword.span.start,
+        .end = closing.kind == SOL_TOKEN_RIGHT_BRACE ? closing.span.end : opening.span.end,
+    };
+}
+
 static SolStatementId sol_parser_statement(SolParser *parser) {
     SolToken start = sol_parser_current(parser);
     SolStatement statement = {
@@ -1753,16 +1880,59 @@ static SolStatementId sol_parser_statement(SolParser *parser) {
         sol_parser_advance(parser);
         ++parser->loop_depth;
         SolExprId condition = SOL_AST_NONE;
+        SolLoopInvariantId first_invariant = SOL_AST_NONE;
+        SolSpan invariant_span = {0};
+        SolExprId decreases = SOL_AST_NONE;
+        SolSpan decreases_span = {0};
         if (conditional) {
             bool previous_suppression = parser->suppress_record_literal;
             parser->suppress_record_literal = true;
             condition = sol_parser_expression(parser, 1);
             parser->suppress_record_literal = previous_suppression;
         }
+        bool saw_invariant = false;
+        bool saw_decreases = false;
+        while (sol_parser_kind(parser) == SOL_TOKEN_INVARIANT
+            || sol_parser_kind(parser) == SOL_TOKEN_DECREASES) {
+            SolToken clause = sol_parser_advance(parser);
+            if (clause.kind == SOL_TOKEN_INVARIANT) {
+                if (saw_invariant) {
+                    sol_parser_error(parser, "SOL-PARSE-020", clause,
+                        "a loop may have at most one invariant clause");
+                }
+                if (saw_decreases) {
+                    sol_parser_error(parser, "SOL-PARSE-020", clause,
+                        "invariant must precede decreases");
+                }
+                SolLoopInvariantId parsed = SOL_AST_NONE;
+                SolSpan span = sol_parser_loop_invariant_clause(parser, clause, &parsed);
+                if (!saw_invariant) {
+                    first_invariant = parsed;
+                    invariant_span = span;
+                }
+                saw_invariant = true;
+            } else {
+                if (saw_decreases) {
+                    sol_parser_error(parser, "SOL-PARSE-020", clause,
+                        "a loop may have at most one decreases clause");
+                }
+                SolExprId parsed = SOL_AST_NONE;
+                SolSpan span = sol_parser_loop_decreases_clause(parser, clause, &parsed);
+                if (!saw_decreases) {
+                    decreases = parsed;
+                    decreases_span = span;
+                }
+                saw_decreases = true;
+            }
+        }
         SolExprId body = sol_parser_block_expression(parser);
         --parser->loop_depth;
         statement.kind = conditional ? SOL_STATEMENT_WHILE : SOL_STATEMENT_LOOP;
         statement.as.loop_statement.condition = condition;
+        statement.as.loop_statement.first_invariant = first_invariant;
+        statement.as.loop_statement.invariant_span = invariant_span;
+        statement.as.loop_statement.decreases = decreases;
+        statement.as.loop_statement.decreases_span = decreases_span;
         statement.as.loop_statement.body = body;
         statement.span = (SolSpan){
             .start = start.span.start,

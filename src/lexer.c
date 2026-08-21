@@ -49,6 +49,8 @@ static const SolKeyword SOL_KEYWORDS[] = {
     {"false", SOL_TOKEN_FALSE},
     {"loop", SOL_TOKEN_LOOP},
     {"while", SOL_TOKEN_WHILE},
+    {"invariant", SOL_TOKEN_INVARIANT},
+    {"decreases", SOL_TOKEN_DECREASES},
     {"break", SOL_TOKEN_BREAK},
     {"continue", SOL_TOKEN_CONTINUE},
 };
@@ -404,7 +406,7 @@ const char *sol_token_kind_name(SolTokenKind kind) {
         "block comment", "identifier", "integer", "string", "module", "edition",
         "use", "public", "private", "record", "enum", "type", "distinct", "refined", "where", "open", "capability",
         "trait", "implementation", "for", "function", "borrow", "inout", "test", "effects", "requires", "ensures", "pure", "let", "var", "return", "region", "modify",
-        "if", "else", "match", "handle", "with", "true", "false", "loop", "while", "break", "continue", "(", ")", "{", "}", "[",
+        "if", "else", "match", "handle", "with", "true", "false", "loop", "while", "invariant", "decreases", "break", "continue", "(", ")", "{", "}", "[",
         "]", "<", ">", "<=", ">=", "=", "==", "!", "!=", "+", "-", "*",
         "/", "%", "+=", "-=", "*=", "/=", "%=", "&&", "||", ".", ",", ":", "@", "?", "->", "=>",
     };

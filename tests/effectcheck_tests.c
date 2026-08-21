@@ -2584,6 +2584,18 @@ static void test_bounded_mutation_effects(void) {
     free_compilation(&compilation);
 }
 
+static void test_loop_specifications_are_effect_erased(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module erased_loop_specs\n"
+        "function noisy() -> Int64 effects { panic } { return 1 }\n"
+        "function run(flag: Bool) -> () effects { pure } { while flag "
+        "invariant { noisy() == 1 } decreases { noisy() } { break } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.effects.functions[1].count == 0);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_private_pure_inference();
     test_generic_closed_effect_rows();
@@ -2645,6 +2657,7 @@ int main(void) {
     test_loop_effect_union();
     test_assignment_rhs_effects();
     test_bounded_mutation_effects();
+    test_loop_specifications_are_effect_erased();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;

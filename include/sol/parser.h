@@ -73,6 +73,9 @@ typedef struct {
     SolStatement *statements;
     size_t statement_count;
     size_t statement_capacity;
+    SolLoopInvariant *loop_invariants;
+    size_t loop_invariant_count;
+    size_t loop_invariant_capacity;
     SolArgument *arguments;
     size_t argument_count;
     size_t argument_capacity;

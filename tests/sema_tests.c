@@ -138,7 +138,9 @@ static void test_loop_resolution_and_validation(void) {
     TestCompilation compilation;
     CHECK(compile_source(&compilation,
         "module loop_resolution\n"
-        "function run(flag: Bool) -> () { while flag { loop { break } continue } }\n"));
+        "function run(flag: Bool) -> () { let outer = 1 while flag "
+        "invariant { flag, outer == 1 } decreases { outer } "
+        "{ loop { break } continue } }\n"));
     CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
     size_t exits = 0;
     SolStatementId loop = SOL_AST_NONE;
@@ -150,6 +152,7 @@ static void test_loop_resolution_and_validation(void) {
         if (kind == SOL_STATEMENT_LOOP) loop = statement;
     }
     CHECK(exits == 2);
+    CHECK(compilation.syntax.loop_invariant_count == 2);
     CHECK(loop != SOL_AST_NONE);
     if (loop != SOL_AST_NONE) {
         compilation.syntax.statements[loop].as.loop_statement.condition = 0;

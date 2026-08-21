@@ -946,6 +946,94 @@ static void test_mutation_forbidden_in_predicates(void) {
     free_compilation(&compilation);
 }
 
+static void test_loop_proof_templates_and_termination(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module loop_templates\n"
+        "function run(flag: Bool) -> () effects { pure } { while flag "
+        "invariant { flag, true } decreases { 1 } { break } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.contracts.loop_obligation_count == 6);
+    SolLoopObligationKind expected[] = {
+        SOL_LOOP_OBLIGATION_INVARIANT_ENTRY,
+        SOL_LOOP_OBLIGATION_INVARIANT_PRESERVATION,
+        SOL_LOOP_OBLIGATION_INVARIANT_ENTRY,
+        SOL_LOOP_OBLIGATION_INVARIANT_PRESERVATION,
+        SOL_LOOP_OBLIGATION_DECREASES_NONNEGATIVE,
+        SOL_LOOP_OBLIGATION_DECREASES_STRICT,
+    };
+    for (size_t index = 0;
+        index < compilation.contracts.loop_obligation_count;
+        ++index) {
+        const SolLoopObligation *obligation
+            = &compilation.contracts.loop_obligations[index];
+        CHECK(obligation->id == index);
+        CHECK(obligation->kind == expected[index]);
+        CHECK(obligation->expression < compilation.syntax.expression_count);
+    }
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module forged_loop_owner\n"
+        "function first(flag: Bool) -> () effects { pure } "
+            "{ while flag decreases { 1 } { break } }\n"
+        "function second(flag: Bool) -> () effects { pure } "
+            "{ while flag decreases { 1 } { break } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolStatementId first_loop = SOL_AST_NONE;
+    for (SolStatementId statement = 0;
+        statement < compilation.types.loop_fact_count; ++statement) {
+        if (compilation.types.loop_facts[statement].is_loop) {
+            first_loop = statement;
+            break;
+        }
+    }
+    CHECK(first_loop != SOL_AST_NONE);
+    if (first_loop != SOL_AST_NONE) {
+        SolDefId owner = compilation.types.loop_facts[first_loop].owner;
+        compilation.types.loop_facts[first_loop].owner = owner == 0 ? 1 : 0;
+        sol_contract_table_free(&compilation.contracts);
+        sol_contract_table_init(&compilation.contracts);
+        CHECK(!sol_contract_lower(&compilation.source, &compilation.syntax,
+            &compilation.hir, &compilation.types, &compilation.effects,
+            &compilation.contracts, &compilation.diagnostics));
+        compilation.types.loop_facts[first_loop].owner = owner;
+    }
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module missing_decreases\n"
+        "function run(flag: Bool) -> () effects { pure } "
+        "{ while flag { continue } }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-006"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module divergence_policy\n"
+        "function diverging(flag: Bool) -> () effects { diverge } "
+        "{ while flag { continue } }\n"
+        "function finite() -> () effects { pure } { loop { break } }\n"
+        "function unreachable() -> () effects { pure } "
+        "{ return () loop { continue } }\n"));
+    CHECK(!has_diagnostic(&compilation, "SOL-CONTRACT-006"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module symbolic_policy\n"
+        "function run<effects E>(callback: function() -> () effects E, flag: Bool) "
+        "-> () effects { E } { callback() while flag { continue } }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-006"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module loop_firewall\n"
+        "function noisy() -> Bool effects { panic } { return true }\n"
+        "function run() -> () effects { pure } "
+        "{ loop invariant { noisy() } { break } }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-002"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_obligations_result_and_snapshots();
     test_member_contract_ownership();
@@ -961,6 +1049,7 @@ int main(void) {
     test_regions_forbidden_in_predicates();
     test_loops_forbidden_in_predicates();
     test_mutation_forbidden_in_predicates();
+    test_loop_proof_templates_and_termination();
     if (failures != 0) {
         fprintf(stderr, "%d contract test failure(s)\n", failures);
         return 1;

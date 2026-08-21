@@ -206,6 +206,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || syntax->parameter_count > syntax->parameter_capacity
         || syntax->argument_count > syntax->argument_capacity
         || syntax->statement_count > syntax->statement_capacity
+        || syntax->loop_invariant_count > syntax->loop_invariant_capacity
         || syntax->expression_count > syntax->expression_capacity
         || syntax->type_count > syntax->type_capacity
         || syntax->type_argument_count > syntax->type_argument_capacity
@@ -225,6 +226,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
         || (syntax->parameter_count != 0 && syntax->parameters == NULL)
         || (syntax->argument_count != 0 && syntax->arguments == NULL)
         || (syntax->statement_count != 0 && syntax->statements == NULL)
+        || (syntax->loop_invariant_count != 0 && syntax->loop_invariants == NULL)
         || (syntax->expression_count != 0 && syntax->expressions == NULL)
         || (syntax->type_count != 0 && syntax->types == NULL)
         || (syntax->type_argument_count != 0 && syntax->type_arguments == NULL)
@@ -684,6 +686,16 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             return false;
         }
     }
+    for (size_t index = 0; index < syntax->loop_invariant_count; ++index) {
+        const SolLoopInvariant *invariant = &syntax->loop_invariants[index];
+        if (invariant->expression >= syntax->expression_count
+            || !sol_type_span_valid(checker->source, invariant->span)
+            || (invariant->next != SOL_AST_NONE
+                && invariant->next >= syntax->loop_invariant_count)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+    }
     for (size_t index = 0; index < syntax->expression_count; ++index) {
         const SolExpr *expression = &syntax->expressions[index];
         bool valid = (int)expression->kind >= 0
@@ -1029,6 +1041,7 @@ void sol_type_table_free(SolTypeTable *table) {
     free(table->implementation_targets);
     free(table->representations);
     free(table->constructions);
+    free(table->loop_facts);
     memset(table, 0, sizeof(*table));
 }
 
@@ -3210,6 +3223,8 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
             / sizeof(*checker->types->pattern_variant_resolutions)
         || checker->syntax->argument_count > SIZE_MAX
             / sizeof(*checker->types->argument_field_resolutions)
+        || checker->syntax->statement_count > SIZE_MAX
+            / sizeof(*checker->types->loop_facts)
         || expression_count > SIZE_MAX / sizeof(*checker->types->constructions)
         || local_count > SIZE_MAX / sizeof(*checker->types->locals)
         || local_count > SIZE_MAX / sizeof(*checker->types->local_capability_origins)
@@ -3276,6 +3291,10 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         expression_count,
         sizeof(*checker->types->constructions)
     );
+    checker->types->loop_facts = calloc(
+        checker->syntax->statement_count,
+        sizeof(*checker->types->loop_facts)
+    );
     checker->states = calloc(expression_count, sizeof(*checker->states));
     checker->declared_states = calloc(
         checker->syntax->type_count,
@@ -3292,6 +3311,8 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
                 || checker->types->variant_resolutions == NULL
                 || checker->types->constructions == NULL
                 || checker->states == NULL))
+        || (checker->syntax->statement_count != 0
+            && checker->types->loop_facts == NULL)
         || (local_count != 0
             && (checker->types->locals == NULL
                 || checker->types->local_capability_origins == NULL
@@ -3332,6 +3353,7 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     checker->types->implementation_target_count = definition_count;
     checker->types->representation_count = definition_count;
     checker->types->construction_count = expression_count;
+    checker->types->loop_fact_count = checker->syntax->statement_count;
     for (size_t index = 0; index < expression_count; ++index) {
         checker->types->expression_capability_origins[index] = SOL_PROVENANCE_NONE;
         checker->types->expression_operation_origins[index] = SOL_PROVENANCE_NONE;
@@ -4398,6 +4420,7 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
     size_t traversed = 0;
     while (statement_id != SOL_AST_NONE && traversed++ < checker->syntax->statement_count) {
         const SolStatement *statement = &checker->syntax->statements[statement_id];
+        bool statement_reachable = !terminated;
         bool unreachable_loop_transfer = terminated && checker->loop_count != 0;
         SolTypeLoopFrame saved_loop = unreachable_loop_transfer
             ? checker->loops[checker->loop_count - 1] : (SolTypeLoopFrame){0};
@@ -4431,11 +4454,47 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
                     );
                 }
             }
+            SolTypeLoopFrame condition_transfers = pushed
+                ? checker->loops[checker->loop_count - 1]
+                : (SolTypeLoopFrame){0};
+            SolLoopInvariantId invariant
+                = statement->as.loop_statement.first_invariant;
+            size_t invariant_count = 0;
+            while (invariant != SOL_AST_NONE) {
+                if (invariant >= checker->syntax->loop_invariant_count
+                    || invariant_count++ >= checker->syntax->loop_invariant_count) {
+                    sol_type_malformed(checker);
+                    break;
+                }
+                const SolLoopInvariant *entry
+                    = &checker->syntax->loop_invariants[invariant];
+                SolType predicate = sol_type_expression(checker, entry->expression);
+                if (predicate.kind != SOL_TYPE_BOOL
+                    && predicate.kind != SOL_TYPE_ERROR) {
+                    sol_type_error(checker, "SOL-CONTRACT-001", entry->span,
+                        "loop invariant must have type Bool");
+                }
+                invariant = entry->next;
+            }
+            if (statement->as.loop_statement.decreases != SOL_AST_NONE) {
+                SolExprId decreases = statement->as.loop_statement.decreases;
+                SolType measure = sol_type_expression(checker, decreases);
+                if (measure.kind != SOL_TYPE_INT64 && measure.kind != SOL_TYPE_ERROR) {
+                    sol_type_error(checker, "SOL-CONTRACT-001",
+                        checker->syntax->expressions[decreases].span,
+                        "loop decreases expression must have type Int64");
+                }
+            }
+            if (pushed) {
+                /* Proof-only control forms are diagnosed later and cannot create runtime edges. */
+                checker->loops[checker->loop_count - 1] = (SolTypeLoopFrame){0};
+            }
             SolType body = sol_type_expression(
                 checker, statement->as.loop_statement.body
             );
-            bool saw_break = pushed
-                && checker->loops[checker->loop_count - 1].saw_break;
+            SolTypeLoopFrame body_transfers = pushed
+                ? checker->loops[checker->loop_count - 1]
+                : (SolTypeLoopFrame){0};
             if (pushed) --checker->loop_count;
             else --checker->loop_overflow;
             if (body.kind != SOL_TYPE_UNIT && body.kind != SOL_TYPE_NEVER
@@ -4449,10 +4508,28 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
                         : "a loop body must have type Unit"
                 );
             }
+            if (statement_id < checker->types->loop_fact_count) {
+                bool body_reachable = condition.kind != SOL_TYPE_NEVER;
+                checker->types->loop_facts[statement_id] = (SolLoopFact){
+                    .is_loop = true,
+                    .reachable_backedge = statement_reachable
+                        && (condition_transfers.saw_continue
+                            || (body_reachable && (body.kind != SOL_TYPE_NEVER
+                                    || body_transfers.saw_continue))),
+                    .reachable_break = statement_reachable
+                        && (condition_transfers.saw_break
+                            || (body_reachable && body_transfers.saw_break)),
+                    .owner = checker->current_definition,
+                    .owner_member = checker->current_member,
+                    .owner_trait_method = checker->current_trait_method,
+                };
+            }
             if (!terminated) {
                 bool falls_through = (statement->kind == SOL_STATEMENT_WHILE
                         && condition.kind != SOL_TYPE_NEVER)
-                    || saw_break;
+                    || condition_transfers.saw_break
+                    || (condition.kind != SOL_TYPE_NEVER
+                        && body_transfers.saw_break);
                 result = falls_through
                     ? (SolType){.kind = SOL_TYPE_UNIT}
                     : (SolType){.kind = SOL_TYPE_NEVER};
@@ -7042,6 +7119,7 @@ bool sol_type_check(
         .types = types,
         .diagnostics = diagnostics,
         .current_member = SOL_AST_NONE,
+        .current_trait_method = SOL_AST_NONE,
     };
     if (types->expressions != NULL || types->expression_capability_origins != NULL
         || types->expression_operation_origins != NULL
@@ -7061,6 +7139,7 @@ bool sol_type_check(
         || types->argument_field_resolutions != NULL
         || types->implementation_targets != NULL
         || types->representations != NULL || types->constructions != NULL
+        || types->loop_facts != NULL
         || types->expression_count != 0 || types->local_count != 0
         || types->definition_count != 0 || types->declared_type_count != 0
         || types->type_application_count != 0 || types->type_application_capacity != 0
@@ -7080,6 +7159,7 @@ bool sol_type_check(
         || types->member_resolution_count != 0
         || types->pattern_resolution_count != 0
         || types->argument_resolution_count != 0
+        || types->loop_fact_count != 0
         || types->implementation_target_count != 0
         || types->representation_count != 0 || types->construction_count != 0) {
         sol_type_malformed(&checker);
@@ -7393,6 +7473,7 @@ bool sol_type_check(
         if (item->kind == SOL_ITEM_FUNCTION) {
             checker.current_definition = index;
             checker.current_member = SOL_AST_NONE;
+            checker.current_trait_method = SOL_AST_NONE;
             sol_type_contracts(
                 &checker,
                 item->first_contract,
@@ -7407,6 +7488,7 @@ bool sol_type_check(
         }
         checker.current_definition = index;
         checker.current_member = SOL_AST_NONE;
+        checker.current_trait_method = SOL_AST_NONE;
         sol_type_contracts(
             &checker,
             item->first_contract,
@@ -7417,6 +7499,7 @@ bool sol_type_check(
         const SolCapabilityMember *member = &syntax->capability_members[member_id];
         checker.current_definition = member->owner_item;
         checker.current_member = member_id;
+        checker.current_trait_method = SOL_AST_NONE;
         sol_type_contracts(
             &checker,
             member->first_contract,
@@ -7453,6 +7536,7 @@ bool sol_type_check(
         }
         checker.current_definition = index;
         checker.current_member = SOL_AST_NONE;
+        checker.current_trait_method = SOL_AST_NONE;
         checker.expected_return = checker.types->definitions[index];
         memset(checker.states, 0, syntax->expression_count * sizeof(*checker.states));
         SolType body_type = sol_type_expression_expected(
@@ -7497,6 +7581,7 @@ bool sol_type_check(
         if (member->body == SOL_AST_NONE) continue;
         checker.current_definition = member->owner_item;
         checker.current_member = member_id;
+        checker.current_trait_method = SOL_AST_NONE;
         checker.expected_return = sol_type_from_id(&checker, member->return_type_id);
         memset(checker.states, 0, syntax->expression_count * sizeof(*checker.states));
         SolType body_type = sol_type_expression_expected(

@@ -118,6 +118,7 @@ void sol_ir_free(SolIr *ir) {
     free(ir->effect_parameters);
     free(ir->obligations);
     free(ir->snapshots);
+    free(ir->loop_obligations);
     for (size_t index = 0; index < ir->file_count; ++index) free(ir->files[index].path);
     free(ir->files);
     memset(ir, 0, sizeof(*ir));
@@ -783,8 +784,11 @@ static bool sol_ir_frontend_shape_valid(SolIrLowerer *lowerer) {
         || (effects->call_row_count != 0 && effects->call_rows == NULL)
         || contracts->expression_count != syntax->expression_count
         || contracts->snapshot_count > contracts->snapshot_capacity
+        || contracts->loop_obligation_count > contracts->loop_obligation_capacity
         || (contracts->obligation_count != 0 && contracts->obligations == NULL)
         || (contracts->snapshot_count != 0 && contracts->snapshots == NULL)
+        || (contracts->loop_obligation_count != 0
+            && contracts->loop_obligations == NULL)
         || (contracts->expression_count != 0 && contracts->expression_snapshots == NULL)) {
         return false;
     }
@@ -880,6 +884,25 @@ static bool sol_ir_frontend_shape_valid(SolIrLowerer *lowerer) {
         if (snapshot->id != index || snapshot->obligation >= contracts->obligation_count
             || snapshot->old_expression >= syntax->expression_count
             || snapshot->operand >= syntax->expression_count) return false;
+    }
+    for (size_t index = 0; index < contracts->loop_obligation_count; ++index) {
+        const SolLoopObligation *obligation = &contracts->loop_obligations[index];
+        const SolLoopFact *fact = obligation->loop_statement < types->loop_fact_count
+            ? &types->loop_facts[obligation->loop_statement] : NULL;
+        if (obligation->id != index
+            || (int)obligation->kind < 0
+            || obligation->kind > SOL_LOOP_OBLIGATION_DECREASES_STRICT
+            || obligation->loop_statement >= syntax->statement_count
+            || (syntax->statements[obligation->loop_statement].kind
+                    != SOL_STATEMENT_LOOP
+                && syntax->statements[obligation->loop_statement].kind
+                    != SOL_STATEMENT_WHILE)
+            || obligation->expression >= syntax->expression_count
+            || fact == NULL || !fact->is_loop
+            || obligation->owner != fact->owner
+            || obligation->owner_member != fact->owner_member
+            || obligation->owner_trait_method != fact->owner_trait_method
+            || !sol_ir_span_valid(lowerer->source, obligation->span)) return false;
     }
     return true;
 }
@@ -2345,6 +2368,7 @@ static bool sol_ir_lower_statements_arms(SolIrLowerer *lowerer) {
 static bool sol_ir_lower_contracts(SolIrLowerer *lowerer) {
     size_t obligation_count = lowerer->contracts->obligation_count;
     size_t snapshot_count = lowerer->contracts->snapshot_count;
+    size_t loop_obligation_count = lowerer->contracts->loop_obligation_count;
     if (obligation_count != 0) {
         lowerer->ir->obligations = sol_ir_allocate(obligation_count,
             sizeof(*lowerer->ir->obligations), true);
@@ -2355,8 +2379,14 @@ static bool sol_ir_lower_contracts(SolIrLowerer *lowerer) {
             sizeof(*lowerer->ir->snapshots), true);
         if (lowerer->ir->snapshots == NULL) return false;
     }
+    if (loop_obligation_count != 0) {
+        lowerer->ir->loop_obligations = sol_ir_allocate(loop_obligation_count,
+            sizeof(*lowerer->ir->loop_obligations), true);
+        if (lowerer->ir->loop_obligations == NULL) return false;
+    }
     lowerer->ir->obligation_count = obligation_count;
     lowerer->ir->snapshot_count = snapshot_count;
+    lowerer->ir->loop_obligation_count = loop_obligation_count;
     for (size_t index = 0; index < obligation_count; ++index) {
         const SolObligation *source = &lowerer->contracts->obligations[index];
         SolIrObligation *output = &lowerer->ir->obligations[index];
@@ -2397,6 +2427,42 @@ static bool sol_ir_lower_contracts(SolIrLowerer *lowerer) {
         output->operand = source->operand;
         output->type = sol_ir_type(lowerer, source->type);
         if (output->type == SOL_IR_NONE) return false;
+    }
+    for (size_t index = 0; index < loop_obligation_count; ++index) {
+        const SolLoopObligation *source
+            = &lowerer->contracts->loop_obligations[index];
+        SolIrLoopObligation *output = &lowerer->ir->loop_obligations[index];
+        if (source->id != index || source->loop_statement >= lowerer->ir->statement_count
+            || source->expression >= lowerer->ir->expression_count) return false;
+        SolIrCallableId callable = source->owner_member != SOL_AST_NONE
+            ? source->owner_member < lowerer->syntax->capability_member_count
+                ? lowerer->member_callables[source->owner_member] : SOL_IR_NONE
+            : source->owner_trait_method != SOL_AST_NONE
+                ? source->owner_trait_method < lowerer->syntax->trait_method_count
+                    ? lowerer->method_callables[source->owner_trait_method] : SOL_IR_NONE
+                : source->owner < lowerer->syntax->item_count
+                    ? lowerer->definition_callables[source->owner] : SOL_IR_NONE;
+        if (callable == SOL_IR_NONE || callable >= lowerer->ir->callable_count) return false;
+        SolIrStatement *loop = &lowerer->ir->statements[source->loop_statement];
+        if (loop->kind != SOL_IR_STATEMENT_LOOP
+            && loop->kind != SOL_IR_STATEMENT_WHILE) return false;
+        if (loop->loop_obligations.count == 0) {
+            loop->loop_obligations.offset = index;
+        } else if (loop->loop_obligations.offset + loop->loop_obligations.count
+            != index) {
+            return false;
+        }
+        ++loop->loop_obligations.count;
+        *output = (SolIrLoopObligation){
+            .id = source->id,
+            .kind = source->kind,
+            .loop_statement = source->loop_statement,
+            .callable = callable,
+            .expression = source->expression,
+            .expression_type = sol_ir_type(lowerer, source->expression_type),
+            .span = source->span,
+        };
+        if (output->expression_type == SOL_IR_NONE) return false;
     }
     return !lowerer->failed;
 }
@@ -3331,6 +3397,18 @@ static bool sol_ir_expression_types_valid(
     return false;
 }
 
+static bool sol_ir_proof_expression_non_executable(
+    const SolIr *ir,
+    SolIrExpressionId id,
+    SolIrCallableId callable_id,
+    const unsigned char *runtime_states,
+    unsigned char *proof_states,
+    SolIrCallableId *proof_callables,
+    SolIrCallableId *local_callables,
+    bool *available,
+    size_t depth
+);
+
 static bool sol_ir_executable_expression(
     const SolIr *ir,
     SolIrExpressionId id,
@@ -3338,6 +3416,8 @@ static bool sol_ir_executable_expression(
     SolIrCallableId callable_id,
     SolIrTypeId callable_result,
     unsigned char *states,
+    SolIrCallableId *statement_callables,
+    SolIrCallableId *local_callables,
     bool *introduced,
     size_t loop_depth,
     bool *loop_break
@@ -3363,7 +3443,8 @@ static bool sol_ir_executable_expression(
     }
 #define SOL_IR_EXEC(child) \
     do { if (!sol_ir_executable_expression( \
-        ir, (child), owner, callable_id, callable_result, states, introduced, \
+        ir, (child), owner, callable_id, callable_result, states, \
+        statement_callables, local_callables, introduced, \
         loop_depth, loop_break)) \
         return false; } while (0)
     switch (expression->kind) {
@@ -3381,7 +3462,9 @@ static bool sol_ir_executable_expression(
             if (place == NULL) return false;
             if (place->root_kind == SOL_IR_PLACE_ROOT_LOCAL) {
                 if (place->local >= ir->local_count
-                    || ir->locals[place->local].owner != owner) return false;
+                    || ir->locals[place->local].owner != owner
+                    || (local_callables[place->local] != SOL_IR_NONE
+                        && local_callables[place->local] != callable_id)) return false;
             } else {
                 SOL_IR_EXEC(place->temporary);
             }
@@ -3437,6 +3520,9 @@ static bool sol_ir_executable_expression(
                     if (local >= ir->local_count || ir->locals[local].owner != owner) {
                         return false;
                     }
+                    if (local_callables[local] != SOL_IR_NONE
+                        && local_callables[local] != callable_id) return false;
+                    local_callables[local] = callable_id;
                     introduced[local] = true;
                 }
                 SOL_IR_EXEC(arm->value);
@@ -3452,8 +3538,12 @@ static bool sol_ir_executable_expression(
             bool computed_never = false;
             SolIrTypeId computed = SOL_IR_NONE;
             for (size_t index = 0; index < expression->as.block.statements.count; ++index) {
-                const SolIrStatement *statement = &ir->statements[ir->statement_ids[
-                    expression->as.block.statements.offset + index]];
+                SolIrStatementId statement_id = ir->statement_ids[
+                    expression->as.block.statements.offset + index];
+                const SolIrStatement *statement = &ir->statements[statement_id];
+                if (statement_callables[statement_id] != SOL_IR_NONE
+                    && statement_callables[statement_id] != callable_id) return false;
+                statement_callables[statement_id] = callable_id;
                 bool unreachable_loop_transfer = terminated && loop_break != NULL;
                 bool saved_loop_break = unreachable_loop_transfer ? *loop_break : false;
                 bool saw_break = false;
@@ -3464,6 +3554,12 @@ static bool sol_ir_executable_expression(
                         || statement->kind == SOL_IR_STATEMENT_DECLARE)
                     && (statement->local >= ir->local_count
                         || ir->locals[statement->local].owner != owner)) return false;
+                if (statement->kind == SOL_IR_STATEMENT_LET
+                    || statement->kind == SOL_IR_STATEMENT_DECLARE) {
+                    if (local_callables[statement->local] != SOL_IR_NONE
+                        && local_callables[statement->local] != callable_id) return false;
+                    local_callables[statement->local] = callable_id;
+                }
                 if (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT) {
                     SolIrLocalId target_local = SOL_IR_NONE;
                     if (!sol_ir_local_place(ir, statement->target,
@@ -3477,14 +3573,45 @@ static bool sol_ir_executable_expression(
                 }
                 if (statement->kind == SOL_IR_STATEMENT_LOOP
                     || statement->kind == SOL_IR_STATEMENT_WHILE) {
+                    SolIrSlice obligations = statement->loop_obligations;
+                    unsigned char *proof_states = ir->expression_count == 0 ? NULL
+                        : calloc(ir->expression_count, 1);
+                    SolIrCallableId *proof_callables = ir->expression_count == 0 ? NULL
+                        : malloc(ir->expression_count * sizeof(*proof_callables));
+                    if (ir->expression_count != 0
+                        && (proof_states == NULL || proof_callables == NULL)) {
+                        free(proof_states);
+                        free(proof_callables);
+                        return false;
+                    }
+                    for (size_t proof = 0; proof < ir->expression_count; ++proof) {
+                        proof_callables[proof] = SOL_IR_NONE;
+                    }
+                    for (size_t obligation = 0; obligation < obligations.count;
+                        obligation += 2) {
+                        const SolIrLoopObligation *entry
+                            = &ir->loop_obligations[obligations.offset + obligation];
+                        if (entry->callable != callable_id
+                            || !sol_ir_proof_expression_non_executable(ir,
+                                entry->expression, callable_id, states, proof_states,
+                                proof_callables, local_callables, introduced, 0)) {
+                            free(proof_states);
+                            free(proof_callables);
+                            return false;
+                        }
+                    }
+                    free(proof_states);
+                    free(proof_callables);
                     if (statement->kind == SOL_IR_STATEMENT_WHILE) {
                         if (!sol_ir_executable_expression(ir, statement->condition,
-                                owner, callable_id, callable_result, states,
-                                introduced, loop_depth + 1, &saw_break)) return false;
-                    }
-                    if (!sol_ir_executable_expression(ir, statement->expression,
                             owner, callable_id, callable_result, states,
-                            introduced, loop_depth + 1, &saw_break)) return false;
+                            statement_callables, local_callables, introduced,
+                            loop_depth + 1, &saw_break)) return false;
+                    }
+                        if (!sol_ir_executable_expression(ir, statement->expression,
+                            owner, callable_id, callable_result, states,
+                            statement_callables, local_callables, introduced,
+                            loop_depth + 1, &saw_break)) return false;
                 } else if (statement->kind != SOL_IR_STATEMENT_DECLARE
                     && statement->kind != SOL_IR_STATEMENT_BREAK
                     && statement->kind != SOL_IR_STATEMENT_CONTINUE) {
@@ -3685,6 +3812,310 @@ static bool sol_ir_validate_arena_ownership(
         "IR statement, arm, cleanup, place, or projection entry is orphaned or shared");
 }
 
+static bool sol_ir_proof_call_is_pure(
+    const SolIr *ir,
+    const SolIrExpression *expression
+) {
+    if (expression->as.call.effects.count != 0
+        || expression->as.call.effect_parameter != SOL_IR_NONE) return false;
+    if (expression->as.call.kind == SOL_IR_CALL_CALLBACK) {
+        SolIrTypeId type = ir->expressions[expression->as.call.callee].type;
+        return type < ir->type_count && ir->types[type].kind == SOL_IR_TYPE_FUNCTION
+            && ir->types[type].effects.count == 0
+            && ir->types[type].effect_parameter == SOL_IR_NONE;
+    }
+    bool callable_call = expression->as.call.kind == SOL_IR_CALL_FUNCTION
+        || expression->as.call.kind == SOL_IR_CALL_CAPABILITY
+        || expression->as.call.kind == SOL_IR_CALL_METHOD;
+    if (!callable_call) return true;
+    if (expression->as.call.callable >= ir->callable_count) return false;
+    const SolIrCallable *target = &ir->callables[expression->as.call.callable];
+    if (target->effects.count != 0) return false;
+    if (target->effect_parameter == SOL_IR_NONE) return true;
+    bool determined = false;
+    for (size_t formal = 0; formal < target->parameters.count; ++formal) {
+        SolIrLocalId parameter = ir->roots[target->parameters.offset + formal];
+        SolIrTypeId formal_type = ir->locals[parameter].type;
+        if (formal_type >= ir->type_count
+            || ir->types[formal_type].kind != SOL_IR_TYPE_FUNCTION
+            || ir->types[formal_type].effect_parameter
+                != target->effect_parameter) continue;
+        SolIrExpressionId actual = SOL_IR_NONE;
+        for (size_t operand = 0; operand < expression->as.call.operands.count;
+            ++operand) {
+            const SolIrOperand *entry
+                = &ir->operands[expression->as.call.operands.offset + operand];
+            if (entry->formal == formal) actual = entry->value;
+        }
+        if (actual >= ir->expression_count) return false;
+        SolIrTypeId actual_type = ir->expressions[actual].type;
+        if (actual_type >= ir->type_count
+            || ir->types[actual_type].kind != SOL_IR_TYPE_FUNCTION
+            || ir->types[actual_type].effects.count != 0
+            || ir->types[actual_type].effect_parameter != SOL_IR_NONE) return false;
+        determined = true;
+    }
+    return determined;
+}
+
+static bool sol_ir_expression_reaches(
+    const SolIr *ir,
+    SolIrExpressionId id,
+    SolIrExpressionId target,
+    unsigned char *states,
+    size_t depth
+) {
+    if (id == target) return true;
+    if (depth >= 256) return true;
+    if (id >= ir->expression_count || states[id] != 0) return false;
+    states[id] = 1;
+#define SOL_IR_REACHES(child) \
+    do { if (sol_ir_expression_reaches( \
+        ir, (child), target, states, depth + 1)) return true; } while (0)
+    const SolIrExpression *expression = &ir->expressions[id];
+    switch (expression->kind) {
+        case SOL_IR_EXPR_PLACE: {
+            const SolIrPlace *place = &ir->places[expression->as.place];
+            if (place->root_kind == SOL_IR_PLACE_ROOT_TEMPORARY) {
+                SOL_IR_REACHES(place->temporary);
+            }
+            for (size_t index = 0; index < place->projections.count; ++index) {
+                const SolIrProjection *projection
+                    = &ir->projections[place->projections.offset + index];
+                if (projection->kind == SOL_IR_PROJECTION_INDEX) {
+                    SOL_IR_REACHES(projection->index);
+                }
+            }
+            break;
+        }
+        case SOL_IR_EXPR_UNARY:
+            SOL_IR_REACHES(expression->as.unary.operand);
+            break;
+        case SOL_IR_EXPR_BINARY:
+            SOL_IR_REACHES(expression->as.binary.left);
+            SOL_IR_REACHES(expression->as.binary.right);
+            break;
+        case SOL_IR_EXPR_CALL:
+            if (expression->as.call.kind == SOL_IR_CALL_CALLBACK
+                || expression->as.call.kind == SOL_IR_CALL_CAPABILITY) {
+                SOL_IR_REACHES(expression->as.call.callee);
+            } else if (expression->as.call.kind == SOL_IR_CALL_METHOD) {
+                SOL_IR_REACHES(expression->as.call.receiver);
+            }
+            for (size_t index = 0; index < expression->as.call.operands.count; ++index) {
+                SOL_IR_REACHES(ir->operands[
+                    expression->as.call.operands.offset + index].value);
+            }
+            break;
+        case SOL_IR_EXPR_RECORD:
+            for (size_t index = 0; index < expression->as.record.fields.count; ++index) {
+                SOL_IR_REACHES(ir->operands[
+                    expression->as.record.fields.offset + index].value);
+            }
+            break;
+        case SOL_IR_EXPR_BOUND_OPERATION:
+            SOL_IR_REACHES(expression->as.operation.receiver);
+            break;
+        case SOL_IR_EXPR_IF:
+            SOL_IR_REACHES(expression->as.if_expr.condition);
+            SOL_IR_REACHES(expression->as.if_expr.then_branch);
+            SOL_IR_REACHES(expression->as.if_expr.else_branch);
+            break;
+        case SOL_IR_EXPR_MATCH:
+            SOL_IR_REACHES(expression->as.match_expr.scrutinee);
+            for (size_t index = 0; index < expression->as.match_expr.arms.count; ++index) {
+                SolIrArmId arm
+                    = ir->arm_ids[expression->as.match_expr.arms.offset + index];
+                SOL_IR_REACHES(ir->arms[arm].value);
+            }
+            break;
+        case SOL_IR_EXPR_BLOCK:
+            for (size_t index = 0; index < expression->as.block.statements.count; ++index) {
+                const SolIrStatement *statement = &ir->statements[ir->statement_ids[
+                    expression->as.block.statements.offset + index]];
+                if (statement->target != SOL_IR_NONE) SOL_IR_REACHES(statement->target);
+                if (statement->condition != SOL_IR_NONE) SOL_IR_REACHES(statement->condition);
+                if (statement->expression != SOL_IR_NONE) SOL_IR_REACHES(statement->expression);
+            }
+            break;
+        case SOL_IR_EXPR_PROPAGATE:
+            SOL_IR_REACHES(expression->as.propagate.operand);
+            break;
+        case SOL_IR_EXPR_HANDLE:
+            SOL_IR_REACHES(expression->as.handler.authority);
+            SOL_IR_REACHES(expression->as.handler.provider);
+            SOL_IR_REACHES(expression->as.handler.body);
+            break;
+        default:
+            break;
+    }
+#undef SOL_IR_REACHES
+    states[id] = 2;
+    return false;
+}
+
+static bool sol_ir_proof_expression_non_executable(
+    const SolIr *ir,
+    SolIrExpressionId id,
+    SolIrCallableId callable_id,
+    const unsigned char *runtime_states,
+    unsigned char *proof_states,
+    SolIrCallableId *proof_callables,
+    SolIrCallableId *local_callables,
+    bool *available,
+    size_t depth
+) {
+    if (id >= ir->expression_count || callable_id >= ir->callable_count
+        || runtime_states[id] != 0 || depth >= 256) return false;
+    if (proof_states[id] == 2) return false;
+    if (proof_states[id] == 1) return false;
+    proof_states[id] = 1;
+    proof_callables[id] = callable_id;
+#define SOL_IR_PROOF(child) \
+    do { if (!sol_ir_proof_expression_non_executable( \
+        ir, (child), callable_id, runtime_states, proof_states, \
+        proof_callables, local_callables, available, depth + 1)) return false; } while (0)
+    const SolIrExpression *expression = &ir->expressions[id];
+    const SolIrCallable *callable = &ir->callables[callable_id];
+    SolIrSlice provenance[2] = {expression->capability_roots,
+        expression->operation_roots};
+    for (size_t slice = 0; slice < 2; ++slice) {
+        for (size_t index = 0; index < provenance[slice].count; ++index) {
+            SolIrLocalId root = ir->roots[provenance[slice].offset + index];
+            if (root >= ir->local_count || ir->locals[root].owner != callable->owner) {
+                return false;
+            }
+            if (local_callables[root] != SOL_IR_NONE
+                && local_callables[root] != callable_id) return false;
+            if (available != NULL && !available[root]) return false;
+        }
+    }
+    switch (expression->kind) {
+        case SOL_IR_EXPR_PLACE: {
+            const SolIrPlace *place = &ir->places[expression->as.place];
+            if (place->root_kind == SOL_IR_PLACE_ROOT_LOCAL) {
+                if (place->local >= ir->local_count
+                    || ir->locals[place->local].owner != callable->owner
+                    || (local_callables[place->local] != SOL_IR_NONE
+                        && local_callables[place->local] != callable_id)
+                    || (available != NULL && !available[place->local])) return false;
+            } else {
+                SOL_IR_PROOF(place->temporary);
+            }
+            for (size_t index = 0; index < place->projections.count; ++index) {
+                const SolIrProjection *projection
+                    = &ir->projections[place->projections.offset + index];
+                if (projection->kind == SOL_IR_PROJECTION_INDEX) {
+                    SOL_IR_PROOF(projection->index);
+                }
+            }
+            break;
+        }
+        case SOL_IR_EXPR_UNARY:
+            SOL_IR_PROOF(expression->as.unary.operand);
+            break;
+        case SOL_IR_EXPR_BINARY:
+            SOL_IR_PROOF(expression->as.binary.left);
+            SOL_IR_PROOF(expression->as.binary.right);
+            break;
+        case SOL_IR_EXPR_CALL:
+            if (!sol_ir_proof_call_is_pure(ir, expression)) return false;
+            if (expression->as.call.kind == SOL_IR_CALL_CALLBACK
+                || expression->as.call.kind == SOL_IR_CALL_CAPABILITY) {
+                SOL_IR_PROOF(expression->as.call.callee);
+            } else if (expression->as.call.kind == SOL_IR_CALL_METHOD) {
+                SOL_IR_PROOF(expression->as.call.receiver);
+            }
+            for (size_t index = 0; index < expression->as.call.operands.count; ++index) {
+                SOL_IR_PROOF(ir->operands[
+                    expression->as.call.operands.offset + index].value);
+            }
+            break;
+        case SOL_IR_EXPR_RECORD:
+            for (size_t index = 0; index < expression->as.record.fields.count; ++index) {
+                SOL_IR_PROOF(ir->operands[
+                    expression->as.record.fields.offset + index].value);
+            }
+            break;
+        case SOL_IR_EXPR_BOUND_OPERATION:
+            SOL_IR_PROOF(expression->as.operation.receiver);
+            break;
+        case SOL_IR_EXPR_IF:
+            SOL_IR_PROOF(expression->as.if_expr.condition);
+            SOL_IR_PROOF(expression->as.if_expr.then_branch);
+            SOL_IR_PROOF(expression->as.if_expr.else_branch);
+            break;
+        case SOL_IR_EXPR_MATCH:
+            SOL_IR_PROOF(expression->as.match_expr.scrutinee);
+            for (size_t index = 0; index < expression->as.match_expr.arms.count; ++index) {
+                SolIrArmId arm = ir->arm_ids[
+                    expression->as.match_expr.arms.offset + index];
+                for (size_t binding = 0; binding < ir->arms[arm].bindings.count;
+                    ++binding) {
+                    SolIrLocalId local = ir->roots[
+                        ir->arms[arm].bindings.offset + binding];
+                    if (local >= ir->local_count
+                        || ir->locals[local].owner != callable->owner
+                        || (local_callables[local] != SOL_IR_NONE
+                            && local_callables[local] != callable_id)) return false;
+                    local_callables[local] = callable_id;
+                    if (available != NULL) available[local] = true;
+                }
+                SOL_IR_PROOF(ir->arms[arm].value);
+                if (available != NULL) {
+                    for (size_t binding = 0; binding < ir->arms[arm].bindings.count;
+                        ++binding) {
+                        available[ir->roots[
+                            ir->arms[arm].bindings.offset + binding]] = false;
+                    }
+                }
+            }
+            break;
+        case SOL_IR_EXPR_BLOCK:
+            for (size_t index = 0; index < expression->as.block.statements.count; ++index) {
+                const SolIrStatement *statement = &ir->statements[ir->statement_ids[
+                    expression->as.block.statements.offset + index]];
+                if (statement->kind != SOL_IR_STATEMENT_LET
+                    && statement->kind != SOL_IR_STATEMENT_EXPRESSION) return false;
+                if (statement->kind == SOL_IR_STATEMENT_LET
+                    && (statement->local >= ir->local_count
+                        || ir->locals[statement->local].owner != callable->owner
+                        || (local_callables[statement->local] != SOL_IR_NONE
+                            && local_callables[statement->local] != callable_id))) {
+                    return false;
+                }
+                SOL_IR_PROOF(statement->expression);
+                if (statement->kind == SOL_IR_STATEMENT_LET) {
+                    local_callables[statement->local] = callable_id;
+                    if (available != NULL) available[statement->local] = true;
+                }
+            }
+            if (available != NULL) {
+                for (size_t index = 0; index < expression->as.block.statements.count;
+                    ++index) {
+                    const SolIrStatement *statement = &ir->statements[ir->statement_ids[
+                        expression->as.block.statements.offset + index]];
+                    if (statement->kind == SOL_IR_STATEMENT_LET) {
+                        available[statement->local] = false;
+                    }
+                }
+            }
+            break;
+        case SOL_IR_EXPR_PROPAGATE:
+        case SOL_IR_EXPR_HANDLE:
+        case SOL_IR_EXPR_RESULT:
+        case SOL_IR_EXPR_SNAPSHOT_READ:
+        case SOL_IR_EXPR_REFINEMENT_SELF:
+        case SOL_IR_EXPR_COMPILE_TIME_HEAD:
+            return false;
+        default:
+            break;
+    }
+#undef SOL_IR_PROOF
+    proof_states[id] = 2;
+    return true;
+}
+
 static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
     bool validate_ownership) {
     if (ir == NULL || ir->source_bytes == NULL || ir->source_path == NULL
@@ -3713,7 +4144,8 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
         || (ir->cleanup_local_count != 0 && ir->cleanup_locals == NULL)
         || (ir->effect_count != 0 && ir->effects == NULL)
         || (ir->obligation_count != 0 && ir->obligations == NULL)
-        || (ir->snapshot_count != 0 && ir->snapshots == NULL)) {
+        || (ir->snapshot_count != 0 && ir->snapshots == NULL)
+        || (ir->loop_obligation_count != 0 && ir->loop_obligations == NULL)) {
         return sol_ir_error(diagnostics, "malformed canonical IR ownership or counts");
     }
     for (size_t index = 0; index < ir->type_count; ++index) {
@@ -4776,6 +5208,9 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                             != SOL_IR_TYPE_UNIT
                         && ir->types[ir->expressions[statement->expression].type].kind
                             != SOL_IR_TYPE_NEVER)))
+            || !sol_ir_slice_valid(statement->loop_obligations,
+                ir->loop_obligation_count)
+            || (!loop && statement->loop_obligations.count != 0)
             || (statement->kind == SOL_IR_STATEMENT_REGION
                 ? !sol_ir_region_label_valid(ir, statement)
                     || statement->region_label_span.start
@@ -5101,6 +5536,129 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             return sol_ir_error(diagnostics, "malformed canonical IR snapshot");
         }
     }
+    for (size_t index = 0; index < ir->loop_obligation_count; ++index) {
+        const SolIrLoopObligation *obligation = &ir->loop_obligations[index];
+        bool invariant = obligation->kind == SOL_LOOP_OBLIGATION_INVARIANT_ENTRY
+            || obligation->kind == SOL_LOOP_OBLIGATION_INVARIANT_PRESERVATION;
+        if (obligation->id != index
+            || (int)obligation->kind < 0
+            || obligation->kind > SOL_LOOP_OBLIGATION_DECREASES_STRICT
+            || obligation->loop_statement >= ir->statement_count
+            || (ir->statements[obligation->loop_statement].kind
+                    != SOL_IR_STATEMENT_LOOP
+                && ir->statements[obligation->loop_statement].kind
+                    != SOL_IR_STATEMENT_WHILE)
+            || obligation->callable >= ir->callable_count
+            || obligation->expression >= ir->expression_count
+            || obligation->expression_type >= ir->type_count
+            || obligation->expression_type
+                != ir->expressions[obligation->expression].type
+            || !sol_ir_type_is(ir, obligation->expression_type,
+                invariant ? SOL_IR_TYPE_BOOL : SOL_IR_TYPE_INT64)
+            || obligation->span.start >= obligation->span.end
+            || obligation->span.end > ir->source_length
+            || ir->expressions[obligation->expression].span.start
+                < obligation->span.start
+            || ir->expressions[obligation->expression].span.end
+                > obligation->span.end) {
+            return sol_ir_error(diagnostics,
+                "malformed canonical IR loop obligation");
+        }
+        size_t owners = 0;
+        for (size_t statement_id = 0; statement_id < ir->statement_count;
+            ++statement_id) {
+            SolIrSlice slice = ir->statements[statement_id].loop_obligations;
+            if (index >= slice.offset && index - slice.offset < slice.count) {
+                ++owners;
+                if (statement_id != obligation->loop_statement) {
+                    return sol_ir_error(diagnostics,
+                        "IR loop obligation has the wrong owner slice");
+                }
+            }
+        }
+        if (owners != 1) return sol_ir_error(diagnostics,
+            "IR loop obligation is missing or duplicated in its owner slice");
+    }
+    for (size_t statement_id = 0; statement_id < ir->statement_count;
+        ++statement_id) {
+        const SolIrStatement *statement = &ir->statements[statement_id];
+        SolIrSlice slice = statement->loop_obligations;
+        if (slice.count == 0) continue;
+        if ((slice.count & 1u) != 0) return sol_ir_error(diagnostics,
+            "IR loop obligation cardinality is not paired");
+        bool saw_decreases = false;
+        for (size_t offset = 0; offset < slice.count; offset += 2) {
+            const SolIrLoopObligation *first
+                = &ir->loop_obligations[slice.offset + offset];
+            const SolIrLoopObligation *second
+                = &ir->loop_obligations[slice.offset + offset + 1];
+            bool invariant = first->kind == SOL_LOOP_OBLIGATION_INVARIANT_ENTRY;
+            if ((!invariant
+                    && first->kind != SOL_LOOP_OBLIGATION_DECREASES_NONNEGATIVE)
+                || (invariant && saw_decreases)
+                || second->kind != (invariant
+                    ? SOL_LOOP_OBLIGATION_INVARIANT_PRESERVATION
+                    : SOL_LOOP_OBLIGATION_DECREASES_STRICT)
+                || first->loop_statement != statement_id
+                || second->loop_statement != statement_id
+                || first->callable != second->callable
+                || first->expression != second->expression
+                || first->expression_type != second->expression_type
+                || first->span.start != second->span.start
+                || first->span.end != second->span.end) {
+                return sol_ir_error(diagnostics,
+                    "IR loop obligation pair or order is invalid");
+            }
+            size_t current = slice.offset + offset;
+            for (size_t previous = 0; previous < current; ++previous) {
+                SolLoopObligationKind kind = ir->loop_obligations[previous].kind;
+                if ((kind == SOL_LOOP_OBLIGATION_INVARIANT_ENTRY
+                        || kind == SOL_LOOP_OBLIGATION_DECREASES_NONNEGATIVE)
+                    && ir->loop_obligations[previous].expression
+                        == first->expression) {
+                    return sol_ir_error(diagnostics,
+                        "IR loop obligation clause is duplicated");
+                }
+            }
+            for (size_t obligation = 0; obligation < ir->obligation_count;
+                ++obligation) {
+                unsigned char *predicate_states = ir->expression_count == 0 ? NULL
+                    : calloc(ir->expression_count, 1);
+                unsigned char *loop_states = ir->expression_count == 0 ? NULL
+                    : calloc(ir->expression_count, 1);
+                if (ir->expression_count != 0
+                    && (predicate_states == NULL || loop_states == NULL)) {
+                    free(predicate_states);
+                    free(loop_states);
+                    return sol_ir_error(diagnostics,
+                        "IR contract proof validation allocation failed");
+                }
+                bool shared = sol_ir_expression_reaches(ir,
+                    ir->obligations[obligation].predicate, SOL_IR_NONE,
+                    predicate_states, 0);
+                for (SolIrExpressionId expression = 0;
+                    !shared && expression < ir->expression_count; ++expression) {
+                    if (predicate_states[expression] == 0) continue;
+                    memset(loop_states, 0, ir->expression_count);
+                    shared = sol_ir_expression_reaches(ir, first->expression,
+                        expression, loop_states, 0);
+                }
+                free(predicate_states);
+                free(loop_states);
+                if (shared) {
+                    return sol_ir_error(diagnostics,
+                        "IR loop proof expression is shared with a contract predicate");
+                }
+            }
+            if (!invariant) {
+                if (saw_decreases || offset + 2 != slice.count) {
+                    return sol_ir_error(diagnostics,
+                        "IR loop decreases obligations are not final and unique");
+                }
+                saw_decreases = true;
+            }
+        }
+    }
     if (ir->file_count == 0 || ir->files == NULL) {
         return sol_ir_error(diagnostics, "IR has no source-file map");
     }
@@ -5116,43 +5674,128 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
     }
     unsigned char *states = ir->expression_count == 0 ? NULL
         : calloc(ir->expression_count, 1);
+    SolIrCallableId *statement_callables = ir->statement_count == 0 ? NULL
+        : malloc(ir->statement_count * sizeof(*statement_callables));
+    SolIrCallableId *local_callables = ir->local_count == 0 ? NULL
+        : malloc(ir->local_count * sizeof(*local_callables));
     bool *introduced = ir->local_count == 0 ? NULL
         : calloc(ir->local_count, sizeof(*introduced));
     if ((ir->expression_count != 0 && states == NULL)
+        || (ir->statement_count != 0 && statement_callables == NULL)
+        || (ir->local_count != 0 && local_callables == NULL)
         || (ir->local_count != 0 && introduced == NULL)) {
         free(states);
+        free(statement_callables);
+        free(local_callables);
         free(introduced);
         return sol_ir_error(diagnostics, "IR executable validation allocation failed");
     }
+    for (size_t index = 0; index < ir->statement_count; ++index) {
+        statement_callables[index] = SOL_IR_NONE;
+    }
+    for (size_t index = 0; index < ir->local_count; ++index) {
+        local_callables[index] = SOL_IR_NONE;
+    }
     for (size_t index = 0; index < ir->callable_count; ++index) {
-        if (ir->local_count != 0) memset(introduced, 0,
-            ir->local_count * sizeof(*introduced));
         const SolIrCallable *callable = &ir->callables[index];
         for (size_t parameter = 0; parameter < callable->parameters.count; ++parameter) {
-            introduced[ir->roots[callable->parameters.offset + parameter]] = true;
+            SolIrLocalId local = ir->roots[callable->parameters.offset + parameter];
+            if (local_callables[local] != SOL_IR_NONE
+                && local_callables[local] != index) {
+                free(states); free(statement_callables); free(local_callables);
+                free(introduced);
+                return sol_ir_error(diagnostics, "IR local is shared by callables");
+            }
+            local_callables[local] = index;
         }
-        if (callable->receiver != SOL_IR_NONE) introduced[callable->receiver] = true;
-        if (callable->capability_source != SOL_IR_NONE) {
-            introduced[callable->capability_source] = true;
-        }
-        SolIrExpressionId body = callable->body;
-        if (body != SOL_IR_NONE
-            && (!sol_ir_type_assignable(ir, ir->expressions[body].type,
-                    callable->result, (SolIrSlice){0}, (SolIrSlice){0}, SOL_IR_NONE)
-                || !sol_ir_executable_expression(ir, body, callable->owner,
-                    index, callable->result, states, introduced, 0, NULL))) {
-            free(states);
-            free(introduced);
-            char message[192];
-            int written = snprintf(message, sizeof(message),
-                "callable '%s' expression is shared, cyclic, non-runtime, or ill-typed",
-                callable->name);
-            return written > 0 && (size_t)written < sizeof(message)
-                ? sol_ir_indexed_error(diagnostics, message, index, (int)callable->kind)
-                : sol_ir_error(diagnostics, "executable expression is invalid");
+        if (callable->receiver != SOL_IR_NONE) {
+            if (local_callables[callable->receiver] != SOL_IR_NONE
+                && local_callables[callable->receiver] != index) {
+                free(states); free(statement_callables); free(local_callables);
+                free(introduced);
+                return sol_ir_error(diagnostics, "IR receiver is shared by callables");
+            }
+            local_callables[callable->receiver] = index;
         }
     }
+    for (size_t pass = 0; pass < 2; ++pass) {
+        if (ir->expression_count != 0) memset(states, 0, ir->expression_count);
+        for (size_t index = 0; index < ir->callable_count; ++index) {
+            if (ir->local_count != 0) memset(introduced, 0,
+                ir->local_count * sizeof(*introduced));
+            const SolIrCallable *callable = &ir->callables[index];
+            for (size_t parameter = 0; parameter < callable->parameters.count;
+                ++parameter) {
+                introduced[ir->roots[callable->parameters.offset + parameter]] = true;
+            }
+            if (callable->receiver != SOL_IR_NONE) introduced[callable->receiver] = true;
+            if (callable->capability_source != SOL_IR_NONE) {
+                introduced[callable->capability_source] = true;
+            }
+            SolIrExpressionId body = callable->body;
+            if (body != SOL_IR_NONE
+                && (!sol_ir_type_assignable(ir, ir->expressions[body].type,
+                        callable->result, (SolIrSlice){0}, (SolIrSlice){0}, SOL_IR_NONE)
+                    || !sol_ir_executable_expression(ir, body, callable->owner,
+                        index, callable->result, states, statement_callables,
+                        local_callables, introduced, 0, NULL))) {
+                free(states);
+                free(statement_callables);
+                free(local_callables);
+                free(introduced);
+                char message[192];
+                int written = snprintf(message, sizeof(message),
+                    "callable '%s' expression is shared, cyclic, non-runtime, or ill-typed",
+                    callable->name);
+                return written > 0 && (size_t)written < sizeof(message)
+                    ? sol_ir_indexed_error(diagnostics, message, index, (int)callable->kind)
+                    : sol_ir_error(diagnostics, "executable expression is invalid");
+            }
+        }
+    }
+    unsigned char *proof_states = ir->expression_count == 0 ? NULL
+        : calloc(ir->expression_count, 1);
+    SolIrCallableId *proof_callables = ir->expression_count == 0 ? NULL
+        : malloc(ir->expression_count * sizeof(*proof_callables));
+    if (ir->expression_count != 0
+        && (proof_states == NULL || proof_callables == NULL)) {
+        free(proof_states);
+        free(proof_callables);
+        free(states);
+        free(statement_callables);
+        free(local_callables);
+        free(introduced);
+        return sol_ir_error(diagnostics,
+            "IR proof-expression validation allocation failed");
+    }
+    for (size_t index = 0; index < ir->expression_count; ++index) {
+        proof_callables[index] = SOL_IR_NONE;
+    }
+    for (size_t index = 0; index < ir->loop_obligation_count; ++index) {
+        const SolIrLoopObligation *obligation = &ir->loop_obligations[index];
+        if (obligation->kind == SOL_LOOP_OBLIGATION_INVARIANT_PRESERVATION
+            || obligation->kind == SOL_LOOP_OBLIGATION_DECREASES_STRICT) continue;
+        if (obligation->callable >= ir->callable_count
+            || statement_callables[obligation->loop_statement]
+                != obligation->callable
+            || !sol_ir_proof_expression_non_executable(ir,
+                obligation->expression, obligation->callable, states,
+                proof_states, proof_callables, local_callables, NULL, 0)) {
+            free(proof_states);
+            free(proof_callables);
+            free(states);
+            free(statement_callables);
+            free(local_callables);
+            free(introduced);
+            return sol_ir_error(diagnostics,
+                "IR loop proof expression is executable or shared with runtime code");
+        }
+    }
+    free(proof_states);
+    free(proof_callables);
     free(states);
+    free(statement_callables);
+    free(local_callables);
     free(introduced);
     if (!sol_ir_validate_arena_ownership(ir, diagnostics)) return false;
     return !validate_ownership || sol_ir_validate_ownership(ir, diagnostics);

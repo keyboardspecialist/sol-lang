@@ -15,6 +15,7 @@ typedef struct {
     unsigned char *expressions;
     unsigned char *arguments;
     unsigned char *statements;
+    unsigned char *loop_invariants;
     unsigned char *arms;
     unsigned char *patterns;
     unsigned char *pattern_bindings;
@@ -322,12 +323,75 @@ static bool sol_structure_statements(
             || current->kind == SOL_STATEMENT_WHILE) {
             SolExprId condition = current->as.loop_statement.condition;
             SolExprId body = current->as.loop_statement.body;
+            SolLoopInvariantId invariant
+                = current->as.loop_statement.first_invariant;
+            SolSpan invariant_span = current->as.loop_statement.invariant_span;
+            SolExprId decreases = current->as.loop_statement.decreases;
+            SolSpan decreases_span = current->as.loop_statement.decreases_span;
+            size_t prefix_end = condition != SOL_AST_NONE
+                    && condition < validator->tree->expression_count
+                ? validator->tree->expressions[condition].span.end
+                : current->span.start;
             ++validator->loop_depth;
             if ((current->kind == SOL_STATEMENT_LOOP && condition != SOL_AST_NONE)
                 || (current->kind == SOL_STATEMENT_WHILE
                     && !sol_structure_expression(validator, condition, context, depth))
+                || ((invariant == SOL_AST_NONE)
+                    != (invariant_span.start == 0 && invariant_span.end == 0))
+                || ((decreases == SOL_AST_NONE)
+                    != (decreases_span.start == 0 && decreases_span.end == 0))
+                || (invariant != SOL_AST_NONE
+                    && (!sol_structure_span_valid(validator, invariant_span)
+                        || invariant_span.start == invariant_span.end
+                        || invariant_span.start < prefix_end))
+                || (decreases != SOL_AST_NONE
+                    && (!sol_structure_span_valid(validator, decreases_span)
+                        || decreases_span.start == decreases_span.end
+                        || decreases_span.start < prefix_end
+                        || decreases >= validator->tree->expression_count
+                        || validator->tree->expressions[decreases].span.start
+                            < decreases_span.start
+                        || validator->tree->expressions[decreases].span.end
+                            > decreases_span.end
+                        || !sol_structure_expression(
+                            validator, decreases, context, depth)))
+                || (invariant != SOL_AST_NONE && decreases != SOL_AST_NONE
+                    && invariant_span.end > decreases_span.start)
                 || body >= validator->tree->expression_count
                 || validator->tree->expressions[body].kind != SOL_EXPR_BLOCK) {
+                --validator->loop_depth;
+                return false;
+            }
+            size_t previous_invariant_end = invariant_span.start;
+            while (invariant != SOL_AST_NONE) {
+                if (invariant >= validator->tree->loop_invariant_count
+                    || validator->loop_invariants[invariant]) {
+                    --validator->loop_depth;
+                    return false;
+                }
+                validator->loop_invariants[invariant] = 1;
+                const SolLoopInvariant *entry
+                    = &validator->tree->loop_invariants[invariant];
+                if (!sol_structure_span_valid(validator, entry->span)
+                    || entry->span.start < invariant_span.start
+                    || entry->span.start < previous_invariant_end
+                    || entry->span.end > invariant_span.end
+                    || entry->expression >= validator->tree->expression_count
+                    || validator->tree->expressions[entry->expression].span.start
+                        != entry->span.start
+                    || validator->tree->expressions[entry->expression].span.end
+                        != entry->span.end
+                    || !sol_structure_expression(
+                        validator, entry->expression, context, depth)) {
+                    --validator->loop_depth;
+                    return false;
+                }
+                previous_invariant_end = entry->span.end;
+                invariant = entry->next;
+            }
+            size_t body_start = validator->tree->expressions[body].span.start;
+            if ((invariant_span.start != 0 && invariant_span.end > body_start)
+                || (decreases_span.start != 0 && decreases_span.end > body_start)) {
                 --validator->loop_depth;
                 return false;
             }
@@ -792,6 +856,7 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
         || tree->argument_count > tree->argument_capacity
         || tree->parameter_count > tree->parameter_capacity
         || tree->statement_count > tree->statement_capacity
+        || tree->loop_invariant_count > tree->loop_invariant_capacity
         || tree->match_arm_count > tree->match_arm_capacity
         || tree->pattern_count > tree->pattern_capacity
         || tree->pattern_binding_count > tree->pattern_binding_capacity
@@ -812,6 +877,7 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
         || (tree->argument_count != 0 && tree->arguments == NULL)
         || (tree->parameter_count != 0 && tree->parameters == NULL)
         || (tree->statement_count != 0 && tree->statements == NULL)
+        || (tree->loop_invariant_count != 0 && tree->loop_invariants == NULL)
         || (tree->match_arm_count != 0 && tree->match_arms == NULL)
         || (tree->pattern_count != 0 && tree->patterns == NULL)
         || (tree->pattern_binding_count != 0 && tree->pattern_bindings == NULL)
@@ -831,6 +897,7 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
     validator.expressions = calloc(tree->expression_count, 1);
     validator.arguments = calloc(tree->argument_count, 1);
     validator.statements = calloc(tree->statement_count, 1);
+    validator.loop_invariants = calloc(tree->loop_invariant_count, 1);
     validator.arms = calloc(tree->match_arm_count, 1);
     validator.patterns = calloc(tree->pattern_count, 1);
     validator.pattern_bindings = calloc(tree->pattern_binding_count, 1);
@@ -848,6 +915,7 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
     bool allocated = (tree->expression_count == 0 || validator.expressions != NULL)
         && (tree->argument_count == 0 || validator.arguments != NULL)
         && (tree->statement_count == 0 || validator.statements != NULL)
+        && (tree->loop_invariant_count == 0 || validator.loop_invariants != NULL)
         && (tree->match_arm_count == 0 || validator.arms != NULL)
         && (tree->pattern_count == 0 || validator.patterns != NULL)
         && (tree->pattern_binding_count == 0 || validator.pattern_bindings != NULL)
@@ -951,6 +1019,8 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
         && sol_structure_all_marked(validator.expressions, tree->expression_count)
         && sol_structure_all_marked(validator.arguments, tree->argument_count)
         && sol_structure_all_marked(validator.statements, tree->statement_count)
+        && sol_structure_all_marked(
+            validator.loop_invariants, tree->loop_invariant_count)
         && sol_structure_all_marked(validator.arms, tree->match_arm_count)
         && sol_structure_all_marked(validator.patterns, tree->pattern_count)
         && sol_structure_all_marked(
@@ -973,6 +1043,7 @@ bool sol_syntax_contracts_validate(const SolSource *source, const SolSyntaxTree 
     free(validator.expressions);
     free(validator.arguments);
     free(validator.statements);
+    free(validator.loop_invariants);
     free(validator.arms);
     free(validator.patterns);
     free(validator.pattern_bindings);

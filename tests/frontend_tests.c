@@ -133,12 +133,22 @@ static void check_ast_links(const SolSyntaxTree *tree) {
                 || (statement->kind == SOL_STATEMENT_WHILE
                     && statement->as.loop_statement.condition < tree->expression_count));
             CHECK(statement->as.loop_statement.body < tree->expression_count);
+            CHECK(statement->as.loop_statement.first_invariant == SOL_AST_NONE
+                || statement->as.loop_statement.first_invariant
+                    < tree->loop_invariant_count);
+            CHECK(statement->as.loop_statement.decreases == SOL_AST_NONE
+                || statement->as.loop_statement.decreases < tree->expression_count);
         } else if (statement->kind == SOL_STATEMENT_BREAK
             || statement->kind == SOL_STATEMENT_CONTINUE) {
             CHECK(statement->as.expression == SOL_AST_NONE);
         } else {
             CHECK(statement->as.expression < tree->expression_count);
         }
+    }
+    for (size_t index = 0; index < tree->loop_invariant_count; ++index) {
+        CHECK(tree->loop_invariants[index].expression < tree->expression_count);
+        CHECK(tree->loop_invariants[index].next == SOL_AST_NONE
+            || tree->loop_invariants[index].next < tree->loop_invariant_count);
     }
     for (size_t index = 0; index < tree->parameter_count; ++index) {
         CHECK(tree->parameters[index].type_id < tree->type_count);
@@ -2023,8 +2033,9 @@ static void test_loop_statement_syntax(void) {
     static const char valid[] =
         "module loops\n"
         "function run(ready: Bool) -> () { "
-        "while ready { if ready { continue } else { break } } "
-        "loop { while ready { break } break } }\n";
+        "while ready invariant { ready\nready == true } decreases { 1 } "
+        "{ if ready { continue } else { break } } "
+        "loop invariant { ready } { while ready { break } break } }\n";
     SolSource source;
     SolTokens tokens;
     SolDiagnostics diagnostics;
@@ -2035,12 +2046,15 @@ static void test_loop_statement_syntax(void) {
     sol_syntax_tree_init(&tree);
     CHECK(sol_lex(&source, &tokens, &diagnostics));
     size_t loop_keywords = 0;
+    size_t clause_keywords = 0;
     for (size_t index = 0; index < tokens.count; ++index) {
         SolTokenKind kind = tokens.items[index].kind;
         loop_keywords += kind == SOL_TOKEN_LOOP || kind == SOL_TOKEN_WHILE
             || kind == SOL_TOKEN_BREAK || kind == SOL_TOKEN_CONTINUE;
+        clause_keywords += kind == SOL_TOKEN_INVARIANT || kind == SOL_TOKEN_DECREASES;
     }
     CHECK(loop_keywords == 7);
+    CHECK(clause_keywords == 3);
     CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
     CHECK(!sol_diagnostics_has_errors(&diagnostics));
     CHECK(sol_syntax_contracts_validate(&source, &tree));
@@ -2048,6 +2062,8 @@ static void test_loop_statement_syntax(void) {
     size_t whiles = 0;
     size_t breaks = 0;
     size_t continues = 0;
+    size_t invariants = 0;
+    bool checked_decreases = false;
     for (size_t index = 0; index < tree.statement_count; ++index) {
         const SolStatement *statement = &tree.statements[index];
         loops += statement->kind == SOL_STATEMENT_LOOP;
@@ -2065,12 +2081,55 @@ static void test_loop_statement_syntax(void) {
             CHECK(statement->next == SOL_AST_NONE);
             CHECK(statement->as.expression == SOL_AST_NONE);
         }
+        if (statement->kind == SOL_STATEMENT_LOOP
+            || statement->kind == SOL_STATEMENT_WHILE) {
+            SolLoopInvariantId invariant
+                = statement->as.loop_statement.first_invariant;
+            while (invariant != SOL_AST_NONE) {
+                CHECK(invariant < tree.loop_invariant_count);
+                if (invariant >= tree.loop_invariant_count) break;
+                const SolLoopInvariant *entry = &tree.loop_invariants[invariant];
+                CHECK(entry->expression < tree.expression_count);
+                CHECK(entry->span.start >= statement->as.loop_statement.invariant_span.start);
+                CHECK(entry->span.end <= statement->as.loop_statement.invariant_span.end);
+                ++invariants;
+                invariant = entry->next;
+            }
+            if (statement->as.loop_statement.decreases != SOL_AST_NONE) {
+                CHECK(statement->kind == SOL_STATEMENT_WHILE);
+                CHECK(span_text_equal(&source,
+                    statement->as.loop_statement.decreases_span,
+                    "decreases { 1 }"));
+                CHECK(tree.expressions[statement->as.loop_statement.decreases].kind
+                    == SOL_EXPR_INTEGER);
+                checked_decreases = true;
+            }
+        }
     }
     CHECK(loops == 1);
     CHECK(whiles == 2);
     CHECK(breaks == 3);
     CHECK(continues == 1);
+    CHECK(invariants == 3);
+    CHECK(checked_decreases);
     check_ast_links(&tree);
+    for (size_t index = 0; index < tree.statement_count; ++index) {
+        SolStatement *statement = &tree.statements[index];
+        if ((statement->kind != SOL_STATEMENT_LOOP
+                && statement->kind != SOL_STATEMENT_WHILE)
+            || statement->as.loop_statement.first_invariant == SOL_AST_NONE) continue;
+        SolLoopInvariantId first = statement->as.loop_statement.first_invariant;
+        SolLoopInvariantId next = tree.loop_invariants[first].next;
+        tree.loop_invariants[first].next = first;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.loop_invariants[first].next = next;
+        SolSpan span = statement->as.loop_statement.invariant_span;
+        statement->as.loop_statement.invariant_span = (SolSpan){0};
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        statement->as.loop_statement.invariant_span = span;
+        CHECK(sol_syntax_contracts_validate(&source, &tree));
+        break;
+    }
     sol_syntax_tree_free(&tree);
     sol_diagnostics_free(&diagnostics);
     sol_tokens_free(&tokens);
@@ -2081,7 +2140,14 @@ static void test_loop_statement_syntax(void) {
         "function outside() -> () { break continue }\n"
         "function payload() -> () { loop { break 1 } }\n"
         "function nonfinal() -> () { loop { continue let value = 1 } }\n"
-        "function missing_body(ready: Bool) -> () { while ready }\n";
+        "function missing_body(ready: Bool) -> () { while ready }\n"
+        "function empty_invariant() -> () { loop invariant {} {} }\n"
+        "function empty_decreases() -> () { loop decreases {} {} }\n"
+        "function many_decreases() -> () { loop decreases { 1, 2 } {} }\n"
+        "function duplicate() -> () { loop invariant { true } invariant { true } {} }\n"
+        "function order() -> () { loop decreases { 1 } invariant { true } {} }\n"
+        "function separator() -> () { loop invariant { true false } {} }\n"
+        "function trailing() -> () { loop invariant { true, } {} }\n";
     CHECK(sol_source_from_text(&source, "bad_loops.sol", malformed));
     sol_tokens_init(&tokens);
     sol_diagnostics_init(&diagnostics);
@@ -2089,7 +2155,7 @@ static void test_loop_statement_syntax(void) {
     CHECK(sol_lex(&source, &tokens, &diagnostics));
     CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
     CHECK(sol_diagnostics_has_errors(&diagnostics));
-    CHECK(diagnostics.count >= 5);
+    CHECK(diagnostics.count >= 12);
     CHECK(!sol_syntax_contracts_validate(&source, &tree));
     sol_syntax_tree_free(&tree);
     sol_diagnostics_free(&diagnostics);

@@ -62,6 +62,7 @@ static void check_valid_package(const SolPackage *package) {
     CHECK_ARENA_CAPACITY(item);
     CHECK_ARENA_CAPACITY(expression);
     CHECK_ARENA_CAPACITY(statement);
+    CHECK_ARENA_CAPACITY(loop_invariant);
     CHECK_ARENA_CAPACITY(argument);
     CHECK_ARENA_CAPACITY(parameter);
     CHECK_ARENA_CAPACITY(type);
@@ -189,11 +190,13 @@ static void test_type_declaration_relocation(void) {
     snprintf(first_path, sizeof(first_path), "%s/a.sol", directory);
     snprintf(second_path, sizeof(second_path), "%s/z.sol", directory);
     CHECK(write_text_file(first_path,
-        "module first\ntype Positive = refined Int64 where self > 0\n"));
+        "module first\ntype Positive = refined Int64 where self > 0\n"
+        "function prior() -> () { loop invariant { true } decreases { 1 } { break } }\n"));
     CHECK(write_text_file(second_path,
         "module second\nfunction seed(value: Int64) -> Int64 "
         "{ var pending: Int64 var copy = value modify copy { copy += 1 } "
-        "while copy < 3 { copy += 1 continue } loop { break } "
+        "while copy < 3 invariant { copy >= 0, copy <= 3 } decreases { 3 - copy } "
+        "{ copy += 1 continue } loop invariant { copy >= 0 } { break } "
         "region scratch { let observed = copy } return copy }\n"));
 
     SolPackage package;
@@ -204,9 +207,9 @@ static void test_type_declaration_relocation(void) {
     CHECK(sol_package_load(&package, directory, &diagnostics, error, sizeof(error)));
     CHECK(!sol_diagnostics_has_errors(&diagnostics));
     CHECK(package.file_count == 2);
-    CHECK(package.syntax.item_count == 2);
-    if (package.syntax.item_count >= 2) {
-        SolExprId body = package.syntax.items[1].body;
+    CHECK(package.syntax.item_count == 3);
+    if (package.syntax.item_count >= 3) {
+        SolExprId body = package.syntax.items[2].body;
         CHECK(body < package.syntax.expression_count);
         if (body < package.syntax.expression_count) {
             SolStatementId region = package.syntax.expressions[body].as.block.first_statement;
@@ -223,7 +226,7 @@ static void test_type_declaration_relocation(void) {
             }
         }
     }
-    if (package.syntax.item_count == 2) {
+    if (package.syntax.item_count == 3) {
         const SolSyntaxItem *type = &package.syntax.items[0];
         CHECK(type->kind == SOL_ITEM_TYPE);
         CHECK(type->representation_type != SOL_AST_NONE);
@@ -268,6 +271,16 @@ static void test_type_declaration_relocation(void) {
             whiles += statement->kind == SOL_STATEMENT_WHILE;
             CHECK(statement->as.loop_statement.body < package.syntax.expression_count);
             CHECK(statement->as.loop_statement.body != SOL_AST_NONE);
+            CHECK(statement->as.loop_statement.first_invariant != SOL_AST_NONE);
+            if (statement->span.start >= package.files[1].aggregate_start) {
+                CHECK(statement->as.loop_statement.first_invariant >= 1);
+                CHECK(statement->as.loop_statement.invariant_span.start
+                    >= package.files[1].aggregate_start);
+                if (statement->as.loop_statement.decreases != SOL_AST_NONE) {
+                    CHECK(statement->as.loop_statement.decreases_span.start
+                        >= package.files[1].aggregate_start);
+                }
+            }
             if (statement->kind == SOL_STATEMENT_LOOP) {
                 CHECK(statement->as.loop_statement.condition == SOL_AST_NONE);
             } else {
@@ -283,9 +296,22 @@ static void test_type_declaration_relocation(void) {
     CHECK(typed_vars == 1);
     CHECK(compound_assignments == 2);
     CHECK(modifies == 1);
-    CHECK(loops == 1);
+    CHECK(loops == 2);
     CHECK(whiles == 1);
-    CHECK(exits == 2);
+    CHECK(exits == 3);
+    CHECK(package.syntax.loop_invariant_count == 4);
+    for (size_t index = 0; index < package.syntax.loop_invariant_count; ++index) {
+        const SolLoopInvariant *invariant = &package.syntax.loop_invariants[index];
+        CHECK(invariant->expression < package.syntax.expression_count);
+        if (index == 0) {
+            CHECK(invariant->span.end <= package.files[0].aggregate_end);
+        } else {
+            CHECK(invariant->expression > package.syntax.loop_invariants[0].expression);
+            CHECK(invariant->span.start >= package.files[1].aggregate_start);
+        }
+        CHECK(invariant->next == SOL_AST_NONE
+            || invariant->next < package.syntax.loop_invariant_count);
+    }
 
     sol_diagnostics_free(&diagnostics);
     sol_package_free(&package);
