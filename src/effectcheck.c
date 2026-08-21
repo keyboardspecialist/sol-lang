@@ -1312,6 +1312,28 @@ static void sol_effect_process_call(SolEffectChecker *checker, const SolExpr *ca
 
 static void sol_effect_expression(SolEffectChecker *checker, SolExprId expression_id);
 
+static void sol_effect_panic(SolEffectChecker *checker, const SolStatement *statement) {
+    if (checker->mode == SOL_EFFECT_WALK_GRAPH
+        || checker->mode == SOL_EFFECT_WALK_RECORD) return;
+    SolEffectRow *row = checker->current_trait_method != SOL_AST_NONE
+        ? &checker->effects->trait_methods[checker->current_trait_method]
+        : checker->current_member != SOL_AST_NONE
+            ? &checker->effects->capability_members[checker->current_member]
+            : &checker->effects->functions[checker->current_function];
+    SolEffectAtom atom = {
+        .name = {statement->span.start, statement->span.start + 5},
+        .span = {statement->span.start, statement->span.start + 5},
+        .argument_kind = SOL_EFFECT_ATOM_NO_ARGUMENT,
+        .parameter = SOL_AST_NONE,
+    };
+    if (checker->mode == SOL_EFFECT_WALK_INFER) {
+        sol_effect_row_append(checker, row, atom);
+    } else if (!sol_effect_row_contains(checker, row, &atom)) {
+        sol_effect_error(checker, "SOL-EFFECT-002", statement->span,
+            "panic statement performs an effect not declared by the caller");
+    }
+}
+
 static void sol_effect_arguments(SolEffectChecker *checker, SolArgumentId argument_id) {
     size_t traversed = 0;
     while (argument_id != SOL_AST_NONE) {
@@ -1415,7 +1437,14 @@ static void sol_effect_expression(SolEffectChecker *checker, SolExprId expressio
                     : statement->kind == SOL_STATEMENT_REGION
                         ? statement->as.region_statement.body
                     : statement->kind == SOL_STATEMENT_MODIFY
-                        ? statement->as.modify.body : statement->as.expression;
+                        ? statement->as.modify.body
+                    : statement->kind == SOL_STATEMENT_PANIC
+                        ? statement->as.panic_statement.message
+                    : statement->kind == SOL_STATEMENT_UNREACHABLE
+                        ? SOL_AST_NONE
+                    : statement->kind == SOL_STATEMENT_REQUIRE
+                        ? statement->as.require_statement.fallback_block
+                        : statement->as.expression;
                 if (statement->kind == SOL_STATEMENT_ASSIGNMENT) {
                     sol_effect_expression(checker, statement->as.assignment.target);
                 } else if (statement->kind == SOL_STATEMENT_MODIFY) {
@@ -1424,8 +1453,15 @@ static void sol_effect_expression(SolEffectChecker *checker, SolExprId expressio
                     sol_effect_expression(
                         checker, statement->as.loop_statement.condition
                     );
+                } else if (statement->kind == SOL_STATEMENT_REQUIRE) {
+                    sol_effect_expression(
+                        checker, statement->as.require_statement.condition
+                    );
                 }
                 if (value != SOL_AST_NONE) sol_effect_expression(checker, value);
+                if (statement->kind == SOL_STATEMENT_PANIC) {
+                    sol_effect_panic(checker, statement);
+                }
                 statement_id = statement->next;
             }
             break;
@@ -1537,7 +1573,7 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
     }
     for (size_t index = 0; index < syntax->statement_count; ++index) {
         const SolStatement *statement = &syntax->statements[index];
-        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_CONTINUE
+        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_REQUIRE
             || !sol_effect_span_valid(source, statement->span)
             || ((statement->kind == SOL_STATEMENT_LET
                     || statement->kind == SOL_STATEMENT_VAR)
@@ -1547,6 +1583,11 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
                         statement->as.region_statement.label)
                     || statement->as.region_statement.label.start
                         == statement->as.region_statement.label.end))
+            || (statement->kind == SOL_STATEMENT_PANIC
+                && (statement->span.end - statement->span.start < 5
+                    || !sol_effect_span_text_equal(source,
+                        (SolSpan){statement->span.start, statement->span.start + 5},
+                        "panic")))
             || (statement->next != SOL_AST_NONE
                 && statement->next >= syntax->statement_count)) {
             return false;
@@ -1565,7 +1606,14 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
             : statement->kind == SOL_STATEMENT_REGION
                 ? statement->as.region_statement.body
             : statement->kind == SOL_STATEMENT_MODIFY
-                ? statement->as.modify.body : statement->as.expression;
+                ? statement->as.modify.body
+            : statement->kind == SOL_STATEMENT_PANIC
+                ? statement->as.panic_statement.message
+            : statement->kind == SOL_STATEMENT_UNREACHABLE
+                ? statement->as.unreachable_statement.proof
+            : statement->kind == SOL_STATEMENT_REQUIRE
+                ? statement->as.require_statement.fallback_block
+                : statement->as.expression;
         bool binding = statement->kind == SOL_STATEMENT_LET
             || statement->kind == SOL_STATEMENT_VAR;
         bool loop_exit = statement->kind == SOL_STATEMENT_BREAK
@@ -1595,6 +1643,23 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
                 && syntax->expressions[value].kind != SOL_EXPR_BLOCK)) return false;
         if (statement->kind == SOL_STATEMENT_MODIFY
             && (statement->as.modify.target >= syntax->expression_count
+                || syntax->expressions[value].kind != SOL_EXPR_BLOCK)) return false;
+        if (statement->kind == SOL_STATEMENT_UNREACHABLE
+            && (!sol_effect_span_valid(source,
+                    statement->as.unreachable_statement.because_span)
+                || statement->as.unreachable_statement.because_span.end
+                    != statement->span.end
+                || statement->as.unreachable_statement.because_span.start
+                    <= statement->span.start
+                || statement->as.unreachable_statement.because_span.end
+                    - statement->as.unreachable_statement.because_span.start < 7
+                || !sol_effect_span_text_equal(source,
+                    (SolSpan){
+                        statement->as.unreachable_statement.because_span.start,
+                        statement->as.unreachable_statement.because_span.start + 7,
+                    }, "because"))) return false;
+        if (statement->kind == SOL_STATEMENT_REQUIRE
+            && (statement->as.require_statement.condition >= syntax->expression_count
                 || syntax->expressions[value].kind != SOL_EXPR_BLOCK)) return false;
         if ((statement->kind == SOL_STATEMENT_LOOP
                 || statement->kind == SOL_STATEMENT_WHILE)
@@ -2182,6 +2247,12 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
                                 ? current->as.region_statement.body
                             : current->kind == SOL_STATEMENT_MODIFY
                                 ? current->as.modify.body
+                            : current->kind == SOL_STATEMENT_PANIC
+                                ? current->as.panic_statement.message
+                            : current->kind == SOL_STATEMENT_UNREACHABLE
+                                ? current->as.unreachable_statement.proof
+                            : current->kind == SOL_STATEMENT_REQUIRE
+                                ? current->as.require_statement.fallback_block
                                 : current->as.expression;
                         if (current->kind == SOL_STATEMENT_ASSIGNMENT) {
                             valid = sol_effect_schedule_owned_expression(
@@ -2195,6 +2266,11 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
                             valid = sol_effect_schedule_owned_expression(
                                 checker, owner,
                                 current->as.loop_statement.condition,
+                                states, stack, &stack_count);
+                        } else if (current->kind == SOL_STATEMENT_REQUIRE) {
+                            valid = sol_effect_schedule_owned_expression(
+                                checker, owner,
+                                current->as.require_statement.condition,
                                 states, stack, &stack_count);
                         }
                         if (valid && (current->kind == SOL_STATEMENT_LOOP
@@ -2337,7 +2413,14 @@ static SolProvenanceId sol_effect_block_origin(
             : current->kind == SOL_STATEMENT_REGION
                 ? current->as.region_statement.body
             : current->kind == SOL_STATEMENT_MODIFY
-                ? current->as.modify.body : current->as.expression;
+                ? current->as.modify.body
+            : current->kind == SOL_STATEMENT_PANIC
+                ? current->as.panic_statement.message
+            : current->kind == SOL_STATEMENT_UNREACHABLE
+                ? current->as.unreachable_statement.proof
+            : current->kind == SOL_STATEMENT_REQUIRE
+                ? current->as.require_statement.fallback_block
+                : current->as.expression;
         if (value_id == SOL_AST_NONE) {
             if (!terminated) result = SOL_PROVENANCE_NONE;
             if (!terminated && (current->kind == SOL_STATEMENT_BREAK
@@ -2356,7 +2439,10 @@ static SolProvenanceId sol_effect_block_origin(
                 ? expression_origins[value_id]
                 : SOL_PROVENANCE_NONE;
             terminated = current->kind == SOL_STATEMENT_RETURN
-                || value.kind == SOL_TYPE_NEVER;
+                || current->kind == SOL_STATEMENT_PANIC
+                || current->kind == SOL_STATEMENT_UNREACHABLE
+                || (current->kind != SOL_STATEMENT_REQUIRE
+                    && value.kind == SOL_TYPE_NEVER);
         }
         statement = current->next;
     }
@@ -2749,13 +2835,24 @@ static void sol_effect_push_expression_provenance_dependencies(
                 : current->kind == SOL_STATEMENT_REGION
                     ? current->as.region_statement.body
                 : current->kind == SOL_STATEMENT_MODIFY
-                    ? current->as.modify.body : current->as.expression;
+                    ? current->as.modify.body
+                : current->kind == SOL_STATEMENT_PANIC
+                    ? current->as.panic_statement.message
+                : current->kind == SOL_STATEMENT_UNREACHABLE
+                    ? current->as.unreachable_statement.proof
+                : current->kind == SOL_STATEMENT_REQUIRE
+                    ? current->as.require_statement.fallback_block
+                    : current->as.expression;
             if (value != SOL_AST_NONE) {
                 sol_effect_push_provenance_dependency(stack, stack_count, value);
             }
             if (current->kind == SOL_STATEMENT_WHILE) {
                 sol_effect_push_provenance_dependency(
                     stack, stack_count, current->as.loop_statement.condition
+                );
+            } else if (current->kind == SOL_STATEMENT_REQUIRE) {
+                sol_effect_push_provenance_dependency(
+                    stack, stack_count, current->as.require_statement.condition
                 );
             }
             statement = current->next;
@@ -3355,6 +3452,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || types->representation_count != syntax->item_count
         || types->construction_count != syntax->expression_count
         || types->loop_fact_count != syntax->statement_count
+        || types->unreachable_fact_count != syntax->statement_count
         || ((types->function_coercion_count == 0)
             != (types->function_coercion_capacity == 0))
         || (types->expression_count != 0 && types->expressions == NULL)
@@ -3391,7 +3489,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             && types->implementation_targets == NULL)
         || (types->representation_count != 0 && types->representations == NULL)
         || (types->construction_count != 0 && types->constructions == NULL)
-        || (types->loop_fact_count != 0 && types->loop_facts == NULL)) {
+        || (types->loop_fact_count != 0 && types->loop_facts == NULL)
+        || (types->unreachable_fact_count != 0
+            && types->unreachable_facts == NULL)) {
         return false;
     }
     if (!sol_syntax_contracts_validate(source, syntax)

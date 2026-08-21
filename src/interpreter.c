@@ -1715,6 +1715,68 @@ static Flow evaluate_block(Interpreter *interpreter,
         const SolIrStatement *statement = &ir->statements[ir->statement_ids[
             expression->as.block.statements.offset + index
         ]];
+        if (statement->kind == SOL_IR_STATEMENT_PANIC) {
+            Flow message = evaluate(interpreter, statement->expression);
+            if (message.kind != FLOW_VALUE) {
+                sol_interpreter_value_free(&last.value);
+                cleanup_slice(interpreter, expression->as.block.cleanup);
+                return message;
+            }
+            if (message.value.kind != SOL_INTERPRETER_VALUE_TEXT) {
+                diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT,
+                    statement->span, "panic message is not Text");
+            } else {
+                diagnostic(interpreter, SOL_INTERPRETER_PANIC, statement->span,
+                    "%s", message.value.as.text.bytes);
+            }
+            sol_interpreter_value_free(&message.value);
+            sol_interpreter_value_free(&last.value);
+            cleanup_slice(interpreter, expression->as.block.cleanup);
+            return flow_new(FLOW_ERROR);
+        }
+        if (statement->kind == SOL_IR_STATEMENT_UNREACHABLE) {
+            diagnostic(interpreter, SOL_INTERPRETER_REACHED_UNREACHABLE,
+                statement->span, "execution reached an unreachable statement");
+            sol_interpreter_value_free(&last.value);
+            cleanup_slice(interpreter, expression->as.block.cleanup);
+            return flow_new(FLOW_ERROR);
+        }
+        if (statement->kind == SOL_IR_STATEMENT_REQUIRE) {
+            Flow condition = evaluate(interpreter, statement->condition);
+            if (condition.kind != FLOW_VALUE) {
+                sol_interpreter_value_free(&last.value);
+                cleanup_slice(interpreter, expression->as.block.cleanup);
+                return condition;
+            }
+            if (condition.value.kind != SOL_INTERPRETER_VALUE_BOOL) {
+                sol_interpreter_value_free(&condition.value);
+                diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT,
+                    statement->span, "require condition is not Bool");
+                sol_interpreter_value_free(&last.value);
+                cleanup_slice(interpreter, expression->as.block.cleanup);
+                return flow_new(FLOW_ERROR);
+            }
+            bool required = condition.value.as.boolean;
+            sol_interpreter_value_free(&condition.value);
+            if (!required) {
+                Flow fallback = evaluate(interpreter, statement->expression);
+                if (fallback.kind == FLOW_VALUE) {
+                    sol_interpreter_value_free(&fallback.value);
+                    diagnostic(interpreter,
+                        SOL_INTERPRETER_REQUIRE_FALLBACK_RETURNED,
+                        statement->span,
+                        "require fallback returned a value instead of terminating");
+                    fallback = flow_new(FLOW_ERROR);
+                }
+                sol_interpreter_value_free(&last.value);
+                cleanup_slice(interpreter, expression->as.block.cleanup);
+                return fallback;
+            }
+            sol_interpreter_value_free(&last.value);
+            last = flow_new(FLOW_VALUE);
+            sol_interpreter_value_unit(&last.value);
+            continue;
+        }
         if (statement->kind == SOL_IR_STATEMENT_DECLARE) {
             if (!declare_local(interpreter, interpreter->frame, statement->local,
                     statement->span)) {

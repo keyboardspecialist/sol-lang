@@ -344,6 +344,9 @@ typedef enum {
     SOL_IR_STATEMENT_WHILE,
     SOL_IR_STATEMENT_BREAK,
     SOL_IR_STATEMENT_CONTINUE,
+    SOL_IR_STATEMENT_PANIC,
+    SOL_IR_STATEMENT_UNREACHABLE,
+    SOL_IR_STATEMENT_REQUIRE,
 } SolIrStatementKind;
 
 typedef struct {
@@ -357,6 +360,7 @@ typedef struct {
     char *region_label;
     SolSpan region_label_span;
     SolIrSlice loop_obligations;
+    SolIrSlice unreachable_obligations;
 } SolIrStatement;
 
 typedef enum {
@@ -404,6 +408,15 @@ typedef struct {
     SolIrTypeId expression_type;
     SolSpan span;
 } SolIrLoopObligation;
+
+typedef struct {
+    size_t id;
+    SolIrStatementId statement;
+    SolIrCallableId callable;
+    SolIrExpressionId proof;
+    SolIrTypeId proof_type;
+    SolSpan span;
+} SolIrUnreachableObligation;
 
 typedef struct {
     char *path;
@@ -467,6 +480,8 @@ typedef struct {
     size_t snapshot_count;
     SolIrLoopObligation *loop_obligations;
     size_t loop_obligation_count;
+    SolIrUnreachableObligation *unreachable_obligations;
+    size_t unreachable_obligation_count;
     SolIrSourceFile *files;
     size_t file_count;
 } SolIr;

@@ -508,6 +508,19 @@ static void sol_package_relocate_arenas(SolSyntaxTree *tree, SolArenaOffsets o, 
         } else if (entry->kind == SOL_STATEMENT_BREAK
             || entry->kind == SOL_STATEMENT_CONTINUE) {
             /* Payloadless exits have no arena references to relocate. */
+        } else if (entry->kind == SOL_STATEMENT_PANIC) {
+            entry->as.panic_statement.message = sol_relocate_id(
+                entry->as.panic_statement.message, o.expressions);
+        } else if (entry->kind == SOL_STATEMENT_UNREACHABLE) {
+            entry->as.unreachable_statement.proof = sol_relocate_id(
+                entry->as.unreachable_statement.proof, o.expressions);
+            entry->as.unreachable_statement.because_span = sol_relocate_span(
+                entry->as.unreachable_statement.because_span, base);
+        } else if (entry->kind == SOL_STATEMENT_REQUIRE) {
+            entry->as.require_statement.condition = sol_relocate_id(
+                entry->as.require_statement.condition, o.expressions);
+            entry->as.require_statement.fallback_block = sol_relocate_id(
+                entry->as.require_statement.fallback_block, o.expressions);
         } else {
             entry->as.expression = sol_relocate_id(entry->as.expression, o.expressions);
         }

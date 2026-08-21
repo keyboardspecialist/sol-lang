@@ -119,6 +119,7 @@ void sol_ir_free(SolIr *ir) {
     free(ir->obligations);
     free(ir->snapshots);
     free(ir->loop_obligations);
+    free(ir->unreachable_obligations);
     for (size_t index = 0; index < ir->file_count; ++index) free(ir->files[index].path);
     free(ir->files);
     memset(ir, 0, sizeof(*ir));
@@ -785,10 +786,14 @@ static bool sol_ir_frontend_shape_valid(SolIrLowerer *lowerer) {
         || contracts->expression_count != syntax->expression_count
         || contracts->snapshot_count > contracts->snapshot_capacity
         || contracts->loop_obligation_count > contracts->loop_obligation_capacity
+        || contracts->unreachable_obligation_count
+            > contracts->unreachable_obligation_capacity
         || (contracts->obligation_count != 0 && contracts->obligations == NULL)
         || (contracts->snapshot_count != 0 && contracts->snapshots == NULL)
         || (contracts->loop_obligation_count != 0
             && contracts->loop_obligations == NULL)
+        || (contracts->unreachable_obligation_count != 0
+            && contracts->unreachable_obligations == NULL)
         || (contracts->expression_count != 0 && contracts->expression_snapshots == NULL)) {
         return false;
     }
@@ -899,6 +904,23 @@ static bool sol_ir_frontend_shape_valid(SolIrLowerer *lowerer) {
                     != SOL_STATEMENT_WHILE)
             || obligation->expression >= syntax->expression_count
             || fact == NULL || !fact->is_loop
+            || obligation->owner != fact->owner
+            || obligation->owner_member != fact->owner_member
+            || obligation->owner_trait_method != fact->owner_trait_method
+            || !sol_ir_span_valid(lowerer->source, obligation->span)) return false;
+    }
+    for (size_t index = 0; index < contracts->unreachable_obligation_count; ++index) {
+        const SolUnreachableObligation *obligation
+            = &contracts->unreachable_obligations[index];
+        const SolUnreachableFact *fact
+            = obligation->statement < types->unreachable_fact_count
+                ? &types->unreachable_facts[obligation->statement] : NULL;
+        if (obligation->id != index
+            || obligation->statement >= syntax->statement_count
+            || syntax->statements[obligation->statement].kind
+                != SOL_STATEMENT_UNREACHABLE
+            || obligation->proof >= syntax->expression_count
+            || fact == NULL || !fact->is_unreachable
             || obligation->owner != fact->owner
             || obligation->owner_member != fact->owner_member
             || obligation->owner_trait_method != fact->owner_trait_method
@@ -2321,6 +2343,15 @@ static bool sol_ir_lower_statements_arms(SolIrLowerer *lowerer) {
             || source->kind == SOL_STATEMENT_CONTINUE) {
             output->kind = source->kind == SOL_STATEMENT_BREAK
                 ? SOL_IR_STATEMENT_BREAK : SOL_IR_STATEMENT_CONTINUE;
+        } else if (source->kind == SOL_STATEMENT_PANIC) {
+            output->kind = SOL_IR_STATEMENT_PANIC;
+            output->expression = source->as.panic_statement.message;
+        } else if (source->kind == SOL_STATEMENT_UNREACHABLE) {
+            output->kind = SOL_IR_STATEMENT_UNREACHABLE;
+        } else if (source->kind == SOL_STATEMENT_REQUIRE) {
+            output->kind = SOL_IR_STATEMENT_REQUIRE;
+            output->condition = source->as.require_statement.condition;
+            output->expression = source->as.require_statement.fallback_block;
         } else {
             output->kind = source->kind == SOL_STATEMENT_RETURN
                 ? SOL_IR_STATEMENT_RETURN : SOL_IR_STATEMENT_EXPRESSION;
@@ -2369,6 +2400,8 @@ static bool sol_ir_lower_contracts(SolIrLowerer *lowerer) {
     size_t obligation_count = lowerer->contracts->obligation_count;
     size_t snapshot_count = lowerer->contracts->snapshot_count;
     size_t loop_obligation_count = lowerer->contracts->loop_obligation_count;
+    size_t unreachable_obligation_count
+        = lowerer->contracts->unreachable_obligation_count;
     if (obligation_count != 0) {
         lowerer->ir->obligations = sol_ir_allocate(obligation_count,
             sizeof(*lowerer->ir->obligations), true);
@@ -2384,9 +2417,16 @@ static bool sol_ir_lower_contracts(SolIrLowerer *lowerer) {
             sizeof(*lowerer->ir->loop_obligations), true);
         if (lowerer->ir->loop_obligations == NULL) return false;
     }
+    if (unreachable_obligation_count != 0) {
+        lowerer->ir->unreachable_obligations = sol_ir_allocate(
+            unreachable_obligation_count,
+            sizeof(*lowerer->ir->unreachable_obligations), true);
+        if (lowerer->ir->unreachable_obligations == NULL) return false;
+    }
     lowerer->ir->obligation_count = obligation_count;
     lowerer->ir->snapshot_count = snapshot_count;
     lowerer->ir->loop_obligation_count = loop_obligation_count;
+    lowerer->ir->unreachable_obligation_count = unreachable_obligation_count;
     for (size_t index = 0; index < obligation_count; ++index) {
         const SolObligation *source = &lowerer->contracts->obligations[index];
         SolIrObligation *output = &lowerer->ir->obligations[index];
@@ -2463,6 +2503,37 @@ static bool sol_ir_lower_contracts(SolIrLowerer *lowerer) {
             .span = source->span,
         };
         if (output->expression_type == SOL_IR_NONE) return false;
+    }
+    for (size_t index = 0; index < unreachable_obligation_count; ++index) {
+        const SolUnreachableObligation *source
+            = &lowerer->contracts->unreachable_obligations[index];
+        if (source->id != index || source->statement >= lowerer->ir->statement_count
+            || source->proof >= lowerer->ir->expression_count) return false;
+        SolIrCallableId callable = source->owner_member != SOL_AST_NONE
+            ? source->owner_member < lowerer->syntax->capability_member_count
+                ? lowerer->member_callables[source->owner_member] : SOL_IR_NONE
+            : source->owner_trait_method != SOL_AST_NONE
+                ? source->owner_trait_method < lowerer->syntax->trait_method_count
+                    ? lowerer->method_callables[source->owner_trait_method] : SOL_IR_NONE
+                : source->owner < lowerer->syntax->item_count
+                    ? lowerer->definition_callables[source->owner] : SOL_IR_NONE;
+        SolIrStatement *statement = &lowerer->ir->statements[source->statement];
+        if (callable == SOL_IR_NONE || callable >= lowerer->ir->callable_count
+            || statement->kind != SOL_IR_STATEMENT_UNREACHABLE
+            || statement->unreachable_obligations.count != 0) return false;
+        statement->unreachable_obligations = (SolIrSlice){index, 1};
+        lowerer->ir->unreachable_obligations[index]
+            = (SolIrUnreachableObligation){
+                .id = source->id,
+                .statement = source->statement,
+                .callable = callable,
+                .proof = source->proof,
+                .proof_type = sol_ir_type(lowerer, source->proof_type),
+                .span = source->span,
+            };
+        if (lowerer->ir->unreachable_obligations[index].proof_type == SOL_IR_NONE) {
+            return false;
+        }
     }
     return !lowerer->failed;
 }
@@ -3612,9 +3683,38 @@ static bool sol_ir_executable_expression(
                             owner, callable_id, callable_result, states,
                             statement_callables, local_callables, introduced,
                             loop_depth + 1, &saw_break)) return false;
+                } else if (statement->kind == SOL_IR_STATEMENT_UNREACHABLE) {
+                    SolIrSlice obligations = statement->unreachable_obligations;
+                    if (obligations.count != 1) return false;
+                    unsigned char *proof_states = ir->expression_count == 0 ? NULL
+                        : calloc(ir->expression_count, 1);
+                    SolIrCallableId *proof_callables = ir->expression_count == 0
+                        ? NULL : malloc(ir->expression_count
+                            * sizeof(*proof_callables));
+                    if (ir->expression_count != 0
+                        && (proof_states == NULL || proof_callables == NULL)) {
+                        free(proof_states);
+                        free(proof_callables);
+                        return false;
+                    }
+                    for (size_t proof = 0; proof < ir->expression_count; ++proof) {
+                        proof_callables[proof] = SOL_IR_NONE;
+                    }
+                    const SolIrUnreachableObligation *obligation
+                        = &ir->unreachable_obligations[obligations.offset];
+                    bool valid = obligation->callable == callable_id
+                        && sol_ir_proof_expression_non_executable(ir,
+                            obligation->proof, callable_id, states, proof_states,
+                            proof_callables, local_callables, introduced, 0);
+                    free(proof_states);
+                    free(proof_callables);
+                    if (!valid) return false;
                 } else if (statement->kind != SOL_IR_STATEMENT_DECLARE
                     && statement->kind != SOL_IR_STATEMENT_BREAK
                     && statement->kind != SOL_IR_STATEMENT_CONTINUE) {
+                    if (statement->kind == SOL_IR_STATEMENT_REQUIRE) {
+                        SOL_IR_EXEC(statement->condition);
+                    }
                     SOL_IR_EXEC(statement->expression);
                 }
                 SolIrTypeId value_type = statement->expression == SOL_IR_NONE
@@ -3637,7 +3737,9 @@ static bool sol_ir_executable_expression(
                 if (!terminated) {
                     if (statement->kind == SOL_IR_STATEMENT_RETURN
                         || statement->kind == SOL_IR_STATEMENT_BREAK
-                        || statement->kind == SOL_IR_STATEMENT_CONTINUE) {
+                        || statement->kind == SOL_IR_STATEMENT_CONTINUE
+                        || statement->kind == SOL_IR_STATEMENT_PANIC
+                        || statement->kind == SOL_IR_STATEMENT_UNREACHABLE) {
                         if ((statement->kind == SOL_IR_STATEMENT_BREAK
                                 || statement->kind == SOL_IR_STATEMENT_CONTINUE)
                             && loop_depth == 0) return false;
@@ -3647,6 +3749,10 @@ static bool sol_ir_executable_expression(
                         computed_unit = false;
                         computed_never = true;
                         terminated = true;
+                    } else if (statement->kind == SOL_IR_STATEMENT_REQUIRE) {
+                        computed = SOL_IR_NONE;
+                        computed_unit = true;
+                        computed_never = false;
                     } else if (statement->kind == SOL_IR_STATEMENT_WHILE) {
                         computed = SOL_IR_NONE;
                         computed_unit = !sol_ir_type_is(
@@ -3946,6 +4052,11 @@ static bool sol_ir_expression_reaches(
             SOL_IR_REACHES(expression->as.handler.provider);
             SOL_IR_REACHES(expression->as.handler.body);
             break;
+        case SOL_IR_EXPR_SNAPSHOT_READ:
+            if (expression->as.snapshot < ir->snapshot_count) {
+                SOL_IR_REACHES(ir->snapshots[expression->as.snapshot].operand);
+            }
+            break;
         default:
             break;
     }
@@ -4145,7 +4256,9 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
         || (ir->effect_count != 0 && ir->effects == NULL)
         || (ir->obligation_count != 0 && ir->obligations == NULL)
         || (ir->snapshot_count != 0 && ir->snapshots == NULL)
-        || (ir->loop_obligation_count != 0 && ir->loop_obligations == NULL)) {
+        || (ir->loop_obligation_count != 0 && ir->loop_obligations == NULL)
+        || (ir->unreachable_obligation_count != 0
+            && ir->unreachable_obligations == NULL)) {
         return sol_ir_error(diagnostics, "malformed canonical IR ownership or counts");
     }
     for (size_t index = 0; index < ir->type_count; ++index) {
@@ -5171,14 +5284,15 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             || statement->kind == SOL_IR_STATEMENT_WHILE;
         bool exit = statement->kind == SOL_IR_STATEMENT_BREAK
             || statement->kind == SOL_IR_STATEMENT_CONTINUE;
-        bool has_expression = statement->kind != SOL_IR_STATEMENT_DECLARE && !exit;
+        bool has_expression = statement->kind != SOL_IR_STATEMENT_DECLARE && !exit
+            && statement->kind != SOL_IR_STATEMENT_UNREACHABLE;
         bool assignment_operator = statement->operator_kind == SOL_TOKEN_EQUAL
             || statement->operator_kind == SOL_TOKEN_PLUS_EQUAL
             || statement->operator_kind == SOL_TOKEN_MINUS_EQUAL
             || statement->operator_kind == SOL_TOKEN_STAR_EQUAL
             || statement->operator_kind == SOL_TOKEN_SLASH_EQUAL
             || statement->operator_kind == SOL_TOKEN_PERCENT_EQUAL;
-        if ((int)statement->kind < 0 || statement->kind > SOL_IR_STATEMENT_CONTINUE
+        if ((int)statement->kind < 0 || statement->kind > SOL_IR_STATEMENT_REQUIRE
             || statement->span.start > statement->span.end
             || statement->span.end > ir->source_length
             || (has_expression ? statement->expression >= ir->expression_count
@@ -5192,6 +5306,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             || (assignment ? !assignment_operator
                 : statement->operator_kind != SOL_TOKEN_EOF)
             || (statement->kind == SOL_IR_STATEMENT_WHILE
+                    || statement->kind == SOL_IR_STATEMENT_REQUIRE
                 ? statement->condition >= ir->expression_count
                     || (!sol_ir_type_is(ir,
                             ir->expressions[statement->condition].type,
@@ -5211,6 +5326,22 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             || !sol_ir_slice_valid(statement->loop_obligations,
                 ir->loop_obligation_count)
             || (!loop && statement->loop_obligations.count != 0)
+            || !sol_ir_slice_valid(statement->unreachable_obligations,
+                ir->unreachable_obligation_count)
+            || (statement->kind == SOL_IR_STATEMENT_UNREACHABLE
+                ? statement->unreachable_obligations.count != 1
+                : statement->unreachable_obligations.count != 0)
+            || (statement->kind == SOL_IR_STATEMENT_PANIC
+                && !sol_ir_type_is(ir,
+                    ir->expressions[statement->expression].type,
+                    SOL_IR_TYPE_TEXT))
+            || (statement->kind == SOL_IR_STATEMENT_REQUIRE
+                && (!sol_ir_type_is(ir,
+                        ir->expressions[statement->condition].type,
+                        SOL_IR_TYPE_BOOL)
+                    || !sol_ir_type_is(ir,
+                        ir->expressions[statement->expression].type,
+                        SOL_IR_TYPE_NEVER)))
             || (statement->kind == SOL_IR_STATEMENT_REGION
                 ? !sol_ir_region_label_valid(ir, statement)
                     || statement->region_label_span.start
@@ -5579,6 +5710,80 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
         if (owners != 1) return sol_ir_error(diagnostics,
             "IR loop obligation is missing or duplicated in its owner slice");
     }
+    for (size_t index = 0; index < ir->unreachable_obligation_count; ++index) {
+        const SolIrUnreachableObligation *obligation
+            = &ir->unreachable_obligations[index];
+        if (obligation->id != index
+            || obligation->statement >= ir->statement_count
+            || ir->statements[obligation->statement].kind
+                != SOL_IR_STATEMENT_UNREACHABLE
+            || obligation->callable >= ir->callable_count
+            || obligation->proof >= ir->expression_count
+            || obligation->proof_type >= ir->type_count
+            || obligation->proof_type != ir->expressions[obligation->proof].type
+            || !sol_ir_type_is(ir, obligation->proof_type, SOL_IR_TYPE_BOOL)
+            || obligation->span.start >= obligation->span.end
+            || obligation->span.end > ir->source_length
+            || ir->expressions[obligation->proof].span.start < obligation->span.start
+            || ir->expressions[obligation->proof].span.end > obligation->span.end) {
+            return sol_ir_error(diagnostics,
+                "malformed canonical IR unreachable obligation");
+        }
+        size_t owners = 0;
+        for (size_t statement_id = 0; statement_id < ir->statement_count;
+            ++statement_id) {
+            SolIrSlice slice
+                = ir->statements[statement_id].unreachable_obligations;
+            if (index >= slice.offset && index - slice.offset < slice.count) {
+                ++owners;
+                if (statement_id != obligation->statement) {
+                    return sol_ir_error(diagnostics,
+                        "IR unreachable obligation has the wrong owner slice");
+                }
+            }
+        }
+        if (owners != 1) return sol_ir_error(diagnostics,
+            "IR unreachable obligation is missing or duplicated in its owner slice");
+        if (index != 0) {
+            const SolIrUnreachableObligation *previous
+                = &ir->unreachable_obligations[index - 1];
+            if (previous->span.start > obligation->span.start
+                || (previous->span.start == obligation->span.start
+                    && (previous->span.end > obligation->span.end
+                        || (previous->span.end == obligation->span.end
+                            && previous->statement >= obligation->statement)))) {
+                return sol_ir_error(diagnostics,
+                    "IR unreachable obligations are not in canonical order");
+            }
+        }
+        for (size_t contract = 0; contract < ir->obligation_count; ++contract) {
+            unsigned char *contract_states = ir->expression_count == 0 ? NULL
+                : calloc(ir->expression_count, 1);
+            unsigned char *proof_states = ir->expression_count == 0 ? NULL
+                : calloc(ir->expression_count, 1);
+            if (ir->expression_count != 0
+                && (contract_states == NULL || proof_states == NULL)) {
+                free(contract_states);
+                free(proof_states);
+                return sol_ir_error(diagnostics,
+                    "IR unreachable proof validation allocation failed");
+            }
+            bool shared = sol_ir_expression_reaches(ir,
+                ir->obligations[contract].predicate, SOL_IR_NONE,
+                contract_states, 0);
+            for (SolIrExpressionId expression = 0;
+                !shared && expression < ir->expression_count; ++expression) {
+                if (contract_states[expression] == 0) continue;
+                memset(proof_states, 0, ir->expression_count);
+                shared = sol_ir_expression_reaches(ir, obligation->proof,
+                    expression, proof_states, 0);
+            }
+            free(contract_states);
+            free(proof_states);
+            if (shared) return sol_ir_error(diagnostics,
+                "IR unreachable proof expression is shared with a contract predicate");
+        }
+    }
     for (size_t statement_id = 0; statement_id < ir->statement_count;
         ++statement_id) {
         const SolIrStatement *statement = &ir->statements[statement_id];
@@ -5789,6 +5994,24 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             free(introduced);
             return sol_ir_error(diagnostics,
                 "IR loop proof expression is executable or shared with runtime code");
+        }
+    }
+    for (size_t index = 0; index < ir->unreachable_obligation_count; ++index) {
+        const SolIrUnreachableObligation *obligation
+            = &ir->unreachable_obligations[index];
+        if (obligation->callable >= ir->callable_count
+            || statement_callables[obligation->statement] != obligation->callable
+            || !sol_ir_proof_expression_non_executable(ir, obligation->proof,
+                obligation->callable, states, proof_states, proof_callables,
+                local_callables, NULL, 0)) {
+            free(proof_states);
+            free(proof_callables);
+            free(states);
+            free(statement_callables);
+            free(local_callables);
+            free(introduced);
+            return sol_ir_error(diagnostics,
+                "IR unreachable proof expression is executable, impure, or shared");
         }
     }
     free(proof_states);

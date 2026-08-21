@@ -42,6 +42,13 @@ typedef struct {
     SolTraitMethodId owner_trait_method;
 } SolLoopFact;
 
+typedef struct {
+    bool is_unreachable;
+    SolDefId owner;
+    SolCapabilityMemberId owner_member;
+    SolTraitMethodId owner_trait_method;
+} SolUnreachableFact;
+
 typedef enum {
     SOL_TYPE_CONSTRUCTOR_OPTION,
     SOL_TYPE_CONSTRUCTOR_RESULT,
@@ -199,6 +206,9 @@ typedef struct {
     /* Indexed by SolStatementId; non-loop entries have is_loop == false. */
     SolLoopFact *loop_facts;
     size_t loop_fact_count;
+    /* Indexed by SolStatementId; non-unreachable entries are zeroed. */
+    SolUnreachableFact *unreachable_facts;
+    size_t unreachable_fact_count;
 } SolTypeTable;
 
 const SolMethodResolution *sol_type_method_resolution(

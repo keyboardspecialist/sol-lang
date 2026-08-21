@@ -2029,6 +2029,133 @@ static void test_loop_execution_and_cleanup(void) {
     free_compilation(&compilation);
 }
 
+static void test_terminating_statements_runtime(void) {
+    Compilation compilation;
+    bool compiled = compile(&compilation,
+        "module terminating_runtime\n"
+        "capability Token {}\n"
+        "function message() -> Text { return \"boom\" }\n"
+        "function panic_now() -> () effects { panic } "
+            "{ let outer = \"x\" panic message() }\n"
+        "function unreachable_short(flag: Bool) -> () "
+            "{ let outer = \"x\" unreachable because { false } }\n"
+        "function unreachable_long(flag: Bool) -> () "
+            "{ let outer = \"x\" unreachable because "
+            "{ flag == false && 1 + 2 == 3 } }\n"
+        "function required(flag: Bool) -> Int64 effects { panic } "
+            "{ let outer = \"x\" require flag else { panic \"required\" } "
+            "return 7 }\n"
+        "function required_return(flag: Bool) -> Int64 "
+            "{ require flag else { return 9 } return 7 }\n"
+        "function keep(flag: Bool, value: capability Token) -> capability Token "
+            "effects { panic } authority { result derives_from value } "
+            "{ require flag else { let consumed = value panic \"no\" } "
+            "return value }\n"
+        "function required_break() -> Int64 { var value = 0 "
+            "loop { require false else { break } value = 1 } return value }\n"
+        "function required_continue() -> Int64 { var value = 0 "
+            "while value < 2 { value += 1 require value == 2 else "
+            "{ continue } return value } return 0 }\n");
+    CHECK(compiled);
+    if (!compiled) {
+        sol_diagnostics_render_human(stderr, &compilation.source,
+            &compilation.diagnostics);
+        free_compilation(&compilation);
+        return;
+    }
+    free_frontend(&compilation);
+    SolInterpreterResult result;
+    CleanupLog log = {.ir = &compilation.ir};
+    CHECK(!run_observed(&compilation.ir, "panic_now", NULL, 0, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_PANIC);
+    CHECK(strcmp(result.diagnostic.message, "boom") == 0);
+    CHECK(log.count == 1 && strcmp(log.names[0], "outer") == 0);
+    sol_interpreter_result_free(&result);
+
+    SolInterpreterValue flag;
+    sol_interpreter_value_bool(&flag, false);
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(!run_observed(&compilation.ir, "unreachable_short", &flag, 1,
+        &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_REACHED_UNREACHABLE);
+    CHECK(log.count == 2 && strcmp(log.names[0], "outer") == 0
+        && strcmp(log.names[1], "flag") == 0);
+    size_t short_steps = result.used.steps;
+    sol_interpreter_result_free(&result);
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(!run_observed(&compilation.ir, "unreachable_long", &flag, 1,
+        &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_REACHED_UNREACHABLE);
+    CHECK(result.used.steps == short_steps);
+    CHECK(log.count == 2 && strcmp(log.names[0], "outer") == 0
+        && strcmp(log.names[1], "flag") == 0);
+    sol_interpreter_result_free(&result);
+
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(!run_observed(&compilation.ir, "required", &flag, 1, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_PANIC);
+    CHECK(strcmp(result.diagnostic.message, "required") == 0);
+    CHECK(log.count == 2 && strcmp(log.names[0], "outer") == 0
+        && strcmp(log.names[1], "flag") == 0);
+    sol_interpreter_result_free(&result);
+    flag.as.boolean = true;
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "required", &flag, 1, &log, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 7);
+    CHECK(log.count == 2 && strcmp(log.names[0], "outer") == 0
+        && strcmp(log.names[1], "flag") == 0);
+    sol_interpreter_result_free(&result);
+
+    flag.as.boolean = false;
+    CHECK(run(&compilation.ir, "required_return", &flag, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 9);
+    sol_interpreter_result_free(&result);
+    flag.as.boolean = true;
+    CHECK(run(&compilation.ir, "required_return", &flag, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 7);
+    sol_interpreter_result_free(&result);
+
+    SolIrDefinitionId token = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.definition_count; ++index) {
+        if (strcmp(compilation.ir.definitions[index].name, "Token") == 0) token = index;
+    }
+    int root;
+    SolInterpreterValue arguments[2];
+    sol_interpreter_value_bool(&arguments[0], true);
+    CHECK(sol_interpreter_value_capability(&arguments[1], token, &root, NULL));
+    CHECK(run(&compilation.ir, "keep", arguments, 2,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_CAPABILITY
+        && result.value.as.capability.root == &root);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&arguments[0]);
+    sol_interpreter_value_free(&arguments[1]);
+
+    CHECK(run(&compilation.ir, "required_break", NULL, 0,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 0);
+    sol_interpreter_result_free(&result);
+    CHECK(run(&compilation.ir, "required_continue", NULL, 0,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 2);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&flag);
+    sol_ir_free(&compilation.ir);
+    sol_diagnostics_free(&compilation.diagnostics);
+}
+
 int main(void) {
     test_primitives_control_and_lifetime();
     test_place_projection_execution();
@@ -2047,6 +2174,7 @@ int main(void) {
     test_projected_moves_assignments_and_inout();
     test_malformed_top_level_requests();
     test_loop_execution_and_cleanup();
+    test_terminating_statements_runtime();
     if (failures != 0) fprintf(stderr, "%d interpreter test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

@@ -131,6 +131,9 @@ typedef enum {
     SOL_STATEMENT_WHILE,
     SOL_STATEMENT_BREAK,
     SOL_STATEMENT_CONTINUE,
+    SOL_STATEMENT_PANIC,
+    SOL_STATEMENT_UNREACHABLE,
+    SOL_STATEMENT_REQUIRE,
 } SolStatementKind;
 
 typedef struct {
@@ -166,6 +169,17 @@ typedef struct {
             SolSpan decreases_span;
             SolExprId body;
         } loop_statement;
+        struct {
+            SolExprId message;
+        } panic_statement;
+        struct {
+            SolExprId proof;
+            SolSpan because_span;
+        } unreachable_statement;
+        struct {
+            SolExprId condition;
+            SolExprId fallback_block;
+        } require_statement;
         SolExprId expression;
     } as;
 } SolStatement;

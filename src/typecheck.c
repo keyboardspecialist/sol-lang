@@ -620,7 +620,8 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     }
     for (size_t index = 0; index < syntax->statement_count; ++index) {
         const SolStatement *statement = &syntax->statements[index];
-        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_CONTINUE) {
+        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_REQUIRE
+            || !sol_type_span_valid(checker->source, statement->span)) {
             sol_type_malformed(checker);
             return false;
         }
@@ -638,7 +639,14 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             : statement->kind == SOL_STATEMENT_REGION
                 ? statement->as.region_statement.body
             : statement->kind == SOL_STATEMENT_MODIFY
-                ? statement->as.modify.body : statement->as.expression;
+                ? statement->as.modify.body
+            : statement->kind == SOL_STATEMENT_PANIC
+                ? statement->as.panic_statement.message
+            : statement->kind == SOL_STATEMENT_UNREACHABLE
+                ? statement->as.unreachable_statement.proof
+            : statement->kind == SOL_STATEMENT_REQUIRE
+                ? statement->as.require_statement.fallback_block
+                : statement->as.expression;
         bool binding = statement->kind == SOL_STATEMENT_LET
             || statement->kind == SOL_STATEMENT_VAR;
         bool loop_exit = statement->kind == SOL_STATEMENT_BREAK
@@ -668,6 +676,29 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                 && syntax->expressions[value].kind != SOL_EXPR_BLOCK)
             || (statement->kind == SOL_STATEMENT_MODIFY
                 && (statement->as.modify.target >= syntax->expression_count
+                    || syntax->expressions[value].kind != SOL_EXPR_BLOCK))
+            || (statement->kind == SOL_STATEMENT_UNREACHABLE
+                && (!sol_type_span_valid(checker->source,
+                        statement->as.unreachable_statement.because_span)
+                    || statement->as.unreachable_statement.because_span.end
+                        != statement->span.end
+                    || statement->as.unreachable_statement.because_span.start
+                        <= statement->span.start
+                    || statement->as.unreachable_statement.because_span.end
+                        - statement->as.unreachable_statement.because_span.start < 7
+                    || !sol_type_span_equal(checker->source,
+                        (SolSpan){
+                            statement->as.unreachable_statement.because_span.start,
+                            statement->as.unreachable_statement.because_span.start + 7,
+                        }, "because")))
+            || (statement->kind == SOL_STATEMENT_PANIC
+                && (statement->span.end - statement->span.start < 5
+                    || !sol_type_span_equal(checker->source,
+                        (SolSpan){statement->span.start,
+                            statement->span.start + 5}, "panic")))
+            || (statement->kind == SOL_STATEMENT_REQUIRE
+                && (statement->as.require_statement.condition
+                        >= syntax->expression_count
                     || syntax->expressions[value].kind != SOL_EXPR_BLOCK))
             || (statement->next != SOL_AST_NONE && statement->next >= syntax->statement_count)) {
             sol_type_malformed(checker);
@@ -1042,6 +1073,7 @@ void sol_type_table_free(SolTypeTable *table) {
     free(table->representations);
     free(table->constructions);
     free(table->loop_facts);
+    free(table->unreachable_facts);
     memset(table, 0, sizeof(*table));
 }
 
@@ -3225,6 +3257,8 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
             / sizeof(*checker->types->argument_field_resolutions)
         || checker->syntax->statement_count > SIZE_MAX
             / sizeof(*checker->types->loop_facts)
+        || checker->syntax->statement_count > SIZE_MAX
+            / sizeof(*checker->types->unreachable_facts)
         || expression_count > SIZE_MAX / sizeof(*checker->types->constructions)
         || local_count > SIZE_MAX / sizeof(*checker->types->locals)
         || local_count > SIZE_MAX / sizeof(*checker->types->local_capability_origins)
@@ -3295,6 +3329,10 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         checker->syntax->statement_count,
         sizeof(*checker->types->loop_facts)
     );
+    checker->types->unreachable_facts = calloc(
+        checker->syntax->statement_count,
+        sizeof(*checker->types->unreachable_facts)
+    );
     checker->states = calloc(expression_count, sizeof(*checker->states));
     checker->declared_states = calloc(
         checker->syntax->type_count,
@@ -3312,7 +3350,8 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
                 || checker->types->constructions == NULL
                 || checker->states == NULL))
         || (checker->syntax->statement_count != 0
-            && checker->types->loop_facts == NULL)
+            && (checker->types->loop_facts == NULL
+                || checker->types->unreachable_facts == NULL))
         || (local_count != 0
             && (checker->types->locals == NULL
                 || checker->types->local_capability_origins == NULL
@@ -3354,6 +3393,7 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     checker->types->representation_count = definition_count;
     checker->types->construction_count = expression_count;
     checker->types->loop_fact_count = checker->syntax->statement_count;
+    checker->types->unreachable_fact_count = checker->syntax->statement_count;
     for (size_t index = 0; index < expression_count; ++index) {
         checker->types->expression_capability_origins[index] = SOL_PROVENANCE_NONE;
         checker->types->expression_operation_origins[index] = SOL_PROVENANCE_NONE;
@@ -4121,7 +4161,14 @@ static SolProvenanceId sol_type_block_origin(
             : statement->kind == SOL_STATEMENT_REGION
                 ? statement->as.region_statement.body
             : statement->kind == SOL_STATEMENT_MODIFY
-                ? statement->as.modify.body : statement->as.expression;
+                ? statement->as.modify.body
+            : statement->kind == SOL_STATEMENT_PANIC
+                ? statement->as.panic_statement.message
+            : statement->kind == SOL_STATEMENT_UNREACHABLE
+                ? statement->as.unreachable_statement.proof
+            : statement->kind == SOL_STATEMENT_REQUIRE
+                ? statement->as.require_statement.fallback_block
+                : statement->as.expression;
         if (value_id == SOL_AST_NONE) {
             if (!terminated) result = SOL_PROVENANCE_NONE;
             statement_id = statement->next;
@@ -4140,7 +4187,10 @@ static SolProvenanceId sol_type_block_origin(
             terminated = statement->kind == SOL_STATEMENT_RETURN
                 || statement->kind == SOL_STATEMENT_BREAK
                 || statement->kind == SOL_STATEMENT_CONTINUE
-                || value.kind == SOL_TYPE_NEVER;
+                || statement->kind == SOL_STATEMENT_PANIC
+                || statement->kind == SOL_STATEMENT_UNREACHABLE
+                || (statement->kind != SOL_STATEMENT_REQUIRE
+                    && value.kind == SOL_TYPE_NEVER);
         }
         statement_id = statement->next;
     }
@@ -4551,6 +4601,55 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
                 result = (SolType){.kind = SOL_TYPE_NEVER};
                 terminated = true;
             }
+        } else if (statement->kind == SOL_STATEMENT_PANIC) {
+            SolExprId message_id = statement->as.panic_statement.message;
+            SolType message = sol_type_expression(checker, message_id);
+            if (message.kind != SOL_TYPE_TEXT && message.kind != SOL_TYPE_ERROR) {
+                sol_type_error(checker, "SOL-TYPE-002",
+                    checker->syntax->expressions[message_id].span,
+                    "panic message must have type Text");
+            }
+            if (!terminated) {
+                result = (SolType){.kind = SOL_TYPE_NEVER};
+                terminated = true;
+            }
+        } else if (statement->kind == SOL_STATEMENT_UNREACHABLE) {
+            SolExprId proof_id = statement->as.unreachable_statement.proof;
+            SolType proof = sol_type_expression(checker, proof_id);
+            if (proof.kind != SOL_TYPE_BOOL && proof.kind != SOL_TYPE_ERROR) {
+                sol_type_error(checker, "SOL-CONTRACT-001",
+                    checker->syntax->expressions[proof_id].span,
+                    "unreachable proof must have type Bool");
+            }
+            if (statement_id < checker->types->unreachable_fact_count) {
+                checker->types->unreachable_facts[statement_id]
+                    = (SolUnreachableFact){
+                        .is_unreachable = true,
+                        .owner = checker->current_definition,
+                        .owner_member = checker->current_member,
+                        .owner_trait_method = checker->current_trait_method,
+                    };
+            }
+            if (!terminated) {
+                result = (SolType){.kind = SOL_TYPE_NEVER};
+                terminated = true;
+            }
+        } else if (statement->kind == SOL_STATEMENT_REQUIRE) {
+            SolExprId condition_id = statement->as.require_statement.condition;
+            SolExprId fallback_id = statement->as.require_statement.fallback_block;
+            SolType condition = sol_type_expression(checker, condition_id);
+            SolType fallback = sol_type_expression(checker, fallback_id);
+            if (condition.kind != SOL_TYPE_BOOL && condition.kind != SOL_TYPE_ERROR) {
+                sol_type_error(checker, "SOL-TYPE-003",
+                    checker->syntax->expressions[condition_id].span,
+                    "require condition must have type Bool");
+            }
+            if (fallback.kind != SOL_TYPE_NEVER && fallback.kind != SOL_TYPE_ERROR) {
+                sol_type_error(checker, "SOL-TYPE-002",
+                    checker->syntax->expressions[fallback_id].span,
+                    "require fallback must have type Never");
+            }
+            if (!terminated) result = (SolType){.kind = SOL_TYPE_UNIT};
         } else if (statement->kind == SOL_STATEMENT_LET
             || statement->kind == SOL_STATEMENT_VAR) {
             SolExprId initializer = statement->as.let_statement.value;
@@ -7139,7 +7238,7 @@ bool sol_type_check(
         || types->argument_field_resolutions != NULL
         || types->implementation_targets != NULL
         || types->representations != NULL || types->constructions != NULL
-        || types->loop_facts != NULL
+        || types->loop_facts != NULL || types->unreachable_facts != NULL
         || types->expression_count != 0 || types->local_count != 0
         || types->definition_count != 0 || types->declared_type_count != 0
         || types->type_application_count != 0 || types->type_application_capacity != 0
@@ -7159,7 +7258,7 @@ bool sol_type_check(
         || types->member_resolution_count != 0
         || types->pattern_resolution_count != 0
         || types->argument_resolution_count != 0
-        || types->loop_fact_count != 0
+        || types->loop_fact_count != 0 || types->unreachable_fact_count != 0
         || types->implementation_target_count != 0
         || types->representation_count != 0 || types->construction_count != 0) {
         sol_type_malformed(&checker);

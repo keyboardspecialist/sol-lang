@@ -753,6 +753,50 @@ static void test_malformed_arena_metadata_rejected(void) {
     sol_source_free(&source);
 }
 
+static void test_failure_statement_resolution(void) {
+    static const char text[] =
+        "module failure_resolution\n"
+        "function guard(flag: Bool, message: Text) -> () { "
+        "panic message unreachable because { flag == false } "
+        "require flag else { panic message } }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolStatementId unreachable = SOL_AST_NONE;
+    SolStatementId require = SOL_AST_NONE;
+    size_t resolved_payload_paths = 0;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        const SolExpr *expression = &compilation.syntax.expressions[index];
+        if (expression->kind == SOL_EXPR_PATH
+            && (span_text_equal(&compilation.source, expression->as.name, "flag")
+                || span_text_equal(&compilation.source,
+                    expression->as.name, "message"))) {
+            CHECK(compilation.hir.resolutions[index].kind == SOL_RESOLUTION_LOCAL);
+            CHECK(compilation.hir.expression_owners[index] != SOL_AST_NONE);
+            ++resolved_payload_paths;
+        }
+    }
+    for (size_t index = 0; index < compilation.syntax.statement_count; ++index) {
+        if (compilation.syntax.statements[index].kind == SOL_STATEMENT_UNREACHABLE) {
+            unreachable = index;
+        } else if (compilation.syntax.statements[index].kind == SOL_STATEMENT_REQUIRE) {
+            require = index;
+        }
+    }
+    CHECK(resolved_payload_paths == 4);
+    CHECK(unreachable < compilation.syntax.statement_count);
+    CHECK(require < compilation.syntax.statement_count);
+    if (unreachable < compilation.syntax.statement_count) {
+        compilation.syntax.statements[unreachable].as.unreachable_statement.proof
+            = compilation.syntax.expression_count;
+        reset_hir_diagnostics(&compilation);
+        CHECK(!sol_hir_lower(&compilation.source, &compilation.syntax,
+            &compilation.hir, &compilation.diagnostics));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    }
+    free_compilation(&compilation);
+}
+
 static void test_scoped_package_resolution(void) {
     static const char text[] =
         "module alpha\n"
@@ -1165,6 +1209,7 @@ int main(void) {
     test_semantic_depth_limit();
     test_malformed_ast_rejected();
     test_malformed_arena_metadata_rejected();
+    test_failure_statement_resolution();
     test_scoped_package_resolution();
     test_scoped_import_requires_exact_module();
     test_scoped_builtin_type_precedence();

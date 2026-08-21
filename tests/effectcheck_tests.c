@@ -179,6 +179,32 @@ static bool row_has_parameter_effect(
     return false;
 }
 
+static void test_termination_statement_effects(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module termination_effects\n"
+        "function noisy() -> Bool effects { panic } { return true }\n"
+        "function inferred() -> Int64 { panic \"inferred\" }\n"
+        "function explicit() -> Int64 effects { panic } { panic \"explicit\" }\n"
+        "function erased() -> Int64 effects { pure } "
+            "{ unreachable because { noisy() } }\n"
+        "function guarded(flag: Bool) -> Int64 effects { panic } "
+            "{ require flag else { panic \"fallback\" } return 1 }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.effects.functions[1].inferred);
+    CHECK(row_has_effect(&compilation, &compilation.effects.functions[1], "panic"));
+    CHECK(row_has_effect(&compilation, &compilation.effects.functions[2], "panic"));
+    CHECK(compilation.effects.functions[3].count == 0);
+    CHECK(row_has_effect(&compilation, &compilation.effects.functions[4], "panic"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module missing_panic_effect\n"
+        "function bad() -> Int64 effects { pure } { panic \"missing\" }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-002"));
+    free_compilation(&compilation);
+}
+
 static void test_effect_row_generic_instantiation(void) {
     static const char text[] =
         "module row_instantiation\n"
@@ -2658,6 +2684,7 @@ int main(void) {
     test_assignment_rhs_effects();
     test_bounded_mutation_effects();
     test_loop_specifications_are_effect_erased();
+    test_termination_statement_effects();
     if (failures != 0) {
         fprintf(stderr, "%d effect-checking test failure(s)\n", failures);
         return 1;

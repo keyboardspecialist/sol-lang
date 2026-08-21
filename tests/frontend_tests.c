@@ -1768,7 +1768,7 @@ static void test_malformed_syntax_structure_rejections(void) {
         SolStatementKind kind = tree.statements[0].kind;
         tree.statements[0].kind = (SolStatementKind)-1;
         CHECK(!sol_syntax_contracts_validate(&source, &tree));
-        tree.statements[0].kind = (SolStatementKind)(SOL_STATEMENT_CONTINUE + 1);
+        tree.statements[0].kind = (SolStatementKind)(SOL_STATEMENT_REQUIRE + 1);
         CHECK(!sol_syntax_contracts_validate(&source, &tree));
         tree.statements[0].kind = kind;
     }
@@ -2163,6 +2163,143 @@ static void test_loop_statement_syntax(void) {
     sol_source_free(&source);
 }
 
+static void test_failure_statement_syntax(void) {
+    static const char valid[] =
+        "module failures\n"
+        "function guard(ready: Bool, message: Text) -> () {\n"
+        "panic message\n"
+        "unreachable because { ready == false }\n"
+        "require ready else { panic \"required\" }\n"
+        "}\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "failures.sol", valid));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    size_t keywords[4] = {0};
+    for (size_t index = 0; index < tokens.count; ++index) {
+        SolTokenKind kind = tokens.items[index].kind;
+        keywords[0] += kind == SOL_TOKEN_REQUIRE;
+        keywords[1] += kind == SOL_TOKEN_PANIC;
+        keywords[2] += kind == SOL_TOKEN_UNREACHABLE;
+        keywords[3] += kind == SOL_TOKEN_BECAUSE;
+    }
+    CHECK(keywords[0] == 1);
+    CHECK(keywords[1] == 2);
+    CHECK(keywords[2] == 1);
+    CHECK(keywords[3] == 1);
+    CHECK(strcmp(sol_token_kind_name(SOL_TOKEN_REQUIRE), "require") == 0);
+    CHECK(strcmp(sol_token_kind_name(SOL_TOKEN_PANIC), "panic") == 0);
+    CHECK(strcmp(sol_token_kind_name(SOL_TOKEN_UNREACHABLE), "unreachable") == 0);
+    CHECK(strcmp(sol_token_kind_name(SOL_TOKEN_BECAUSE), "because") == 0);
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+
+    SolStatementId panic_id = SOL_AST_NONE;
+    SolStatementId unreachable_id = SOL_AST_NONE;
+    SolStatementId require_id = SOL_AST_NONE;
+    for (size_t index = 0; index < tree.statement_count; ++index) {
+        if (tree.statements[index].kind == SOL_STATEMENT_PANIC
+            && panic_id == SOL_AST_NONE) panic_id = index;
+        if (tree.statements[index].kind == SOL_STATEMENT_UNREACHABLE) {
+            unreachable_id = index;
+        }
+        if (tree.statements[index].kind == SOL_STATEMENT_REQUIRE) require_id = index;
+    }
+    CHECK(panic_id < tree.statement_count);
+    CHECK(unreachable_id < tree.statement_count);
+    CHECK(require_id < tree.statement_count);
+    if (panic_id < tree.statement_count) {
+        CHECK(tree.statements[panic_id].as.panic_statement.message
+            < tree.expression_count);
+    }
+    if (unreachable_id < tree.statement_count) {
+        SolStatement *statement = &tree.statements[unreachable_id];
+        CHECK(statement->as.unreachable_statement.proof < tree.expression_count);
+        if (statement->as.unreachable_statement.proof < tree.expression_count) {
+            CHECK(tree.expressions[statement->as.unreachable_statement.proof].kind
+                == SOL_EXPR_BINARY);
+        }
+        CHECK(span_text_equal(&source,
+            statement->as.unreachable_statement.because_span,
+            "because { ready == false }"));
+    }
+    if (require_id < tree.statement_count) {
+        SolStatement *statement = &tree.statements[require_id];
+        CHECK(statement->as.require_statement.condition < tree.expression_count);
+        CHECK(statement->as.require_statement.fallback_block < tree.expression_count);
+        CHECK(tree.expressions[statement->as.require_statement.fallback_block].kind
+            == SOL_EXPR_BLOCK);
+    }
+
+    if (panic_id < tree.statement_count) {
+        SolExprId message = tree.statements[panic_id].as.panic_statement.message;
+        tree.statements[panic_id].as.panic_statement.message = tree.expression_count;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.statements[panic_id].as.panic_statement.message = message;
+    }
+    if (unreachable_id < tree.statement_count) {
+        SolStatement *statement = &tree.statements[unreachable_id];
+        SolSpan because = statement->as.unreachable_statement.because_span;
+        statement->as.unreachable_statement.because_span = (SolSpan){0};
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        statement->as.unreachable_statement.because_span = because;
+        if (panic_id < tree.statement_count) {
+            SolExprId proof = statement->as.unreachable_statement.proof;
+            statement->as.unreachable_statement.proof
+                = tree.statements[panic_id].as.panic_statement.message;
+            CHECK(!sol_syntax_contracts_validate(&source, &tree));
+            statement->as.unreachable_statement.proof = proof;
+        }
+    }
+    if (require_id < tree.statement_count) {
+        SolStatement *statement = &tree.statements[require_id];
+        SolExprId fallback = statement->as.require_statement.fallback_block;
+        statement->as.require_statement.fallback_block
+            = statement->as.require_statement.condition;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        statement->as.require_statement.fallback_block = fallback;
+    }
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+
+    static const char malformed[] =
+        "module bad_failures\n"
+        "function missing_panic() -> () { panic }\n"
+        "function empty_proof() -> () { unreachable because {} }\n"
+        "function many_proofs() -> () { unreachable because { true false } }\n"
+        "function nested_recovery() -> () { unreachable because { true "
+            "if true { true } else { false } } panic \"after\" }\n"
+        "function missing_because() -> () { unreachable { true } }\n"
+        "function missing_else() -> () { require true {} }\n"
+        "function nonblock_fallback() -> () { require true else panic \"bad\" }\n"
+        "function expression_position() -> () { return panic \"bad\" }\n";
+    CHECK(sol_source_from_text(&source, "bad_failures.sol", malformed));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    size_t proof_errors = 0;
+    for (size_t index = 0; index < diagnostics.count; ++index) {
+        proof_errors += strcmp(diagnostics.items[index].code, "SOL-PARSE-023") == 0;
+    }
+    CHECK(proof_errors == 3);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
 int main(void) {
     test_type_declaration_syntax();
     test_invalid_type_declarations_and_recovery();
@@ -2208,6 +2345,7 @@ int main(void) {
     test_mutable_statement_syntax();
     test_projected_mutation_frontend();
     test_loop_statement_syntax();
+    test_failure_statement_syntax();
     if (failures != 0) {
         fprintf(stderr, "%d frontend test failure(s)\n", failures);
         return 1;

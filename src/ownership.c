@@ -1022,6 +1022,72 @@ call_complete:
                     || statement->kind == SOL_IR_STATEMENT_WHILE) {
                     valid_statement = analyze_loop(analysis, statement,
                         unavailable, reachable);
+                } else if (statement->kind == SOL_IR_STATEMENT_UNREACHABLE) {
+                    *reachable = false;
+                    valid_statement = true;
+                } else if (statement->kind == SOL_IR_STATEMENT_PANIC) {
+                    valid_statement = analyze_expression(analysis,
+                        statement->expression, unavailable, SOL_ACCESS_OWNED,
+                        reachable);
+                    if (valid_statement) *reachable = false;
+                } else if (statement->kind == SOL_IR_STATEMENT_REQUIRE) {
+                    valid_statement = analyze_expression(analysis,
+                        statement->condition, unavailable, SOL_ACCESS_OWNED,
+                        reachable);
+                    if (valid_statement && *reachable) {
+                        size_t place_count = analysis->ir->place_count;
+                        size_t local_count = analysis->ir->local_count;
+                        bool *fallback_unavailable = place_count == 0 ? NULL
+                            : malloc(place_count * sizeof(*fallback_unavailable));
+                        bool *saved_initialized = local_count == 0 ? NULL
+                            : malloc(local_count * sizeof(*saved_initialized));
+                        bool *saved_introduced = local_count == 0 ? NULL
+                            : malloc(local_count * sizeof(*saved_introduced));
+                        size_t *saved_depths = local_count == 0 ? NULL
+                            : malloc(local_count * sizeof(*saved_depths));
+                        if ((place_count != 0 && fallback_unavailable == NULL)
+                            || (local_count != 0 && (saved_initialized == NULL
+                                || saved_introduced == NULL
+                                || saved_depths == NULL))) {
+                            free(fallback_unavailable);
+                            free(saved_initialized);
+                            free(saved_introduced);
+                            free(saved_depths);
+                            return ownership_internal(analysis, statement->span,
+                                "ownership require branch allocation failed");
+                        }
+                        if (place_count != 0) memcpy(fallback_unavailable,
+                            unavailable, place_count * sizeof(*unavailable));
+                        if (local_count != 0) {
+                            memcpy(saved_initialized, analysis->initialized,
+                                local_count * sizeof(*saved_initialized));
+                            memcpy(saved_introduced, analysis->introduced,
+                                local_count * sizeof(*saved_introduced));
+                            memcpy(saved_depths, analysis->introduction_depths,
+                                local_count * sizeof(*saved_depths));
+                        }
+                        bool fallback_reachable = true;
+                        valid_statement = analyze_expression(analysis,
+                            statement->expression, fallback_unavailable,
+                            SOL_ACCESS_OWNED, &fallback_reachable);
+                        if (valid_statement && fallback_reachable) {
+                            valid_statement = ownership_internal(analysis,
+                                statement->span,
+                                "require fallback does not terminate");
+                        }
+                        if (local_count != 0) {
+                            memcpy(analysis->initialized, saved_initialized,
+                                local_count * sizeof(*saved_initialized));
+                            memcpy(analysis->introduced, saved_introduced,
+                                local_count * sizeof(*saved_introduced));
+                            memcpy(analysis->introduction_depths, saved_depths,
+                                local_count * sizeof(*saved_depths));
+                        }
+                        free(fallback_unavailable);
+                        free(saved_initialized);
+                        free(saved_introduced);
+                        free(saved_depths);
+                    }
                 } else if (statement->kind == SOL_IR_STATEMENT_BREAK
                     || statement->kind == SOL_IR_STATEMENT_CONTINUE) {
                     if (analysis->loop == NULL) {

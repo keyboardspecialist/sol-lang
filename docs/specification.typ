@@ -783,9 +783,11 @@ The bootstrap represents exact `Result` applications, bounded user generic insta
 
 `panic` represents a defect or violated invariant, not normal control flow. A function that may panic carries the effect unless unreachability is proved. Verified/safety profiles prohibit outward panic. Production policy may abort, terminate a task, restart a supervised actor, or trap.
 
+#status("IMPLEMENTED", [The bootstrap provides statement-only `panic message`, `unreachable because { proof }`, and `require condition else { fallback }`. A panic message has exact type `Text`, is evaluated once, contributes the authority-free unparameterized `panic` effect, and terminates as `Never`. The reference interpreter returns a structured panic diagnostic rather than aborting and performs ordinary reverse lexical cleanup. An unreachable proof has exact type `Bool`, resolves in the current pre-statement lexical scope, passes the contract purity/forbidden-form firewall, and is erased from runtime effects, ownership transfer, cleanup, host calls, and step accounting. It emits one deterministic unresolved callable-owned obligation; no solver or discharge is implied. Reaching the statement at runtime is a distinct defensive error. A require condition has exact type `Bool`; its mandatory fallback block has exact type `Never`. The condition executes once. A true result continues as Unit without adding a refinement fact; false executes the fallback and propagates its terminating flow. Fallback-only moves do not pollute the continuing ownership state. Backend panic policy and obligation discharge remain future work.])
+
 #listing([Unreachability requires an obligation.], ```sol
 unreachable because {
-    match is exhaustive after `state.validate()`
+    state.validate() == false
 }
 ```)
 
@@ -1568,6 +1570,7 @@ The current C17 bootstrap provides:
 - Explicitly typed authority-free uninitialized locals; reachable-path definite-initialization joins; checked atomic `Int64` compound assignment; and lexical whole-local owned `modify` scopes.
 - Statement-only `loop`/`while`, nearest payloadless `break`/`continue`, bounded ownership fixed points, and exact per-edge/per-iteration cleanup.
 - Pure typed loop invariants and `decreases`, concrete `diverge` totality policy, deterministic entry/preservation/nonnegative/strict-decrease templates, owning-IR retention, and runtime erasure.
+- Statement-form `panic Text`, pure proof-backed `unreachable`, and `require Bool else Never`, with explicit IR, isolated ownership flow, deterministic cleanup, unresolved obligations, and structured interpreter failures.
 
 It is not a production compiler. In particular, general row constraints and explicit/multiple/recursive or authority-capturing effect parameters, refined construction/validation/assumptions, richer traits and constrained or higher-order generics, first-class or escaping borrows, index/dereference mutation, field-by-field or authority-bearing initialization, loop labels/values and obligation discharge, first-class/allocator regions, lifetime generics, user-defined Drop/destructors/finalizers/close protocols, unsafe/FFI authority gates, general algebraic handlers, static/unparameterized or runtime-dynamic handler matching, runtime contract checks, call-site contract/refinement use, logical normalization, SMT/proof discharge, concurrency, package manifests/host wiring/dependencies, member/local stable identities, width-based and declaration-reordering formatting, stable public schemas/IR, semantic patches, backend cleanup behavior, and code generation are not implemented.
 
@@ -1846,7 +1849,11 @@ capability_decl := "capability" TYPE_NAME
 type_decl := "type" TYPE_NAME type_generic_params? "="
     ("distinct" type | "refined" type refinement)
 statement := let_stmt | var_stmt | assignment | return_stmt
-    | require_stmt | emit_stmt | using_stmt | expression_stmt
+    | panic_stmt | unreachable_stmt | require_stmt
+    | emit_stmt | using_stmt | expression_stmt
+panic_stmt := "panic" expression
+unreachable_stmt := "unreachable" "because" "{" expression "}"
+require_stmt := "require" expression "else" block
 expression := literal | path | call | block | if_expr | match_expr
     | binary_expr | unary_expr | record_expr | type_apply_expr
     | lambda_expr | handle_expr

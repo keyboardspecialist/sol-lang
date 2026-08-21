@@ -1838,6 +1838,80 @@ static SolStatementId sol_parser_statement(SolParser *parser) {
                 : value == SOL_AST_NONE ? name.span.end
                 : parser->tree->expressions[value].span.end,
         };
+    } else if (sol_parser_match(parser, SOL_TOKEN_PANIC)) {
+        SolExprId message = sol_parser_expression(parser, 1);
+        sol_parser_check_multiline_record(parser, message);
+        statement.kind = SOL_STATEMENT_PANIC;
+        statement.as.panic_statement.message = message;
+        statement.span = (SolSpan){
+            .start = start.span.start,
+            .end = message == SOL_AST_NONE ? start.span.end
+                : parser->tree->expressions[message].span.end,
+        };
+    } else if (sol_parser_match(parser, SOL_TOKEN_UNREACHABLE)) {
+        SolToken because = sol_parser_current(parser);
+        sol_parser_expect(parser, SOL_TOKEN_BECAUSE,
+            "expected 'because' after 'unreachable'");
+        SolToken opening = sol_parser_current(parser);
+        SolExprId proof = SOL_AST_NONE;
+        if (sol_parser_expect(parser, SOL_TOKEN_LEFT_BRACE,
+                "expected a proof clause after 'because'")) {
+            if (sol_parser_kind(parser) == SOL_TOKEN_RIGHT_BRACE) {
+                sol_parser_error(parser, "SOL-PARSE-023", sol_parser_current(parser),
+                    "an unreachable proof clause requires exactly one expression");
+            } else if (sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+                bool previous_suppression = parser->suppress_record_literal;
+                parser->suppress_record_literal = true;
+                proof = sol_parser_expression(parser, 1);
+                parser->suppress_record_literal = previous_suppression;
+            }
+            if (sol_parser_kind(parser) != SOL_TOKEN_RIGHT_BRACE
+                && sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+                sol_parser_error(parser, "SOL-PARSE-023", sol_parser_current(parser),
+                    "an unreachable proof clause contains exactly one expression");
+                size_t brace_depth = 0;
+                while (sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+                    if (sol_parser_kind(parser) == SOL_TOKEN_LEFT_BRACE) {
+                        ++brace_depth;
+                    } else if (sol_parser_kind(parser) == SOL_TOKEN_RIGHT_BRACE) {
+                        if (brace_depth == 0) break;
+                        --brace_depth;
+                    }
+                    sol_parser_advance(parser);
+                }
+            }
+        }
+        SolToken closing = sol_parser_current(parser);
+        sol_parser_expect(parser, SOL_TOKEN_RIGHT_BRACE,
+            "expected '}' after unreachable proof");
+        statement.kind = SOL_STATEMENT_UNREACHABLE;
+        statement.as.unreachable_statement.proof = proof;
+        statement.as.unreachable_statement.because_span = (SolSpan){
+            .start = because.span.start,
+            .end = closing.kind == SOL_TOKEN_RIGHT_BRACE
+                ? closing.span.end : opening.span.end,
+        };
+        statement.span = (SolSpan){
+            .start = start.span.start,
+            .end = closing.kind == SOL_TOKEN_RIGHT_BRACE
+                ? closing.span.end : start.span.end,
+        };
+    } else if (sol_parser_match(parser, SOL_TOKEN_REQUIRE)) {
+        bool previous_suppression = parser->suppress_record_literal;
+        parser->suppress_record_literal = true;
+        SolExprId condition = sol_parser_expression(parser, 1);
+        parser->suppress_record_literal = previous_suppression;
+        sol_parser_expect(parser, SOL_TOKEN_ELSE,
+            "expected 'else' after require condition");
+        SolExprId fallback = sol_parser_block_expression(parser);
+        statement.kind = SOL_STATEMENT_REQUIRE;
+        statement.as.require_statement.condition = condition;
+        statement.as.require_statement.fallback_block = fallback;
+        statement.span = (SolSpan){
+            .start = start.span.start,
+            .end = fallback == SOL_AST_NONE ? start.span.end
+                : parser->tree->expressions[fallback].span.end,
+        };
     } else if (sol_parser_match(parser, SOL_TOKEN_RETURN)) {
         SolExprId value = sol_parser_expression(parser, 1);
         sol_parser_check_multiline_record(parser, value);
@@ -2194,7 +2268,9 @@ static bool sol_parser_effect_clause(
         SolToken first = sol_parser_current(parser);
         bool is_pure = sol_parser_match(parser, SOL_TOKEN_PURE);
         SolSpan name = first.span;
-        if (!is_pure && !sol_parser_path(parser, &name, "expected an effect name")) {
+        bool panic_effect = !is_pure && sol_parser_match(parser, SOL_TOKEN_PANIC);
+        if (!is_pure && !panic_effect
+            && !sol_parser_path(parser, &name, "expected an effect name")) {
             return false;
         }
         SolSpan argument = {0};

@@ -1113,6 +1113,8 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
         || types->implementation_target_count != syntax->item_count
         || types->representation_count != syntax->item_count
         || types->construction_count != syntax->expression_count
+        || types->loop_fact_count != syntax->statement_count
+        || types->unreachable_fact_count != syntax->statement_count
         || types->handler_count != syntax->expression_count
         || types->call_instantiation_count != syntax->expression_count
         || types->method_resolution_count != syntax->expression_count
@@ -1148,6 +1150,9 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
         || !SOL_INSPECTION_TABLE_SLICE(types->implementation_targets,
             types->implementation_target_count)
         || !SOL_INSPECTION_TABLE_SLICE(types->constructions, types->construction_count)
+        || !SOL_INSPECTION_TABLE_SLICE(types->loop_facts, types->loop_fact_count)
+        || !SOL_INSPECTION_TABLE_SLICE(types->unreachable_facts,
+            types->unreachable_fact_count)
         || !SOL_INSPECTION_TABLE_SLICE(types->expression_capability_origins,
             types->expression_count)
         || !SOL_INSPECTION_TABLE_SLICE(types->expression_operation_origins,
@@ -1324,6 +1329,13 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
         || (contracts->obligation_count != 0 && contracts->obligations == NULL)
         || contracts->snapshot_count > contracts->snapshot_capacity
         || (contracts->snapshot_count != 0 && contracts->snapshots == NULL)
+        || contracts->loop_obligation_count > contracts->loop_obligation_capacity
+        || (contracts->loop_obligation_count != 0
+            && contracts->loop_obligations == NULL)
+        || contracts->unreachable_obligation_count
+            > contracts->unreachable_obligation_capacity
+        || (contracts->unreachable_obligation_count != 0
+            && contracts->unreachable_obligations == NULL)
         || contracts->expression_count != syntax->expression_count
         || (contracts->expression_count != 0 && contracts->expression_snapshots == NULL)
         || diagnostics->count > diagnostics->capacity
@@ -1380,6 +1392,58 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
             || syntax->expressions[entry->old_expression].kind != SOL_EXPR_OLD
             || syntax->expressions[entry->old_expression].as.old_expression != entry->operand
             || contracts->expression_snapshots[entry->old_expression] != index) return false;
+    }
+    for (size_t index = 0; index < contracts->loop_obligation_count; ++index) {
+        const SolLoopObligation *entry = &contracts->loop_obligations[index];
+        bool invariant = entry->kind == SOL_LOOP_OBLIGATION_INVARIANT_ENTRY
+            || entry->kind == SOL_LOOP_OBLIGATION_INVARIANT_PRESERVATION;
+        if (entry->id != index
+            || (int)entry->kind < 0
+            || entry->kind > SOL_LOOP_OBLIGATION_DECREASES_STRICT
+            || entry->loop_statement >= syntax->statement_count
+            || (syntax->statements[entry->loop_statement].kind != SOL_STATEMENT_LOOP
+                && syntax->statements[entry->loop_statement].kind
+                    != SOL_STATEMENT_WHILE)
+            || entry->expression >= syntax->expression_count
+            || !sol_inspection_type_valid(inspector, entry->expression_type)
+            || entry->expression_type.kind
+                != types->expressions[entry->expression].kind
+            || entry->expression_type.definition
+                != types->expressions[entry->expression].definition
+            || entry->expression_type.kind
+                != (invariant ? SOL_TYPE_BOOL : SOL_TYPE_INT64)
+            || entry->span.start >= entry->span.end
+            || entry->span.end > package->source.length) return false;
+        const SolLoopFact *fact = &types->loop_facts[entry->loop_statement];
+        if (!fact->is_loop || entry->owner != fact->owner
+            || entry->owner_member != fact->owner_member
+            || entry->owner_trait_method != fact->owner_trait_method) return false;
+    }
+    for (size_t index = 0; index < contracts->unreachable_obligation_count; ++index) {
+        const SolUnreachableObligation *entry
+            = &contracts->unreachable_obligations[index];
+        if (entry->id != index || entry->statement >= syntax->statement_count
+            || syntax->statements[entry->statement].kind != SOL_STATEMENT_UNREACHABLE
+            || entry->proof >= syntax->expression_count
+            || !sol_inspection_type_valid(inspector, entry->proof_type)
+            || entry->proof_type.kind != SOL_TYPE_BOOL
+            || entry->proof_type.kind != types->expressions[entry->proof].kind
+            || entry->proof_type.definition != types->expressions[entry->proof].definition
+            || entry->span.start >= entry->span.end
+            || entry->span.end > package->source.length) return false;
+        const SolUnreachableFact *fact = &types->unreachable_facts[entry->statement];
+        if (!fact->is_unreachable || entry->owner != fact->owner
+            || entry->owner_member != fact->owner_member
+            || entry->owner_trait_method != fact->owner_trait_method) return false;
+        if (index != 0) {
+            const SolUnreachableObligation *previous
+                = &contracts->unreachable_obligations[index - 1];
+            if (previous->span.start > entry->span.start
+                || (previous->span.start == entry->span.start
+                    && (previous->span.end > entry->span.end
+                        || (previous->span.end == entry->span.end
+                            && previous->statement >= entry->statement)))) return false;
+        }
     }
     for (size_t index = 0; index < contracts->expression_count; ++index) {
         SolSnapshotId snapshot = contracts->expression_snapshots[index];

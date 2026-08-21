@@ -931,25 +931,46 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     }
     for (size_t index = 0; index < syntax->statement_count; ++index) {
         const SolStatement *statement = &syntax->statements[index];
-        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_CONTINUE) {
+        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_REQUIRE) {
             sol_resolver_malformed(resolver);
             return false;
         }
-        SolExprId value = statement->kind == SOL_STATEMENT_LOOP
-                || statement->kind == SOL_STATEMENT_WHILE
-            ? statement->as.loop_statement.body
-            : statement->kind == SOL_STATEMENT_BREAK
-                    || statement->kind == SOL_STATEMENT_CONTINUE
-                ? SOL_AST_NONE
-            : statement->kind == SOL_STATEMENT_LET
-                || statement->kind == SOL_STATEMENT_VAR
-            ? statement->as.let_statement.value
-            : statement->kind == SOL_STATEMENT_ASSIGNMENT
-                ? statement->as.assignment.value
-            : statement->kind == SOL_STATEMENT_REGION
-                ? statement->as.region_statement.body
-            : statement->kind == SOL_STATEMENT_MODIFY
-                ? statement->as.modify.body : statement->as.expression;
+        SolExprId value = SOL_AST_NONE;
+        switch (statement->kind) {
+            case SOL_STATEMENT_LET:
+            case SOL_STATEMENT_VAR:
+                value = statement->as.let_statement.value;
+                break;
+            case SOL_STATEMENT_ASSIGNMENT:
+                value = statement->as.assignment.value;
+                break;
+            case SOL_STATEMENT_RETURN:
+            case SOL_STATEMENT_EXPRESSION:
+                value = statement->as.expression;
+                break;
+            case SOL_STATEMENT_REGION:
+                value = statement->as.region_statement.body;
+                break;
+            case SOL_STATEMENT_MODIFY:
+                value = statement->as.modify.body;
+                break;
+            case SOL_STATEMENT_LOOP:
+            case SOL_STATEMENT_WHILE:
+                value = statement->as.loop_statement.body;
+                break;
+            case SOL_STATEMENT_PANIC:
+                value = statement->as.panic_statement.message;
+                break;
+            case SOL_STATEMENT_UNREACHABLE:
+                value = statement->as.unreachable_statement.proof;
+                break;
+            case SOL_STATEMENT_BREAK:
+            case SOL_STATEMENT_CONTINUE:
+                break;
+            case SOL_STATEMENT_REQUIRE:
+                value = statement->as.require_statement.fallback_block;
+                break;
+        }
         bool binding = statement->kind == SOL_STATEMENT_LET
             || statement->kind == SOL_STATEMENT_VAR;
         bool loop_exit = statement->kind == SOL_STATEMENT_BREAK
@@ -987,7 +1008,28 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                     || syntax->expressions[value].kind != SOL_EXPR_BLOCK))
             || (statement->kind == SOL_STATEMENT_MODIFY
                 && (statement->as.modify.target >= syntax->expression_count
-                    || syntax->expressions[value].kind != SOL_EXPR_BLOCK))) {
+                    || syntax->expressions[value].kind != SOL_EXPR_BLOCK))
+            || (statement->kind == SOL_STATEMENT_UNREACHABLE
+                && (!sol_span_valid(resolver->source,
+                        statement->as.unreachable_statement.because_span)
+                    || statement->as.unreachable_statement.because_span.start
+                        == statement->as.unreachable_statement.because_span.end
+                    || statement->as.unreachable_statement.because_span.start
+                        < statement->span.start
+                    || statement->as.unreachable_statement.because_span.end
+                        > statement->span.end
+                    || syntax->expressions[value].span.start
+                        < statement->as.unreachable_statement.because_span.start
+                    || syntax->expressions[value].span.end
+                        > statement->as.unreachable_statement.because_span.end))
+            || (statement->kind == SOL_STATEMENT_REQUIRE
+                && (statement->as.require_statement.condition
+                        >= syntax->expression_count
+                    || statement->as.require_statement.fallback_block
+                        >= syntax->expression_count
+                    || syntax->expressions[
+                        statement->as.require_statement.fallback_block].kind
+                        != SOL_EXPR_BLOCK))) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -1612,6 +1654,14 @@ static void sol_resolver_block(SolResolver *resolver, const SolExpr *block) {
         } else if (statement->kind == SOL_STATEMENT_MODIFY) {
             sol_resolver_expression(resolver, statement->as.modify.target);
             sol_resolver_expression(resolver, statement->as.modify.body);
+        } else if (statement->kind == SOL_STATEMENT_PANIC) {
+            sol_resolver_expression(resolver, statement->as.panic_statement.message);
+        } else if (statement->kind == SOL_STATEMENT_UNREACHABLE) {
+            sol_resolver_expression(resolver, statement->as.unreachable_statement.proof);
+        } else if (statement->kind == SOL_STATEMENT_REQUIRE) {
+            sol_resolver_expression(resolver, statement->as.require_statement.condition);
+            sol_resolver_expression(resolver,
+                statement->as.require_statement.fallback_block);
         } else {
             sol_resolver_expression(resolver, statement->as.expression);
         }

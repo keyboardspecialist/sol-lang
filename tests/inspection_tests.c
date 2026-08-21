@@ -49,7 +49,8 @@ static bool compile_fixture(TestCompilation *compilation) {
         "ensures { result == old(value) } { var local = value local = value "
         "return local }\n"
         "function looped() -> Int64 { var n = 0 while n < 1 "
-        "invariant { false } decreases { 1 / 0 } { n += 1 } return n }\n";
+        "invariant { false } decreases { 1 / 0 } { n += 1 } return n }\n"
+        "function impossible() -> () { unreachable because { true } }\n";
     memset(compilation, 0, sizeof(*compilation));
     compilation->package.path = "fixture.sol";
     sol_tokens_init(&compilation->tokens);
@@ -116,7 +117,9 @@ static void test_expression_kind_spellings(TestCompilation *compilation) {
         CHECK(strstr(output, expected) != NULL);
     }
     CHECK(compilation->contracts.loop_obligation_count == 4);
+    CHECK(compilation->contracts.unreachable_obligation_count == 1);
     CHECK(strstr(output, "\"loopObligations\"") == NULL);
+    CHECK(strstr(output, "\"unreachableObligations\"") == NULL);
     fclose(stream);
 }
 
@@ -228,6 +231,34 @@ static void test_contract_preflight(TestCompilation *compilation) {
     table->expression_snapshots[snapshot.old_expression] = SOL_AST_NONE;
     check_rejected(compilation);
     table->expression_snapshots[snapshot.old_expression] = mapping;
+
+    CHECK(table->loop_obligation_count == 4);
+    if (table->loop_obligation_count != 0) {
+        size_t capacity = table->loop_obligation_capacity;
+        table->loop_obligation_capacity = 0;
+        check_rejected(compilation);
+        table->loop_obligation_capacity = capacity;
+        SolLoopObligation *entries = table->loop_obligations;
+        table->loop_obligations = NULL;
+        check_rejected(compilation);
+        table->loop_obligations = entries;
+    }
+
+    CHECK(table->unreachable_obligation_count == 1);
+    if (table->unreachable_obligation_count == 1) {
+        SolUnreachableObligation entry = table->unreachable_obligations[0];
+        table->unreachable_obligations[0].id = 1;
+        check_rejected(compilation);
+        table->unreachable_obligations[0] = entry;
+        size_t capacity = table->unreachable_obligation_capacity;
+        table->unreachable_obligation_capacity = 0;
+        check_rejected(compilation);
+        table->unreachable_obligation_capacity = capacity;
+        SolUnreachableObligation *entries = table->unreachable_obligations;
+        table->unreachable_obligations = NULL;
+        check_rejected(compilation);
+        table->unreachable_obligations = entries;
+    }
 
     size_t snapshot_capacity = table->snapshot_capacity;
     table->snapshot_capacity = 0;

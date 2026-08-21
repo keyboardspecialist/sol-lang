@@ -257,7 +257,7 @@ static void test_local_function_call_and_unreachable(void) {
         "module local_function\n"
         "function target() -> Int64 { return 1 }\n"
         "function indirect() -> Int64 { let callable = target return callable() }\n"
-        "function unreachable() -> Int64 { return 1 true }\n";
+        "function unreachable_code() -> Int64 { return 1 true }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
     CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
@@ -881,7 +881,7 @@ static void test_invalid_match(void) {
         "function branch(state: State) -> Int64 {\n"
         "    return match state { idle => 0 running(speed) => \"bad\" }\n"
         "}\n"
-        "function unreachable(state: State) -> Int64 {\n"
+        "function unreachable_arm(state: State) -> Int64 {\n"
         "    return match state { _ => 0 idle => 1 }\n"
         "}\n"
         "function complete_then_wildcard(state: State) -> Int64 {\n"
@@ -2040,7 +2040,7 @@ static void test_loop_types_and_reachability(void) {
         "function nested() -> Int64 { loop { loop { break } continue } }\n"
         "function break_condition() -> Int64 { while { break } {} return 4 }\n"
         "function continue_condition() -> Int64 { while { continue } {} return 5 }\n"
-        "function unreachable(flag: Bool) -> Int64 { loop { loop {} "
+        "function unreachable_path(flag: Bool) -> Int64 { loop { loop {} "
         "if flag { break } else { () } } return 3 }\n"));
     if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
         sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
@@ -2160,6 +2160,47 @@ static void test_bounded_mutation_types(void) {
     free_compilation(&compilation);
 }
 
+static void test_termination_statement_types_and_facts(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module termination_types\n"
+        "function fail() -> Int64 { panic \"failed\" }\n"
+        "function prove(flag: Bool) -> Int64 { unreachable because { flag } }\n"
+        "function guard(flag: Bool) -> Int64 { require flag else { panic \"no\" } "
+            "return 1 }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    size_t unreachable_count = 0;
+    for (SolStatementId statement = 0;
+        statement < compilation.types.unreachable_fact_count; ++statement) {
+        const SolUnreachableFact *fact
+            = &compilation.types.unreachable_facts[statement];
+        if (!fact->is_unreachable) continue;
+        ++unreachable_count;
+        CHECK(fact->owner == 1);
+        CHECK(fact->owner_member == SOL_AST_NONE);
+        CHECK(fact->owner_trait_method == SOL_AST_NONE);
+    }
+    CHECK(unreachable_count == 1);
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module bad_termination_types\n"
+        "function panic_type() -> () { panic 1 }\n"
+        "function proof_type() -> () { unreachable because { 1 } }\n"
+        "function condition_type() -> () { require 1 else { panic \"x\" } }\n"
+        "function fallback_type() -> () { require true else { () } }\n"));
+    CHECK(diagnostic_count(&compilation, "SOL-TYPE-002") == 2);
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-003"));
+    CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-001"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module unreachable_scope\n"
+        "function bad() -> () { unreachable because { hidden } let hidden = true }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-RESOLVE-002"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_valid_types();
     test_invalid_operator();
@@ -2223,6 +2264,7 @@ int main(void) {
     test_region_types();
     test_loop_types_and_reachability();
     test_loop_specification_types_scope_and_facts();
+    test_termination_statement_types_and_facts();
     test_bounded_mutation_types();
     test_mutable_local_types_and_targets();
     if (failures != 0) {

@@ -456,6 +456,30 @@ static void test_construct_golden_formatting(void) {
     sol_formatted_free(&formatted);
 }
 
+static void test_failure_statement_formatting(void) {
+    static const char source[] =
+        "module failures\nfunction guard(ready:Bool)->(){\n"
+        "panic\"bad\"\nunreachable because{ready==false}\n"
+        "require ready else{panic\"required\"}\n}\n";
+    static const char expected[] =
+        "module failures\n"
+        "function guard(ready: Bool) -> () {\n"
+        "    panic \"bad\"\n"
+        "    unreachable because { ready == false }\n"
+        "    require ready else { panic \"required\" }\n"
+        "}\n";
+    SolFormatted formatted;
+    SolDiagnostics diagnostics;
+    sol_formatted_init(&formatted);
+    sol_diagnostics_init(&diagnostics);
+    CHECK(format_text(source, &formatted, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    check_output(&formatted, expected);
+    check_second_pass(&formatted);
+    sol_diagnostics_free(&diagnostics);
+    sol_formatted_free(&formatted);
+}
+
 int main(void) {
     test_golden_formatting();
     test_comments_and_preserved_bytes();
@@ -470,6 +494,7 @@ int main(void) {
     test_projected_mutation_formatting();
     test_loop_formatting();
     test_construct_golden_formatting();
+    test_failure_statement_formatting();
 
     if (failures != 0) {
         fprintf(stderr, "%d formatter test(s) failed\n", failures);

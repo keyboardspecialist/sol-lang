@@ -1013,7 +1013,7 @@ static void test_loop_proof_templates_and_termination(void) {
         "function diverging(flag: Bool) -> () effects { diverge } "
         "{ while flag { continue } }\n"
         "function finite() -> () effects { pure } { loop { break } }\n"
-        "function unreachable() -> () effects { pure } "
+        "function unreachable_loop() -> () effects { pure } "
         "{ return () loop { continue } }\n"));
     CHECK(!has_diagnostic(&compilation, "SOL-CONTRACT-006"));
     free_compilation(&compilation);
@@ -1034,6 +1034,67 @@ static void test_loop_proof_templates_and_termination(void) {
     free_compilation(&compilation);
 }
 
+static void test_unreachable_obligations_and_firewall(void) {
+    static const char text[] =
+        "module unreachable_obligations\n"
+        "function first(flag: Bool) -> Int64 effects { pure } "
+            "{ unreachable because { flag } }\n"
+        "function second() -> Int64 effects { pure } "
+            "{ unreachable because { true } }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.contracts.unreachable_obligation_count == 2);
+    for (size_t index = 0;
+        index < compilation.contracts.unreachable_obligation_count; ++index) {
+        const SolUnreachableObligation *obligation
+            = &compilation.contracts.unreachable_obligations[index];
+        CHECK(obligation->id == index);
+        CHECK(obligation->statement < compilation.syntax.statement_count);
+        CHECK(obligation->proof < compilation.syntax.expression_count);
+        CHECK(obligation->proof_type.kind == SOL_TYPE_BOOL);
+        CHECK(obligation->owner_member == SOL_AST_NONE);
+        CHECK(obligation->owner_trait_method == SOL_AST_NONE);
+    }
+    TestCompilation repeated;
+    CHECK(compile_source(&repeated, text));
+    CHECK(repeated.contracts.unreachable_obligation_count
+        == compilation.contracts.unreachable_obligation_count);
+    for (size_t index = 0;
+        index < compilation.contracts.unreachable_obligation_count
+            && index < repeated.contracts.unreachable_obligation_count; ++index) {
+        const SolUnreachableObligation *left
+            = &compilation.contracts.unreachable_obligations[index];
+        const SolUnreachableObligation *right
+            = &repeated.contracts.unreachable_obligations[index];
+        CHECK(left->id == right->id);
+        CHECK(left->statement == right->statement);
+        CHECK(left->owner == right->owner);
+        CHECK(left->proof == right->proof);
+        CHECK(left->span.start == right->span.start);
+        CHECK(left->span.end == right->span.end);
+    }
+    free_compilation(&repeated);
+    SolStatementId first = compilation.contracts.unreachable_obligations[0].statement;
+    SolDefId owner = compilation.types.unreachable_facts[first].owner;
+    compilation.types.unreachable_facts[first].owner = owner == 0 ? 1 : 0;
+    sol_contract_table_free(&compilation.contracts);
+    sol_contract_table_init(&compilation.contracts);
+    CHECK(!sol_contract_lower(&compilation.source, &compilation.syntax,
+        &compilation.hir, &compilation.types, &compilation.effects,
+        &compilation.contracts, &compilation.diagnostics));
+    compilation.types.unreachable_facts[first].owner = owner;
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module unreachable_firewall\n"
+        "function noisy() -> Bool effects { panic } { return true }\n"
+        "function bad() -> Int64 effects { pure } "
+            "{ unreachable because { noisy() } }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-002"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_obligations_result_and_snapshots();
     test_member_contract_ownership();
@@ -1050,6 +1111,7 @@ int main(void) {
     test_loops_forbidden_in_predicates();
     test_mutation_forbidden_in_predicates();
     test_loop_proof_templates_and_termination();
+    test_unreachable_obligations_and_firewall();
     if (failures != 0) {
         fprintf(stderr, "%d contract test failure(s)\n", failures);
         return 1;

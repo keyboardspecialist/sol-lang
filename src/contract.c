@@ -29,6 +29,7 @@ void sol_contract_table_free(SolContractTable *table) {
     free(table->snapshots);
     free(table->expression_snapshots);
     free(table->loop_obligations);
+    free(table->unreachable_obligations);
     memset(table, 0, sizeof(*table));
 }
 
@@ -287,6 +288,7 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || types->representation_count != syntax->item_count
         || types->construction_count != syntax->expression_count
         || types->loop_fact_count != syntax->statement_count
+        || types->unreachable_fact_count != syntax->statement_count
         || effects->function_count != syntax->item_count
         || effects->capability_member_count != syntax->capability_member_count
         || effects->trait_method_count != syntax->trait_method_count
@@ -334,6 +336,8 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || (types->representation_count != 0 && types->representations == NULL)
         || (types->construction_count != 0 && types->constructions == NULL)
         || (types->loop_fact_count != 0 && types->loop_facts == NULL)
+        || (types->unreachable_fact_count != 0
+            && types->unreachable_facts == NULL)
         || (effects->function_count != 0 && effects->functions == NULL)
         || (effects->capability_member_count != 0
             && effects->capability_members == NULL)
@@ -347,7 +351,10 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || contracts->snapshot_capacity != 0 || contracts->expression_snapshots != NULL
         || contracts->expression_count != 0 || contracts->loop_obligations != NULL
         || contracts->loop_obligation_count != 0
-        || contracts->loop_obligation_capacity != 0) {
+        || contracts->loop_obligation_capacity != 0
+        || contracts->unreachable_obligations != NULL
+        || contracts->unreachable_obligation_count != 0
+        || contracts->unreachable_obligation_capacity != 0) {
         return false;
     }
     for (size_t statement = 0; statement < syntax->statement_count; ++statement) {
@@ -398,6 +405,53 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
                     || (!body_contains_loop && !predicate_contains_loop)))) {
             return false;
         }
+        const SolUnreachableFact *unreachable
+            = &types->unreachable_facts[statement];
+        bool is_unreachable = syntax->statements[statement].kind
+            == SOL_STATEMENT_UNREACHABLE;
+        bool unreachable_member = is_unreachable
+            && unreachable->owner < syntax->item_count
+            && unreachable->owner_member < syntax->capability_member_count
+            && syntax->capability_members[unreachable->owner_member].owner_item
+                == unreachable->owner;
+        bool unreachable_method = is_unreachable
+            && unreachable->owner < syntax->item_count
+            && unreachable->owner_trait_method < syntax->trait_method_count
+            && syntax->trait_methods[unreachable->owner_trait_method].owner_item
+                == unreachable->owner;
+        bool unreachable_item = is_unreachable
+            && unreachable->owner < syntax->item_count
+            && unreachable->owner_member == SOL_AST_NONE
+            && unreachable->owner_trait_method == SOL_AST_NONE
+            && (syntax->items[unreachable->owner].kind == SOL_ITEM_FUNCTION
+                || syntax->items[unreachable->owner].kind == SOL_ITEM_TEST);
+        SolExprId unreachable_body = unreachable_member
+            ? syntax->capability_members[unreachable->owner_member].body
+            : unreachable_method
+                ? syntax->trait_methods[unreachable->owner_trait_method].body
+                : unreachable_item ? syntax->items[unreachable->owner].body : SOL_AST_NONE;
+        SolSpan unreachable_span = syntax->statements[statement].span;
+        bool body_contains_unreachable = unreachable_body < syntax->expression_count
+            && syntax->expressions[unreachable_body].span.start <= unreachable_span.start
+            && syntax->expressions[unreachable_body].span.end >= unreachable_span.end;
+        bool predicate_contains_unreachable = false;
+        for (size_t condition = 0; !predicate_contains_unreachable
+            && condition < syntax->contract_condition_count; ++condition) {
+            SolExprId expression = syntax->contract_conditions[condition].expression;
+            predicate_contains_unreachable = expression < syntax->expression_count
+                && syntax->expressions[expression].span.start <= unreachable_span.start
+                && syntax->expressions[expression].span.end >= unreachable_span.end;
+        }
+        if (unreachable->is_unreachable != is_unreachable
+            || (!is_unreachable && (unreachable->owner != 0
+                    || unreachable->owner_member != 0
+                    || unreachable->owner_trait_method != 0))
+            || (is_unreachable && ((!unreachable_member && !unreachable_method
+                        && !unreachable_item)
+                    || (unreachable->owner_member != SOL_AST_NONE
+                        && unreachable->owner_trait_method != SOL_AST_NONE)
+                    || (!body_contains_unreachable
+                        && !predicate_contains_unreachable)))) return false;
     }
     if (!sol_type_resolution_metadata_valid(syntax, types)) return false;
     for (size_t index = 0; index < syntax->effect_parameter_count; ++index) {
@@ -1017,7 +1071,7 @@ static void sol_contract_statements(
             return;
         }
         const SolStatement *entry = &lowerer->syntax->statements[statement];
-        if ((int)entry->kind < 0 || entry->kind > SOL_STATEMENT_CONTINUE) {
+        if ((int)entry->kind < 0 || entry->kind > SOL_STATEMENT_REQUIRE) {
             lowerer->malformed = true;
             return;
         }
@@ -1088,6 +1142,12 @@ static void sol_contract_statements(
                     : "loop exits are not allowed in contract or refinement predicates"
             );
         }
+        if (entry->kind == SOL_STATEMENT_PANIC
+            || entry->kind == SOL_STATEMENT_UNREACHABLE
+            || entry->kind == SOL_STATEMENT_REQUIRE) {
+            sol_contract_error(lowerer, "SOL-CONTRACT-002", entry->span,
+                "termination statements are not allowed in contract, refinement, or proof predicates");
+        }
         SolExprId value = entry->kind == SOL_STATEMENT_LOOP
                 || entry->kind == SOL_STATEMENT_WHILE
             ? entry->as.loop_statement.body
@@ -1102,10 +1162,21 @@ static void sol_contract_statements(
             : entry->kind == SOL_STATEMENT_REGION
                 ? entry->as.region_statement.body
             : entry->kind == SOL_STATEMENT_MODIFY
-                ? entry->as.modify.body : entry->as.expression;
+                ? entry->as.modify.body
+            : entry->kind == SOL_STATEMENT_PANIC
+                ? entry->as.panic_statement.message
+            : entry->kind == SOL_STATEMENT_UNREACHABLE
+                ? entry->as.unreachable_statement.proof
+            : entry->kind == SOL_STATEMENT_REQUIRE
+                ? entry->as.require_statement.fallback_block
+                : entry->as.expression;
         if (entry->kind == SOL_STATEMENT_WHILE) {
             sol_contract_expression(
                 lowerer, entry->as.loop_statement.condition, in_old
+            );
+        } else if (entry->kind == SOL_STATEMENT_REQUIRE) {
+            sol_contract_expression(
+                lowerer, entry->as.require_statement.condition, in_old
             );
         }
         if (value != SOL_AST_NONE) sol_contract_expression(lowerer, value, in_old);
@@ -1440,6 +1511,100 @@ static void sol_contract_lower_loops(SolContractLowerer *lowerer) {
     lowerer->in_loop_specification = false;
 }
 
+static bool sol_contract_append_unreachable_obligation(
+    SolContractLowerer *lowerer,
+    SolStatementId statement,
+    const SolUnreachableFact *fact
+) {
+    SolContractTable *table = lowerer->contracts;
+    if (table->unreachable_obligation_count
+        == table->unreachable_obligation_capacity) {
+        size_t capacity = table->unreachable_obligation_capacity == 0
+            ? 8 : table->unreachable_obligation_capacity * 2;
+        if (capacity < table->unreachable_obligation_capacity
+            || capacity > SIZE_MAX / sizeof(*table->unreachable_obligations)) {
+            lowerer->allocation_failed = true;
+            return false;
+        }
+        SolUnreachableObligation *grown = realloc(
+            table->unreachable_obligations,
+            capacity * sizeof(*table->unreachable_obligations));
+        if (grown == NULL) {
+            lowerer->allocation_failed = true;
+            return false;
+        }
+        table->unreachable_obligations = grown;
+        table->unreachable_obligation_capacity = capacity;
+    }
+    const SolStatement *entry = &lowerer->syntax->statements[statement];
+    SolExprId proof = entry->as.unreachable_statement.proof;
+    size_t id = table->unreachable_obligation_count++;
+    table->unreachable_obligations[id] = (SolUnreachableObligation){
+        .id = id,
+        .statement = statement,
+        .owner = fact->owner,
+        .owner_member = fact->owner_member,
+        .owner_trait_method = fact->owner_trait_method,
+        .proof = proof,
+        .proof_type = lowerer->types->expressions[proof],
+        .span = lowerer->syntax->expressions[proof].span,
+    };
+    return true;
+}
+
+static int sol_contract_unreachable_obligation_compare(
+    const void *left,
+    const void *right
+) {
+    const SolUnreachableObligation *a = left;
+    const SolUnreachableObligation *b = right;
+    if (a->span.start != b->span.start) return a->span.start < b->span.start ? -1 : 1;
+    if (a->span.end != b->span.end) return a->span.end < b->span.end ? -1 : 1;
+    if (a->statement != b->statement) return a->statement < b->statement ? -1 : 1;
+    return 0;
+}
+
+static void sol_contract_lower_unreachable(SolContractLowerer *lowerer) {
+    lowerer->in_loop_specification = true;
+    lowerer->obligation = NULL;
+    for (SolStatementId statement = 0;
+        statement < lowerer->syntax->statement_count; ++statement) {
+        const SolStatement *entry = &lowerer->syntax->statements[statement];
+        if (entry->kind != SOL_STATEMENT_UNREACHABLE) continue;
+        bool in_predicate = false;
+        for (size_t condition = 0; !in_predicate
+            && condition < lowerer->syntax->contract_condition_count; ++condition) {
+            SolExprId expression
+                = lowerer->syntax->contract_conditions[condition].expression;
+            in_predicate = expression < lowerer->syntax->expression_count
+                && lowerer->syntax->expressions[expression].span.start
+                    <= entry->span.start
+                && lowerer->syntax->expressions[expression].span.end
+                    >= entry->span.end;
+        }
+        if (in_predicate) continue;
+        lowerer->depth = 0;
+        lowerer->depth_reported = false;
+        sol_contract_expression(
+            lowerer, entry->as.unreachable_statement.proof, false);
+        sol_contract_append_unreachable_obligation(
+            lowerer, statement, &lowerer->types->unreachable_facts[statement]);
+        if (lowerer->malformed || lowerer->allocation_failed) break;
+    }
+    if (!lowerer->allocation_failed
+        && lowerer->contracts->unreachable_obligation_count > 1) {
+        qsort(lowerer->contracts->unreachable_obligations,
+            lowerer->contracts->unreachable_obligation_count,
+            sizeof(*lowerer->contracts->unreachable_obligations),
+            sol_contract_unreachable_obligation_compare);
+        for (size_t index = 0;
+            index < lowerer->contracts->unreachable_obligation_count; ++index) {
+            lowerer->contracts->unreachable_obligations[index].id = index;
+        }
+    }
+    lowerer->in_loop_specification = false;
+}
+
 bool sol_contract_lower(
     const SolSource *source,
     const SolSyntaxTree *syntax,
@@ -1537,6 +1702,9 @@ bool sol_contract_lower(
         }
         if (!lowerer.malformed && !lowerer.allocation_failed) {
             sol_contract_lower_loops(&lowerer);
+        }
+        if (!lowerer.malformed && !lowerer.allocation_failed) {
+            sol_contract_lower_unreachable(&lowerer);
         }
     }
     if (lowerer.allocation_failed) diagnostics->allocation_failed = true;

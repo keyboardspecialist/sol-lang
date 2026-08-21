@@ -61,6 +61,17 @@ typedef struct {
 } SolLoopObligation;
 
 typedef struct {
+    size_t id;
+    SolStatementId statement;
+    SolDefId owner;
+    SolCapabilityMemberId owner_member;
+    SolTraitMethodId owner_trait_method;
+    SolExprId proof;
+    SolType proof_type;
+    SolSpan span;
+} SolUnreachableObligation;
+
+typedef struct {
     SolObligation *obligations;
     size_t obligation_count;
     SolSnapshot *snapshots;
@@ -72,6 +83,9 @@ typedef struct {
     SolLoopObligation *loop_obligations;
     size_t loop_obligation_count;
     size_t loop_obligation_capacity;
+    SolUnreachableObligation *unreachable_obligations;
+    size_t unreachable_obligation_count;
+    size_t unreachable_obligation_capacity;
 } SolContractTable;
 
 void sol_contract_table_init(SolContractTable *table);

@@ -444,13 +444,48 @@ static void test_composite_relocation(void) {
         CHECK(argument->next == SOL_AST_NONE || argument->next >= seed.syntax.argument_count);
     }
     CHECK(package.syntax.statement_count > seed.syntax.statement_count);
+    size_t relocated_panics = 0;
+    size_t relocated_unreachable = 0;
+    size_t relocated_requires = 0;
     for (size_t index = seed.syntax.statement_count;
         index < package.syntax.statement_count; ++index) {
         const SolStatement *statement = &package.syntax.statements[index];
         CHECK(statement->span.start >= package.files[1].aggregate_start);
         CHECK(statement->span.end <= package.files[1].aggregate_end);
         CHECK(statement->next == SOL_AST_NONE || statement->next >= seed.syntax.statement_count);
+        if (statement->kind == SOL_STATEMENT_PANIC) {
+            ++relocated_panics;
+            CHECK(statement->as.panic_statement.message >= seed.syntax.expression_count);
+            CHECK(statement->as.panic_statement.message < package.syntax.expression_count);
+        } else if (statement->kind == SOL_STATEMENT_UNREACHABLE) {
+            ++relocated_unreachable;
+            CHECK(statement->as.unreachable_statement.proof >= seed.syntax.expression_count);
+            CHECK(statement->as.unreachable_statement.proof
+                < package.syntax.expression_count);
+            CHECK(statement->as.unreachable_statement.because_span.start
+                >= package.files[1].aggregate_start);
+            CHECK(span_text_equal(&package.source,
+                statement->as.unreachable_statement.because_span,
+                "because { selected == local }"));
+        } else if (statement->kind == SOL_STATEMENT_REQUIRE) {
+            ++relocated_requires;
+            CHECK(statement->as.require_statement.condition
+                >= seed.syntax.expression_count);
+            CHECK(statement->as.require_statement.fallback_block
+                >= seed.syntax.expression_count);
+            CHECK(statement->as.require_statement.fallback_block
+                < package.syntax.expression_count);
+            if (statement->as.require_statement.fallback_block
+                < package.syntax.expression_count) {
+                CHECK(package.syntax.expressions[
+                    statement->as.require_statement.fallback_block].kind
+                    == SOL_EXPR_BLOCK);
+            }
+        }
     }
+    CHECK(relocated_panics == 2);
+    CHECK(relocated_unreachable == 1);
+    CHECK(relocated_requires == 1);
     CHECK(package.syntax.type_argument_count > seed.syntax.type_argument_count);
     for (size_t index = seed.syntax.type_argument_count;
         index < package.syntax.type_argument_count; ++index) {

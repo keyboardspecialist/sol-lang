@@ -15,6 +15,9 @@ function composite(value: Option<Int64>, choice: Choice, source: capability Read
     } else { 0 }
     let handled = handle service.read<source> with provider { source.read() }
     let propagated = value?
+    panic "relocated panic"
+    unreachable because { selected == local }
+    require true else { panic "relocated fallback" }
     return some(selected + local + handled + propagated)
 }
 

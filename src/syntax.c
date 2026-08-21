@@ -265,14 +265,17 @@ static bool sol_structure_statements(
         }
         validator->statements[statement] = 1;
         const SolStatement *current = &validator->tree->statements[statement];
-        if ((int)current->kind < 0 || current->kind > SOL_STATEMENT_CONTINUE
+        if ((int)current->kind < 0 || current->kind > SOL_STATEMENT_REQUIRE
             || !sol_structure_span_valid(validator, current->span)
             || ((current->kind == SOL_STATEMENT_REGION
                     || current->kind == SOL_STATEMENT_MODIFY
                     || current->kind == SOL_STATEMENT_LOOP
                     || current->kind == SOL_STATEMENT_WHILE
                     || current->kind == SOL_STATEMENT_BREAK
-                    || current->kind == SOL_STATEMENT_CONTINUE)
+                    || current->kind == SOL_STATEMENT_CONTINUE
+                    || current->kind == SOL_STATEMENT_PANIC
+                    || current->kind == SOL_STATEMENT_UNREACHABLE
+                    || current->kind == SOL_STATEMENT_REQUIRE)
                 && context != SOL_EXPRESSION_CONTEXT_BODY)) return false;
         if ((current->kind == SOL_STATEMENT_LET
                 || current->kind == SOL_STATEMENT_VAR)
@@ -287,18 +290,38 @@ static bool sol_structure_statements(
                     && current->as.let_statement.type_id >= validator->tree->type_count))) {
             return false;
         }
-        SolExprId value = current->kind == SOL_STATEMENT_LET
-                || current->kind == SOL_STATEMENT_VAR
-            ? current->as.let_statement.value
-            : current->kind == SOL_STATEMENT_ASSIGNMENT
-                ? current->as.assignment.value
-            : current->kind == SOL_STATEMENT_REGION
-                ? current->as.region_statement.body
-            : current->kind == SOL_STATEMENT_MODIFY
-                ? current->as.modify.body
-            : current->kind == SOL_STATEMENT_LOOP
-                    || current->kind == SOL_STATEMENT_WHILE
-                ? SOL_AST_NONE : current->as.expression;
+        SolExprId value = SOL_AST_NONE;
+        switch (current->kind) {
+            case SOL_STATEMENT_LET:
+            case SOL_STATEMENT_VAR:
+                value = current->as.let_statement.value;
+                break;
+            case SOL_STATEMENT_ASSIGNMENT:
+                value = current->as.assignment.value;
+                break;
+            case SOL_STATEMENT_RETURN:
+            case SOL_STATEMENT_EXPRESSION:
+                value = current->as.expression;
+                break;
+            case SOL_STATEMENT_REGION:
+                value = current->as.region_statement.body;
+                break;
+            case SOL_STATEMENT_MODIFY:
+                value = current->as.modify.body;
+                break;
+            case SOL_STATEMENT_PANIC:
+                value = current->as.panic_statement.message;
+                break;
+            case SOL_STATEMENT_UNREACHABLE:
+                value = current->as.unreachable_statement.proof;
+                break;
+            case SOL_STATEMENT_LOOP:
+            case SOL_STATEMENT_WHILE:
+            case SOL_STATEMENT_BREAK:
+            case SOL_STATEMENT_CONTINUE:
+            case SOL_STATEMENT_REQUIRE:
+                break;
+        }
         if (current->kind == SOL_STATEMENT_REGION
             && (!sol_structure_span_valid(validator,
                     current->as.region_statement.label)
@@ -319,6 +342,28 @@ static bool sol_structure_statements(
                     != SOL_EXPR_BLOCK
                 || !sol_structure_expression(validator, current->as.modify.target,
                     context, depth))) return false;
+        if (current->kind == SOL_STATEMENT_UNREACHABLE) {
+            SolSpan because = current->as.unreachable_statement.because_span;
+            if (!sol_structure_span_valid(validator, because)
+                || because.start == because.end
+                || because.start < current->span.start
+                || because.end > current->span.end
+                || value >= validator->tree->expression_count
+                || validator->tree->expressions[value].span.start < because.start
+                || validator->tree->expressions[value].span.end > because.end) {
+                return false;
+            }
+        }
+        if (current->kind == SOL_STATEMENT_REQUIRE) {
+            SolExprId condition = current->as.require_statement.condition;
+            SolExprId fallback = current->as.require_statement.fallback_block;
+            if (!sol_structure_expression(validator, condition, context, depth)
+                || fallback >= validator->tree->expression_count
+                || validator->tree->expressions[fallback].kind != SOL_EXPR_BLOCK
+                || !sol_structure_expression(validator, fallback, context, depth)) {
+                return false;
+            }
+        }
         if (current->kind == SOL_STATEMENT_LOOP
             || current->kind == SOL_STATEMENT_WHILE) {
             SolExprId condition = current->as.loop_statement.condition;

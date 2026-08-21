@@ -109,6 +109,8 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
         || left->obligation_count != right->obligation_count
         || left->snapshot_count != right->snapshot_count
         || left->loop_obligation_count != right->loop_obligation_count
+        || left->unreachable_obligation_count
+            != right->unreachable_obligation_count
         || left->file_count != right->file_count) return false;
     if (memcmp(left->types, right->types, left->type_count * sizeof(*left->types)) != 0
         || memcmp(left->type_ids, right->type_ids,
@@ -134,7 +136,11 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
         || memcmp(left->projections, right->projections,
             left->projection_count * sizeof(*left->projections)) != 0
         || memcmp(left->loop_obligations, right->loop_obligations,
-            left->loop_obligation_count * sizeof(*left->loop_obligations)) != 0) {
+            left->loop_obligation_count * sizeof(*left->loop_obligations)) != 0
+        || memcmp(left->unreachable_obligations,
+            right->unreachable_obligations,
+            left->unreachable_obligation_count
+                * sizeof(*left->unreachable_obligations)) != 0) {
         return false;
     }
     for (size_t index = 0; index < left->definition_count; ++index) {
@@ -181,6 +187,10 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
             || a->region_label_span.end != b->region_label_span.end
             || a->loop_obligations.offset != b->loop_obligations.offset
             || a->loop_obligations.count != b->loop_obligations.count
+            || a->unreachable_obligations.offset
+                != b->unreachable_obligations.offset
+            || a->unreachable_obligations.count
+                != b->unreachable_obligations.count
             || ((a->region_label == NULL) != (b->region_label == NULL))
             || (a->region_label != NULL
                 && strcmp(a->region_label, b->region_label) != 0)) return false;
@@ -2324,7 +2334,10 @@ static void test_exhaustive_validation_domains(void) {
         "function boolean(value: Bool) -> Int64 { return match value "
         "{ true => 1 false => 0 } }\n"
         "function loops(flag: Bool) -> () { while flag decreases { 1 } "
-            "{ continue } loop { break } }\n");
+            "{ continue } loop { break } }\n"
+        "function terminating(message: Text, flag: Bool) -> () effects { panic } "
+            "{ require flag else { panic \"required\" } panic message "
+            "unreachable because { flag == false } }\n");
     CHECK(compiled);
     if (!compiled) {
         sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
@@ -2380,7 +2393,7 @@ static void test_exhaustive_validation_domains(void) {
     CHECK(generic_call != SOL_IR_NONE && builtin_call != SOL_IR_NONE
         && method_call != SOL_IR_NONE);
     bool expression_kinds[SOL_IR_EXPR_BOUND_OPERATION + 1] = {false};
-    bool statement_kinds[SOL_IR_STATEMENT_CONTINUE + 1] = {false};
+    bool statement_kinds[SOL_IR_STATEMENT_REQUIRE + 1] = {false};
     bool pattern_kinds[SOL_IR_PATTERN_VARIANT + 1] = {false};
     for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
         SolIrExpressionKind kind = compilation.ir.expressions[index].kind;
@@ -2391,8 +2404,8 @@ static void test_exhaustive_validation_domains(void) {
     }
     for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
         SolIrStatementKind kind = compilation.ir.statements[index].kind;
-        CHECK((int)kind >= 0 && kind <= SOL_IR_STATEMENT_CONTINUE);
-        if ((int)kind >= 0 && kind <= SOL_IR_STATEMENT_CONTINUE) {
+        CHECK((int)kind >= 0 && kind <= SOL_IR_STATEMENT_REQUIRE);
+        if ((int)kind >= 0 && kind <= SOL_IR_STATEMENT_REQUIRE) {
             statement_kinds[kind] = true;
         }
     }
@@ -2404,7 +2417,7 @@ static void test_exhaustive_validation_domains(void) {
     for (size_t kind = 0; kind <= SOL_IR_EXPR_BOUND_OPERATION; ++kind) {
         CHECK(expression_kinds[kind]);
     }
-    for (size_t kind = 0; kind <= SOL_IR_STATEMENT_CONTINUE; ++kind) {
+    for (size_t kind = 0; kind <= SOL_IR_STATEMENT_REQUIRE; ++kind) {
         CHECK(statement_kinds[kind]);
     }
     for (size_t kind = 0; kind <= SOL_IR_PATTERN_VARIANT; ++kind) {
@@ -2919,6 +2932,213 @@ static void test_loop_obligation_ir(void) {
     sol_diagnostics_free(&compilation.diagnostics);
 }
 
+static void test_terminating_statement_ir(void) {
+    const char *source =
+        "module terminating_ir\n"
+        "function panic_value(message: Text) -> () effects { panic } "
+            "{ panic message }\n"
+        "function impossible(flag: Bool) -> () "
+            "{ while flag invariant { flag } { break } "
+            "unreachable because { flag == false } }\n"
+        "function guarded(flag: Bool) -> Int64 effects { panic } "
+            "{ require flag else { panic \"required\" } return 1 }\n"
+        "function contracted(flag: Bool) -> () requires { flag } "
+            "{ unreachable because { flag == false } }\n";
+    TestCompilation compilation;
+    TestCompilation repeated;
+    bool compiled = compile_ir(&compilation, source);
+    bool repeated_compiled = compile_ir(&repeated, source);
+    CHECK(compiled && repeated_compiled);
+    if (!compiled || !repeated_compiled) {
+        if (!compiled) sol_diagnostics_render_human(stderr, &compilation.source,
+            &compilation.diagnostics);
+        if (!repeated_compiled) sol_diagnostics_render_human(stderr,
+            &repeated.source, &repeated.diagnostics);
+        free_compilation(&compilation);
+        free_compilation(&repeated);
+        return;
+    }
+    CHECK(ir_equal(&compilation.ir, &repeated.ir));
+    CHECK(compilation.ir.unreachable_obligation_count == 2);
+    size_t panic_count = 0;
+    size_t unreachable_count = 0;
+    size_t require_count = 0;
+    for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
+        const SolIrStatement *statement = &compilation.ir.statements[index];
+        panic_count += statement->kind == SOL_IR_STATEMENT_PANIC;
+        require_count += statement->kind == SOL_IR_STATEMENT_REQUIRE;
+        if (statement->kind == SOL_IR_STATEMENT_UNREACHABLE) {
+            ++unreachable_count;
+            CHECK(statement->expression == SOL_IR_NONE);
+            CHECK(statement->unreachable_obligations.count == 1);
+        }
+    }
+    CHECK(panic_count == 2 && unreachable_count == 2 && require_count == 1);
+    for (size_t index = 0;
+        index < compilation.ir.unreachable_obligation_count; ++index) {
+        const SolIrUnreachableObligation *obligation
+            = &compilation.ir.unreachable_obligations[index];
+        CHECK(obligation->id == index);
+        CHECK(obligation->statement < compilation.ir.statement_count);
+        CHECK(obligation->callable < compilation.ir.callable_count);
+        CHECK(obligation->proof < compilation.ir.expression_count);
+        CHECK(compilation.ir.types[obligation->proof_type].kind
+            == SOL_IR_TYPE_BOOL);
+    }
+    size_t unreachable_capacity
+        = compilation.contracts.unreachable_obligation_capacity;
+    compilation.contracts.unreachable_obligation_capacity = 0;
+    CHECK(lower_rejected(&compilation));
+    compilation.contracts.unreachable_obligation_capacity = unreachable_capacity;
+    SolUnreachableObligation *semantic_unreachable
+        = compilation.contracts.unreachable_obligations;
+    compilation.contracts.unreachable_obligations = NULL;
+    CHECK(lower_rejected(&compilation));
+    compilation.contracts.unreachable_obligations = semantic_unreachable;
+    free_frontend(&compilation);
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+
+    if (compilation.ir.unreachable_obligation_count == 2) {
+        SolIrUnreachableObligation first = compilation.ir.unreachable_obligations[0];
+        SolIrUnreachableObligation second = compilation.ir.unreachable_obligations[1];
+        SolIrSlice first_slice
+            = compilation.ir.statements[first.statement].unreachable_obligations;
+        SolIrSlice second_slice
+            = compilation.ir.statements[second.statement].unreachable_obligations;
+        compilation.ir.unreachable_obligations[0] = second;
+        compilation.ir.unreachable_obligations[0].id = 0;
+        compilation.ir.unreachable_obligations[1] = first;
+        compilation.ir.unreachable_obligations[1].id = 1;
+        compilation.ir.statements[first.statement].unreachable_obligations.offset = 1;
+        compilation.ir.statements[second.statement].unreachable_obligations.offset = 0;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        compilation.ir.unreachable_obligations[0] = first;
+        compilation.ir.unreachable_obligations[1] = second;
+        compilation.ir.statements[first.statement].unreachable_obligations = first_slice;
+        compilation.ir.statements[second.statement].unreachable_obligations = second_slice;
+    }
+
+    SolIrUnreachableObligation *obligation
+        = &compilation.ir.unreachable_obligations[0];
+    SolIrStatement *panic_statement = NULL;
+    SolIrStatement *require_statement = NULL;
+    for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
+        if (panic_statement == NULL
+            && compilation.ir.statements[index].kind == SOL_IR_STATEMENT_PANIC) {
+            panic_statement = &compilation.ir.statements[index];
+        }
+        if (compilation.ir.statements[index].kind == SOL_IR_STATEMENT_REQUIRE) {
+            require_statement = &compilation.ir.statements[index];
+        }
+    }
+    CHECK(panic_statement != NULL && require_statement != NULL);
+    if (panic_statement != NULL && require_statement != NULL) {
+        SolIrExpressionId saved_expression = panic_statement->expression;
+        panic_statement->expression = require_statement->condition;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        panic_statement->expression = saved_expression;
+        SolIrExpressionId saved_condition = require_statement->condition;
+        require_statement->condition = panic_statement->expression;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        require_statement->condition = saved_condition;
+        saved_expression = require_statement->expression;
+        require_statement->expression = require_statement->condition;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        require_statement->expression = saved_expression;
+    }
+    size_t saved_id = obligation->id;
+    obligation->id = compilation.ir.unreachable_obligation_count;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    obligation->id = saved_id;
+
+    SolIrStatement *owner = &compilation.ir.statements[obligation->statement];
+    owner->expression = obligation->proof;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    owner->expression = SOL_IR_NONE;
+    SolIrSlice saved_slice = owner->unreachable_obligations;
+    owner->unreachable_obligations.count = 0;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    owner->unreachable_obligations = saved_slice;
+
+    SolIrCallableId saved_callable = obligation->callable;
+    obligation->callable = (saved_callable + 1) % compilation.ir.callable_count;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    obligation->callable = saved_callable;
+
+    SolIrExpressionId saved_proof = obligation->proof;
+    SolIrTypeId saved_type = obligation->proof_type;
+    SolSpan saved_span = obligation->span;
+    SolIrExpressionId runtime_bool = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
+        if (compilation.ir.statements[index].kind == SOL_IR_STATEMENT_REQUIRE) {
+            runtime_bool = compilation.ir.statements[index].condition;
+        }
+    }
+    CHECK(runtime_bool != SOL_IR_NONE);
+    if (runtime_bool != SOL_IR_NONE) {
+        obligation->proof = runtime_bool;
+        obligation->proof_type = compilation.ir.expressions[runtime_bool].type;
+        obligation->span = compilation.ir.expressions[runtime_bool].span;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    }
+    obligation->proof = saved_proof;
+    obligation->proof_type = saved_type;
+    obligation->span = saved_span;
+
+    CHECK(compilation.ir.obligation_count != 0);
+    if (compilation.ir.obligation_count != 0) {
+        SolIrExpressionId predicate = compilation.ir.obligations[0].predicate;
+        SolIrCallableId contract_callable = compilation.ir.definitions[
+            compilation.ir.obligations[0].owner].callable;
+        SolIrUnreachableObligation *contract_proof = NULL;
+        for (size_t index = 0;
+            index < compilation.ir.unreachable_obligation_count; ++index) {
+            if (compilation.ir.unreachable_obligations[index].callable
+                == contract_callable) {
+                contract_proof = &compilation.ir.unreachable_obligations[index];
+            }
+        }
+        CHECK(contract_proof != NULL);
+        SolIrExpressionId contract_saved_proof = contract_proof->proof;
+        SolIrTypeId contract_saved_type = contract_proof->proof_type;
+        SolSpan contract_saved_span = contract_proof->span;
+        contract_proof->proof = predicate;
+        contract_proof->proof_type = compilation.ir.expressions[predicate].type;
+        contract_proof->span = compilation.ir.expressions[predicate].span;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        contract_proof->proof = contract_saved_proof;
+        contract_proof->proof_type = contract_saved_type;
+        contract_proof->span = contract_saved_span;
+    }
+    CHECK(compilation.ir.loop_obligation_count != 0);
+    if (compilation.ir.loop_obligation_count != 0) {
+        const SolIrLoopObligation *loop = &compilation.ir.loop_obligations[0];
+        SolIrUnreachableObligation *loop_proof = NULL;
+        for (size_t index = 0;
+            index < compilation.ir.unreachable_obligation_count; ++index) {
+            if (compilation.ir.unreachable_obligations[index].callable
+                == loop->callable) {
+                loop_proof = &compilation.ir.unreachable_obligations[index];
+            }
+        }
+        CHECK(loop_proof != NULL);
+        SolIrExpressionId loop_saved_proof = loop_proof->proof;
+        SolIrTypeId loop_saved_type = loop_proof->proof_type;
+        SolSpan loop_saved_span = loop_proof->span;
+        loop_proof->proof = loop->expression;
+        loop_proof->proof_type = loop->expression_type;
+        loop_proof->span = loop->span;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        loop_proof->proof = loop_saved_proof;
+        loop_proof->proof_type = loop_saved_type;
+        loop_proof->span = loop_saved_span;
+    }
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+    sol_ir_free(&compilation.ir);
+    sol_diagnostics_free(&compilation.diagnostics);
+    free_compilation(&repeated);
+}
+
 int main(void) {
     test_geometric_growth();
     test_complete_ir_and_lifetime();
@@ -2942,6 +3162,7 @@ int main(void) {
     test_exhaustive_validation_domains();
     test_loop_ir_and_ownership();
     test_loop_obligation_ir();
+    test_terminating_statement_ir();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }
