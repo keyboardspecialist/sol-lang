@@ -18,6 +18,7 @@ typedef struct {
     bool allocation_failed;
     bool depth_reported;
     bool in_loop_specification;
+    bool validating_guard;
 } SolContractLowerer;
 
 void sol_contract_table_init(SolContractTable *table) {
@@ -41,7 +42,7 @@ static void sol_contract_error(
 ) {
     sol_diagnostics_add(
         lowerer->diagnostics,
-        code,
+        lowerer->validating_guard ? "SOL-EFFECT-010" : code,
         SOL_SEVERITY_ERROR,
         span,
         "%s",
@@ -300,6 +301,7 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || types->member_resolution_count != syntax->expression_count
         || types->tuple_projection_count != syntax->expression_count
         || types->pattern_resolution_count != syntax->pattern_count
+        || types->pattern_child_resolution_count != syntax->pattern_binding_count
         || types->argument_resolution_count != syntax->argument_count
         || types->implementation_target_count != syntax->item_count
         || types->representation_count != syntax->item_count
@@ -346,7 +348,11 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
             && (types->field_resolutions == NULL || types->variant_resolutions == NULL))
         || (types->tuple_projection_count != 0 && types->tuple_projections == NULL)
         || (types->pattern_resolution_count != 0
-            && types->pattern_variant_resolutions == NULL)
+            && (types->pattern_variant_resolutions == NULL
+                || types->pattern_types == NULL))
+        || (types->pattern_child_resolution_count != 0
+            && (types->pattern_field_resolutions == NULL
+                || types->pattern_tuple_ordinals == NULL))
         || (types->argument_resolution_count != 0
             && types->argument_field_resolutions == NULL)
         || (types->implementation_target_count != 0
@@ -471,7 +477,7 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
                     || (!body_contains_unreachable
                         && !predicate_contains_unreachable)))) return false;
     }
-    if (!sol_type_resolution_metadata_valid(syntax, types)) return false;
+    if (!sol_type_resolution_metadata_valid(lowerer->source, syntax, types)) return false;
     for (SolExprId expression = 0; expression < types->tuple_projection_count;
         ++expression) {
         size_t ordinal = types->tuple_projections[expression];
@@ -1288,12 +1294,16 @@ static void sol_contract_expression(
                     lowerer->malformed = true;
                     break;
                 }
+                const SolMatchArm *entry = &lowerer->syntax->match_arms[arm];
+                if (entry->guard != SOL_AST_NONE) {
+                    sol_contract_expression(lowerer, entry->guard, in_old);
+                }
                 sol_contract_expression(
                     lowerer,
-                    lowerer->syntax->match_arms[arm].value,
+                    entry->value,
                     in_old
                 );
-                arm = lowerer->syntax->match_arms[arm].next;
+                arm = entry->next;
             }
             break;
         }
@@ -1321,6 +1331,9 @@ static void sol_contract_expression(
             sol_contract_expression(lowerer, expression->as.handle.body, in_old);
             break;
         case SOL_EXPR_RESULT:
+            if (lowerer->validating_guard) {
+                break;
+            }
             if (lowerer->in_loop_specification) {
                 sol_contract_error(lowerer, "SOL-CONTRACT-003", expression->span,
                     "result is unavailable in a loop specification");
@@ -1341,6 +1354,10 @@ static void sol_contract_expression(
             }
             break;
         case SOL_EXPR_OLD:
+            if (lowerer->validating_guard) {
+                sol_contract_expression(lowerer, expression->as.old_expression, true);
+                break;
+            }
             if (lowerer->in_loop_specification) {
                 sol_contract_error(lowerer, "SOL-CONTRACT-003", expression->span,
                     "old is unavailable in a loop specification");
@@ -1376,6 +1393,33 @@ static void sol_contract_expression(
             break;
     }
     --lowerer->depth;
+}
+
+bool sol_contract_validate_guard(
+    const SolSource *source,
+    const SolSyntaxTree *syntax,
+    const SolHirModule *hir,
+    const SolTypeTable *types,
+    const SolEffectTable *effects,
+    SolExprId guard,
+    SolDiagnostics *diagnostics
+) {
+    if (source == NULL || syntax == NULL || hir == NULL || types == NULL
+        || effects == NULL || diagnostics == NULL || guard >= syntax->expression_count) {
+        return false;
+    }
+    SolContractLowerer lowerer = {
+        .source = source,
+        .syntax = syntax,
+        .hir = hir,
+        .types = types,
+        .effects = effects,
+        .diagnostics = diagnostics,
+        .validating_guard = true,
+    };
+    sol_contract_expression(&lowerer, guard, false);
+    return !lowerer.malformed && !lowerer.allocation_failed
+        && !diagnostics->allocation_failed;
 }
 
 static SolType sol_contract_owner_result(

@@ -859,7 +859,8 @@ static void test_data_callbacks_generics_and_traits(void) {
     SolIrArm *payloadless_arm = NULL;
     for (size_t index = 0; index < compilation.ir.arm_count; ++index) {
         SolIrArm *arm = &compilation.ir.arms[index];
-        if (arm->kind != SOL_IR_PATTERN_VARIANT) continue;
+        if (compilation.ir.patterns[arm->pattern].kind
+            != SOL_IR_PATTERN_VARIANT) continue;
         if (arm->bindings.count == 0) payloadless_arm = arm;
         else if (payload_arm == NULL) payload_arm = arm;
     }
@@ -2279,6 +2280,88 @@ static void test_tuple_runtime_and_host_values(void) {
     free_compilation(&compilation);
 }
 
+static void test_recursive_patterns_guards_and_cleanup(void) {
+    Compilation compilation;
+    bool compiled = compile(&compilation,
+        "module recursive_runtime\n"
+        "record Packet<T> { ignored: Bool, data: (T, Bool) }\n"
+        "enum Envelope<T> { wrapped(packet: Packet<T>), empty }\n"
+        "function choose(gate: Bool, payload: Bool) -> Int64 { "
+        "let value = Envelope<Int64>.wrapped(Packet<Int64> { "
+        "data = (7, payload), ignored = false }) "
+        "return match value { "
+        "wrapped(Packet { data = (number, true) }) if gate => number "
+        "wrapped(Packet { ignored = ignored, data = (number, true) }) => number + 10 "
+        "_ => 0 } }\n"
+        "function guard_error() -> Int64 { "
+        "let value = Envelope<Int64>.wrapped(Packet<Int64> { "
+        "ignored = false, data = (7, true) }) "
+        "return match value { wrapped(Packet { data = (number, true) }) "
+        "if 1 / 0 == 0 => number _ => 0 } }\n");
+    if (!compiled) sol_diagnostics_render_human(stderr, &compilation.source,
+        &compilation.diagnostics);
+    CHECK(compiled);
+    if (!compiled) {
+        free_compilation(&compilation);
+        return;
+    }
+    SolInterpreterValue arguments[2];
+    SolInterpreterResult result;
+    CleanupLog log;
+
+    sol_interpreter_value_bool(&arguments[0], true);
+    sol_interpreter_value_bool(&arguments[1], true);
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "choose", arguments, 2, &log, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 7);
+    CHECK(log.count == 3 && strcmp(log.names[0], "number") == 0
+        && strcmp(log.names[1], "payload") == 0
+        && strcmp(log.names[2], "gate") == 0);
+    sol_interpreter_result_free(&result);
+
+    sol_interpreter_value_free(&arguments[0]);
+    sol_interpreter_value_bool(&arguments[0], false);
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "choose", arguments, 2, &log, &result));
+    CHECK(result.value.as.integer == 17);
+    CHECK(log.count == 5 && strcmp(log.names[0], "number") == 0
+        && strcmp(log.names[1], "number") == 0
+        && strcmp(log.names[2], "ignored") == 0
+        && strcmp(log.names[3], "payload") == 0
+        && strcmp(log.names[4], "gate") == 0);
+    sol_interpreter_result_free(&result);
+
+    sol_interpreter_value_free(&arguments[1]);
+    sol_interpreter_value_bool(&arguments[1], false);
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "choose", arguments, 2, &log, &result));
+    CHECK(result.value.as.integer == 0);
+    CHECK(log.count == 2 && strcmp(log.names[0], "payload") == 0
+        && strcmp(log.names[1], "gate") == 0);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&arguments[0]);
+    sol_interpreter_value_free(&arguments[1]);
+
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(!run_observed(&compilation.ir, "guard_error", NULL, 0, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_DIVISION_BY_ZERO);
+    CHECK(log.count == 1 && strcmp(log.names[0], "number") == 0);
+    sol_interpreter_result_free(&result);
+    free_compilation(&compilation);
+
+    CHECK(!compile(&compilation,
+        "module rejected_guard_moves\n"
+        "record Box<T> { value: T }\n"
+        "enum Hold { one }\n"
+        "function consume(value: Box<Int64>, result: Bool) -> Bool { return result }\n"
+        "function true_path(value: Hold, box: Box<Int64>) -> Int64 { "
+        "return match value { one if consume(box, true) => box.value one => 0 } }\n"
+        "function false_path(value: Hold, box: Box<Int64>) -> Int64 { "
+        "return match value { one if consume(box, false) => 1 one => box.value } }\n"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_primitives_control_and_lifetime();
     test_place_projection_execution();
@@ -2299,6 +2382,7 @@ int main(void) {
     test_loop_execution_and_cleanup();
     test_terminating_statements_runtime();
     test_tuple_runtime_and_host_values();
+    test_recursive_patterns_guards_and_cleanup();
     if (failures != 0) fprintf(stderr, "%d interpreter test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

@@ -805,7 +805,43 @@ static bool analyze_match(Ownership *analysis, const SolIrExpression *expression
             analysis->introduction_depths[local] = analysis->region_depth;
         }
         bool branch_reachable = true;
-        valid = analyze_expression(analysis, arm->value, branch, SOL_ACCESS_OWNED,
+        if (arm->guard != SOL_IR_NONE) {
+            valid = analyze_expression(analysis, arm->guard, branch,
+                SOL_ACCESS_OWNED, &branch_reachable);
+            for (size_t place = 0; valid && place < count; ++place) {
+                const SolIrPlace *entry = &analysis->ir->places[place];
+                if (branch[place] && !baseline[place]
+                    && entry->root_kind == SOL_IR_PLACE_ROOT_LOCAL
+                    && !type_is_copy(analysis,
+                        analysis->ir->locals[entry->local].type)) {
+                    valid = ownership_error_code(analysis,
+                        analysis->ir->expressions[arm->guard].span,
+                        "SOL-OWNERSHIP-005",
+                        "an affine local cannot be consumed in a match guard");
+                }
+            }
+            for (size_t local = 0; valid && local < local_count; ++local) {
+                if (baseline_initialized[local] && !analysis->initialized[local]
+                    && !type_is_copy(analysis, analysis->ir->locals[local].type)) {
+                    valid = ownership_error_code(analysis,
+                        analysis->ir->expressions[arm->guard].span,
+                        "SOL-OWNERSHIP-005",
+                        "an affine local cannot be consumed in a match guard");
+                }
+            }
+            if (count != 0) memcpy(branch, baseline,
+                count * sizeof(*branch));
+            if (local_count != 0) memcpy(analysis->initialized,
+                baseline_initialized, local_count * sizeof(*baseline_initialized));
+            for (size_t binding = 0; binding < arm->bindings.count; ++binding) {
+                SolIrLocalId local = analysis->ir->roots[
+                    arm->bindings.offset + binding];
+                clear_local_paths(analysis, branch, local);
+                analysis->initialized[local] = true;
+            }
+            branch_reachable = true;
+        }
+        valid = valid && analyze_expression(analysis, arm->body, branch, SOL_ACCESS_OWNED,
             &branch_reachable);
         for (size_t binding = 0; binding < arm->bindings.count; ++binding) {
             SolIrLocalId local = analysis->ir->roots[arm->bindings.offset + binding];

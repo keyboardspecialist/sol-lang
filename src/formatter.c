@@ -197,6 +197,7 @@ static bool sol_format_needs_space(
     }
     if (previous == SOL_TOKEN_RIGHT_BRACE && sol_format_is_word(current)) return true;
     if (previous == SOL_TOKEN_RIGHT_BRACE && current == SOL_TOKEN_ELSE) return true;
+    if (current == SOL_TOKEN_IF && sol_format_is_right_delimiter(previous)) return true;
     if (current == SOL_TOKEN_LEFT_BRACE) return true;
     if (sol_format_is_word(previous) && sol_format_is_word(current)) return true;
     return false;

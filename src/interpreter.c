@@ -569,6 +569,66 @@ static bool bind_local(Interpreter *interpreter, Frame *frame,
     return true;
 }
 
+static int match_pattern(Interpreter *interpreter, SolIrPatternId id,
+    const SolInterpreterValue *value, const SolInterpreterValue **leaves,
+    size_t *leaf_count, size_t leaf_capacity, size_t depth) {
+    const SolIr *ir = interpreter->request->ir;
+    if (id >= ir->pattern_count || depth >= 64
+        || !consume(interpreter, &interpreter->result->used.steps,
+            interpreter->request->limits.steps, SOL_INTERPRETER_STEP_LIMIT,
+            id < ir->pattern_count ? ir->patterns[id].span : (SolSpan){0},
+            "interpreter step")) return -1;
+    const SolIrPattern *pattern = &ir->patterns[id];
+    if (pattern->kind == SOL_IR_PATTERN_BOOL) {
+        return value->kind == SOL_INTERPRETER_VALUE_BOOL
+            && value->as.boolean == pattern->boolean;
+    }
+    if (pattern->kind == SOL_IR_PATTERN_BINDING) {
+        if (*leaf_count >= leaf_capacity) return -1;
+        leaves[(*leaf_count)++] = value;
+        return 1;
+    }
+    if (pattern->kind == SOL_IR_PATTERN_WILDCARD) return 1;
+    const SolInterpreterValue *fields = NULL;
+    size_t field_count = 0;
+    if (pattern->kind == SOL_IR_PATTERN_VARIANT) {
+        if (value->kind != SOL_INTERPRETER_VALUE_ENUM
+            || value->as.aggregate.variant != pattern->variant) return 0;
+        fields = value->as.aggregate.fields;
+        field_count = value->as.aggregate.field_count;
+    } else if (pattern->kind == SOL_IR_PATTERN_RECORD) {
+        if (value->kind != SOL_INTERPRETER_VALUE_RECORD
+            || value->as.aggregate.definition != pattern->definition) return 0;
+        fields = value->as.aggregate.fields;
+        field_count = value->as.aggregate.field_count;
+    } else if (pattern->kind == SOL_IR_PATTERN_TUPLE) {
+        if (value->kind != SOL_INTERPRETER_VALUE_TUPLE) return 0;
+        fields = value->as.aggregate.fields;
+        field_count = value->as.aggregate.field_count;
+    } else {
+        return -1;
+    }
+    size_t saved_count = *leaf_count;
+    for (size_t index = 0; index < pattern->children.count; ++index) {
+        const SolIrPatternChild *edge
+            = &ir->pattern_children[pattern->children.offset + index];
+        size_t ordinal = edge->field != SOL_IR_NONE
+            ? edge->field - ir->definitions[pattern->definition].fields.offset
+            : edge->ordinal;
+        if (ordinal >= field_count) {
+            *leaf_count = saved_count;
+            return 0;
+        }
+        int matched = match_pattern(interpreter, edge->pattern, &fields[ordinal],
+            leaves, leaf_count, leaf_capacity, depth + 1);
+        if (matched != 1) {
+            *leaf_count = saved_count;
+            return matched;
+        }
+    }
+    return 1;
+}
+
 static bool declare_local(Interpreter *interpreter, Frame *frame,
     SolIrLocalId local, SolSpan span) {
     if (local >= interpreter->request->ir->local_count || frame->registered[local]) {
@@ -616,6 +676,13 @@ static void cleanup_slice(Interpreter *interpreter, SolIrSlice cleanup) {
         cleanup_binding(interpreter, interpreter->frame,
             interpreter->request->ir->cleanup_locals[
                 cleanup.offset + cleanup.count]);
+    }
+}
+
+static void cleanup_arm_slice(Interpreter *interpreter, SolIrSlice cleanup) {
+    for (size_t index = 0; index < cleanup.count; ++index) {
+        cleanup_binding(interpreter, interpreter->frame,
+            interpreter->request->ir->cleanup_locals[cleanup.offset + index]);
     }
 }
 
@@ -2287,26 +2354,60 @@ static Flow evaluate(Interpreter *interpreter, SolIrExpressionId expression_id) 
                 const SolIrArm *arm = &ir->arms[ir->arm_ids[
                     expression->as.match_expr.arms.offset + index
                 ]];
-                bool matches = arm->kind == SOL_IR_PATTERN_WILDCARD
-                    || (arm->kind == SOL_IR_PATTERN_BOOL
-                        && scrutinee.value.kind == SOL_INTERPRETER_VALUE_BOOL
-                        && scrutinee.value.as.boolean == arm->boolean)
-                    || (arm->kind == SOL_IR_PATTERN_VARIANT
-                        && scrutinee.value.kind == SOL_INTERPRETER_VALUE_ENUM
-                        && scrutinee.value.as.aggregate.variant == arm->variant);
-                if (!matches) continue;
+                const SolInterpreterValue **leaves = arm->bindings.count == 0 ? NULL
+                    : calloc(arm->bindings.count, sizeof(*leaves));
+                if (arm->bindings.count != 0 && leaves == NULL) {
+                    sol_interpreter_value_free(&scrutinee.value);
+                    return flow_new(FLOW_ERROR);
+                }
+                size_t leaf_count = 0;
+                int matched = match_pattern(interpreter, arm->pattern,
+                    &scrutinee.value, leaves, &leaf_count, arm->bindings.count, 0);
+                if (matched < 0) {
+                    free(leaves);
+                    sol_interpreter_value_free(&scrutinee.value);
+                    return flow_new(FLOW_ERROR);
+                }
+                if (matched == 0) {
+                    free(leaves);
+                    continue;
+                }
                 for (size_t binding = 0; binding < arm->bindings.count; ++binding) {
                     if (!bind_local(interpreter, interpreter->frame,
                         ir->roots[arm->bindings.offset + binding],
-                        &scrutinee.value.as.aggregate.fields[binding], arm->span)) {
+                        leaves[binding], arm->span)) {
+                        free(leaves);
                         sol_interpreter_value_free(&scrutinee.value);
-                        cleanup_slice(interpreter, arm->cleanup);
+                        cleanup_arm_slice(interpreter, arm->cleanup);
                         return flow_new(FLOW_ERROR);
                     }
                 }
+                free(leaves);
+                if (arm->guard != SOL_IR_NONE) {
+                    Flow guard = evaluate(interpreter, arm->guard);
+                    if (guard.kind != FLOW_VALUE) {
+                        cleanup_arm_slice(interpreter, arm->cleanup);
+                        sol_interpreter_value_free(&scrutinee.value);
+                        return guard;
+                    }
+                    if (guard.value.kind != SOL_INTERPRETER_VALUE_BOOL) {
+                        sol_interpreter_value_free(&guard.value);
+                        cleanup_arm_slice(interpreter, arm->cleanup);
+                        sol_interpreter_value_free(&scrutinee.value);
+                        diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT,
+                            arm->span, "match guard is not Bool");
+                        return flow_new(FLOW_ERROR);
+                    }
+                    bool selected = guard.value.as.boolean;
+                    sol_interpreter_value_free(&guard.value);
+                    if (!selected) {
+                        cleanup_arm_slice(interpreter, arm->cleanup);
+                        continue;
+                    }
+                }
                 sol_interpreter_value_free(&scrutinee.value);
-                Flow value = evaluate(interpreter, arm->value);
-                cleanup_slice(interpreter, arm->cleanup);
+                Flow value = evaluate(interpreter, arm->body);
+                cleanup_arm_slice(interpreter, arm->cleanup);
                 return value;
             }
             sol_interpreter_value_free(&scrutinee.value);

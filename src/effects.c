@@ -163,7 +163,10 @@ static bool sol_effects_collect_callable(
                 PUSH(expression->as.match_expr.scrutinee);
                 for (size_t index = 0; index < expression->as.match_expr.arms.count; ++index) {
                     SolIrArmId arm = ir->arm_ids[expression->as.match_expr.arms.offset + index];
-                    PUSH(ir->arms[arm].value);
+                    if (ir->arms[arm].guard != SOL_IR_NONE) {
+                        PUSH(ir->arms[arm].guard);
+                    }
+                    PUSH(ir->arms[arm].body);
                 }
                 break;
             case SOL_IR_EXPR_BLOCK:

@@ -896,6 +896,226 @@ static void test_invalid_match(void) {
     free_compilation(&compilation);
 }
 
+static void test_recursive_pattern_semantics(void) {
+    static const char valid[] =
+        "module recursive_patterns\n"
+        "record Pair<T> { left: T, right: Bool, }\n"
+        "enum Wrap<T> { some(value: T), pair(value: Pair<T>), none, }\n"
+        "function select(value: Wrap<(Int64, Bool)>) -> Int64 {\n"
+        " return match value {\n"
+        "  some((number, flag)) => number\n"
+        "  pair(Pair { right = true, left = (number, _) }) => number\n"
+        "  pair(Pair { left = (number, _), right = false }) => number\n"
+        "  none => 0\n"
+        " }\n"
+        "}\n"
+        "enum Maybe { none, }\n"
+        "enum Outer { box(value: Maybe), }\n"
+        "function nested(value: Outer) -> Int64 { return match value { box(none()) => 1 } }\n"
+        "enum Bits { bits(value: (Bool, Bool)), }\n"
+        "function products(value: Bits) -> Int64 { return match value {\n"
+        " bits((true, _)) => 1 bits((false, true)) => 2 bits((false, false)) => 3 } }\n"
+        "function guarded(value: Bits, gate: Bool) -> Int64 { return match value {\n"
+        " bits((true, _)) if gate => 1 bits((false, _)) => 2 bits((true, _)) => 3 } }\n"
+        "enum List { nil, cons(tail: List), }\n"
+        "function length(value: List) -> Int64 { return match value {\n"
+        " nil => 0 cons(_) => 1 } }\n"
+        "enum Shade { red, blue, }\n"
+        "function shade(value: Shade) -> Bool { return match value {\n"
+        " red => true blue => false } }\n"
+        "record Twin { left: Bool, right: Bool, }\n"
+        "function twin(value: Twin) -> Bool { return match value {\n"
+        " Twin { left = selected } => selected } }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, valid));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    bool saw_field = false;
+    bool saw_tuple = false;
+    for (size_t pattern = 0; pattern < compilation.types.pattern_resolution_count;
+        ++pattern) {
+        CHECK(compilation.types.pattern_types[pattern].kind != SOL_TYPE_UNKNOWN);
+    }
+    for (size_t child = 0;
+        child < compilation.types.pattern_child_resolution_count; ++child) {
+        saw_field = saw_field
+            || compilation.types.pattern_field_resolutions[child] != SOL_AST_NONE;
+        saw_tuple = saw_tuple
+            || compilation.types.pattern_tuple_ordinals[child] != SOL_AST_NONE;
+    }
+    CHECK(saw_field);
+    CHECK(saw_tuple);
+    CHECK(sol_type_resolution_metadata_valid(&compilation.source,
+        &compilation.syntax, &compilation.types));
+    for (size_t pattern = 0; pattern < compilation.syntax.pattern_count; ++pattern) {
+        SolVariantId variant = compilation.types.pattern_variant_resolutions[pattern];
+        if (variant == SOL_AST_NONE) continue;
+        for (size_t replacement = 0; replacement < compilation.syntax.variant_count;
+            ++replacement) {
+            if (replacement == variant
+                || compilation.syntax.variants[replacement].owner_item
+                    != compilation.syntax.variants[variant].owner_item
+                || compilation.syntax.variants[replacement].first_field
+                    != SOL_AST_NONE
+                || compilation.syntax.variants[variant].first_field
+                    != SOL_AST_NONE) continue;
+            compilation.types.pattern_variant_resolutions[pattern] = replacement;
+            CHECK(!sol_type_resolution_metadata_valid(&compilation.source,
+                &compilation.syntax, &compilation.types));
+            compilation.types.pattern_variant_resolutions[pattern] = variant;
+            pattern = compilation.syntax.pattern_count;
+            break;
+        }
+    }
+    bool tested_sibling_field = false;
+    for (size_t child = 0; !tested_sibling_field
+        && child < compilation.syntax.pattern_binding_count; ++child) {
+        SolFieldId field = compilation.types.pattern_field_resolutions[child];
+        if (field == SOL_AST_NONE) continue;
+        for (size_t item = 0; item < compilation.syntax.item_count; ++item) {
+            if (compilation.syntax.items[item].kind != SOL_ITEM_RECORD) continue;
+            bool owns_field = false;
+            for (SolFieldId entry = compilation.syntax.items[item].first_field;
+                entry != SOL_AST_NONE; entry = compilation.syntax.fields[entry].next) {
+                owns_field = owns_field || entry == field;
+            }
+            if (!owns_field) continue;
+            for (SolFieldId replacement = compilation.syntax.items[item].first_field;
+                replacement != SOL_AST_NONE;
+                replacement = compilation.syntax.fields[replacement].next) {
+                SolType replacement_type = compilation.types.declared_types[
+                    compilation.syntax.fields[replacement].type];
+                SolType field_type = compilation.types.declared_types[
+                    compilation.syntax.fields[field].type];
+                if (replacement == field
+                    || replacement_type.kind != field_type.kind
+                    || replacement_type.definition != field_type.definition) continue;
+                compilation.types.pattern_field_resolutions[child] = replacement;
+                CHECK(!sol_type_resolution_metadata_valid(&compilation.source,
+                    &compilation.syntax, &compilation.types));
+                compilation.types.pattern_field_resolutions[child] = field;
+                tested_sibling_field = true;
+                break;
+            }
+        }
+    }
+    CHECK(tested_sibling_field);
+    free_compilation(&compilation);
+
+    static const char invalid[] =
+        "module invalid_recursive_patterns\n"
+        "record Pair { left: Int64, right: Bool, }\n"
+        "record Other { left: Int64, }\n"
+        "enum State { idle, item(value: Pair), }\n"
+        "function tuple_kind(value: Bool) -> Int64 { return match value { (a, b) => 0 _ => 1 } }\n"
+        "function record_head(value: Pair) -> Int64 { return match value { Other { left } => 0 _ => 1 } }\n"
+        "function fields(value: Pair) -> Int64 { return match value {\n"
+        " Pair { missing, left, left = again } => 0 _ => 1 } }\n"
+        "function payload(value: State) -> Int64 { return match value { idle() => 0 item() => 1 } }\n"
+        "function bool_leaf(value: State) -> Int64 { return match value {\n"
+        " idle => 0 item(true) => 1 } }\n"
+        "function guard_type(value: Bool) -> Int64 { return match value {\n"
+        " true if 1 => 1 false => 0 true => 2 } }\n"
+        "enum Bits { bits(value: (Bool, Bool)), }\n"
+        "function nested_incomplete(value: Bits) -> Int64 { return match value {\n"
+        " bits((true, _)) => 1 bits((false, true)) => 2 } }\n"
+        "function nested_unreachable(value: Bits) -> Int64 { return match value {\n"
+        " bits((true, _)) => 1 bits((false, _)) => 2 bits((false, true)) => 3 } }\n"
+        "enum List { nil, cons(tail: List), }\n"
+        "function recursive_incomplete(value: List) -> Int64 { return match value {\n"
+        " nil => 0 cons(nil) => 1 } }\n"
+        "function recursive_unreachable(value: List) -> Int64 { return match value {\n"
+        " nil => 0 cons(_) => 1 cons(nil) => 2 } }\n";
+    CHECK(compile_source(&compilation, invalid));
+    CHECK(diagnostic_count(&compilation, "SOL-MATCH-001") >= 9);
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-003"));
+    free_compilation(&compilation);
+}
+
+static void test_recursive_uninhabited_match_domains(void) {
+    static const char valid[] =
+        "module recursive_uninhabited\n"
+        "enum Loop { next(value: Loop) }\n"
+        "enum First { second(value: Second) }\n"
+        "enum Second { first(value: First) }\n"
+        "record Holder { value: Nested }\n"
+        "enum Nested { tuple(value: (Nested, Bool)), boxed(value: Holder) }\n"
+        "enum Generic<T> { next(value: Generic<T>) }\n"
+        "enum List { nil, cons(value: List) }\n"
+        "function direct(value: Loop) -> Int64 { return match value {} }\n"
+        "function mutual(value: First) -> Int64 { return match value {} }\n"
+        "function nested(value: Nested) -> Int64 { return match value {} }\n"
+        "function generic(value: Generic<Int64>) -> Int64 { return match value {} }\n"
+        "function list(value: List) -> Int64 { return match value { "
+            "nil => 0 cons(_) => 1 } }\n";
+    TestCompilation compilation;
+    bool compiled = compile_source(&compilation, valid);
+    CHECK(compiled);
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    size_t empty_matches = 0;
+    if (compiled) {
+        for (SolExprId expression = 0; expression < compilation.syntax.expression_count;
+            ++expression) {
+            const SolExpr *node = &compilation.syntax.expressions[expression];
+            if (node->kind == SOL_EXPR_MATCH
+                && node->as.match_expr.first_arm == SOL_AST_NONE) {
+                CHECK(compilation.types.expressions[expression].kind == SOL_TYPE_NEVER);
+                ++empty_matches;
+            }
+        }
+    }
+    CHECK(empty_matches == 4);
+    free_compilation(&compilation);
+
+    static const char impossible_arm[] =
+        "module impossible_recursive_arm\n"
+        "enum Loop { next(value: Loop) }\n"
+        "function bad(value: Loop) -> Int64 { return match value { next(_) => 0 } }\n";
+    CHECK(compile_source(&compilation, impossible_arm));
+    CHECK(has_diagnostic(&compilation, "SOL-MATCH-001"));
+    bool unreachable = false;
+    for (size_t index = 0; index < compilation.diagnostics.count; ++index) {
+        unreachable = unreachable || strstr(compilation.diagnostics.items[index].message,
+            "structurally unreachable") != NULL;
+    }
+    CHECK(unreachable);
+    free_compilation(&compilation);
+}
+
+static void test_nested_bare_enum_variant_ambiguity(void) {
+    static const char invalid[] =
+        "module nested_variant_ambiguity\n"
+        "enum Maybe { none, some, }\n"
+        "enum Wrap { wrap(value: Maybe), }\n"
+        "function ambiguous(value: Wrap) -> Int64 { return match value { "
+        "wrap(none) => 1 wrap(some()) => 2 } }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, invalid));
+    CHECK(diagnostic_count(&compilation, "SOL-MATCH-001") == 2);
+    bool explained = false;
+    for (size_t index = 0; index < compilation.diagnostics.count; ++index) {
+        explained = explained || strstr(compilation.diagnostics.items[index].message,
+            "write variant()") != NULL;
+    }
+    CHECK(explained);
+    free_compilation(&compilation);
+
+    static const char valid[] =
+        "module explicit_nested_variant\n"
+        "enum Maybe { none, some, }\n"
+        "enum Wrap { wrap(value: Maybe), }\n"
+        "function explicit(value: Wrap) -> Int64 { return match value { "
+        "wrap(none()) => 1 wrap(some()) => 2 } }\n";
+    CHECK(compile_source(&compilation, valid));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+}
+
 static void test_invalid_enum_constructor(void) {
     static const char text[] =
         "module invalid_constructor\n"
@@ -2242,7 +2462,8 @@ static void test_tuple_types_expressions_and_projections(void) {
     CHECK(projections == 3);
     CHECK(compilation.types.tuple_projection_count
         == compilation.syntax.expression_count);
-    CHECK(sol_type_resolution_metadata_valid(&compilation.syntax, &compilation.types));
+    CHECK(sol_type_resolution_metadata_valid(&compilation.source,
+        &compilation.syntax, &compilation.types));
     CHECK(first_tuple.kind == SOL_TYPE_APPLICATION);
     if (first_tuple.kind == SOL_TYPE_APPLICATION) {
         SolTypeApplication *application
@@ -2253,7 +2474,8 @@ static void test_tuple_types_expressions_and_projections(void) {
         application->definition = definition;
     }
     --compilation.types.tuple_projection_count;
-    CHECK(!sol_type_resolution_metadata_valid(&compilation.syntax, &compilation.types));
+    CHECK(!sol_type_resolution_metadata_valid(&compilation.source,
+        &compilation.syntax, &compilation.types));
     ++compilation.types.tuple_projection_count;
     free_compilation(&compilation);
 
@@ -2328,6 +2550,9 @@ int main(void) {
     test_invalid_record_declaration();
     test_enum_constructors_and_match();
     test_invalid_match();
+    test_recursive_pattern_semantics();
+    test_recursive_uninhabited_match_domains();
+    test_nested_bare_enum_variant_ambiguity();
     test_invalid_enum_constructor();
     test_capability_operation_calls();
     test_invalid_capability_operations();

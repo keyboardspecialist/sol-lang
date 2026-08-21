@@ -18,6 +18,7 @@ typedef size_t SolIrExpressionId;
 typedef size_t SolIrPlaceId;
 typedef size_t SolIrStatementId;
 typedef size_t SolIrArmId;
+typedef size_t SolIrPatternId;
 typedef size_t SolIrSnapshotId;
 typedef size_t SolIrMemberId;
 typedef size_t SolIrEvidenceId;
@@ -112,6 +113,7 @@ typedef struct {
     SolIrSlice generic_parameters;
     SolIrSlice effect_parameters;
     SolIrLocalId capability_source;
+    bool open;
 } SolIrDefinition;
 
 typedef enum {
@@ -371,16 +373,35 @@ typedef struct {
 typedef enum {
     SOL_IR_PATTERN_WILDCARD,
     SOL_IR_PATTERN_BOOL,
+    SOL_IR_PATTERN_BINDING,
     SOL_IR_PATTERN_VARIANT,
+    SOL_IR_PATTERN_RECORD,
+    SOL_IR_PATTERN_TUPLE,
 } SolIrPatternKind;
 
 typedef struct {
     SolIrPatternKind kind;
+    SolIrTypeId type;
+    SolSpan span;
     bool boolean;
     SolIrVariantId variant;
+    SolIrDefinitionId definition;
+    SolIrLocalId binding;
+    SolIrSlice children;
+} SolIrPattern;
+
+typedef struct {
+    SolIrFieldId field;
+    size_t ordinal;
+    SolIrPatternId pattern;
+} SolIrPatternChild;
+
+typedef struct {
+    SolIrPatternId pattern;
+    SolIrExpressionId guard;
     SolIrSlice bindings;
     SolIrSlice cleanup;
-    SolIrExpressionId value;
+    SolIrExpressionId body;
     SolSpan span;
 } SolIrArm;
 
@@ -467,6 +488,10 @@ typedef struct {
     size_t arm_count;
     SolIrArmId *arm_ids;
     size_t arm_id_count;
+    SolIrPattern *patterns;
+    size_t pattern_count;
+    SolIrPatternChild *pattern_children;
+    size_t pattern_child_count;
     SolIrOperand *operands;
     size_t operand_count;
     SolIrLocalId *roots;

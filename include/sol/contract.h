@@ -91,6 +91,16 @@ typedef struct {
 void sol_contract_table_init(SolContractTable *table);
 void sol_contract_table_free(SolContractTable *table);
 
+bool sol_contract_validate_guard(
+    const SolSource *source,
+    const SolSyntaxTree *syntax,
+    const SolHirModule *hir,
+    const SolTypeTable *types,
+    const SolEffectTable *effects,
+    SolExprId guard,
+    SolDiagnostics *diagnostics
+);
+
 bool sol_contract_lower(
     const SolSource *source,
     const SolSyntaxTree *syntax,

@@ -102,6 +102,8 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
         || left->statement_id_count != right->statement_id_count
         || left->arm_count != right->arm_count
         || left->arm_id_count != right->arm_id_count
+        || left->pattern_count != right->pattern_count
+        || left->pattern_child_count != right->pattern_child_count
         || left->cleanup_local_count != right->cleanup_local_count
         || left->operand_count != right->operand_count
         || left->root_count != right->root_count
@@ -127,6 +129,10 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
             left->statement_id_count * sizeof(*left->statement_ids)) != 0
         || memcmp(left->arm_ids, right->arm_ids,
             left->arm_id_count * sizeof(*left->arm_ids)) != 0
+        || memcmp(left->patterns, right->patterns,
+            left->pattern_count * sizeof(*left->patterns)) != 0
+        || memcmp(left->pattern_children, right->pattern_children,
+            left->pattern_child_count * sizeof(*left->pattern_children)) != 0
         || memcmp(left->cleanup_locals, right->cleanup_locals,
             left->cleanup_local_count * sizeof(*left->cleanup_locals)) != 0
         || memcmp(left->roots, right->roots,
@@ -148,6 +154,7 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
                 != right->definitions[index].semantic_id.high
             || left->definitions[index].semantic_id.low
                 != right->definitions[index].semantic_id.low
+            || left->definitions[index].open != right->definitions[index].open
             || strcmp(left->definitions[index].name, right->definitions[index].name) != 0) {
             return false;
         }
@@ -319,7 +326,8 @@ static void test_complete_ir_and_lifetime(void) {
             && expression->as.call.kind == SOL_IR_CALL_BUILTIN_NONE);
     }
     for (size_t index = 0; index < left.ir.arm_count; ++index) {
-        pattern = pattern || left.ir.arms[index].kind == SOL_IR_PATTERN_VARIANT;
+        pattern = pattern || left.ir.patterns[left.ir.arms[index].pattern].kind
+            == SOL_IR_PATTERN_VARIANT;
     }
     CHECK(field);
     CHECK(pattern);
@@ -2296,6 +2304,7 @@ static void test_exhaustive_validation_domains(void) {
     bool compiled = compile_ir(&compilation,
         "module exhaustive_validation\n"
         "record Pair { left: Int64, right: Int64 }\n"
+        "record Bundle { pair: (Int64, Bool) }\n"
         "enum Choice<T> { yes(value: T), no }\n"
         "type Positive = refined Int64 where self > 0\n"
         "capability Read { function read() -> Int64 effects { service.read<Self> } }\n"
@@ -2334,6 +2343,8 @@ static void test_exhaustive_validation_domains(void) {
         "{ let item = value? return some(item) }\n"
         "function boolean(value: Bool) -> Int64 { return match value "
         "{ true => 1 false => 0 } }\n"
+        "function destructure(value: Bundle) -> Int64 { return match value "
+        "{ Bundle { pair = (item, _) } => item } }\n"
         "function loops(flag: Bool) -> () { while flag decreases { 1 } "
             "{ continue } loop { break } }\n"
         "function terminating(message: Text, flag: Bool) -> () effects { panic } "
@@ -2395,7 +2406,7 @@ static void test_exhaustive_validation_domains(void) {
         && method_call != SOL_IR_NONE);
     bool expression_kinds[SOL_IR_EXPR_BOUND_OPERATION + 1] = {false};
     bool statement_kinds[SOL_IR_STATEMENT_REQUIRE + 1] = {false};
-    bool pattern_kinds[SOL_IR_PATTERN_VARIANT + 1] = {false};
+    bool pattern_kinds[SOL_IR_PATTERN_TUPLE + 1] = {false};
     for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
         SolIrExpressionKind kind = compilation.ir.expressions[index].kind;
         CHECK((int)kind >= 0 && kind <= SOL_IR_EXPR_BOUND_OPERATION);
@@ -2410,10 +2421,10 @@ static void test_exhaustive_validation_domains(void) {
             statement_kinds[kind] = true;
         }
     }
-    for (size_t index = 0; index < compilation.ir.arm_count; ++index) {
-        SolIrPatternKind kind = compilation.ir.arms[index].kind;
-        CHECK((int)kind >= 0 && kind <= SOL_IR_PATTERN_VARIANT);
-        if ((int)kind >= 0 && kind <= SOL_IR_PATTERN_VARIANT) pattern_kinds[kind] = true;
+    for (size_t index = 0; index < compilation.ir.pattern_count; ++index) {
+        SolIrPatternKind kind = compilation.ir.patterns[index].kind;
+        CHECK((int)kind >= 0 && kind <= SOL_IR_PATTERN_TUPLE);
+        if ((int)kind >= 0 && kind <= SOL_IR_PATTERN_TUPLE) pattern_kinds[kind] = true;
     }
     for (size_t kind = 0; kind <= SOL_IR_EXPR_BOUND_OPERATION; ++kind) {
         CHECK(expression_kinds[kind]);
@@ -2421,7 +2432,7 @@ static void test_exhaustive_validation_domains(void) {
     for (size_t kind = 0; kind <= SOL_IR_STATEMENT_REQUIRE; ++kind) {
         CHECK(statement_kinds[kind]);
     }
-    for (size_t kind = 0; kind <= SOL_IR_PATTERN_VARIANT; ++kind) {
+    for (size_t kind = 0; kind <= SOL_IR_PATTERN_TUPLE; ++kind) {
         CHECK(pattern_kinds[kind]);
     }
 
@@ -2585,7 +2596,7 @@ static void test_exhaustive_validation_domains(void) {
     CHECK_REJECTED_MUTATION(compilation.ir.statements[0].kind,
         SolIrStatementKind,
         (SolIrStatementKind)-1);
-    CHECK_REJECTED_MUTATION(compilation.ir.arms[0].kind, SolIrPatternKind,
+    CHECK_REJECTED_MUTATION(compilation.ir.patterns[0].kind, SolIrPatternKind,
         (SolIrPatternKind)-1);
     CHECK_REJECTED_MUTATION(compilation.ir.callables[0].kind, SolIrCallableKind,
         (SolIrCallableKind)-1);
@@ -3228,6 +3239,284 @@ static void test_tuple_ir_ownership_and_validation(void) {
     free_compilation(&compilation);
 }
 
+static void test_recursive_pattern_ir_and_guards(void) {
+    TestCompilation compilation;
+    bool compiled = compile_ir(&compilation,
+        "module recursive_patterns\n"
+        "record Packet<T> { ignored: Bool, data: (T, Bool) }\n"
+        "record Flags { pair: (Bool, Bool) }\n"
+        "enum Envelope<T> { wrapped(packet: Packet<T>), empty }\n"
+        "function select(value: Envelope<Int64>, gate: Bool) -> Int64 { "
+        "return match value { "
+        "wrapped(Packet { data = (number, true) }) if gate => number "
+        "wrapped(Packet { data = (number, true), ignored = _ }) => number + 1 "
+        "_ => 0 } }\n"
+        "function flags(value: Flags) -> Bool { return match value { "
+        "Flags { pair = (left, right) } => left && right } }\n"
+        "enum List { nil, cons(tail: List) }\n"
+        "function list(value: List, gate: Bool) -> Int64 { return match value { "
+        "nil => 0 cons(_) if gate => 1 cons(_) => 2 } }\n"
+        "function effectful() -> Bool effects { panic } { panic \"effect\" }\n"
+        "function call_effect() -> Bool effects { panic } { return effectful() }\n"
+        "function propagate(value: Option<Bool>) -> Option<Bool> { "
+        "return some(value?) }\n"
+        "function imperative(flag: Bool) -> Bool { return if flag { "
+        "var changed: Bool changed = false changed = true changed } else { false } }\n");
+    if (!compiled) sol_diagnostics_render_human(stderr, &compilation.source,
+        &compilation.diagnostics);
+    CHECK(compiled);
+    if (!compiled) {
+        free_compilation(&compilation);
+        return;
+    }
+    bool kinds[SOL_IR_PATTERN_TUPLE + 1] = {false};
+    SolIrPattern *record = NULL;
+    SolIrPattern *tuple = NULL;
+    SolIrPattern *variant = NULL;
+    SolIrArm *guarded = NULL;
+    for (size_t index = 0; index < compilation.ir.pattern_count; ++index) {
+        SolIrPattern *pattern = &compilation.ir.patterns[index];
+        kinds[pattern->kind] = true;
+        if (pattern->kind == SOL_IR_PATTERN_RECORD && record == NULL) record = pattern;
+        if (pattern->kind == SOL_IR_PATTERN_TUPLE && tuple == NULL) tuple = pattern;
+        if (pattern->kind == SOL_IR_PATTERN_VARIANT && variant == NULL) variant = pattern;
+    }
+    for (size_t index = 0; index < compilation.ir.arm_count; ++index) {
+        if (compilation.ir.arms[index].guard != SOL_IR_NONE
+            && compilation.ir.arms[index].bindings.count == 1) {
+            guarded = &compilation.ir.arms[index];
+        }
+    }
+    CHECK(record != NULL && tuple != NULL && variant != NULL && guarded != NULL);
+    CHECK(kinds[SOL_IR_PATTERN_WILDCARD] && kinds[SOL_IR_PATTERN_BOOL]
+        && kinds[SOL_IR_PATTERN_BINDING] && kinds[SOL_IR_PATTERN_VARIANT]
+        && kinds[SOL_IR_PATTERN_RECORD] && kinds[SOL_IR_PATTERN_TUPLE]);
+    CHECK(record == NULL || record->children.count == 1);
+    CHECK(tuple == NULL || tuple->children.count == 2);
+    CHECK(guarded == NULL || guarded->bindings.count == 1);
+
+    if (tuple != NULL) {
+        SolIrPatternChild *edge
+            = &compilation.ir.pattern_children[tuple->children.offset];
+        size_t saved = edge->ordinal;
+        edge->ordinal = 1;
+        CHECK(validate_rejected(&compilation.ir));
+        edge->ordinal = saved;
+        SolIrPatternId child = edge->pattern;
+        edge->pattern = (SolIrPatternId)(tuple - compilation.ir.patterns);
+        CHECK(validate_rejected(&compilation.ir));
+        edge->pattern = child;
+    }
+    for (size_t index = 0; index < compilation.ir.pattern_count; ++index) {
+        SolIrPattern *candidate = &compilation.ir.patterns[index];
+        if (candidate->kind != SOL_IR_PATTERN_TUPLE
+            || candidate->children.count != 2) continue;
+        SolIrPatternChild *first = &compilation.ir.pattern_children[
+            candidate->children.offset];
+        SolIrPatternChild *second = first + 1;
+        if (compilation.ir.patterns[first->pattern].type
+            != compilation.ir.patterns[second->pattern].type) continue;
+        SolIrPatternId saved = second->pattern;
+        second->pattern = first->pattern;
+        CHECK(validate_rejected(&compilation.ir));
+        second->pattern = saved;
+        break;
+    }
+    if (record != NULL) {
+        SolIrPatternChild *edge
+            = &compilation.ir.pattern_children[record->children.offset];
+        SolIrFieldId saved = edge->field;
+        edge->field = compilation.ir.field_count;
+        CHECK(validate_rejected(&compilation.ir));
+        edge->field = saved;
+    }
+    if (guarded != NULL) {
+        SolIrExpressionId saved = guarded->guard;
+        for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+            if (compilation.ir.types[compilation.ir.expressions[index].type].kind
+                == SOL_IR_TYPE_INT64) {
+                guarded->guard = index;
+                break;
+            }
+        }
+        CHECK(validate_rejected(&compilation.ir));
+        guarded->guard = saved;
+
+        SolIrExpressionId effectful = SOL_IR_NONE;
+        SolIrExpressionId imperative = SOL_IR_NONE;
+        SolIrExpressionId propagating = SOL_IR_NONE;
+        for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+            const SolIrExpression *candidate = &compilation.ir.expressions[index];
+            if (candidate->type >= compilation.ir.type_count
+                || compilation.ir.types[candidate->type].kind != SOL_IR_TYPE_BOOL) continue;
+            if (candidate->kind == SOL_IR_EXPR_CALL
+                && candidate->as.call.effects.count != 0) effectful = index;
+            if (candidate->kind == SOL_IR_EXPR_PROPAGATE) propagating = index;
+            if (candidate->kind == SOL_IR_EXPR_BLOCK) {
+                for (size_t statement = 0;
+                    statement < candidate->as.block.statements.count; ++statement) {
+                    SolIrStatementKind kind = compilation.ir.statements[
+                        compilation.ir.statement_ids[
+                            candidate->as.block.statements.offset + statement]].kind;
+                    if (kind == SOL_IR_STATEMENT_ASSIGNMENT
+                        || kind == SOL_IR_STATEMENT_DECLARE) imperative = index;
+                }
+            }
+        }
+        CHECK(effectful != SOL_IR_NONE && imperative != SOL_IR_NONE
+            && propagating != SOL_IR_NONE);
+        if (effectful != SOL_IR_NONE) {
+            guarded->guard = effectful;
+            CHECK(validate_rejected(&compilation.ir));
+        }
+        if (imperative != SOL_IR_NONE) {
+            guarded->guard = imperative;
+            CHECK(validate_rejected(&compilation.ir));
+        }
+        if (propagating != SOL_IR_NONE) {
+            guarded->guard = propagating;
+            CHECK(validate_rejected(&compilation.ir));
+        }
+        guarded->guard = saved;
+    }
+
+    SolIrPattern *list_nil = NULL;
+    SolIrPattern *list_wildcard = NULL;
+    SolIrArm *list_guarded = NULL;
+    for (size_t index = 0; index < compilation.ir.arm_count; ++index) {
+        SolIrArm *arm = &compilation.ir.arms[index];
+        SolIrPattern *pattern = &compilation.ir.patterns[arm->pattern];
+        if (pattern->kind != SOL_IR_PATTERN_VARIANT) continue;
+        const char *name = compilation.ir.variants[pattern->variant].name;
+        if (strcmp(name, "nil") == 0) list_nil = pattern;
+        if (strcmp(name, "cons") == 0 && pattern->children.count == 1) {
+            SolIrPattern *child = &compilation.ir.patterns[
+                compilation.ir.pattern_children[pattern->children.offset].pattern];
+            if (child->kind == SOL_IR_PATTERN_WILDCARD) list_wildcard = child;
+            if (arm->guard != SOL_IR_NONE) list_guarded = arm;
+        }
+    }
+    CHECK(list_nil != NULL && list_wildcard != NULL && list_guarded != NULL);
+    if (list_nil != NULL && list_wildcard != NULL) {
+        SolIrPattern saved = *list_wildcard;
+        *list_wildcard = *list_nil;
+        list_wildcard->span = saved.span;
+        CHECK(validate_rejected(&compilation.ir));
+        *list_wildcard = saved;
+    }
+    if (list_guarded != NULL) {
+        SolIrExpressionId saved = list_guarded->guard;
+        list_guarded->guard = SOL_IR_NONE;
+        CHECK(validate_rejected(&compilation.ir));
+        list_guarded->guard = saved;
+    }
+    SolIr forged = compilation.ir;
+    forged.patterns = NULL;
+    CHECK(validate_rejected(&forged));
+    forged = compilation.ir;
+    forged.pattern_children = NULL;
+    CHECK(validate_rejected(&forged));
+    free_frontend(&compilation);
+    CHECK(sol_ir_validate(&compilation.ir, &compilation.diagnostics));
+    sol_ir_free(&compilation.ir);
+    sol_diagnostics_free(&compilation.diagnostics);
+
+    CHECK(!compile_ir(&compilation,
+        "module guard_move\n"
+        "record Box<T> { value: T }\n"
+        "enum Hold { one(item: Box<Int64>) }\n"
+        "function consume(value: Box<Int64>, result: Bool) -> Bool { return result }\n"
+        "function bad(value: Hold) -> Int64 { return match value { "
+        "one(item) if consume(item, true) => 1 one(_) => 0 } }\n"
+        "function outer_true(value: Hold, box: Box<Int64>) -> Int64 { "
+        "return match value { one(_) if consume(box, true) => box.value one(_) => 0 } }\n"
+        "function outer_false(value: Hold, box: Box<Int64>) -> Int64 { "
+        "return match value { one(_) if consume(box, false) => 1 one(_) => box.value } }\n"));
+    CHECK(has_code(&compilation, "SOL-OWNERSHIP-005"));
+    free_compilation(&compilation);
+
+    CHECK(compile_ir(&compilation,
+        "module forged_coverage\n"
+        "function value(input: Bool) -> Int64 { return match input { "
+        "true => 1 false => 0 } }\n"));
+    SolIrPattern *false_pattern = NULL;
+    for (size_t index = 0; index < compilation.ir.pattern_count; ++index) {
+        if (compilation.ir.patterns[index].kind == SOL_IR_PATTERN_BOOL
+            && !compilation.ir.patterns[index].boolean) {
+            false_pattern = &compilation.ir.patterns[index];
+        }
+    }
+    CHECK(false_pattern != NULL);
+    if (false_pattern != NULL) {
+        false_pattern->boolean = true;
+        CHECK(validate_rejected(&compilation.ir));
+    }
+    free_compilation(&compilation);
+}
+
+static void test_recursive_uninhabited_ir_coverage(void) {
+    static const char source[] =
+        "module recursive_uninhabited_ir\n"
+        "enum Loop { next(value: Loop) }\n"
+        "enum First { second(value: Second) }\n"
+        "enum Second { first(value: First) }\n"
+        "record Holder { value: Nested }\n"
+        "enum Nested { tuple(value: (Nested, Bool)), boxed(value: Holder) }\n"
+        "enum Generic<T> { next(value: Generic<T>) }\n"
+        "enum List { nil, cons(value: List) }\n"
+        "function direct(value: Loop) -> Int64 { return match value {} }\n"
+        "function mutual(value: First) -> Int64 { return match value {} }\n"
+        "function nested(value: Nested) -> Int64 { return match value {} }\n"
+        "function generic(value: Generic<Int64>) -> Int64 { return match value {} }\n"
+        "function list(value: List) -> Int64 { return match value { "
+            "nil => 0 cons(_) => 1 } }\n";
+    TestCompilation compilation;
+    CHECK(compile_ir(&compilation, source));
+    size_t empty_matches = 0;
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        const SolIrExpression *expression = &compilation.ir.expressions[index];
+        if (expression->kind == SOL_IR_EXPR_MATCH
+            && expression->as.match_expr.arms.count == 0) {
+            CHECK(compilation.ir.types[expression->type].kind == SOL_IR_TYPE_NEVER);
+            ++empty_matches;
+        }
+    }
+    CHECK(empty_matches == 4);
+    free_compilation(&compilation);
+
+    CHECK(compile_ir(&compilation,
+        "module malformed_recursive_coverage\n"
+        "enum Loop { next(value: Loop) }\n"
+        "function direct(value: Loop) -> Int64 { return match value {} }\n"
+        "function boolean(value: Bool) -> Bool { return value }\n"));
+    SolIrTypeId bool_type = SOL_IR_NONE;
+    SolIrTypeId never_type = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.type_count; ++index) {
+        if (compilation.ir.types[index].kind == SOL_IR_TYPE_BOOL) bool_type = index;
+        if (compilation.ir.types[index].kind == SOL_IR_TYPE_NEVER) never_type = index;
+    }
+    CHECK(bool_type != SOL_IR_NONE && never_type != SOL_IR_NONE);
+    SolIrField *loop_field = NULL;
+    for (size_t index = 0; index < compilation.ir.field_count; ++index) {
+        SolIrDefinitionId owner = compilation.ir.fields[index].owner;
+        if (owner < compilation.ir.definition_count
+            && strcmp(compilation.ir.definitions[owner].name, "Loop") == 0) {
+            loop_field = &compilation.ir.fields[index];
+        }
+    }
+    CHECK(loop_field != NULL);
+    if (loop_field != NULL && bool_type != SOL_IR_NONE && never_type != SOL_IR_NONE) {
+        SolIrTypeId saved = loop_field->type;
+        loop_field->type = bool_type;
+        CHECK(validate_rejected(&compilation.ir));
+        loop_field->type = never_type;
+        CHECK(sol_ir_validate(&compilation.ir, NULL));
+        loop_field->type = saved;
+        CHECK(sol_ir_validate(&compilation.ir, NULL));
+    }
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_geometric_growth();
     test_complete_ir_and_lifetime();
@@ -3253,6 +3542,8 @@ int main(void) {
     test_loop_obligation_ir();
     test_terminating_statement_ir();
     test_tuple_ir_ownership_and_validation();
+    test_recursive_pattern_ir_and_guards();
+    test_recursive_uninhabited_ir_coverage();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

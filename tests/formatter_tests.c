@@ -502,6 +502,32 @@ static void test_tuple_formatting(void) {
     sol_formatted_free(&formatted);
 }
 
+static void test_nested_pattern_formatting(void) {
+    static const char source[] =
+        "module patterns\nfunction choose(value:Int64,ready:Bool)->Int64{\n"
+        "return match value{\nsome((left,Pair{first,second=some(inner)},_)) "
+        "if ready&&left==inner=>left\nPair{first=_,second}=>second\n}\n}\n";
+    static const char expected[] =
+        "module patterns\n"
+        "function choose(value: Int64, ready: Bool) -> Int64 {\n"
+        "    return match value {\n"
+        "        some((left, Pair { first, second = some(inner) }, _)) "
+        "if ready && left == inner => left\n"
+        "        Pair { first = _, second } => second\n"
+        "    }\n"
+        "}\n";
+    SolFormatted formatted;
+    SolDiagnostics diagnostics;
+    sol_formatted_init(&formatted);
+    sol_diagnostics_init(&diagnostics);
+    CHECK(format_text(source, &formatted, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    check_output(&formatted, expected);
+    check_second_pass(&formatted);
+    sol_diagnostics_free(&diagnostics);
+    sol_formatted_free(&formatted);
+}
+
 int main(void) {
     test_golden_formatting();
     test_comments_and_preserved_bytes();
@@ -518,6 +544,7 @@ int main(void) {
     test_construct_golden_formatting();
     test_failure_statement_formatting();
     test_tuple_formatting();
+    test_nested_pattern_formatting();
 
     if (failures != 0) {
         fprintf(stderr, "%d formatter test(s) failed\n", failures);

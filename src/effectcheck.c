@@ -1,4 +1,5 @@
 #include "sol/effectcheck.h"
+#include "sol/contract.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -1427,6 +1428,13 @@ static void sol_effect_expression(SolEffectChecker *checker, SolExprId expressio
                     break;
                 }
                 const SolMatchArm *arm = &checker->syntax->match_arms[arm_id];
+                if (arm->guard != SOL_AST_NONE
+                    && checker->mode == SOL_EFFECT_WALK_VALIDATE) {
+                    SolEffectWalkMode saved_mode = checker->mode;
+                    checker->mode = SOL_EFFECT_WALK_RECORD;
+                    sol_effect_expression(checker, arm->guard);
+                    checker->mode = saved_mode;
+                }
                 sol_effect_expression(checker, arm->value);
                 arm_id = arm->next;
             }
@@ -1693,6 +1701,8 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
     for (size_t index = 0; index < syntax->match_arm_count; ++index) {
         const SolMatchArm *arm = &syntax->match_arms[index];
         if (arm->pattern >= syntax->pattern_count
+            || (arm->guard != SOL_AST_NONE
+                && arm->guard >= syntax->expression_count)
             || arm->value >= syntax->expression_count
             || !sol_effect_span_valid(source, arm->span)
             || (arm->next != SOL_AST_NONE && arm->next >= syntax->match_arm_count)) {
@@ -2246,15 +2256,27 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
                             break;
                         }
                         arm_owners[arm] = expression_id;
-                        valid = sol_effect_schedule_owned_expression(
+                        const SolMatchArm *match_arm
+                            = &checker->syntax->match_arms[arm];
+                        if (match_arm->guard != SOL_AST_NONE) {
+                            valid = sol_effect_schedule_owned_expression(
+                                checker,
+                                owner,
+                                match_arm->guard,
+                                states,
+                                stack,
+                                &stack_count
+                            );
+                        }
+                        valid = valid && sol_effect_schedule_owned_expression(
                             checker,
                             owner,
-                            checker->syntax->match_arms[arm].value,
+                            match_arm->value,
                             states,
                             stack,
                             &stack_count
                         );
-                        arm = checker->syntax->match_arms[arm].next;
+                        arm = match_arm->next;
                     }
                     break;
                 }
@@ -2953,12 +2975,18 @@ static void sol_effect_push_expression_provenance_dependencies(
     } else if (expression->kind == SOL_EXPR_MATCH) {
         SolMatchArmId arm = expression->as.match_expr.first_arm;
         while (arm != SOL_AST_NONE) {
+            const SolMatchArm *entry = &checker->syntax->match_arms[arm];
+            if (entry->guard != SOL_AST_NONE) {
+                sol_effect_push_provenance_dependency(
+                    stack, stack_count, entry->guard
+                );
+            }
             sol_effect_push_provenance_dependency(
                 stack,
                 stack_count,
-                checker->syntax->match_arms[arm].value
+                entry->value
             );
-            arm = checker->syntax->match_arms[arm].next;
+            arm = entry->next;
         }
     } else if (capability && expression->kind == SOL_EXPR_RECORD) {
         SolArgumentId source = expression->as.record.first_field;
@@ -3530,6 +3558,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || types->member_resolution_count != syntax->expression_count
         || types->tuple_projection_count != syntax->expression_count
         || types->pattern_resolution_count != syntax->pattern_count
+        || types->pattern_child_resolution_count != syntax->pattern_binding_count
         || types->argument_resolution_count != syntax->argument_count
         || types->implementation_target_count != syntax->item_count
         || types->representation_count != syntax->item_count
@@ -3566,7 +3595,11 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             && (types->field_resolutions == NULL || types->variant_resolutions == NULL))
         || (types->tuple_projection_count != 0 && types->tuple_projections == NULL)
         || (types->pattern_resolution_count != 0
-            && types->pattern_variant_resolutions == NULL)
+            && (types->pattern_variant_resolutions == NULL
+                || types->pattern_types == NULL))
+        || (types->pattern_child_resolution_count != 0
+            && (types->pattern_field_resolutions == NULL
+                || types->pattern_tuple_ordinals == NULL))
         || (types->argument_resolution_count != 0
             && types->argument_field_resolutions == NULL)
         || (types->implementation_target_count != 0
@@ -3579,7 +3612,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         return false;
     }
     if (!sol_syntax_contracts_validate(source, syntax)
-        || !sol_type_resolution_metadata_valid(syntax, types)) return false;
+        || !sol_type_resolution_metadata_valid(source, syntax, types)) return false;
     for (SolExprId expression = 0; expression < types->tuple_projection_count;
         ++expression) {
         size_t ordinal = types->tuple_projections[expression];
@@ -4143,7 +4176,13 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
                         ].as.let_statement.name.end))
             || (local->kind != SOL_LOCAL_BINDING && local->mutable)
             || (local->kind == SOL_LOCAL_PATTERN
-                && local->syntax_id >= syntax->pattern_binding_count)) {
+                && (local->syntax_id >= syntax->pattern_count
+                    || syntax->patterns[local->syntax_id].kind
+                        != SOL_PATTERN_BINDING
+                    || local->name.start
+                        != syntax->patterns[local->syntax_id].name.start
+                    || local->name.end
+                        != syntax->patterns[local->syntax_id].name.end))) {
             return false;
         }
     }
@@ -4804,6 +4843,14 @@ bool sol_effect_check(
             for (size_t index = 0; index < syntax->trait_method_count; ++index) {
                 if (syntax->trait_methods[index].body != SOL_AST_NONE) {
                     sol_effect_walk_trait_method(&checker, index);
+                }
+            }
+            for (size_t arm = 0; arm < syntax->match_arm_count; ++arm) {
+                if (syntax->match_arms[arm].guard != SOL_AST_NONE
+                    && !sol_contract_validate_guard(source, syntax, hir, types,
+                        effects, syntax->match_arms[arm].guard, diagnostics)) {
+                    checker.malformed = diagnostics->allocation_failed;
+                    break;
                 }
             }
         }

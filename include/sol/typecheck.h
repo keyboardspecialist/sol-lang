@@ -194,7 +194,13 @@ typedef struct {
     size_t tuple_projection_count;
     /* Indexed by SolPatternId; non-variant patterns use SOL_AST_NONE. */
     SolVariantId *pattern_variant_resolutions;
+    /* Indexed by SolPatternId; the exact scrutinee type expected at this node. */
+    SolType *pattern_types;
     size_t pattern_resolution_count;
+    /* Indexed by SolPatternBindingId; only record/tuple child edges are resolved. */
+    SolFieldId *pattern_field_resolutions;
+    size_t *pattern_tuple_ordinals;
+    size_t pattern_child_resolution_count;
     /* Indexed by SolArgumentId; record literal fields use SOL_AST_NONE otherwise. */
     SolFieldId *argument_field_resolutions;
     size_t argument_resolution_count;
@@ -271,6 +277,7 @@ bool sol_type_provenance(
     SolProvenance *provenance
 );
 bool sol_type_resolution_metadata_valid(
+    const SolSource *source,
     const SolSyntaxTree *syntax,
     const SolTypeTable *table
 );

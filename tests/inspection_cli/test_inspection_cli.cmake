@@ -70,7 +70,7 @@ if(NOT package_output MATCHES "\"kind\":\"directory\""
 endif()
 
 run_inspect(generic 0 "${GENERIC_FILE}" --require-generic)
-run_inspect(tuple 0 "${TUPLE_FILE}" --require-tuple)
+run_inspect(tuple 0 "${TUPLE_FILE}" --require-tuple --require-patterns)
 run_inspect(mutable 0 "${MUTABLE_FILE}")
 if(NOT mutable_output MATCHES "\"mutable\":true")
     message(FATAL_ERROR "mutable HIR metadata is missing: ${mutable_output}")

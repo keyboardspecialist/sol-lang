@@ -12,7 +12,7 @@ from pathlib import Path
 SEMANTIC = re.compile(r"^sem:1:[0-9a-f]{32}$")
 IDS = re.compile(
     r"^(?:declaration|expr|local|syntax-type|type-parameter|effect-parameter|"
-    r"type-app|signature|capability-member|variant|trait-method|provenance|"
+    r"type-app|signature|capability-member|variant|field|pattern|match-arm|trait-method|provenance|"
     r"obligation|snapshot):[0-9]+$"
 )
 TYPE_SNAPSHOTS = {
@@ -36,7 +36,7 @@ ARTIFACT_TAGS = {
     "contracts": "sol.inspection.contracts",
     "diagnostics": "sol.inspection.diagnostics",
 }
-ARTIFACT_VERSIONS = {"syntax": 2, "types": 2, "hir": 1, "effects": 1,
+ARTIFACT_VERSIONS = {"syntax": 3, "types": 3, "hir": 1, "effects": 1,
                      "contracts": 1, "diagnostics": 1}
 
 
@@ -56,10 +56,66 @@ def walk(value):
             yield from walk(child)
 
 
-def validate_schema(schema):
+def schema_accepts(schema, definition, value):
+    if "$ref" in definition:
+        return schema_accepts(schema, schema["$defs"][definition["$ref"].split("/")[-1]], value)
+    if "anyOf" in definition:
+        if not any(schema_accepts(schema, branch, value) for branch in definition["anyOf"]):
+            return False
+    if "oneOf" in definition:
+        if sum(schema_accepts(schema, branch, value) for branch in definition["oneOf"]) != 1:
+            return False
+    if "not" in definition and schema_accepts(schema, definition["not"], value):
+        return False
+    if "const" in definition and value != definition["const"]:
+        return False
+    if "enum" in definition and value not in definition["enum"]:
+        return False
+    kinds = definition.get("type")
+    if kinds is not None:
+        kinds = [kinds] if isinstance(kinds, str) else kinds
+        matches = {"object": isinstance(value, dict), "array": isinstance(value, list),
+                   "string": isinstance(value, str), "integer": type(value) is int,
+                   "boolean": isinstance(value, bool), "null": value is None}
+        if not any(matches.get(kind, False) for kind in kinds):
+            return False
+    if isinstance(value, dict):
+        if not set(definition.get("required", ())) <= set(value):
+            return False
+        for key, child in definition.get("properties", {}).items():
+            if key in value and not schema_accepts(schema, child, value[key]):
+                return False
+    if isinstance(value, list):
+        if len(value) < definition.get("minItems", 0):
+            return False
+        if "maxItems" in definition and len(value) > definition["maxItems"]:
+            return False
+        if "items" in definition and not all(
+                schema_accepts(schema, definition["items"], child) for child in value):
+            return False
+    if isinstance(value, str):
+        if len(value) < definition.get("minLength", 0):
+            return False
+        if "pattern" in definition and re.fullmatch(definition["pattern"], value) is None:
+            return False
+    if type(value) is int:
+        if value < definition.get("minimum", value):
+            return False
+        if value > definition.get("maximum", value):
+            return False
+    for condition in definition.get("allOf", ()):
+        if "if" not in condition or schema_accepts(schema, condition["if"], value):
+            if not schema_accepts(schema, condition.get("then", condition), value):
+                return False
+        elif "else" in condition and not schema_accepts(schema, condition["else"], value):
+            return False
+    return True
+
+
+def validate_schema(schema, previous):
     require_object(schema, ["$schema", "$id", "required", "properties", "$defs"], "schema")
     assert schema["properties"]["schema"] == {"const": "sol.inspection"}
-    assert schema["properties"]["version"] == {"const": 2}
+    assert schema["properties"]["version"] == {"const": 3}
     for name, tag in ARTIFACT_TAGS.items():
         artifact = schema["$defs"][name]
         assert tag == artifact["properties"]["schema"]["const"]
@@ -78,7 +134,7 @@ def validate_schema(schema):
         "semanticId", "exprId", "obligationId", "snapshotId", "span", "type",
         "nullableType", "contractObligation", "contractSnapshot", "expressionSnapshot",
         "position", "byteSpan", "diagnosticLocation", "diagnostic", "atom", "effectRow",
-        "diagnostics",
+        "diagnostics", "patternId", "matchArmId", "fieldId", "variantId",
     ):
         assert name in schema["$defs"], f"schema missing definition {name}"
     contracts = schema["$defs"]["contracts"]["properties"]
@@ -126,9 +182,99 @@ def validate_schema(schema):
     }
     applications = schema["$defs"]["typeApplication"]["properties"]
     assert "tuple" in applications["constructor"]["enum"]
-    assert schema["$defs"]["types"]["properties"]["tupleProjections"] == {
-        "$ref": "#/$defs/tupleProjections"
+    assert schema["$defs"]["syntax"]["properties"]["patterns"]["items"] == {
+        "$ref": "#/$defs/pattern"
     }
+    assert schema["$defs"]["syntax"]["properties"]["matchArms"]["items"] == {
+        "$ref": "#/$defs/matchArm"
+    }
+    assert schema["$defs"]["types"]["properties"]["patterns"]["items"] == {
+        "$ref": "#/$defs/patternType"
+    }
+    assert schema["$defs"]["types"]["properties"]["variants"]["items"] == {
+        "$ref": "#/$defs/variantSemantic"
+    }
+    assert schema["$defs"]["types"]["properties"]["fields"]["items"] == {
+        "$ref": "#/$defs/fieldSemantic"
+    }
+    unchanged = set(previous["$defs"]) - {"syntax", "types"}
+    for name in unchanged:
+        assert schema["$defs"][name] == previous["$defs"][name], (
+            f"v3 weakened or changed unchanged v2 definition {name}"
+        )
+    for name in ("files", "declarations", "arenaCounts"):
+        assert schema["$defs"]["syntax"]["properties"][name] == previous["$defs"]["syntax"]["properties"][name]
+    preserved_type_fields = set(previous["$defs"]["types"]["properties"]) - {
+        "schema", "version", "patternVariantResolutions"
+    }
+    for name in preserved_type_fields:
+        assert schema["$defs"]["types"]["properties"][name] == previous["$defs"]["types"]["properties"][name], (
+            f"v3 weakened unchanged types.{name}"
+        )
+
+    semantic = "sem:1:" + "0" * 32
+    primitive = {"kind": "int64", "definition": None, "snapshotRef": None}
+    span = {"file": "sample.sol", "start": 0, "end": 1}
+    hir_definition = {"semanticId": semantic, "kind": "record", "name": "R",
+                      "syntaxDeclaration": "declaration:0"}
+    assert schema_accepts(schema, schema["$defs"]["hir"]["properties"]["definitions"]["items"], hir_definition)
+    assert not schema_accepts(schema, schema["$defs"]["hir"]["properties"]["definitions"]["items"],
+                              {key: value for key, value in hir_definition.items() if key != "name"})
+    signature = {"id": "signature:0", "parameters": [primitive], "accesses": ["owned"],
+                 "result": primitive, "effects": [], "rowTail": None}
+    assert schema_accepts(schema, schema["$defs"]["types"]["properties"]["functionSignatures"]["items"], signature)
+    assert not schema_accepts(schema, schema["$defs"]["types"]["properties"]["functionSignatures"]["items"],
+                              {key: value for key, value in signature.items() if key != "result"})
+    call = {"call": "expr:0", "function": semantic, "arguments": []}
+    assert schema_accepts(schema, schema["$defs"]["types"]["properties"]["callInstantiations"]["items"], call)
+    assert not schema_accepts(schema, schema["$defs"]["types"]["properties"]["callInstantiations"]["items"],
+                              {"call": "expr:0", "function": semantic})
+    tuple_type = {"id": "type-app:0", "constructor": "tuple", "definition": None,
+                  "arguments": [primitive, primitive]}
+    assert schema_accepts(schema, schema["$defs"]["typeApplication"], tuple_type)
+    tuple_type["arguments"] = [primitive]
+    assert not schema_accepts(schema, schema["$defs"]["typeApplication"], tuple_type)
+    field_expression = {"id": "expr:0", "kind": "field", "span": span, "base": "expr:1"}
+    expression_schema = schema["$defs"]["syntax"]["properties"]["expressions"]["items"]
+    assert schema_accepts(schema, expression_schema, field_expression)
+    del field_expression["base"]
+    assert not schema_accepts(schema, expression_schema, field_expression)
+    plain_expression = {"id": "expr:0", "kind": "integer", "span": span}
+    for extra in ({"base": "expr:1"}, {"scrutinee": "expr:1"}, {"arms": []}):
+        assert not schema_accepts(schema, expression_schema, plain_expression | extra)
+    match_expression = plain_expression | {
+        "kind": "match", "scrutinee": "expr:1", "arms": []
+    }
+    assert schema_accepts(schema, expression_schema, match_expression)
+    assert not schema_accepts(schema, expression_schema,
+                              match_expression | {"base": "expr:2"})
+
+    pattern_schema = schema["$defs"]["pattern"]
+    child = {"pattern": "pattern:1", "field": None}
+    pattern = {"id": "pattern:0", "kind": "tuple", "span": span, "name": None,
+               "boolValue": None, "children": [child, child]}
+    assert schema_accepts(schema, pattern_schema, pattern)
+    pattern["children"][0] = child | {"field": "value"}
+    assert not schema_accepts(schema, pattern_schema, pattern)
+    pattern |= {"kind": "variant", "name": "item", "children": [child]}
+    assert schema_accepts(schema, pattern_schema, pattern)
+    pattern["children"] = [child | {"field": "value"}]
+    assert not schema_accepts(schema, pattern_schema, pattern)
+    pattern |= {"kind": "record", "name": "Box"}
+    assert schema_accepts(schema, pattern_schema, pattern)
+    pattern["children"] = [child]
+    assert not schema_accepts(schema, pattern_schema, pattern)
+
+    pattern_type_child = schema["$defs"]["patternTypeChild"]
+    typed_child = {"pattern": "pattern:1", "type": primitive,
+                   "field": "field:0", "tupleOrdinal": None}
+    assert schema_accepts(schema, pattern_type_child, typed_child)
+    assert schema_accepts(schema, pattern_type_child,
+                          typed_child | {"field": None, "tupleOrdinal": 0})
+    assert not schema_accepts(schema, pattern_type_child,
+                              typed_child | {"tupleOrdinal": 0})
+    assert not schema_accepts(schema, pattern_type_child,
+                              typed_child | {"field": None})
     for node in walk(schema):
         if isinstance(node, dict) and isinstance(node.get("$ref"), str):
             reference = node["$ref"]
@@ -157,17 +303,69 @@ def validate_type(value, semantic_ids, snapshot_ids):
         assert definition is None and snapshot is None, f"{kind}: unexpected identity"
 
 
-def validate(path, schema_path, require_generic, require_tuple):
+def nominal_owner(type_value, applications):
+    owner = type_value.get("definition")
+    application = applications.get(type_value.get("snapshotRef"))
+    if application is not None and application["constructor"] == "user":
+        owner = application["definition"]
+    return owner
+
+
+def variant_target_matches(semantic, syntax_pattern, target, applications):
+    return target is not None and target["name"] == syntax_pattern["name"] \
+        and target["owner"] == nominal_owner(semantic["type"], applications)
+
+
+def type_structure(value, applications, substitutions=None):
+    substitutions = substitutions or {}
+    if value["kind"] == "parameter" and value["snapshotRef"] in substitutions:
+        return type_structure(substitutions[value["snapshotRef"]], applications,
+                              substitutions)
+    if value["kind"] == "application":
+        application = applications[value["snapshotRef"]]
+        return ("application", application["constructor"], application["definition"],
+                tuple(type_structure(argument, applications, substitutions)
+                      for argument in application["arguments"]))
+    return value["kind"], value["definition"], value["snapshotRef"]
+
+
+def instantiated_field_type_matches(semantic, target, child_type, applications):
+    substitutions = {}
+    owner_application = applications.get(semantic["type"].get("snapshotRef"))
+    if owner_application is not None and owner_application["constructor"] == "user":
+        parameters = target["ownerTypeParameters"]
+        if len(parameters) != len(owner_application["arguments"]):
+            return False
+        substitutions = dict(zip(parameters, owner_application["arguments"]))
+    return type_structure(target["type"], applications, substitutions) \
+        == type_structure(child_type, applications)
+
+
+def field_target_matches(semantic, syntax_pattern, syntax_child, ordinal, target,
+                         applications):
+    if target is None or not instantiated_field_type_matches(
+            semantic, target, semantic["children"][ordinal]["type"], applications):
+        return False
+    if syntax_pattern["kind"] == "record":
+        return target["parentKind"] == "record" \
+            and target["parent"] == nominal_owner(semantic["type"], applications) \
+            and target["name"] == syntax_child["field"]
+    return target["parentKind"] == "variant" \
+        and target["parent"] == semantic["variant"] and target["ordinal"] == ordinal
+
+
+def validate(path, schema_path, require_generic, require_tuple, require_patterns):
     text = path.read_text(encoding="utf-8")
     assert "18446744073709551615" not in text, "64-bit SIZE_MAX leaked"
     assert "4294967295" not in text, "32-bit SIZE_MAX leaked"
     assert "SIZE_MAX" not in text and "SOL_AST_NONE" not in text, "native sentinel leaked"
     data = json.loads(text)
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
-    validate_schema(schema)
+    previous = json.loads(schema_path.with_name("sol-inspection-2.schema.json").read_text(encoding="utf-8"))
+    validate_schema(schema, previous)
 
     require_object(data, ["schema", "version", "producer", "package", "artifacts"], "root")
-    assert data["schema"] == "sol.inspection" and data["version"] == 2
+    assert data["schema"] == "sol.inspection" and data["version"] == 3
     require_object(data["producer"], ["name", "version"], "producer")
     assert data["producer"]["name"] == "sol"
     require_object(data["package"], ["kind", "edition", "fileCount"], "package")
@@ -177,9 +375,9 @@ def validate(path, schema_path, require_generic, require_tuple):
     artifacts = data["artifacts"]
     require_object(artifacts, ARTIFACT_TAGS, "artifacts")
     required_arrays = {
-        "syntax": ["files", "declarations", "expressions"],
+        "syntax": ["files", "declarations", "expressions", "patterns", "matchArms"],
         "hir": ["definitions", "locals", "expressionResolutions", "typeResolutions", "effectResolutions", "occurrences"],
-        "types": ["expressions", "locals", "definitions", "declaredSyntaxTypes", "applications", "functionSignatures", "provenanceRoots", "callInstantiations", "coercions", "handlers", "methodResolutions", "tupleProjections", "representations", "constructions", "variantConstructors", "patternVariantResolutions", "argumentFieldResolutions", "implementationTargets"],
+        "types": ["expressions", "locals", "definitions", "declaredSyntaxTypes", "applications", "functionSignatures", "provenanceRoots", "callInstantiations", "coercions", "handlers", "methodResolutions", "tupleProjections", "representations", "constructions", "variantConstructors", "variants", "fields", "patterns", "argumentFieldResolutions", "implementationTargets"],
         "effects": ["rows", "callInstantiations"],
         "contracts": ["obligations", "snapshots", "expressionSnapshots"],
         "diagnostics": ["items"],
@@ -225,6 +423,81 @@ def validate(path, schema_path, require_generic, require_tuple):
     for entry in expressions:
         if entry["kind"] == "field":
             assert entry.get("base") in expression_ids, "field has an invalid base reference"
+
+    patterns = syntax["patterns"]
+    arms = syntax["matchArms"]
+    pattern_ids = {entry["id"] for entry in patterns}
+    arm_ids = {entry["id"] for entry in arms}
+    assert [entry["id"] for entry in patterns] == [
+        f"pattern:{index}" for index in range(len(patterns))
+    ]
+    assert [entry["id"] for entry in arms] == [
+        f"match-arm:{index}" for index in range(len(arms))
+    ]
+    assert len(pattern_ids) == len(patterns) and len(arm_ids) == len(arms)
+    pattern_by_id = {entry["id"]: entry for entry in patterns}
+    owners = {pattern_id: 0 for pattern_id in pattern_ids}
+    arm_owners = {arm_id: 0 for arm_id in arm_ids}
+    for pattern in patterns:
+        require_object(pattern, ["id", "kind", "span", "name", "boolValue", "children"], "pattern")
+        assert pattern["kind"] in {"wildcard", "bool", "binding", "variant", "record", "tuple"}
+        named = pattern["kind"] in {"binding", "variant", "record"}
+        assert (isinstance(pattern["name"], str) and pattern["name"] != "") if named else pattern["name"] is None
+        assert isinstance(pattern["boolValue"], bool) if pattern["kind"] == "bool" else pattern["boolValue"] is None
+        has_children = pattern["kind"] in {"variant", "record", "tuple"}
+        assert has_children or not pattern["children"]
+        if pattern["kind"] == "tuple":
+            assert 2 <= len(pattern["children"]) <= 16
+        source = sources[pattern["span"]["file"]][pattern["span"]["start"]:pattern["span"]["end"]]
+        if named:
+            assert pattern["name"].encode("utf-8") in source, "pattern name is not its source spelling"
+        for child in pattern["children"]:
+            require_object(child, ["pattern", "field"], "pattern child")
+            assert child["pattern"] in pattern_ids
+            owners[child["pattern"]] += 1
+            if pattern["kind"] == "record":
+                assert isinstance(child["field"], str) and child["field"]
+                assert child["field"].encode("utf-8") in source, "record field is not its source spelling"
+            else:
+                assert child["field"] is None
+    for arm in arms:
+        require_object(arm, ["id", "pattern", "guard", "value", "span"], "match arm")
+        assert arm["pattern"] in pattern_ids and arm["value"] in expression_ids
+        assert arm["guard"] is None or arm["guard"] in expression_ids
+        owners[arm["pattern"]] += 1
+        root_span = pattern_by_id[arm["pattern"]]["span"]
+        value_span = expressions[int(arm["value"].split(":")[1])]["span"]
+        assert arm["span"]["file"] == root_span["file"] == value_span["file"]
+        assert arm["span"]["start"] == root_span["start"]
+        assert arm["span"]["end"] == value_span["end"]
+    for expression in expressions:
+        if expression["kind"] == "match":
+            assert expression.get("scrutinee") in expression_ids
+            assert isinstance(expression.get("arms"), list)
+            starts = [arms[int(arm_id.split(":")[1])]["span"]["start"]
+                      for arm_id in expression["arms"]]
+            assert starts == sorted(starts), "match arms are not in source order"
+            for arm_id in expression["arms"]:
+                assert arm_id in arm_ids
+                arm_owners[arm_id] += 1
+        else:
+            assert "scrutinee" not in expression and "arms" not in expression
+    assert all(count == 1 for count in owners.values()), "patterns must have exactly one parent or arm owner"
+    assert all(count == 1 for count in arm_owners.values()), "match arms must have exactly one match owner"
+
+    visiting = set()
+    visited = set()
+    def visit_pattern(pattern_id):
+        assert pattern_id not in visiting, "recursive pattern cycle"
+        if pattern_id in visited:
+            return
+        visiting.add(pattern_id)
+        for child in pattern_by_id[pattern_id]["children"]:
+            visit_pattern(child["pattern"])
+        visiting.remove(pattern_id)
+        visited.add(pattern_id)
+    for pattern_id in pattern_ids:
+        visit_pattern(pattern_id)
 
     hir = artifacts["hir"]
     assert {entry["semanticId"] for entry in hir["definitions"]} == semantic_ids
@@ -305,6 +578,85 @@ def validate(path, schema_path, require_generic, require_tuple):
         assert len(signature.get("accesses", [])) == len(signature["parameters"])
         assert all(access in ("owned", "shared", "exclusive")
                    for access in signature["accesses"])
+    variants = types["variants"]
+    fields = types["fields"]
+    assert [entry["id"] for entry in variants] == [
+        f"variant:{index}" for index in range(syntax["arenaCounts"]["variants"])
+    ]
+    assert [entry["id"] for entry in fields] == [
+        f"field:{index}" for index in range(syntax["arenaCounts"]["fields"])
+    ]
+    variant_by_id = {entry["id"]: entry for entry in variants}
+    field_by_id = {entry["id"]: entry for entry in fields}
+    for variant in variants:
+        require_object(variant, ["id", "owner", "name"], "variant semantic")
+        assert variant["owner"] in semantic_ids and isinstance(variant["name"], str)
+    parent_ordinals = {}
+    for field in fields:
+        require_object(field, ["id", "parentKind", "parent", "owner", "name", "ordinal",
+                               "ownerTypeParameters", "type"],
+                       "field semantic")
+        assert field["owner"] in semantic_ids and field["parentKind"] in ("record", "variant")
+        assert isinstance(field["name"], str) and field["name"]
+        assert type(field["ordinal"]) is int and field["ordinal"] >= 0
+        assert isinstance(field["ownerTypeParameters"], list)
+        assert len(set(field["ownerTypeParameters"])) == len(field["ownerTypeParameters"])
+        assert all(re.fullmatch(r"type-parameter:[0-9]+", parameter)
+                   and int(parameter.split(":")[1]) < syntax["arenaCounts"]["typeParameters"]
+                   for parameter in field["ownerTypeParameters"])
+        if field["parentKind"] == "record":
+            assert field["parent"] == field["owner"]
+        else:
+            assert field["parent"] in variant_by_id
+            assert variant_by_id[field["parent"]]["owner"] == field["owner"]
+        parent_ordinals.setdefault(field["parent"], []).append(field["ordinal"])
+    assert all(sorted(ordinals) == list(range(len(ordinals)))
+               for ordinals in parent_ordinals.values())
+    pattern_types = types["patterns"]
+    assert [entry["subject"] for entry in pattern_types] == [
+        f"pattern:{index}" for index in range(len(patterns))
+    ]
+    pattern_semantics = {entry["subject"]: entry for entry in pattern_types}
+    assert len(pattern_semantics) == len(pattern_ids)
+    for semantic in pattern_types:
+        syntax_pattern = pattern_by_id[semantic["subject"]]
+        require_object(semantic, ["subject", "type", "variant", "children"], "pattern type")
+        assert (semantic["variant"] is not None) == (syntax_pattern["kind"] == "variant")
+        if semantic["variant"] is not None:
+            assert re.fullmatch(r"variant:[0-9]+", semantic["variant"])
+            assert semantic["variant"] in variant_by_id
+            resolved_variant = variant_by_id[semantic["variant"]]
+            assert variant_target_matches(semantic, syntax_pattern, resolved_variant,
+                                          applications_by_id)
+        assert len(semantic["children"]) == len(syntax_pattern["children"])
+        application = applications_by_id.get(semantic["type"].get("snapshotRef"))
+        for ordinal, (child, syntax_child) in enumerate(zip(semantic["children"], syntax_pattern["children"])):
+            require_object(child, ["pattern", "type", "field", "tupleOrdinal"], "pattern child type")
+            assert child["pattern"] == syntax_child["pattern"]
+            assert child["type"] == pattern_semantics[child["pattern"]]["type"]
+            if syntax_pattern["kind"] == "tuple":
+                assert child["field"] is None and child["tupleOrdinal"] == ordinal
+                assert application is not None and application["constructor"] == "tuple"
+                assert ordinal < len(application["arguments"])
+                assert child["type"] == application["arguments"][ordinal]
+            elif syntax_pattern["kind"] in {"record", "variant"}:
+                assert re.fullmatch(r"field:[0-9]+", child["field"] or "")
+                assert child["field"] in field_by_id
+                assert child["tupleOrdinal"] is None
+                resolved_field = field_by_id[child["field"]]
+                assert field_target_matches(semantic, syntax_pattern, syntax_child,
+                                            ordinal, resolved_field, applications_by_id)
+            else:
+                assert child["field"] is None and child["tupleOrdinal"] is None
+    for expression in expressions:
+        if expression["kind"] != "match":
+            continue
+        subject_type = expression_types[expression["scrutinee"]]
+        for arm_id in expression["arms"]:
+            arm = arms[int(arm_id.split(":")[1])]
+            assert pattern_semantics[arm["pattern"]]["type"] == subject_type
+            if arm["guard"] is not None:
+                assert expression_types[arm["guard"]]["kind"] == "bool", "match guard is not exact Bool"
     for entry in types["representations"]:
         require_object(entry, ["definition", "flavor", "type"], "representation")
         assert entry["definition"] in semantic_ids and entry["flavor"] in ("distinct", "refined")
@@ -396,6 +748,40 @@ def validate(path, schema_path, require_generic, require_tuple):
         ordinals = [ordinal for ordinal in projections if ordinal is not None]
         assert ordinals, "tuple projection is missing"
 
+    if require_patterns:
+        kinds = {entry["kind"] for entry in patterns}
+        assert {"wildcard", "bool", "binding", "variant", "record", "tuple"} <= kinds, (
+            "nested-pattern fixture does not cover every recursive pattern kind"
+        )
+        assert any(entry["guard"] is not None for entry in arms), "guarded match arm is missing"
+        assert any(any(pattern_by_id[child["pattern"]]["children"]
+                       for child in pattern["children"]) for pattern in patterns), (
+            "nested recursive pattern is missing"
+        )
+        assert any(entry["kind"] == "match" and entry["arms"] == []
+                   for entry in expressions), "empty-enum zero-arm match is missing"
+        variant_mutation_rejected = False
+        field_mutation_rejected = False
+        for semantic in pattern_types:
+            syntax_pattern = pattern_by_id[semantic["subject"]]
+            if semantic["variant"] is not None:
+                for candidate in variants:
+                    if candidate["id"] != semantic["variant"]:
+                        variant_mutation_rejected = variant_mutation_rejected or not \
+                            variant_target_matches(semantic, syntax_pattern, candidate,
+                                                   applications_by_id)
+            for ordinal, (child, syntax_child) in enumerate(
+                    zip(semantic["children"], syntax_pattern["children"])):
+                if child["field"] is None:
+                    continue
+                for candidate in fields:
+                    if candidate["id"] != child["field"]:
+                        field_mutation_rejected = field_mutation_rejected or not \
+                            field_target_matches(semantic, syntax_pattern, syntax_child,
+                                                 ordinal, candidate, applications_by_id)
+        assert variant_mutation_rejected, "malformed variant target was not rejected"
+        assert field_mutation_rejected, "malformed field target was not rejected"
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -403,8 +789,10 @@ def main():
     parser.add_argument("schema", type=Path)
     parser.add_argument("--require-generic", action="store_true")
     parser.add_argument("--require-tuple", action="store_true")
+    parser.add_argument("--require-patterns", action="store_true")
     args = parser.parse_args()
-    validate(args.output, args.schema, args.require_generic, args.require_tuple)
+    validate(args.output, args.schema, args.require_generic, args.require_tuple,
+             args.require_patterns)
 
 
 if __name__ == "__main__":

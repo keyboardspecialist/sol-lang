@@ -248,6 +248,13 @@ static const char *sol_inspection_expr_kind(SolExprKind kind) {
     return (size_t)kind < sizeof(names) / sizeof(names[0]) ? names[kind] : "unknown";
 }
 
+static const char *sol_inspection_pattern_kind(SolPatternKind kind) {
+    static const char *const names[] = {
+        "wildcard", "variant", "bool", "binding", "record", "tuple"
+    };
+    return (size_t)kind < sizeof(names) / sizeof(names[0]) ? names[kind] : "unknown";
+}
+
 static const char *sol_inspection_type_kind(SolTypeKind kind) {
     static const char *const names[] = {
         "unknown", "error", "int64", "bool", "text", "unit", "nominal",
@@ -338,7 +345,7 @@ static void sol_inspection_base64(
 
 static void sol_inspection_syntax(SolInspector *inspector) {
     SolInspectionBuffer *out = inspector->output;
-    sol_inspection_text(out, "\"syntax\":{\"schema\":\"sol.inspection.syntax\",\"version\":2,\"edition\":");
+    sol_inspection_text(out, "\"syntax\":{\"schema\":\"sol.inspection.syntax\",\"version\":3,\"edition\":");
     sol_inspection_format(out, "%u,\"files\":[", inspector->syntax->edition);
     size_t file_count = inspector->package->is_directory ? inspector->package->file_count : 1;
     for (size_t index = 0; index < file_count; ++index) {
@@ -383,7 +390,63 @@ static void sol_inspection_syntax(SolInspector *inspector) {
         if (inspector->syntax->expressions[index].kind == SOL_EXPR_FIELD) {
             sol_inspection_format(out, ",\"base\":\"expr:%zu\"",
                 inspector->syntax->expressions[index].as.field.base);
+        } else if (inspector->syntax->expressions[index].kind == SOL_EXPR_MATCH) {
+            const SolExpr *expression = &inspector->syntax->expressions[index];
+            sol_inspection_format(out, ",\"scrutinee\":\"expr:%zu\",\"arms\":[",
+                expression->as.match_expr.scrutinee);
+            SolMatchArmId arm = expression->as.match_expr.first_arm;
+            size_t emitted = 0;
+            while (arm != SOL_AST_NONE) {
+                if (emitted++ != 0) sol_inspection_text(out, ",");
+                sol_inspection_format(out, "\"match-arm:%zu\"", arm);
+                arm = inspector->syntax->match_arms[arm].next;
+            }
+            sol_inspection_text(out, "]");
         }
+        sol_inspection_text(out, "}");
+    }
+    sol_inspection_text(out, "],\"patterns\":[");
+    for (size_t index = 0; index < inspector->syntax->pattern_count; ++index) {
+        const SolPattern *pattern = &inspector->syntax->patterns[index];
+        if (index != 0) sol_inspection_text(out, ",");
+        sol_inspection_format(out, "{\"id\":\"pattern:%zu\",\"kind\":", index);
+        sol_inspection_string(out, sol_inspection_pattern_kind(pattern->kind));
+        sol_inspection_text(out, ",\"span\":"); sol_inspection_span(inspector, pattern->span);
+        sol_inspection_text(out, ",\"name\":");
+        if (pattern->kind == SOL_PATTERN_VARIANT || pattern->kind == SOL_PATTERN_BINDING
+            || pattern->kind == SOL_PATTERN_RECORD) {
+            sol_inspection_source_span(inspector, pattern->name);
+        } else sol_inspection_text(out, "null");
+        sol_inspection_text(out, ",\"boolValue\":");
+        if (pattern->kind == SOL_PATTERN_BOOL) {
+            sol_inspection_text(out, pattern->bool_value ? "true" : "false");
+        } else sol_inspection_text(out, "null");
+        sol_inspection_text(out, ",\"children\":[");
+        SolPatternBindingId child = pattern->first_binding;
+        size_t emitted = 0;
+        while (child != SOL_AST_NONE) {
+            const SolPatternBinding *edge = &inspector->syntax->pattern_bindings[child];
+            if (emitted++ != 0) sol_inspection_text(out, ",");
+            sol_inspection_format(out, "{\"pattern\":\"pattern:%zu\",\"field\":",
+                edge->pattern);
+            if (pattern->kind == SOL_PATTERN_RECORD) {
+                sol_inspection_source_span(inspector, edge->field);
+            } else sol_inspection_text(out, "null");
+            sol_inspection_text(out, "}");
+            child = edge->next;
+        }
+        sol_inspection_text(out, "]}");
+    }
+    sol_inspection_text(out, "],\"matchArms\":[");
+    for (size_t index = 0; index < inspector->syntax->match_arm_count; ++index) {
+        const SolMatchArm *arm = &inspector->syntax->match_arms[index];
+        if (index != 0) sol_inspection_text(out, ",");
+        sol_inspection_format(out, "{\"id\":\"match-arm:%zu\",\"pattern\":\"pattern:%zu\","
+            "\"guard\":", index, arm->pattern);
+        if (arm->guard == SOL_AST_NONE) sol_inspection_text(out, "null");
+        else sol_inspection_format(out, "\"expr:%zu\"", arm->guard);
+        sol_inspection_format(out, ",\"value\":\"expr:%zu\",\"span\":", arm->value);
+        sol_inspection_span(inspector, arm->span);
         sol_inspection_text(out, "}");
     }
     sol_inspection_format(out,
@@ -547,9 +610,46 @@ static void sol_inspection_type_facts(
     sol_inspection_text(out, "]");
 }
 
+static bool sol_inspection_field_parent(
+    const SolSyntaxTree *syntax,
+    SolFieldId target,
+    bool *is_variant,
+    SolDefId *owner,
+    SolVariantId *variant,
+    size_t *ordinal
+) {
+    for (SolDefId item = 0; item < syntax->item_count; ++item) {
+        if (syntax->items[item].kind == SOL_ITEM_RECORD) {
+            size_t index = 0;
+            for (SolFieldId field = syntax->items[item].first_field;
+                field != SOL_AST_NONE; field = syntax->fields[field].next, ++index) {
+                if (field == target) {
+                    *is_variant = false; *owner = item; *variant = SOL_AST_NONE;
+                    *ordinal = index;
+                    return true;
+                }
+            }
+        } else if (syntax->items[item].kind == SOL_ITEM_ENUM) {
+            for (SolVariantId entry = syntax->items[item].first_variant;
+                entry != SOL_AST_NONE; entry = syntax->variants[entry].next) {
+                size_t index = 0;
+                for (SolFieldId field = syntax->variants[entry].first_field;
+                    field != SOL_AST_NONE; field = syntax->fields[field].next, ++index) {
+                    if (field == target) {
+                        *is_variant = true; *owner = item; *variant = entry;
+                        *ordinal = index;
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    return false;
+}
+
 static void sol_inspection_types(SolInspector *inspector) {
     SolInspectionBuffer *out = inspector->output;
-    sol_inspection_text(out, "\"types\":{\"schema\":\"sol.inspection.types\",\"version\":2,");
+    sol_inspection_text(out, "\"types\":{\"schema\":\"sol.inspection.types\",\"version\":3,");
     sol_inspection_type_facts(inspector, "expressions", "expr", inspector->types->expressions,
         inspector->types->expression_count, false); sol_inspection_text(out, ",");
     sol_inspection_type_facts(inspector, "locals", "local", inspector->types->locals,
@@ -738,12 +838,84 @@ static void sol_inspection_types(SolInspector *inspector) {
         sol_inspection_format(out, "{\"variantIndex\":%zu,\"owner\":", variant->variant);
         sol_inspection_type(inspector, variant->owner); sol_inspection_text(out, "}");
     }
-    sol_inspection_text(out, "],\"patternVariantResolutions\":[");
-    for (size_t index = 0; index < inspector->types->pattern_resolution_count; ++index) {
+    sol_inspection_text(out, "],\"variants\":[");
+    for (size_t index = 0; index < inspector->syntax->variant_count; ++index) {
+        const SolVariant *variant = &inspector->syntax->variants[index];
         if (index != 0) sol_inspection_text(out, ",");
-        size_t value = inspector->types->pattern_variant_resolutions[index];
-        if (value == SOL_AST_NONE) sol_inspection_text(out, "null");
-        else sol_inspection_format(out, "%zu", value);
+        sol_inspection_format(out, "{\"id\":\"variant:%zu\",\"owner\":", index);
+        sol_inspection_semantic_id(inspector, variant->owner_item);
+        sol_inspection_text(out, ",\"name\":");
+        sol_inspection_source_span(inspector, variant->name);
+        sol_inspection_text(out, "}");
+    }
+    sol_inspection_text(out, "],\"fields\":[");
+    for (size_t index = 0; index < inspector->syntax->field_count; ++index) {
+        bool is_variant = false;
+        SolDefId owner = SOL_AST_NONE;
+        SolVariantId variant = SOL_AST_NONE;
+        size_t ordinal = 0;
+        (void)sol_inspection_field_parent(inspector->syntax, index,
+            &is_variant, &owner, &variant, &ordinal);
+        if (index != 0) sol_inspection_text(out, ",");
+        sol_inspection_format(out, "{\"id\":\"field:%zu\",\"parentKind\":", index);
+        sol_inspection_string(out, is_variant ? "variant" : "record");
+        sol_inspection_text(out, ",\"parent\":");
+        if (is_variant) sol_inspection_format(out, "\"variant:%zu\"", variant);
+        else sol_inspection_semantic_id(inspector, owner);
+        sol_inspection_text(out, ",\"owner\":");
+        sol_inspection_semantic_id(inspector, owner);
+        sol_inspection_text(out, ",\"name\":");
+        sol_inspection_source_span(inspector, inspector->syntax->fields[index].name);
+        sol_inspection_format(out, ",\"ordinal\":%zu,\"ownerTypeParameters\":[", ordinal);
+        SolTypeParameterId parameter = inspector->syntax->items[owner].first_type_parameter;
+        size_t parameter_count = 0;
+        while (parameter != SOL_AST_NONE) {
+            if (parameter_count++ != 0) sol_inspection_text(out, ",");
+            sol_inspection_format(out, "\"type-parameter:%zu\"", parameter);
+            parameter = inspector->syntax->type_parameters[parameter].next;
+        }
+        sol_inspection_text(out, "],\"type\":");
+        sol_inspection_type(inspector, inspector->types->declared_types[
+            inspector->syntax->fields[index].type]);
+        sol_inspection_text(out, "}");
+    }
+    sol_inspection_text(out, "],\"patterns\":[");
+    for (size_t index = 0; index < inspector->types->pattern_resolution_count; ++index) {
+        const SolPattern *pattern = &inspector->syntax->patterns[index];
+        if (index != 0) sol_inspection_text(out, ",");
+        sol_inspection_format(out, "{\"subject\":\"pattern:%zu\",\"type\":", index);
+        sol_inspection_type(inspector, inspector->types->pattern_types[index]);
+        sol_inspection_text(out, ",\"variant\":");
+        size_t variant = inspector->types->pattern_variant_resolutions[index];
+        if (variant == SOL_AST_NONE) sol_inspection_text(out, "null");
+        else sol_inspection_format(out, "\"variant:%zu\"", variant);
+        sol_inspection_text(out, ",\"children\":[");
+        SolPatternBindingId child = pattern->first_binding;
+        SolFieldId variant_field = variant == SOL_AST_NONE ? SOL_AST_NONE
+            : inspector->syntax->variants[variant].first_field;
+        size_t emitted_child = 0;
+        while (child != SOL_AST_NONE) {
+            const SolPatternBinding *edge = &inspector->syntax->pattern_bindings[child];
+            if (emitted_child++ != 0) sol_inspection_text(out, ",");
+            sol_inspection_format(out, "{\"pattern\":\"pattern:%zu\",\"type\":",
+                edge->pattern);
+            sol_inspection_type(inspector, inspector->types->pattern_types[edge->pattern]);
+            sol_inspection_text(out, ",\"field\":");
+            SolFieldId field = pattern->kind == SOL_PATTERN_RECORD
+                ? inspector->types->pattern_field_resolutions[child] : variant_field;
+            if (field == SOL_AST_NONE) sol_inspection_text(out, "null");
+            else sol_inspection_format(out, "\"field:%zu\"", field);
+            sol_inspection_text(out, ",\"tupleOrdinal\":");
+            size_t ordinal = inspector->types->pattern_tuple_ordinals[child];
+            if (ordinal == SOL_AST_NONE) sol_inspection_text(out, "null");
+            else sol_inspection_format(out, "%zu", ordinal);
+            sol_inspection_text(out, "}");
+            if (variant_field != SOL_AST_NONE) {
+                variant_field = inspector->syntax->fields[variant_field].next;
+            }
+            child = edge->next;
+        }
+        sol_inspection_text(out, "]}");
     }
     sol_inspection_text(out, "],\"argumentFieldResolutions\":[");
     for (size_t index = 0; index < inspector->types->argument_resolution_count; ++index) {
@@ -974,6 +1146,186 @@ static bool sol_inspection_type_valid(const SolInspector *inspector, SolType typ
     return false;
 }
 
+static bool sol_inspection_type_equal(SolType left, SolType right) {
+    return left.kind == right.kind && left.definition == right.definition;
+}
+
+static SolDefId sol_inspection_nominal_definition(
+    const SolInspector *inspector, SolType type
+) {
+    if (type.kind == SOL_TYPE_NOMINAL) return type.definition;
+    if (type.kind == SOL_TYPE_APPLICATION
+        && type.definition < inspector->types->type_application_count) {
+        const SolTypeApplication *application
+            = &inspector->types->type_applications[type.definition];
+        if (application->constructor == SOL_TYPE_CONSTRUCTOR_USER) {
+            return application->definition;
+        }
+    }
+    return SOL_AST_NONE;
+}
+
+static bool sol_inspection_name_equal(
+    const SolSource *source, SolSpan left, SolSpan right
+) {
+    size_t left_length = left.end - left.start;
+    size_t right_length = right.end - right.start;
+    return left_length == right_length
+        && memcmp(source->text + left.start, source->text + right.start, left_length) == 0;
+}
+
+static bool sol_inspection_field_in_list(
+    const SolSyntaxTree *syntax, SolFieldId first, SolFieldId target
+) {
+    size_t traversed = 0;
+    while (first != SOL_AST_NONE) {
+        if (first >= syntax->field_count || traversed++ >= syntax->field_count) return false;
+        if (first == target) return true;
+        first = syntax->fields[first].next;
+    }
+    return false;
+}
+
+static bool sol_inspection_member_type_equal(
+    const SolInspector *inspector,
+    SolType owner,
+    SolDefId definition,
+    SolType declared,
+    SolType actual,
+    size_t depth
+) {
+    if (depth >= 64) return false;
+    if (declared.kind == SOL_TYPE_SELF) return sol_inspection_type_equal(owner, actual);
+    if (declared.kind == SOL_TYPE_PARAMETER && definition < inspector->syntax->item_count
+        && owner.kind == SOL_TYPE_APPLICATION
+        && owner.definition < inspector->types->type_application_count) {
+        const SolTypeApplication *application
+            = &inspector->types->type_applications[owner.definition];
+        SolTypeParameterId parameter
+            = inspector->syntax->items[definition].first_type_parameter;
+        size_t ordinal = 0;
+        while (parameter != SOL_AST_NONE && parameter != declared.definition) {
+            if (parameter >= inspector->syntax->type_parameter_count
+                || ordinal++ >= inspector->syntax->type_parameter_count) return false;
+            parameter = inspector->syntax->type_parameters[parameter].next;
+        }
+        return parameter == declared.definition && ordinal < application->argument_count
+            && sol_inspection_type_equal(actual,
+                inspector->types->type_application_arguments[
+                    application->argument_offset + ordinal]);
+    }
+    if (declared.kind != SOL_TYPE_APPLICATION) {
+        return sol_inspection_type_equal(declared, actual);
+    }
+    if (actual.kind != SOL_TYPE_APPLICATION
+        || declared.definition >= inspector->types->type_application_count
+        || actual.definition >= inspector->types->type_application_count) return false;
+    const SolTypeApplication *declared_application
+        = &inspector->types->type_applications[declared.definition];
+    const SolTypeApplication *actual_application
+        = &inspector->types->type_applications[actual.definition];
+    if (declared_application->constructor != actual_application->constructor
+        || declared_application->definition != actual_application->definition
+        || declared_application->argument_count != actual_application->argument_count) {
+        return false;
+    }
+    for (size_t index = 0; index < declared_application->argument_count; ++index) {
+        SolType declared_argument = inspector->types->type_application_arguments[
+            declared_application->argument_offset + index];
+        SolType actual_argument = inspector->types->type_application_arguments[
+            actual_application->argument_offset + index];
+        if (!sol_inspection_member_type_equal(inspector, owner, definition,
+                declared_argument, actual_argument, depth + 1)) return false;
+    }
+    return true;
+}
+
+static bool sol_inspection_patterns_valid(const SolInspector *inspector) {
+    const SolSyntaxTree *syntax = inspector->syntax;
+    const SolTypeTable *types = inspector->types;
+    for (size_t index = 0; index < syntax->pattern_count; ++index) {
+        const SolPattern *pattern = &syntax->patterns[index];
+        SolType subject = types->pattern_types[index];
+        SolVariantId variant = types->pattern_variant_resolutions[index];
+        SolDefId definition = sol_inspection_nominal_definition(inspector, subject);
+        if ((pattern->kind == SOL_PATTERN_VARIANT) != (variant != SOL_AST_NONE)) return false;
+        SolFieldId variant_field = SOL_AST_NONE;
+        if (variant != SOL_AST_NONE) {
+            if (variant >= syntax->variant_count
+                || syntax->variants[variant].owner_item != definition
+                || !sol_inspection_name_equal(inspector->source, pattern->name,
+                    syntax->variants[variant].name)) return false;
+            variant_field = syntax->variants[variant].first_field;
+        }
+        if (pattern->kind == SOL_PATTERN_RECORD
+            && (definition >= syntax->item_count
+                || syntax->items[definition].kind != SOL_ITEM_RECORD
+                || !sol_inspection_name_equal(inspector->source, pattern->name,
+                    syntax->items[definition].name))) return false;
+        const SolTypeApplication *tuple = NULL;
+        if (pattern->kind == SOL_PATTERN_TUPLE) {
+            if (subject.kind != SOL_TYPE_APPLICATION
+                || subject.definition >= types->type_application_count) return false;
+            tuple = &types->type_applications[subject.definition];
+            if (tuple->constructor != SOL_TYPE_CONSTRUCTOR_TUPLE) return false;
+        }
+        SolPatternBindingId child = pattern->first_binding;
+        size_t ordinal = 0;
+        while (child != SOL_AST_NONE) {
+            const SolPatternBinding *edge = &syntax->pattern_bindings[child];
+            SolFieldId field = types->pattern_field_resolutions[child];
+            size_t tuple_ordinal = types->pattern_tuple_ordinals[child];
+            if (edge->pattern >= syntax->pattern_count) return false;
+            if (pattern->kind == SOL_PATTERN_RECORD) {
+                if (field >= syntax->field_count || tuple_ordinal != SOL_AST_NONE
+                    || !sol_inspection_field_in_list(syntax,
+                        syntax->items[definition].first_field, field)
+                    || !sol_inspection_name_equal(inspector->source, edge->field,
+                        syntax->fields[field].name)
+                    || !sol_inspection_member_type_equal(inspector, subject, definition,
+                        types->declared_types[syntax->fields[field].type],
+                        types->pattern_types[edge->pattern], 0)) return false;
+            } else if (pattern->kind == SOL_PATTERN_TUPLE) {
+                if (field != SOL_AST_NONE || tuple_ordinal != ordinal
+                    || ordinal >= tuple->argument_count
+                    || !sol_inspection_type_equal(types->pattern_types[edge->pattern],
+                        types->type_application_arguments[tuple->argument_offset + ordinal])) {
+                    return false;
+                }
+            } else if (field != SOL_AST_NONE || tuple_ordinal != SOL_AST_NONE) {
+                return false;
+            }
+            if (pattern->kind == SOL_PATTERN_VARIANT) {
+                if (variant_field == SOL_AST_NONE) return false;
+                if (!sol_inspection_member_type_equal(inspector, subject, definition,
+                        types->declared_types[syntax->fields[variant_field].type],
+                        types->pattern_types[edge->pattern], 0)) return false;
+                variant_field = syntax->fields[variant_field].next;
+            }
+            child = edge->next;
+            ++ordinal;
+        }
+        if ((pattern->kind == SOL_PATTERN_VARIANT && variant_field != SOL_AST_NONE)
+            || (pattern->kind == SOL_PATTERN_TUPLE && ordinal != tuple->argument_count)) {
+            return false;
+        }
+    }
+    for (size_t expression = 0; expression < syntax->expression_count; ++expression) {
+        const SolExpr *match = &syntax->expressions[expression];
+        if (match->kind != SOL_EXPR_MATCH) continue;
+        SolMatchArmId arm = match->as.match_expr.first_arm;
+        while (arm != SOL_AST_NONE) {
+            const SolMatchArm *entry = &syntax->match_arms[arm];
+            if (!sol_inspection_type_equal(types->pattern_types[entry->pattern],
+                    types->expressions[match->as.match_expr.scrutinee])
+                || (entry->guard != SOL_AST_NONE
+                    && types->expressions[entry->guard].kind != SOL_TYPE_BOOL)) return false;
+            arm = entry->next;
+        }
+    }
+    return true;
+}
+
 static bool sol_inspection_atom_valid(
     const SolInspector *inspector, const SolEffectAtom *atom
 ) {
@@ -1149,6 +1501,7 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
         || types->member_resolution_count != syntax->expression_count
         || types->tuple_projection_count != syntax->expression_count
         || types->pattern_resolution_count != syntax->pattern_count
+        || types->pattern_child_resolution_count != syntax->pattern_binding_count
         || types->argument_resolution_count != syntax->argument_count
         || types->implementation_target_count != syntax->item_count
         || types->representation_count != syntax->item_count
@@ -1205,6 +1558,12 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
             types->variant_constructor_count)
         || !SOL_INSPECTION_TABLE_SLICE(types->pattern_variant_resolutions,
             types->pattern_resolution_count)
+        || !SOL_INSPECTION_TABLE_SLICE(types->pattern_types,
+            types->pattern_resolution_count)
+        || !SOL_INSPECTION_TABLE_SLICE(types->pattern_field_resolutions,
+            types->pattern_child_resolution_count)
+        || !SOL_INSPECTION_TABLE_SLICE(types->pattern_tuple_ordinals,
+            types->pattern_child_resolution_count)
         || !SOL_INSPECTION_TABLE_SLICE(types->argument_field_resolutions,
             types->argument_resolution_count)) return false;
 #undef SOL_INSPECTION_TABLE_SLICE
@@ -1215,12 +1574,32 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
     SOL_INSPECTION_CHECK_TYPES(types->locals, types->local_count);
     SOL_INSPECTION_CHECK_TYPES(types->definitions, types->definition_count);
     SOL_INSPECTION_CHECK_TYPES(types->declared_types, types->declared_type_count);
+    SOL_INSPECTION_CHECK_TYPES(types->pattern_types, types->pattern_resolution_count);
     SOL_INSPECTION_CHECK_TYPES(types->type_application_arguments,
         types->type_application_argument_count);
     SOL_INSPECTION_CHECK_TYPES(types->call_instantiation_arguments,
         types->call_instantiation_argument_count);
     SOL_INSPECTION_CHECK_TYPES(types->implementation_targets,
         types->implementation_target_count);
+    for (size_t index = 0; index < syntax->variant_count; ++index) {
+        SolDefId owner = syntax->variants[index].owner_item;
+        if (owner >= syntax->item_count || syntax->items[owner].kind != SOL_ITEM_ENUM
+            || !sol_inspection_span_valid(syntax->variants[index].name,
+                package->source.length)) return false;
+    }
+    for (size_t index = 0; index < syntax->field_count; ++index) {
+        bool is_variant = false;
+        SolDefId owner = SOL_AST_NONE;
+        SolVariantId variant = SOL_AST_NONE;
+        size_t ordinal = 0;
+        if (!sol_inspection_field_parent(syntax, index, &is_variant,
+                &owner, &variant, &ordinal)
+            || owner >= syntax->item_count
+            || (is_variant && variant >= syntax->variant_count)
+            || ordinal >= syntax->field_count
+            || !sol_inspection_span_valid(syntax->fields[index].name,
+                package->source.length)) return false;
+    }
     for (size_t index = 0; index < types->type_application_count; ++index) {
         const SolTypeApplication *entry = &types->type_applications[index];
         if ((int)entry->constructor < 0 || entry->constructor > SOL_TYPE_CONSTRUCTOR_TUPLE
@@ -1345,6 +1724,7 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
         if (types->pattern_variant_resolutions[index] != SOL_AST_NONE
             && types->pattern_variant_resolutions[index] >= syntax->variant_count) return false;
     }
+    if (!sol_inspection_patterns_valid(inspector)) return false;
     for (size_t index = 0; index < types->argument_resolution_count; ++index) {
         if (types->argument_field_resolutions[index] != SOL_AST_NONE
             && types->argument_field_resolutions[index] >= syntax->field_count) return false;
@@ -1558,7 +1938,7 @@ bool sol_inspection_render(
         .contracts = contracts, .diagnostics = diagnostics,
     };
     if (!sol_inspection_preflight(&inspector)) return false;
-    sol_inspection_text(&output, "{\"schema\":\"sol.inspection\",\"version\":2,"
+    sol_inspection_text(&output, "{\"schema\":\"sol.inspection\",\"version\":3,"
         "\"producer\":{\"name\":\"sol\",\"version\":\"0.1.0-dev\"},\"package\":{\"kind\":");
     sol_inspection_string(&output, package->is_directory ? "directory" : "file");
     sol_inspection_format(&output, ",\"edition\":%u,\"fileCount\":%zu},\"artifacts\":{",

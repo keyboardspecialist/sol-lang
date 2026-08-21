@@ -269,6 +269,9 @@ typedef enum {
     SOL_PATTERN_WILDCARD,
     SOL_PATTERN_VARIANT,
     SOL_PATTERN_BOOL,
+    SOL_PATTERN_BINDING,
+    SOL_PATTERN_RECORD,
+    SOL_PATTERN_TUPLE,
 } SolPatternKind;
 
 typedef struct {
@@ -280,12 +283,14 @@ typedef struct {
 } SolPattern;
 
 typedef struct {
-    SolSpan name;
+    SolPatternId pattern;
+    SolSpan field;
     SolPatternBindingId next;
 } SolPatternBinding;
 
 typedef struct {
     SolPatternId pattern;
+    SolExprId guard;
     SolExprId value;
     SolSpan span;
     SolMatchArmId next;

@@ -513,6 +513,7 @@ static void test_composite_relocation(void) {
         const SolMatchArm *arm = &package.syntax.match_arms[index];
         CHECK(arm->span.start >= package.files[1].aggregate_start);
         CHECK(arm->pattern >= seed.syntax.pattern_count);
+        CHECK(arm->guard == SOL_AST_NONE || arm->guard >= seed.syntax.expression_count);
         CHECK(arm->value >= seed.syntax.expression_count);
         CHECK(arm->next == SOL_AST_NONE || arm->next >= seed.syntax.match_arm_count);
     }
@@ -524,6 +525,20 @@ static void test_composite_relocation(void) {
         CHECK(pattern->first_binding == SOL_AST_NONE
             || pattern->first_binding >= seed.syntax.pattern_binding_count);
     }
+    CHECK(package.syntax.pattern_binding_count > seed.syntax.pattern_binding_count);
+    bool relocated_record_pattern_field = false;
+    for (size_t index = seed.syntax.pattern_binding_count;
+        index < package.syntax.pattern_binding_count; ++index) {
+        const SolPatternBinding *child = &package.syntax.pattern_bindings[index];
+        CHECK(child->pattern >= seed.syntax.pattern_count);
+        CHECK(child->next == SOL_AST_NONE
+            || child->next >= seed.syntax.pattern_binding_count);
+        if (child->field.start != child->field.end) {
+            relocated_record_pattern_field = true;
+            CHECK(child->field.start >= package.files[1].aggregate_start);
+        }
+    }
+    CHECK(relocated_record_pattern_field);
     CHECK(package.syntax.effect_count > seed.syntax.effect_count);
     for (size_t index = seed.syntax.effect_count;
         index < package.syntax.effect_count; ++index) {

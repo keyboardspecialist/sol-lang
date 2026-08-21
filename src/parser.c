@@ -1262,7 +1262,45 @@ static SolParsedArguments sol_parser_record_fields(SolParser *parser) {
     }
 }
 
-static SolPatternId sol_parser_pattern(SolParser *parser) {
+static SolPatternId sol_parser_pattern_depth(
+    SolParser *parser,
+    size_t depth,
+    bool bare_binding
+);
+
+static bool sol_parser_pattern_child(
+    SolParser *parser,
+    SolPatternBindingId *first,
+    SolPatternBindingId *last,
+    SolPatternId pattern,
+    SolSpan field
+) {
+    if (pattern == SOL_AST_NONE) return false;
+    SolPatternBindingId child = sol_parser_add_pattern_binding(
+        parser,
+        (SolPatternBinding){
+            .pattern = pattern,
+            .field = field,
+            .next = SOL_AST_NONE,
+        }
+    );
+    if (child == SOL_AST_NONE) return false;
+    if (*first == SOL_AST_NONE) *first = child;
+    else parser->tree->pattern_bindings[*last].next = child;
+    *last = child;
+    return true;
+}
+
+static SolPatternId sol_parser_pattern_depth(
+    SolParser *parser,
+    size_t depth,
+    bool bare_binding
+) {
+    if (depth >= 64) {
+        sol_parser_error(parser, "SOL-PARSE-016", sol_parser_current(parser),
+            "pattern nesting is too deep");
+        return SOL_AST_NONE;
+    }
     SolToken token = sol_parser_current(parser);
     if (token.kind == SOL_TOKEN_TRUE || token.kind == SOL_TOKEN_FALSE) {
         sol_parser_advance(parser);
@@ -1271,6 +1309,54 @@ static SolPatternId sol_parser_pattern(SolParser *parser) {
             .span = token.span,
             .bool_value = token.kind == SOL_TOKEN_TRUE,
             .first_binding = SOL_AST_NONE,
+        });
+    }
+    if (token.kind == SOL_TOKEN_LEFT_PAREN) {
+        SolToken opening = sol_parser_advance(parser);
+        if (sol_parser_kind(parser) == SOL_TOKEN_RIGHT_PAREN) {
+            sol_parser_error(parser, "SOL-PARSE-016", sol_parser_current(parser),
+                "unit is not a pattern");
+            sol_parser_advance(parser);
+            return SOL_AST_NONE;
+        }
+        SolPatternBindingId first = SOL_AST_NONE;
+        SolPatternBindingId last = SOL_AST_NONE;
+        size_t count = 0;
+        for (;;) {
+            SolPatternId element = sol_parser_pattern_depth(parser, depth + 1, true);
+            if (!sol_parser_pattern_child(parser, &first, &last, element, (SolSpan){0})) {
+                return SOL_AST_NONE;
+            }
+            ++count;
+            if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+                if (count == 1) {
+                    sol_parser_error(parser, "SOL-PARSE-016", opening,
+                        "singleton tuple patterns are reserved");
+                    return SOL_AST_NONE;
+                }
+                break;
+            }
+            if (!sol_parser_expect(parser, SOL_TOKEN_COMMA,
+                "expected ',' between tuple pattern elements")) return SOL_AST_NONE;
+            if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+                if (count == 1) {
+                    sol_parser_error(parser, "SOL-PARSE-016", opening,
+                        "singleton tuple patterns are reserved");
+                    return SOL_AST_NONE;
+                }
+                break;
+            }
+        }
+        SolToken closing = parser->tokens->items[parser->cursor - 1];
+        if (count > 16) {
+            sol_parser_error(parser, "SOL-PARSE-016", opening,
+                "tuple patterns support at most 16 elements");
+            return SOL_AST_NONE;
+        }
+        return sol_parser_add_pattern(parser, (SolPattern){
+            .kind = SOL_PATTERN_TUPLE,
+            .span = {.start = opening.span.start, .end = closing.span.end},
+            .first_binding = first,
         });
     }
     if (token.kind != SOL_TOKEN_IDENTIFIER) {
@@ -1290,31 +1376,45 @@ static SolPatternId sol_parser_pattern(SolParser *parser) {
     SolPatternBindingId first_binding = SOL_AST_NONE;
     SolPatternBindingId last_binding = SOL_AST_NONE;
     size_t end = token.span.end;
-    if (sol_parser_match(parser, SOL_TOKEN_LEFT_PAREN)) {
+    if (sol_parser_match(parser, SOL_TOKEN_LEFT_BRACE)) {
+        while (!sol_parser_match(parser, SOL_TOKEN_RIGHT_BRACE)) {
+            SolToken field = sol_parser_current(parser);
+            if (!sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER,
+                "expected a record pattern field")) return SOL_AST_NONE;
+            SolPatternId child;
+            if (sol_parser_match(parser, SOL_TOKEN_EQUAL)) {
+                child = sol_parser_pattern_depth(parser, depth + 1, true);
+            } else {
+                child = sol_parser_add_pattern(parser, (SolPattern){
+                    .kind = SOL_PATTERN_BINDING,
+                    .span = field.span,
+                    .name = field.span,
+                    .first_binding = SOL_AST_NONE,
+                });
+            }
+            if (!sol_parser_pattern_child(
+                parser, &first_binding, &last_binding, child, field.span
+            )) return SOL_AST_NONE;
+            if (sol_parser_match(parser, SOL_TOKEN_RIGHT_BRACE)) break;
+            if (!sol_parser_expect(parser, SOL_TOKEN_COMMA,
+                "expected ',' between record pattern fields")) return SOL_AST_NONE;
+            if (sol_parser_match(parser, SOL_TOKEN_RIGHT_BRACE)) break;
+        }
+        end = parser->tokens->items[parser->cursor - 1].span.end;
+        return sol_parser_add_pattern(parser, (SolPattern){
+            .kind = SOL_PATTERN_RECORD,
+            .span = {.start = token.span.start, .end = end},
+            .name = token.span,
+            .first_binding = first_binding,
+        });
+    }
+    bool positional = sol_parser_match(parser, SOL_TOKEN_LEFT_PAREN);
+    if (positional) {
         if (!sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
             for (;;) {
-                SolToken binding_name = sol_parser_current(parser);
-                if (!sol_parser_expect(
-                    parser,
-                    SOL_TOKEN_IDENTIFIER,
-                    "expected a pattern binding"
-                )) {
-                    return SOL_AST_NONE;
-                }
-                SolPatternBindingId binding = sol_parser_add_pattern_binding(
-                    parser,
-                    (SolPatternBinding){
-                        .name = binding_name.span,
-                        .next = SOL_AST_NONE,
-                    }
-                );
-                if (binding == SOL_AST_NONE) return SOL_AST_NONE;
-                if (first_binding == SOL_AST_NONE) {
-                    first_binding = binding;
-                } else {
-                    parser->tree->pattern_bindings[last_binding].next = binding;
-                }
-                last_binding = binding;
+                SolPatternId child = sol_parser_pattern_depth(parser, depth + 1, true);
+                if (!sol_parser_pattern_child(parser, &first_binding, &last_binding,
+                    child, (SolSpan){0})) return SOL_AST_NONE;
                 if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) break;
                 if (!sol_parser_expect(
                     parser,
@@ -1329,11 +1429,47 @@ static SolPatternId sol_parser_pattern(SolParser *parser) {
         end = parser->tokens->items[parser->cursor - 1].span.end;
     }
     return sol_parser_add_pattern(parser, (SolPattern){
-        .kind = SOL_PATTERN_VARIANT,
+        .kind = positional || !bare_binding
+            ? SOL_PATTERN_VARIANT : SOL_PATTERN_BINDING,
         .span = {.start = token.span.start, .end = end},
         .name = token.span,
         .first_binding = first_binding,
     });
+}
+
+static SolPatternId sol_parser_pattern(SolParser *parser) {
+    return sol_parser_pattern_depth(parser, 0, false);
+}
+
+static void sol_parser_synchronize_match_arm(SolParser *parser) {
+    size_t remaining = parser->tokens->count;
+    size_t parentheses = 0;
+    size_t braces = 0;
+    while (remaining-- != 0) {
+        SolTokenKind kind = sol_parser_kind(parser);
+        if (kind == SOL_TOKEN_EOF) return;
+        if (kind == SOL_TOKEN_LEFT_PAREN) {
+            ++parentheses;
+        } else if (kind == SOL_TOKEN_RIGHT_PAREN && parentheses != 0) {
+            --parentheses;
+        } else if (kind == SOL_TOKEN_LEFT_BRACE) {
+            ++braces;
+        } else if (kind == SOL_TOKEN_RIGHT_BRACE) {
+            if (braces == 0) return;
+            --braces;
+        } else if (kind == SOL_TOKEN_FAT_ARROW
+            && parentheses == 0 && braces == 0) {
+            sol_parser_advance(parser);
+            (void)sol_parser_nested_expression(parser, 1);
+            sol_parser_match(parser, SOL_TOKEN_COMMA);
+            return;
+        }
+        if (kind == SOL_TOKEN_COMMA && parentheses == 0 && braces == 0) {
+            sol_parser_advance(parser);
+            return;
+        }
+        sol_parser_advance(parser);
+    }
 }
 
 static SolExprId sol_parser_match_expression(SolParser *parser) {
@@ -1353,9 +1489,29 @@ static SolExprId sol_parser_match_expression(SolParser *parser) {
     SolMatchArmId last_arm = SOL_AST_NONE;
     while (sol_parser_kind(parser) != SOL_TOKEN_RIGHT_BRACE
         && sol_parser_kind(parser) != SOL_TOKEN_EOF) {
+        size_t cursor_mark = parser->cursor;
+        size_t pattern_mark = parser->tree->pattern_count;
+        size_t binding_mark = parser->tree->pattern_binding_count;
         SolPatternId pattern = sol_parser_pattern(parser);
-        if (pattern == SOL_AST_NONE) break;
-        sol_parser_expect(parser, SOL_TOKEN_FAT_ARROW, "expected '=>' after match pattern");
+        if (pattern == SOL_AST_NONE) {
+            parser->tree->pattern_count = pattern_mark;
+            parser->tree->pattern_binding_count = binding_mark;
+            parser->cursor = cursor_mark;
+            sol_parser_synchronize_match_arm(parser);
+            continue;
+        }
+        SolExprId guard = SOL_AST_NONE;
+        if (sol_parser_match(parser, SOL_TOKEN_IF)) {
+            guard = sol_parser_expression(parser, 1);
+        }
+        if (!sol_parser_expect(parser, SOL_TOKEN_FAT_ARROW,
+                "expected '=>' after match pattern")) {
+            parser->tree->pattern_count = pattern_mark;
+            parser->tree->pattern_binding_count = binding_mark;
+            parser->cursor = cursor_mark;
+            sol_parser_synchronize_match_arm(parser);
+            continue;
+        }
         SolExprId value = sol_parser_nested_expression(parser, 1);
         SolSpan arm_span = {
             .start = parser->tree->patterns[pattern].span.start,
@@ -1365,6 +1521,7 @@ static SolExprId sol_parser_match_expression(SolParser *parser) {
         };
         SolMatchArmId arm = sol_parser_add_match_arm(parser, (SolMatchArm){
             .pattern = pattern,
+            .guard = guard,
             .value = value,
             .span = arm_span,
             .next = SOL_AST_NONE,

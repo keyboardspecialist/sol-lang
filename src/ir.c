@@ -27,6 +27,7 @@ typedef struct {
     SolIrLocalId *parameter_locals;
     SolIrLocalId *binding_locals;
     SolIrLocalId *pattern_locals;
+    unsigned char *pattern_states;
     size_t type_capacity;
     size_t type_id_capacity;
     size_t access_capacity;
@@ -35,6 +36,8 @@ typedef struct {
     size_t evidence_capacity;
     size_t statement_id_capacity;
     size_t arm_id_capacity;
+    size_t pattern_capacity;
+    size_t pattern_child_capacity;
     size_t operand_capacity;
     size_t place_capacity;
     size_t projection_capacity;
@@ -110,6 +113,8 @@ void sol_ir_free(SolIr *ir) {
     free(ir->statement_ids);
     free(ir->arms);
     free(ir->arm_ids);
+    free(ir->patterns);
+    free(ir->pattern_children);
     free(ir->operands);
     free(ir->roots);
     free(ir->cleanup_locals);
@@ -678,7 +683,7 @@ static bool sol_ir_allocate_maps(SolIrLowerer *lowerer) {
     SOL_IR_MAP(method_callables, lowerer->syntax->trait_method_count);
     SOL_IR_MAP(parameter_locals, lowerer->syntax->parameter_count);
     SOL_IR_MAP(binding_locals, lowerer->syntax->statement_count);
-    SOL_IR_MAP(pattern_locals, lowerer->syntax->pattern_binding_count);
+    SOL_IR_MAP(pattern_locals, lowerer->syntax->pattern_count);
 #undef SOL_IR_MAP
     if (lowerer->types->type_application_count != 0) {
         lowerer->application_states = sol_ir_allocate(
@@ -689,6 +694,11 @@ static bool sol_ir_allocate_maps(SolIrLowerer *lowerer) {
         lowerer->function_states = sol_ir_allocate(
             lowerer->types->function_type_count, 1, true);
         if (lowerer->function_states == NULL) return false;
+    }
+    if (lowerer->syntax->pattern_count != 0) {
+        lowerer->pattern_states = sol_ir_allocate(
+            lowerer->syntax->pattern_count, 1, true);
+        if (lowerer->pattern_states == NULL) return false;
     }
     return true;
 }
@@ -705,6 +715,7 @@ static void sol_ir_free_maps(SolIrLowerer *lowerer) {
     free(lowerer->parameter_locals);
     free(lowerer->binding_locals);
     free(lowerer->pattern_locals);
+    free(lowerer->pattern_states);
 }
 
 static bool sol_ir_frontend_shape_valid(SolIrLowerer *lowerer) {
@@ -714,7 +725,7 @@ static bool sol_ir_frontend_shape_valid(SolIrLowerer *lowerer) {
     const SolEffectTable *effects = lowerer->effects;
     const SolContractTable *contracts = lowerer->contracts;
     if (!sol_syntax_contracts_validate(lowerer->source, syntax)
-        || !sol_type_resolution_metadata_valid(syntax, types)
+        || !sol_type_resolution_metadata_valid(lowerer->source, syntax, types)
         || hir->definition_count != syntax->item_count
         || hir->resolution_count != syntax->expression_count
         || hir->trait_resolution_count != syntax->item_count
@@ -737,6 +748,7 @@ static bool sol_ir_frontend_shape_valid(SolIrLowerer *lowerer) {
         || types->method_resolution_count != syntax->expression_count
         || types->member_resolution_count != syntax->expression_count
         || types->pattern_resolution_count != syntax->pattern_count
+        || types->pattern_child_resolution_count != syntax->pattern_binding_count
         || types->argument_resolution_count != syntax->argument_count
         || types->construction_count != syntax->expression_count
         || types->type_application_count > types->type_application_capacity
@@ -762,7 +774,11 @@ static bool sol_ir_frontend_shape_valid(SolIrLowerer *lowerer) {
         || (types->implementation_target_count != 0
             && types->implementation_targets == NULL)
         || (types->pattern_resolution_count != 0
-            && types->pattern_variant_resolutions == NULL)
+            && (types->pattern_variant_resolutions == NULL
+                || types->pattern_types == NULL))
+        || (types->pattern_child_resolution_count != 0
+            && (types->pattern_field_resolutions == NULL
+                || types->pattern_tuple_ordinals == NULL))
         || (types->argument_resolution_count != 0
             && types->argument_field_resolutions == NULL)
         || (types->type_application_count != 0 && types->type_applications == NULL)
@@ -956,9 +972,11 @@ static bool sol_ir_lower_locals(SolIrLowerer *lowerer) {
             name = lowerer->syntax->statements[source->syntax_id].as.let_statement.name;
             lowerer->binding_locals[source->syntax_id] = index;
         } else if (source->kind == SOL_LOCAL_PATTERN
-            && source->syntax_id < lowerer->syntax->pattern_binding_count) {
+            && source->syntax_id < lowerer->syntax->pattern_count
+            && lowerer->syntax->patterns[source->syntax_id].kind
+                == SOL_PATTERN_BINDING) {
             local->kind = SOL_IR_LOCAL_PATTERN;
-            name = lowerer->syntax->pattern_bindings[source->syntax_id].name;
+            name = lowerer->syntax->patterns[source->syntax_id].name;
             lowerer->pattern_locals[source->syntax_id] = index;
         } else {
             return false;
@@ -1181,6 +1199,7 @@ static bool sol_ir_lower_declarations(SolIrLowerer *lowerer) {
         SolIrDefinition *definition = &lowerer->ir->definitions[index];
         definition->kind = sol_ir_definition_kind(source);
         definition->semantic_id = lowerer->hir->definitions[index].semantic_id;
+        definition->open = source->is_open;
         definition->name = sol_ir_copy_span(lowerer->source, source->name);
         definition->span = source->span;
         definition->callable = SOL_IR_NONE;
@@ -2301,6 +2320,132 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
     return !lowerer->failed;
 }
 
+static bool sol_ir_lower_pattern(
+    SolIrLowerer *lowerer, SolPatternId source_id, SolIrPatternId *result
+) {
+    if (source_id >= lowerer->syntax->pattern_count
+        || lowerer->pattern_states[source_id] != 0) return false;
+    lowerer->pattern_states[source_id] = 1;
+    const SolPattern *source = &lowerer->syntax->patterns[source_id];
+    SolIrPattern *pattern = &lowerer->ir->patterns[source_id];
+    switch (source->kind) {
+        case SOL_PATTERN_WILDCARD: pattern->kind = SOL_IR_PATTERN_WILDCARD; break;
+        case SOL_PATTERN_BOOL: pattern->kind = SOL_IR_PATTERN_BOOL; break;
+        case SOL_PATTERN_BINDING: pattern->kind = SOL_IR_PATTERN_BINDING; break;
+        case SOL_PATTERN_VARIANT: pattern->kind = SOL_IR_PATTERN_VARIANT; break;
+        case SOL_PATTERN_RECORD: pattern->kind = SOL_IR_PATTERN_RECORD; break;
+        case SOL_PATTERN_TUPLE: pattern->kind = SOL_IR_PATTERN_TUPLE; break;
+        default: return false;
+    }
+    pattern->type = sol_ir_type(lowerer, lowerer->types->pattern_types[source_id]);
+    pattern->span = source->span;
+    pattern->variant = SOL_IR_NONE;
+    pattern->definition = SOL_IR_NONE;
+    pattern->binding = SOL_IR_NONE;
+    pattern->children.offset = lowerer->ir->pattern_child_count;
+    if (pattern->type == SOL_IR_NONE || !sol_ir_span_valid(lowerer->source, source->span)
+        || (int)source->kind < SOL_PATTERN_WILDCARD
+        || source->kind > SOL_PATTERN_TUPLE) return false;
+
+    size_t child_count = 0;
+    SolPatternBindingId child = source->first_binding;
+    while (child != SOL_AST_NONE) {
+        if (child >= lowerer->syntax->pattern_binding_count
+            || child_count++ >= lowerer->syntax->pattern_binding_count) return false;
+        child = lowerer->syntax->pattern_bindings[child].next;
+    }
+    bool aggregate = source->kind == SOL_PATTERN_VARIANT
+        || source->kind == SOL_PATTERN_RECORD || source->kind == SOL_PATTERN_TUPLE;
+    if (!aggregate && child_count != 0) return false;
+    SolIrPatternChild *edges = NULL;
+    if (!sol_ir_grow((void **)&lowerer->ir->pattern_children,
+        &lowerer->ir->pattern_child_count, &lowerer->pattern_child_capacity,
+        child_count, sizeof(*edges), (void **)&edges)) return false;
+    pattern->children.count = child_count;
+
+    const SolIrType *type = &lowerer->ir->types[pattern->type];
+    if (source->kind == SOL_PATTERN_BINDING) {
+        pattern->binding = lowerer->pattern_locals[source_id];
+        if (pattern->binding == SOL_IR_NONE) return false;
+    } else if (source->kind == SOL_PATTERN_BOOL) {
+        if (type->kind != SOL_IR_TYPE_BOOL) return false;
+        pattern->boolean = source->bool_value;
+    } else if (source->kind == SOL_PATTERN_VARIANT) {
+        pattern->variant = lowerer->types->pattern_variant_resolutions[source_id];
+        if (pattern->variant >= lowerer->ir->variant_count
+            || type->kind != SOL_IR_TYPE_NOMINAL
+            || lowerer->ir->variants[pattern->variant].owner != type->definition
+            || lowerer->ir->variants[pattern->variant].fields.count != child_count) {
+            return false;
+        }
+    } else if (source->kind == SOL_PATTERN_RECORD) {
+        if (type->kind != SOL_IR_TYPE_NOMINAL
+            || type->definition >= lowerer->ir->definition_count
+            || lowerer->ir->definitions[type->definition].kind
+                != SOL_IR_DEFINITION_RECORD) return false;
+        pattern->definition = type->definition;
+    } else if (source->kind == SOL_PATTERN_TUPLE) {
+        if (type->kind != SOL_IR_TYPE_TUPLE
+            || type->argument_count != child_count) return false;
+    }
+
+    child = source->first_binding;
+    for (size_t index = 0; index < child_count; ++index) {
+        const SolPatternBinding *source_edge
+            = &lowerer->syntax->pattern_bindings[child];
+        size_t edge_index = pattern->children.offset + index;
+        lowerer->ir->pattern_children[edge_index].field = SOL_IR_NONE;
+        lowerer->ir->pattern_children[edge_index].ordinal = SOL_IR_NONE;
+        if (source->kind == SOL_PATTERN_RECORD) {
+            lowerer->ir->pattern_children[edge_index].field
+                = lowerer->types->pattern_field_resolutions[child];
+            if (lowerer->ir->pattern_children[edge_index].field
+                    >= lowerer->ir->field_count
+                || lowerer->ir->fields[
+                    lowerer->ir->pattern_children[edge_index].field].owner
+                    != pattern->definition) return false;
+            for (size_t previous = 0; previous < index; ++previous) {
+                if (lowerer->ir->pattern_children[
+                        pattern->children.offset + previous].field
+                    == lowerer->ir->pattern_children[edge_index].field) return false;
+            }
+        } else if (source->kind == SOL_PATTERN_TUPLE) {
+            lowerer->ir->pattern_children[edge_index].ordinal
+                = lowerer->types->pattern_tuple_ordinals[child];
+            if (lowerer->ir->pattern_children[edge_index].ordinal != index) return false;
+        } else if (source->kind == SOL_PATTERN_VARIANT) {
+            lowerer->ir->pattern_children[edge_index].ordinal = index;
+        }
+        SolIrPatternId child_pattern = SOL_IR_NONE;
+        if (!sol_ir_lower_pattern(lowerer, source_edge->pattern,
+                &child_pattern)) return false;
+        lowerer->ir->pattern_children[edge_index].pattern = child_pattern;
+        child = source_edge->next;
+    }
+    lowerer->pattern_states[source_id] = 2;
+    *result = source_id;
+    return true;
+}
+
+static bool sol_ir_collect_pattern_bindings(
+    SolIrLowerer *lowerer, SolIrPatternId id, SolIrArm *arm, size_t depth
+) {
+    if (id >= lowerer->ir->pattern_count || depth >= 64) return false;
+    const SolIrPattern *pattern = &lowerer->ir->patterns[id];
+    if (pattern->kind == SOL_IR_PATTERN_BINDING) {
+        if (!sol_ir_append_root(lowerer, pattern->binding)
+            || !sol_ir_append_cleanup_local(lowerer, pattern->binding)) return false;
+        ++arm->bindings.count;
+        ++arm->cleanup.count;
+    }
+    for (size_t index = 0; index < pattern->children.count; ++index) {
+        if (!sol_ir_collect_pattern_bindings(lowerer,
+            lowerer->ir->pattern_children[pattern->children.offset + index].pattern,
+            arm, depth + 1)) return false;
+    }
+    return true;
+}
+
 static bool sol_ir_lower_statements_arms(SolIrLowerer *lowerer) {
     size_t statement_count = lowerer->syntax->statement_count;
     size_t arm_count = lowerer->syntax->match_arm_count;
@@ -2313,8 +2458,14 @@ static bool sol_ir_lower_statements_arms(SolIrLowerer *lowerer) {
         lowerer->ir->arms = sol_ir_allocate(arm_count, sizeof(*lowerer->ir->arms), true);
         if (lowerer->ir->arms == NULL) return false;
     }
+    if (lowerer->syntax->pattern_count != 0) {
+        lowerer->ir->patterns = sol_ir_allocate(lowerer->syntax->pattern_count,
+            sizeof(*lowerer->ir->patterns), true);
+        if (lowerer->ir->patterns == NULL) return false;
+    }
     lowerer->ir->statement_count = statement_count;
     lowerer->ir->arm_count = arm_count;
+    lowerer->ir->pattern_count = lowerer->syntax->pattern_count;
     for (size_t index = 0; index < statement_count; ++index) {
         const SolStatement *source = &lowerer->syntax->statements[index];
         SolIrStatement *output = &lowerer->ir->statements[index];
@@ -2376,38 +2527,26 @@ static bool sol_ir_lower_statements_arms(SolIrLowerer *lowerer) {
     }
     for (size_t index = 0; index < arm_count; ++index) {
         const SolMatchArm *source = &lowerer->syntax->match_arms[index];
-        const SolPattern *pattern = &lowerer->syntax->patterns[source->pattern];
         SolIrArm *output = &lowerer->ir->arms[index];
         output->span = source->span;
-        output->value = source->value;
-        output->variant = SOL_IR_NONE;
+        output->guard = source->guard == SOL_AST_NONE ? SOL_IR_NONE : source->guard;
+        output->body = source->value;
         output->bindings.offset = lowerer->ir->root_count;
         output->cleanup.offset = lowerer->ir->cleanup_local_count;
-        if (pattern->kind == SOL_PATTERN_WILDCARD) {
-            output->kind = SOL_IR_PATTERN_WILDCARD;
-        } else if (pattern->kind == SOL_PATTERN_BOOL) {
-            output->kind = SOL_IR_PATTERN_BOOL;
-            output->boolean = pattern->bool_value;
-        } else {
-            output->kind = SOL_IR_PATTERN_VARIANT;
-            output->variant = lowerer->types->pattern_variant_resolutions[source->pattern];
-            if (output->variant >= lowerer->syntax->variant_count) return false;
-            SolPatternBindingId binding = pattern->first_binding;
-            while (binding != SOL_AST_NONE) {
-                if (binding >= lowerer->syntax->pattern_binding_count
-                    || lowerer->pattern_locals[binding] == SOL_IR_NONE
-                    || !sol_ir_append_root(lowerer, lowerer->pattern_locals[binding])) {
-                    return false;
-                }
-                ++output->bindings.count;
-                if (!sol_ir_append_cleanup_local(lowerer,
-                    lowerer->pattern_locals[binding])) return false;
-                ++output->cleanup.count;
-                binding = lowerer->syntax->pattern_bindings[binding].next;
-            }
-            if (output->bindings.count
-                != lowerer->ir->variants[output->variant].fields.count) return false;
+        if (!sol_ir_lower_pattern(lowerer, source->pattern, &output->pattern)
+            || !sol_ir_collect_pattern_bindings(lowerer, output->pattern,
+                output, 0)) return false;
+        for (size_t left = 0; left < output->cleanup.count / 2; ++left) {
+            size_t right = output->cleanup.count - 1 - left;
+            SolIrLocalId temporary = lowerer->ir->cleanup_locals[
+                output->cleanup.offset + left];
+            lowerer->ir->cleanup_locals[output->cleanup.offset + left]
+                = lowerer->ir->cleanup_locals[output->cleanup.offset + right];
+            lowerer->ir->cleanup_locals[output->cleanup.offset + right] = temporary;
         }
+    }
+    for (size_t index = 0; index < lowerer->ir->pattern_count; ++index) {
+        if (lowerer->pattern_states[index] != 2) return false;
     }
     return true;
 }
@@ -3480,51 +3619,21 @@ static bool sol_ir_expression_types_valid(
             SolIrTypeId scrutinee_id
                 = ir->expressions[expression->as.match_expr.scrutinee].type;
             if (scrutinee_id >= ir->type_count) return false;
-            const SolIrType *scrutinee = &ir->types[scrutinee_id];
-            bool wildcard = false;
-            bool bool_values[2] = {false, false};
-            size_t variants = 0;
             for (size_t index = 0; index < expression->as.match_expr.arms.count; ++index) {
                 SolIrArmId arm_id = ir->arm_ids[expression->as.match_expr.arms.offset + index];
-                if (arm_id >= ir->arm_count || ir->arms[arm_id].value >= ir->expression_count
-                    || !sol_ir_type_assignable(ir, ir->expressions[ir->arms[arm_id].value].type,
+                if (arm_id >= ir->arm_count || ir->arms[arm_id].body >= ir->expression_count
+                    || ir->arms[arm_id].pattern >= ir->pattern_count
+                    || ir->patterns[ir->arms[arm_id].pattern].type != scrutinee_id
+                    || (ir->arms[arm_id].guard != SOL_IR_NONE
+                        && (ir->arms[arm_id].guard >= ir->expression_count
+                            || !sol_ir_type_is(ir,
+                                ir->expressions[ir->arms[arm_id].guard].type,
+                                SOL_IR_TYPE_BOOL)))
+                    || !sol_ir_type_assignable(ir, ir->expressions[ir->arms[arm_id].body].type,
                         expression->type, (SolIrSlice){0}, (SolIrSlice){0},
                         SOL_IR_NONE)) return false;
-                const SolIrArm *arm = &ir->arms[arm_id];
-                if (arm->kind == SOL_IR_PATTERN_WILDCARD) {
-                    if (wildcard || index + 1 != expression->as.match_expr.arms.count) {
-                        return false;
-                    }
-                    wildcard = true;
-                } else if (arm->kind == SOL_IR_PATTERN_BOOL) {
-                    size_t value = arm->boolean ? 1 : 0;
-                    if (scrutinee->kind != SOL_IR_TYPE_BOOL || bool_values[value]) return false;
-                    bool_values[value] = true;
-                } else if (arm->kind == SOL_IR_PATTERN_VARIANT) {
-                    if (arm->variant >= ir->variant_count
-                        || scrutinee->kind != SOL_IR_TYPE_NOMINAL
-                        || ir->variants[arm->variant].owner != scrutinee->definition) {
-                        return false;
-                    }
-                    for (size_t previous = 0; previous < index; ++previous) {
-                        const SolIrArm *other = &ir->arms[ir->arm_ids[
-                            expression->as.match_expr.arms.offset + previous]];
-                        if (other->kind == SOL_IR_PATTERN_VARIANT
-                            && other->variant == arm->variant) return false;
-                    }
-                    ++variants;
-                } else {
-                    return false;
-                }
             }
-            if (wildcard) return true;
-            if (scrutinee->kind == SOL_IR_TYPE_BOOL) {
-                return bool_values[0] && bool_values[1];
-            }
-            return scrutinee->kind == SOL_IR_TYPE_NOMINAL
-                && scrutinee->definition < ir->definition_count
-                && ir->definitions[scrutinee->definition].kind == SOL_IR_DEFINITION_ENUM
-                && variants == ir->definitions[scrutinee->definition].variants.count;
+            return true;
         }
         case SOL_IR_EXPR_HANDLE:
             return expression->as.handler.body < ir->expression_count
@@ -3681,7 +3790,8 @@ static bool sol_ir_executable_expression(
                     local_callables[local] = callable_id;
                     introduced[local] = true;
                 }
-                SOL_IR_EXEC(arm->value);
+                if (arm->guard != SOL_IR_NONE) SOL_IR_EXEC(arm->guard);
+                SOL_IR_EXEC(arm->body);
                 for (size_t binding = 0; binding < arm->bindings.count; ++binding) {
                     introduced[ir->roots[arm->bindings.offset + binding]] = false;
                 }
@@ -4071,6 +4181,110 @@ static bool sol_ir_proof_call_is_pure(
     return determined;
 }
 
+static bool sol_ir_guard_expression_pure(const SolIr *ir,
+    SolIrExpressionId id, unsigned char *states, size_t depth) {
+    if (id >= ir->expression_count || depth >= 256 || states[id] == 1) return false;
+    if (states[id] == 2) return true;
+    states[id] = 1;
+#define SOL_IR_GUARD(child) \
+    do { if (!sol_ir_guard_expression_pure( \
+        ir, (child), states, depth + 1)) return false; } while (0)
+    const SolIrExpression *expression = &ir->expressions[id];
+    if (expression->local_use == SOL_IR_LOCAL_USE_EXCLUSIVE
+        || expression->local_use == SOL_IR_LOCAL_USE_UPDATE) return false;
+    switch (expression->kind) {
+        case SOL_IR_EXPR_PLACE: {
+            const SolIrPlace *place = &ir->places[expression->as.place];
+            if (place->root_kind == SOL_IR_PLACE_ROOT_TEMPORARY) {
+                SOL_IR_GUARD(place->temporary);
+            }
+            for (size_t index = 0; index < place->projections.count; ++index) {
+                const SolIrProjection *projection
+                    = &ir->projections[place->projections.offset + index];
+                if (projection->kind == SOL_IR_PROJECTION_INDEX) {
+                    SOL_IR_GUARD(projection->index);
+                }
+            }
+            break;
+        }
+        case SOL_IR_EXPR_UNARY:
+            SOL_IR_GUARD(expression->as.unary.operand);
+            break;
+        case SOL_IR_EXPR_BINARY:
+            SOL_IR_GUARD(expression->as.binary.left);
+            SOL_IR_GUARD(expression->as.binary.right);
+            break;
+        case SOL_IR_EXPR_CALL:
+            if (!sol_ir_proof_call_is_pure(ir, expression)) return false;
+            if (expression->as.call.kind == SOL_IR_CALL_CALLBACK
+                || expression->as.call.kind == SOL_IR_CALL_CAPABILITY) {
+                SOL_IR_GUARD(expression->as.call.callee);
+            } else if (expression->as.call.kind == SOL_IR_CALL_METHOD) {
+                if (expression->as.call.receiver_access == SOL_ACCESS_EXCLUSIVE) {
+                    return false;
+                }
+                SOL_IR_GUARD(expression->as.call.receiver);
+            }
+            for (size_t index = 0; index < expression->as.call.operands.count; ++index) {
+                const SolIrOperand *operand
+                    = &ir->operands[expression->as.call.operands.offset + index];
+                if (operand->access == SOL_ACCESS_EXCLUSIVE) return false;
+                SOL_IR_GUARD(operand->value);
+            }
+            break;
+        case SOL_IR_EXPR_RECORD:
+            for (size_t index = 0; index < expression->as.record.fields.count; ++index) {
+                SOL_IR_GUARD(ir->operands[
+                    expression->as.record.fields.offset + index].value);
+            }
+            break;
+        case SOL_IR_EXPR_TUPLE:
+            for (size_t index = 0; index < expression->as.tuple.operands.count; ++index) {
+                SOL_IR_GUARD(ir->operands[
+                    expression->as.tuple.operands.offset + index].value);
+            }
+            break;
+        case SOL_IR_EXPR_BOUND_OPERATION:
+            SOL_IR_GUARD(expression->as.operation.receiver);
+            break;
+        case SOL_IR_EXPR_IF:
+            SOL_IR_GUARD(expression->as.if_expr.condition);
+            SOL_IR_GUARD(expression->as.if_expr.then_branch);
+            SOL_IR_GUARD(expression->as.if_expr.else_branch);
+            break;
+        case SOL_IR_EXPR_MATCH:
+            SOL_IR_GUARD(expression->as.match_expr.scrutinee);
+            for (size_t index = 0; index < expression->as.match_expr.arms.count; ++index) {
+                const SolIrArm *arm = &ir->arms[ir->arm_ids[
+                    expression->as.match_expr.arms.offset + index]];
+                if (arm->guard != SOL_IR_NONE) SOL_IR_GUARD(arm->guard);
+                SOL_IR_GUARD(arm->body);
+            }
+            break;
+        case SOL_IR_EXPR_BLOCK:
+            for (size_t index = 0; index < expression->as.block.statements.count; ++index) {
+                const SolIrStatement *statement = &ir->statements[ir->statement_ids[
+                    expression->as.block.statements.offset + index]];
+                if (statement->kind != SOL_IR_STATEMENT_LET
+                    && statement->kind != SOL_IR_STATEMENT_EXPRESSION) return false;
+                SOL_IR_GUARD(statement->expression);
+            }
+            break;
+        case SOL_IR_EXPR_PROPAGATE:
+        case SOL_IR_EXPR_HANDLE:
+        case SOL_IR_EXPR_RESULT:
+        case SOL_IR_EXPR_SNAPSHOT_READ:
+        case SOL_IR_EXPR_REFINEMENT_SELF:
+        case SOL_IR_EXPR_COMPILE_TIME_HEAD:
+            return false;
+        default:
+            break;
+    }
+#undef SOL_IR_GUARD
+    states[id] = 2;
+    return true;
+}
+
 static bool sol_ir_expression_reaches(
     const SolIr *ir,
     SolIrExpressionId id,
@@ -4145,7 +4359,10 @@ static bool sol_ir_expression_reaches(
             for (size_t index = 0; index < expression->as.match_expr.arms.count; ++index) {
                 SolIrArmId arm
                     = ir->arm_ids[expression->as.match_expr.arms.offset + index];
-                SOL_IR_REACHES(ir->arms[arm].value);
+                if (ir->arms[arm].guard != SOL_IR_NONE) {
+                    SOL_IR_REACHES(ir->arms[arm].guard);
+                }
+                SOL_IR_REACHES(ir->arms[arm].body);
             }
             break;
         case SOL_IR_EXPR_BLOCK:
@@ -4291,7 +4508,10 @@ static bool sol_ir_proof_expression_non_executable(
                     local_callables[local] = callable_id;
                     if (available != NULL) available[local] = true;
                 }
-                SOL_IR_PROOF(ir->arms[arm].value);
+                if (ir->arms[arm].guard != SOL_IR_NONE) {
+                    SOL_IR_PROOF(ir->arms[arm].guard);
+                }
+                SOL_IR_PROOF(ir->arms[arm].body);
                 if (available != NULL) {
                     for (size_t binding = 0; binding < ir->arms[arm].bindings.count;
                         ++binding) {
@@ -4346,6 +4566,504 @@ static bool sol_ir_proof_expression_non_executable(
     return true;
 }
 
+static bool sol_ir_validate_pattern_tree(const SolIr *ir, SolIrPatternId id,
+    unsigned char *states, size_t *binding_index, const SolIrArm *arm,
+    size_t depth) {
+    if (id >= ir->pattern_count || depth >= 64 || states[id] != 0) return false;
+    states[id] = 1;
+    const SolIrPattern *pattern = &ir->patterns[id];
+    if (pattern->kind == SOL_IR_PATTERN_BINDING) {
+        if (*binding_index >= arm->bindings.count
+            || ir->roots[arm->bindings.offset + *binding_index] != pattern->binding
+            || ir->cleanup_locals[arm->cleanup.offset + arm->cleanup.count
+                - 1 - *binding_index]
+                != pattern->binding) return false;
+        ++*binding_index;
+    }
+    if (!sol_ir_slice_valid(pattern->children, ir->pattern_child_count)) return false;
+    for (size_t index = 0; index < pattern->children.count; ++index) {
+        if (!sol_ir_validate_pattern_tree(ir,
+            ir->pattern_children[pattern->children.offset + index].pattern,
+            states, binding_index, arm, depth + 1)) return false;
+    }
+    states[id] = 2;
+    return true;
+}
+
+static bool sol_ir_validate_pattern_ownership(
+    const SolIr *ir, SolDiagnostics *diagnostics
+) {
+    unsigned char *states = ir->pattern_count == 0 ? NULL
+        : calloc(ir->pattern_count, 1);
+    size_t *local_owners = ir->local_count == 0 ? NULL
+        : calloc(ir->local_count, sizeof(*local_owners));
+    size_t *edge_owners = ir->pattern_child_count == 0 ? NULL
+        : calloc(ir->pattern_child_count, sizeof(*edge_owners));
+    if ((ir->pattern_count != 0 && states == NULL)
+        || (ir->local_count != 0 && local_owners == NULL)
+        || (ir->pattern_child_count != 0 && edge_owners == NULL)) {
+        free(states); free(local_owners); free(edge_owners);
+        return sol_ir_error(diagnostics, "IR pattern ownership allocation failed");
+    }
+    bool valid = true;
+    for (size_t index = 0; valid && index < ir->arm_count; ++index) {
+        size_t binding = 0;
+        valid = sol_ir_validate_pattern_tree(ir, ir->arms[index].pattern,
+            states, &binding, &ir->arms[index], 0)
+            && binding == ir->arms[index].bindings.count;
+    }
+    for (size_t index = 0; valid && index < ir->pattern_count; ++index) {
+        valid = states[index] == 2;
+        for (size_t child = 0; valid
+            && child < ir->patterns[index].children.count; ++child) {
+            ++edge_owners[ir->patterns[index].children.offset + child];
+        }
+        if (valid && ir->patterns[index].kind == SOL_IR_PATTERN_BINDING
+            && ir->patterns[index].binding < ir->local_count) {
+            ++local_owners[ir->patterns[index].binding];
+        }
+    }
+    for (size_t index = 0; valid && index < ir->local_count; ++index) {
+        valid = ir->locals[index].kind == SOL_IR_LOCAL_PATTERN
+            ? local_owners[index] == 1 : local_owners[index] == 0;
+    }
+    for (size_t index = 0; valid && index < ir->pattern_child_count; ++index) {
+        valid = edge_owners[index] == 1;
+    }
+    free(states); free(local_owners); free(edge_owners);
+    return valid || sol_ir_error(diagnostics,
+        "IR patterns are cyclic, shared, orphaned, or have incorrect binding slices");
+}
+
+typedef struct { SolIrPatternId pattern; } SolIrMatchCell;
+typedef struct {
+    SolIrMatchCell *cells;
+    size_t row_count;
+    size_t column_count;
+} SolIrMatchMatrix;
+typedef struct { unsigned kind; size_t id; } SolIrMatchConstructor;
+
+static bool sol_ir_pattern_constructor(const SolIr *ir, SolIrPatternId id,
+    SolIrMatchConstructor *constructor) {
+    if (id == SOL_IR_NONE) return false;
+    const SolIrPattern *pattern = &ir->patterns[id];
+    if (pattern->kind == SOL_IR_PATTERN_BOOL) {
+        *constructor = (SolIrMatchConstructor){1, pattern->boolean ? 1 : 0};
+        return true;
+    }
+    if (pattern->kind == SOL_IR_PATTERN_VARIANT) {
+        *constructor = (SolIrMatchConstructor){2, pattern->variant};
+        return true;
+    }
+    if (pattern->kind == SOL_IR_PATTERN_RECORD
+        || pattern->kind == SOL_IR_PATTERN_TUPLE) {
+        *constructor = (SolIrMatchConstructor){3, 0};
+        return true;
+    }
+    return false;
+}
+
+static SolIrPatternId sol_ir_constructor_child(const SolIr *ir,
+    SolIrPatternId id, size_t ordinal, SolIrFieldId field) {
+    const SolIrPattern *pattern = &ir->patterns[id];
+    for (size_t index = 0; index < pattern->children.count; ++index) {
+        const SolIrPatternChild *edge
+            = &ir->pattern_children[pattern->children.offset + index];
+        if ((pattern->kind == SOL_IR_PATTERN_RECORD && edge->field == field)
+            || (pattern->kind != SOL_IR_PATTERN_RECORD
+                && edge->ordinal == ordinal)) return edge->pattern;
+    }
+    return SOL_IR_NONE;
+}
+
+static bool sol_ir_constructor_fields(const SolIr *ir, SolIrTypeId type_id,
+    SolIrMatchConstructor constructor, SolIrTypeId **types,
+    SolIrFieldId **fields, size_t *count) {
+    *types = NULL; *fields = NULL; *count = 0;
+    const SolIrType *type = &ir->types[type_id];
+    if (constructor.kind == 1) return type->kind == SOL_IR_TYPE_BOOL;
+    if (constructor.kind == 3 && type->kind == SOL_IR_TYPE_TUPLE) {
+        *count = type->argument_count;
+        *types = sol_ir_allocate(*count, sizeof(**types), false);
+        if (*count != 0 && *types == NULL) return false;
+        for (size_t index = 0; index < *count; ++index) {
+            (*types)[index] = ir->type_ids[type->argument_offset + index];
+        }
+        return true;
+    }
+    if (type->kind != SOL_IR_TYPE_NOMINAL
+        || type->definition >= ir->definition_count) return false;
+    const SolIrDefinition *definition = &ir->definitions[type->definition];
+    SolIrSlice source = {0};
+    if (constructor.kind == 2 && constructor.id < ir->variant_count
+        && ir->variants[constructor.id].owner == type->definition) {
+        source = ir->variants[constructor.id].fields;
+    } else if (constructor.kind == 3
+        && definition->kind == SOL_IR_DEFINITION_RECORD) {
+        source = definition->fields;
+    } else {
+        return false;
+    }
+    *count = source.count;
+    *types = sol_ir_allocate(*count, sizeof(**types), false);
+    *fields = sol_ir_allocate(*count, sizeof(**fields), false);
+    if (*count != 0 && (*types == NULL || *fields == NULL)) {
+        free(*types); free(*fields); *types = NULL; *fields = NULL;
+        return false;
+    }
+    for (size_t index = 0; index < *count; ++index) {
+        (*fields)[index] = source.offset + index;
+        (*types)[index] = SOL_IR_NONE;
+        for (size_t candidate = 0; candidate < ir->type_count; ++candidate) {
+            if (sol_ir_type_matches_instantiation(ir, candidate,
+                ir->fields[source.offset + index].type,
+                definition->generic_parameters,
+                (SolIrSlice){type->argument_offset, type->argument_count},
+                SOL_IR_NONE, 0)) {
+                (*types)[index] = candidate;
+                break;
+            }
+        }
+        if ((*types)[index] == SOL_IR_NONE) {
+            free(*types); free(*fields); *types = NULL; *fields = NULL;
+            return false;
+        }
+    }
+    return true;
+}
+
+typedef enum {
+    SOL_IR_INHABITATION_EMPTY,
+    SOL_IR_INHABITATION_INHABITED,
+    SOL_IR_INHABITATION_CYCLE,
+    SOL_IR_INHABITATION_INDETERMINATE,
+} SolIrInhabitation;
+
+static SolIrInhabitation sol_ir_finite_inhabitation(const SolIr *ir,
+    SolIrTypeId type_id, SolIrTypeId *stack, size_t depth, size_t *steps);
+
+static SolIrInhabitation sol_ir_type_list_inhabitation(const SolIr *ir,
+    const SolIrTypeId *types, size_t count, SolIrTypeId *stack,
+    size_t depth, size_t *steps) {
+    SolIrInhabitation result = SOL_IR_INHABITATION_INHABITED;
+    for (size_t index = 0; index < count; ++index) {
+        SolIrInhabitation child = sol_ir_finite_inhabitation(
+            ir, types[index], stack, depth, steps);
+        if (child == SOL_IR_INHABITATION_EMPTY) return child;
+        if (child == SOL_IR_INHABITATION_INDETERMINATE) {
+            result = SOL_IR_INHABITATION_INDETERMINATE;
+        } else if (child == SOL_IR_INHABITATION_CYCLE
+            && result == SOL_IR_INHABITATION_INHABITED) {
+            result = SOL_IR_INHABITATION_CYCLE;
+        }
+    }
+    return result;
+}
+
+static SolIrInhabitation sol_ir_constructor_inhabitation(const SolIr *ir,
+    SolIrTypeId type_id, SolIrMatchConstructor constructor,
+    SolIrTypeId *stack, size_t depth, size_t *steps) {
+    SolIrTypeId *types = NULL;
+    SolIrFieldId *fields = NULL;
+    size_t count = 0;
+    if (!sol_ir_constructor_fields(
+        ir, type_id, constructor, &types, &fields, &count)) {
+        return SOL_IR_INHABITATION_INDETERMINATE;
+    }
+    SolIrInhabitation result = sol_ir_type_list_inhabitation(
+        ir, types, count, stack, depth, steps);
+    free(types);
+    free(fields);
+    return result;
+}
+
+static SolIrInhabitation sol_ir_finite_inhabitation(const SolIr *ir,
+    SolIrTypeId type_id, SolIrTypeId *stack, size_t depth, size_t *steps) {
+    if (type_id >= ir->type_count || depth >= 64 || (*steps)++ >= 1024) {
+        return SOL_IR_INHABITATION_INDETERMINATE;
+    }
+    const SolIrType *type = &ir->types[type_id];
+    if (type->kind == SOL_IR_TYPE_NEVER) return SOL_IR_INHABITATION_EMPTY;
+    if (type->kind == SOL_IR_TYPE_PARAMETER || type->kind == SOL_IR_TYPE_SELF) {
+        return SOL_IR_INHABITATION_INDETERMINATE;
+    }
+    for (size_t index = 0; index < depth; ++index) {
+        if (stack[index] == type_id) return SOL_IR_INHABITATION_CYCLE;
+    }
+    stack[depth] = type_id;
+    if (type->kind == SOL_IR_TYPE_OPTION) return SOL_IR_INHABITATION_INHABITED;
+    if (type->kind == SOL_IR_TYPE_RESULT) {
+        if (!sol_ir_slice_valid((SolIrSlice){type->argument_offset,
+                type->argument_count}, ir->type_id_count)
+            || type->argument_count != 2) return SOL_IR_INHABITATION_INDETERMINATE;
+        SolIrInhabitation left = sol_ir_finite_inhabitation(ir,
+            ir->type_ids[type->argument_offset], stack, depth + 1, steps);
+        SolIrInhabitation right = sol_ir_finite_inhabitation(ir,
+            ir->type_ids[type->argument_offset + 1], stack, depth + 1, steps);
+        if (left == SOL_IR_INHABITATION_INHABITED
+            || right == SOL_IR_INHABITATION_INHABITED) {
+            return SOL_IR_INHABITATION_INHABITED;
+        }
+        if (left == SOL_IR_INHABITATION_INDETERMINATE
+            || right == SOL_IR_INHABITATION_INDETERMINATE) {
+            return SOL_IR_INHABITATION_INDETERMINATE;
+        }
+        if (left == SOL_IR_INHABITATION_CYCLE
+            || right == SOL_IR_INHABITATION_CYCLE) return SOL_IR_INHABITATION_CYCLE;
+        return SOL_IR_INHABITATION_EMPTY;
+    }
+    if (type->kind == SOL_IR_TYPE_TUPLE) {
+        if (!sol_ir_slice_valid((SolIrSlice){type->argument_offset,
+                type->argument_count}, ir->type_id_count)) {
+            return SOL_IR_INHABITATION_INDETERMINATE;
+        }
+        return sol_ir_type_list_inhabitation(ir,
+            ir->type_ids + type->argument_offset, type->argument_count,
+            stack, depth + 1, steps);
+    }
+    if (type->kind != SOL_IR_TYPE_NOMINAL
+        || type->definition >= ir->definition_count) {
+        return type->kind == SOL_IR_TYPE_NOMINAL
+            ? SOL_IR_INHABITATION_INDETERMINATE
+            : SOL_IR_INHABITATION_INHABITED;
+    }
+    const SolIrDefinition *definition = &ir->definitions[type->definition];
+    if (definition->kind == SOL_IR_DEFINITION_RECORD) {
+        return sol_ir_constructor_inhabitation(ir, type_id,
+            (SolIrMatchConstructor){3, 0}, stack, depth + 1, steps);
+    }
+    if (definition->kind != SOL_IR_DEFINITION_ENUM || definition->open) {
+        return SOL_IR_INHABITATION_INHABITED;
+    }
+    if (!sol_ir_slice_valid(definition->variants, ir->variant_count)) {
+        return SOL_IR_INHABITATION_INDETERMINATE;
+    }
+    SolIrInhabitation result = SOL_IR_INHABITATION_EMPTY;
+    for (size_t index = 0; index < definition->variants.count; ++index) {
+        SolIrInhabitation constructor = sol_ir_constructor_inhabitation(ir,
+            type_id, (SolIrMatchConstructor){2,
+                definition->variants.offset + index},
+            stack, depth + 1, steps);
+        if (constructor == SOL_IR_INHABITATION_INHABITED) return constructor;
+        if (constructor == SOL_IR_INHABITATION_INDETERMINATE) {
+            result = SOL_IR_INHABITATION_INDETERMINATE;
+        } else if (constructor == SOL_IR_INHABITATION_CYCLE
+            && result == SOL_IR_INHABITATION_EMPTY) {
+            result = SOL_IR_INHABITATION_CYCLE;
+        }
+    }
+    return result;
+}
+
+static bool sol_ir_maybe_finitely_inhabited(const SolIr *ir, SolIrTypeId type) {
+    SolIrTypeId stack[64];
+    size_t steps = 0;
+    SolIrInhabitation result = sol_ir_finite_inhabitation(
+        ir, type, stack, 0, &steps);
+    return result != SOL_IR_INHABITATION_EMPTY
+        && result != SOL_IR_INHABITATION_CYCLE;
+}
+
+static bool sol_ir_match_constructor_inhabited(const SolIr *ir,
+    SolIrTypeId type, SolIrMatchConstructor constructor) {
+    SolIrTypeId stack[64];
+    size_t steps = 0;
+    SolIrInhabitation result = sol_ir_constructor_inhabitation(
+        ir, type, constructor, stack, 0, &steps);
+    return result != SOL_IR_INHABITATION_EMPTY
+        && result != SOL_IR_INHABITATION_CYCLE;
+}
+
+static bool sol_ir_match_specialize(const SolIr *ir,
+    const SolIrMatchMatrix *source, SolIrMatchConstructor constructor,
+    size_t arity, const SolIrFieldId *fields, SolIrMatchMatrix *result,
+    bool *overflow) {
+    result->column_count = source->column_count - 1 + arity;
+    result->row_count = 0;
+    result->cells = NULL;
+    if (source->row_count != 0
+        && result->column_count > 8192 / source->row_count) {
+        *overflow = true;
+        return false;
+    }
+    size_t capacity = source->row_count * result->column_count;
+    result->cells = sol_ir_allocate(capacity, sizeof(*result->cells), false);
+    if (capacity != 0 && result->cells == NULL) return false;
+    for (size_t row = 0; row < source->row_count; ++row) {
+        const SolIrMatchCell *input
+            = source->cells + row * source->column_count;
+        SolIrMatchConstructor actual;
+        bool wildcard = !sol_ir_pattern_constructor(ir, input[0].pattern, &actual);
+        if (!wildcard && (actual.kind != constructor.kind
+                || actual.id != constructor.id)) continue;
+        SolIrMatchCell *output = result->column_count == 0 ? NULL
+            : result->cells + result->row_count * result->column_count;
+        ++result->row_count;
+        for (size_t index = 0; index < arity; ++index) {
+            output[index].pattern = wildcard ? SOL_IR_NONE
+                : sol_ir_constructor_child(ir, input[0].pattern, index,
+                    fields == NULL ? SOL_IR_NONE : fields[index]);
+        }
+        if (source->column_count > 1) memcpy(output + arity, input + 1,
+            (source->column_count - 1) * sizeof(*output));
+    }
+    return true;
+}
+
+static bool sol_ir_match_useful(const SolIr *ir, const SolIrMatchMatrix *matrix,
+    const SolIrMatchCell *candidate, const SolIrTypeId *types, size_t depth,
+    size_t *steps, bool *overflow) {
+    if (*overflow) return false;
+    if (depth >= 64 || (*steps)++ >= 8192) {
+        *overflow = true;
+        return false;
+    }
+    if (matrix->column_count == 0) return matrix->row_count == 0;
+    if (!sol_ir_maybe_finitely_inhabited(ir, types[0])) return false;
+    bool candidate_wildcards = true;
+    for (size_t column = 0; column < matrix->column_count; ++column) {
+        SolIrMatchConstructor ignored;
+        candidate_wildcards = candidate_wildcards
+            && !sol_ir_pattern_constructor(ir, candidate[column].pattern, &ignored);
+    }
+    if (candidate_wildcards) {
+        for (size_t row = 0; row < matrix->row_count; ++row) {
+            bool row_wildcards = true;
+            for (size_t column = 0; column < matrix->column_count; ++column) {
+                SolIrMatchConstructor ignored;
+                row_wildcards = row_wildcards && !sol_ir_pattern_constructor(ir,
+                    matrix->cells[row * matrix->column_count + column].pattern,
+                    &ignored);
+            }
+            if (row_wildcards) return false;
+        }
+    }
+    SolIrMatchConstructor direct;
+    bool has_direct = sol_ir_pattern_constructor(ir, candidate[0].pattern, &direct);
+    const SolIrType *type = &ir->types[types[0]];
+    bool product = type->kind == SOL_IR_TYPE_TUPLE
+        || (type->kind == SOL_IR_TYPE_NOMINAL
+            && type->definition < ir->definition_count
+            && ir->definitions[type->definition].kind == SOL_IR_DEFINITION_RECORD);
+    bool closed_enum = type->kind == SOL_IR_TYPE_NOMINAL
+        && type->definition < ir->definition_count
+        && ir->definitions[type->definition].kind == SOL_IR_DEFINITION_ENUM
+        && !ir->definitions[type->definition].open;
+    bool complete = type->kind == SOL_IR_TYPE_BOOL || product || closed_enum;
+    SolIrMatchConstructor constructors[2] = {{0}};
+    size_t constructor_count = 0;
+    size_t enum_index = 0;
+    size_t enum_count = 0;
+    if (has_direct) constructors[constructor_count++] = direct;
+    else if (type->kind == SOL_IR_TYPE_BOOL) {
+        constructors[0] = (SolIrMatchConstructor){1, 0};
+        constructors[1] = (SolIrMatchConstructor){1, 1};
+        constructor_count = 2;
+    } else if (product) {
+        constructors[constructor_count++] = (SolIrMatchConstructor){3, 0};
+    } else if (closed_enum) {
+        enum_index = ir->definitions[type->definition].variants.offset;
+        enum_count = ir->definitions[type->definition].variants.count;
+    }
+    if (has_direct || complete) {
+        while (constructor_count != 0 || enum_count != 0) {
+            SolIrMatchConstructor constructor;
+            if (enum_count != 0) {
+                constructor = (SolIrMatchConstructor){2, enum_index++};
+                --enum_count;
+            } else {
+                constructor = constructors[--constructor_count];
+            }
+            if (!sol_ir_match_constructor_inhabited(
+                ir, types[0], constructor)) continue;
+            SolIrTypeId *field_types = NULL;
+            SolIrFieldId *field_ids = NULL;
+            size_t arity = 0;
+            if (!sol_ir_constructor_fields(ir, types[0], constructor,
+                    &field_types, &field_ids, &arity)) return false;
+            size_t columns = matrix->column_count - 1 + arity;
+            SolIrTypeId *specialized_types
+                = sol_ir_allocate(columns, sizeof(*specialized_types), false);
+            SolIrMatchCell *specialized_candidate
+                = sol_ir_allocate(columns, sizeof(*specialized_candidate), false);
+            SolIrMatchMatrix specialized;
+            bool allocated = (columns == 0
+                    || (specialized_types != NULL && specialized_candidate != NULL))
+                && sol_ir_match_specialize(ir, matrix, constructor, arity,
+                    field_ids, &specialized, overflow);
+            if (!allocated) {
+                free(field_types); free(field_ids); free(specialized_types);
+                free(specialized_candidate);
+                return false;
+            }
+            if (arity != 0) memcpy(specialized_types, field_types,
+                arity * sizeof(*field_types));
+            if (matrix->column_count > 1) memcpy(specialized_types + arity,
+                types + 1, (matrix->column_count - 1) * sizeof(*types));
+            for (size_t index = 0; index < arity; ++index) {
+                specialized_candidate[index].pattern = has_direct
+                    ? sol_ir_constructor_child(ir, candidate[0].pattern, index,
+                        field_ids == NULL ? SOL_IR_NONE : field_ids[index])
+                    : SOL_IR_NONE;
+            }
+            if (matrix->column_count > 1) memcpy(specialized_candidate + arity,
+                candidate + 1,
+                (matrix->column_count - 1) * sizeof(*candidate));
+            bool useful = sol_ir_match_useful(ir, &specialized,
+                specialized_candidate, specialized_types, depth + 1,
+                steps, overflow);
+            free(field_types); free(field_ids); free(specialized_types);
+            free(specialized_candidate); free(specialized.cells);
+            if (useful) return true;
+        }
+        return false;
+    }
+    SolIrMatchMatrix defaults;
+    if (!sol_ir_match_specialize(ir, matrix,
+        (SolIrMatchConstructor){0, 0}, 0, NULL, &defaults, overflow)) return false;
+    bool useful = sol_ir_match_useful(ir, &defaults, candidate + 1,
+        types + 1, depth + 1, steps, overflow);
+    free(defaults.cells);
+    return useful;
+}
+
+static bool sol_ir_match_coverage_valid(const SolIr *ir,
+    const SolIrExpression *expression) {
+    size_t arm_count = expression->as.match_expr.arms.count;
+    SolIrMatchCell *rows = sol_ir_allocate(arm_count, sizeof(*rows), false);
+    if (arm_count != 0 && rows == NULL) return false;
+    size_t row_count = 0;
+    SolIrTypeId type = ir->expressions[expression->as.match_expr.scrutinee].type;
+    for (size_t index = 0; index < arm_count; ++index) {
+        const SolIrArm *arm = &ir->arms[ir->arm_ids[
+            expression->as.match_expr.arms.offset + index]];
+        SolIrMatchMatrix matrix = {rows, row_count, 1};
+        SolIrMatchCell candidate = {arm->pattern};
+        size_t steps = 0;
+        bool overflow = false;
+        if (!sol_ir_match_useful(ir, &matrix, &candidate, &type, 0,
+                &steps, &overflow) || overflow) {
+            free(rows);
+            return false;
+        }
+        if (arm->guard == SOL_IR_NONE) rows[row_count++].pattern = arm->pattern;
+    }
+    if (sol_ir_maybe_finitely_inhabited(ir, type)) {
+        SolIrMatchMatrix matrix = {rows, row_count, 1};
+        SolIrMatchCell wildcard = {SOL_IR_NONE};
+        size_t steps = 0;
+        bool overflow = false;
+        bool missing = sol_ir_match_useful(ir, &matrix, &wildcard, &type,
+            0, &steps, &overflow);
+        if (missing || overflow) {
+            free(rows);
+            return false;
+        }
+    }
+    free(rows);
+    return true;
+}
+
 static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
     bool validate_ownership) {
     if (ir == NULL || ir->source_bytes == NULL || ir->source_path == NULL
@@ -4369,6 +5087,10 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
         || (ir->statement_id_count != 0 && ir->statement_ids == NULL)
         || (ir->arm_count != 0 && ir->arms == NULL)
         || (ir->arm_id_count != 0 && ir->arm_ids == NULL)
+        || (ir->pattern_count != 0 && ir->patterns == NULL)
+        || (ir->pattern_child_count != 0 && ir->pattern_children == NULL)
+        || ir->pattern_count > SIZE_MAX / sizeof(*ir->patterns)
+        || ir->pattern_child_count > SIZE_MAX / sizeof(*ir->pattern_children)
         || (ir->operand_count != 0 && ir->operands == NULL)
         || (ir->root_count != 0 && ir->roots == NULL)
         || (ir->cleanup_local_count != 0 && ir->cleanup_locals == NULL)
@@ -4437,6 +5159,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             || (definition->kind == SOL_IR_DEFINITION_IMPLEMENTATION
                 && (definition->implementation_trait >= ir->definition_count
                     || definition->implementation_target >= ir->type_count))
+            || (definition->kind != SOL_IR_DEFINITION_ENUM && definition->open)
             || (definition->kind != SOL_IR_DEFINITION_IMPLEMENTATION
                 && (definition->implementation_trait != SOL_IR_NONE
                     || definition->implementation_target != SOL_IR_NONE))
@@ -5622,83 +6345,156 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             }
         }
     }
+    for (size_t index = 0; index < ir->pattern_count; ++index) {
+        const SolIrPattern *pattern = &ir->patterns[index];
+        if ((int)pattern->kind < 0 || pattern->kind > SOL_IR_PATTERN_TUPLE
+            || pattern->type >= ir->type_count
+            || pattern->span.start >= pattern->span.end
+            || pattern->span.end > ir->source_length
+            || !sol_ir_slice_valid(pattern->children, ir->pattern_child_count)) {
+            return sol_ir_error(diagnostics, "malformed recursive IR pattern");
+        }
+        const SolIrType *type = &ir->types[pattern->type];
+        bool leaf = pattern->kind == SOL_IR_PATTERN_WILDCARD
+            || pattern->kind == SOL_IR_PATTERN_BOOL
+            || pattern->kind == SOL_IR_PATTERN_BINDING;
+        if ((leaf && pattern->children.count != 0)
+            || (pattern->kind == SOL_IR_PATTERN_BOOL
+                ? type->kind != SOL_IR_TYPE_BOOL
+                : pattern->boolean)
+            || (pattern->kind == SOL_IR_PATTERN_VARIANT
+                ? (pattern->variant >= ir->variant_count
+                    || type->kind != SOL_IR_TYPE_NOMINAL
+                    || ir->variants[pattern->variant].owner != type->definition
+                    || pattern->children.count
+                        != ir->variants[pattern->variant].fields.count)
+                : pattern->variant != SOL_IR_NONE)
+            || (pattern->kind == SOL_IR_PATTERN_RECORD
+                ? (pattern->definition >= ir->definition_count
+                    || type->kind != SOL_IR_TYPE_NOMINAL
+                    || type->definition != pattern->definition
+                    || ir->definitions[pattern->definition].kind
+                        != SOL_IR_DEFINITION_RECORD)
+                : pattern->definition != SOL_IR_NONE)
+            || (pattern->kind == SOL_IR_PATTERN_BINDING
+                ? (pattern->binding >= ir->local_count
+                    || ir->locals[pattern->binding].kind != SOL_IR_LOCAL_PATTERN
+                    || ir->locals[pattern->binding].type != pattern->type
+                    || ir->locals[pattern->binding].access != SOL_ACCESS_OWNED)
+                : pattern->binding != SOL_IR_NONE)
+            || (pattern->kind == SOL_IR_PATTERN_TUPLE
+                && (type->kind != SOL_IR_TYPE_TUPLE
+                    || pattern->children.count != type->argument_count))) {
+            return sol_ir_error(diagnostics, "IR pattern payload metadata is invalid");
+        }
+        for (size_t child = 0; child < pattern->children.count; ++child) {
+            const SolIrPatternChild *edge
+                = &ir->pattern_children[pattern->children.offset + child];
+            if (edge->pattern >= ir->pattern_count) {
+                return sol_ir_error(diagnostics, "IR pattern child is out of range");
+            }
+            if (ir->patterns[edge->pattern].span.start < pattern->span.start
+                || ir->patterns[edge->pattern].span.end > pattern->span.end) {
+                return sol_ir_error(diagnostics,
+                    "IR child pattern span is outside its parent");
+            }
+            SolIrTypeId expected = SOL_IR_NONE;
+            if (pattern->kind == SOL_IR_PATTERN_TUPLE) {
+                if (edge->field != SOL_IR_NONE || edge->ordinal != child) {
+                    return sol_ir_error(diagnostics, "IR tuple pattern ordinal is invalid");
+                }
+                expected = ir->type_ids[type->argument_offset + child];
+            } else if (pattern->kind == SOL_IR_PATTERN_VARIANT) {
+                SolIrSlice fields = ir->variants[pattern->variant].fields;
+                if (edge->field != SOL_IR_NONE || edge->ordinal != child) {
+                    return sol_ir_error(diagnostics, "IR variant payload ordinal is invalid");
+                }
+                SolIrFieldId field = fields.offset + child;
+                const SolIrDefinition *definition = &ir->definitions[type->definition];
+                for (size_t candidate = 0; candidate < ir->type_count; ++candidate) {
+                    if (sol_ir_type_matches_instantiation(ir, candidate,
+                        ir->fields[field].type, definition->generic_parameters,
+                        (SolIrSlice){type->argument_offset, type->argument_count},
+                        SOL_IR_NONE, 0)) {
+                        expected = candidate;
+                        break;
+                    }
+                }
+            } else if (pattern->kind == SOL_IR_PATTERN_RECORD) {
+                if (edge->field >= ir->field_count || edge->ordinal != SOL_IR_NONE
+                    || ir->fields[edge->field].owner != pattern->definition) {
+                    return sol_ir_error(diagnostics, "IR record pattern field is invalid");
+                }
+                for (size_t previous = 0; previous < child; ++previous) {
+                    if (ir->pattern_children[pattern->children.offset + previous].field
+                        == edge->field) return sol_ir_error(diagnostics,
+                            "IR record pattern field is duplicated");
+                }
+                const SolIrDefinition *definition
+                    = &ir->definitions[pattern->definition];
+                for (size_t candidate = 0; candidate < ir->type_count; ++candidate) {
+                    if (sol_ir_type_matches_instantiation(ir, candidate,
+                        ir->fields[edge->field].type,
+                        definition->generic_parameters,
+                        (SolIrSlice){type->argument_offset, type->argument_count},
+                        SOL_IR_NONE, 0)) {
+                        expected = candidate;
+                        break;
+                    }
+                }
+            } else {
+                return sol_ir_error(diagnostics, "IR leaf pattern owns child edges");
+            }
+            if (expected == SOL_IR_NONE
+                || ir->patterns[edge->pattern].type != expected) {
+                return sol_ir_error(diagnostics, "IR pattern child type is invalid");
+            }
+        }
+    }
     for (size_t index = 0; index < ir->arm_count; ++index) {
         const SolIrArm *arm = &ir->arms[index];
-        if ((int)arm->kind < 0 || arm->kind > SOL_IR_PATTERN_VARIANT
-            || arm->value >= ir->expression_count
+        if (arm->pattern >= ir->pattern_count || arm->body >= ir->expression_count
+            || (arm->guard != SOL_IR_NONE
+                && (arm->guard >= ir->expression_count
+                    || !sol_ir_type_is(ir, ir->expressions[arm->guard].type,
+                        SOL_IR_TYPE_BOOL)))
             || arm->span.start > arm->span.end || arm->span.end > ir->source_length
+            || ir->patterns[arm->pattern].span.start < arm->span.start
+            || ir->patterns[arm->pattern].span.end > arm->span.end
             || !sol_ir_slice_valid(arm->bindings, ir->root_count)
             || !sol_ir_slice_valid(arm->cleanup, ir->cleanup_local_count)
-            || (arm->kind == SOL_IR_PATTERN_VARIANT
-                && arm->variant >= ir->variant_count)
-            || (arm->kind != SOL_IR_PATTERN_VARIANT
-                && (arm->variant != SOL_IR_NONE || arm->bindings.count != 0
-                    || arm->cleanup.count != 0))) {
+            || arm->cleanup.count != arm->bindings.count) {
             return sol_ir_error(diagnostics, "malformed IR match arm");
         }
-        if (arm->kind == SOL_IR_PATTERN_VARIANT) {
-            SolIrSlice fields = ir->variants[arm->variant].fields;
-            if (!sol_ir_slice_valid(fields, ir->field_count)
-                || arm->bindings.count != fields.count
-                || arm->cleanup.count != arm->bindings.count) {
-                return sol_ir_error(diagnostics,
-                    "IR variant arm payload bindings are incomplete");
+        if (arm->guard != SOL_IR_NONE) {
+            unsigned char *states = sol_ir_allocate(
+                ir->expression_count, sizeof(*states), true);
+            bool pure = states != NULL
+                && sol_ir_guard_expression_pure(ir, arm->guard, states, 0);
+            free(states);
+            if (!pure) return sol_ir_error(diagnostics,
+                "IR match guard is effectful or imperative");
+        }
+        for (size_t binding = 0; binding < arm->bindings.count; ++binding) {
+            SolIrLocalId local = ir->roots[arm->bindings.offset + binding];
+            if (local >= ir->local_count
+                || ir->cleanup_locals[arm->cleanup.offset + arm->cleanup.count
+                    - 1 - binding] != local
+                || ir->locals[local].kind != SOL_IR_LOCAL_PATTERN) {
+                return sol_ir_error(diagnostics, "IR match binding cleanup is invalid");
             }
-            SolIrTypeId scrutinee_id = SOL_IR_NONE;
-            for (size_t expression = 0; expression < ir->expression_count; ++expression) {
-                const SolIrExpression *match = &ir->expressions[expression];
-                if (match->kind != SOL_IR_EXPR_MATCH) continue;
-                for (size_t slot = 0; slot < match->as.match_expr.arms.count; ++slot) {
-                    if (ir->arm_ids[match->as.match_expr.arms.offset + slot] == index) {
-                        scrutinee_id = ir->expressions[
-                            match->as.match_expr.scrutinee
-                        ].type;
-                    }
+            for (size_t previous = 0; previous < binding; ++previous) {
+                if (ir->roots[arm->bindings.offset + previous] == local) {
+                    return sol_ir_error(diagnostics, "IR match binding is duplicated");
                 }
             }
-            if (scrutinee_id >= ir->type_count
-                || ir->types[scrutinee_id].kind != SOL_IR_TYPE_NOMINAL
-                || ir->types[scrutinee_id].definition
-                    != ir->variants[arm->variant].owner) {
-                return sol_ir_error(diagnostics,
-                    "IR variant arm scrutinee type is invalid");
-            }
-            const SolIrType *scrutinee = &ir->types[scrutinee_id];
-            const SolIrDefinition *definition
-                = &ir->definitions[scrutinee->definition];
-            for (size_t binding = 0; binding < fields.count; ++binding) {
-                SolIrLocalId local = ir->roots[arm->bindings.offset + binding];
-                if (local >= ir->local_count
-                    || ir->locals[local].kind != SOL_IR_LOCAL_PATTERN
-                    || !sol_ir_type_matches_instantiation(ir,
-                        ir->locals[local].type,
-                        ir->fields[fields.offset + binding].type,
-                        definition->generic_parameters,
-                        (SolIrSlice){scrutinee->argument_offset,
-                            scrutinee->argument_count},
-                        SOL_IR_NONE, 0)) {
-                    return sol_ir_error(diagnostics,
-                        "IR variant arm payload binding type is invalid");
-                }
-                if (ir->cleanup_locals[arm->cleanup.offset + binding] != local
-                    || ir->locals[local].access != SOL_ACCESS_OWNED) {
-                    return sol_ir_error(diagnostics,
-                        "IR match cleanup metadata is invalid");
-                }
-                for (size_t previous_arm = 0; previous_arm <= index;
-                    ++previous_arm) {
-                    const SolIrArm *previous = &ir->arms[previous_arm];
-                    size_t limit = previous_arm == index ? binding : previous->bindings.count;
-                    for (size_t previous_binding = 0; previous_binding < limit;
-                        ++previous_binding) {
-                        if (ir->roots[previous->bindings.offset + previous_binding]
-                            == local) {
-                            return sol_ir_error(diagnostics,
-                                "IR pattern binding is duplicated");
-                        }
-                    }
-                }
-            }
+        }
+    }
+    for (size_t index = 0; index < ir->expression_count; ++index) {
+        if (ir->expressions[index].kind == SOL_IR_EXPR_MATCH
+            && !sol_ir_match_coverage_valid(ir, &ir->expressions[index])) {
+            return sol_ir_error(diagnostics,
+                "IR match patterns are not useful, exhaustive, or within the complexity bound");
         }
     }
     for (size_t index = 0; index < ir->local_count; ++index) {
@@ -6163,7 +6959,8 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
     free(statement_callables);
     free(local_callables);
     free(introduced);
-    if (!sol_ir_validate_arena_ownership(ir, diagnostics)) return false;
+    if (!sol_ir_validate_pattern_ownership(ir, diagnostics)
+        || !sol_ir_validate_arena_ownership(ir, diagnostics)) return false;
     return !validate_ownership || sol_ir_validate_ownership(ir, diagnostics);
 }
 

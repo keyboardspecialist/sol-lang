@@ -777,7 +777,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     }
     for (size_t index = 0; index < syntax->pattern_count; ++index) {
         const SolPattern *pattern = &syntax->patterns[index];
-        if ((int)pattern->kind < 0 || pattern->kind > SOL_PATTERN_BOOL
+        if ((int)pattern->kind < 0 || pattern->kind > SOL_PATTERN_TUPLE
             || !sol_span_valid(resolver->source, pattern->span)
             || !sol_span_valid(resolver->source, pattern->name)
             || (pattern->first_binding != SOL_AST_NONE
@@ -788,7 +788,8 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     }
     for (size_t index = 0; index < syntax->pattern_binding_count; ++index) {
         const SolPatternBinding *binding = &syntax->pattern_bindings[index];
-        if (!sol_span_valid(resolver->source, binding->name)
+        if (binding->pattern >= syntax->pattern_count
+            || !sol_span_valid(resolver->source, binding->field)
             || (binding->next != SOL_AST_NONE
                 && binding->next >= syntax->pattern_binding_count)) {
             sol_resolver_malformed(resolver);
@@ -798,6 +799,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     for (size_t index = 0; index < syntax->match_arm_count; ++index) {
         const SolMatchArm *arm = &syntax->match_arms[index];
         if (arm->pattern >= syntax->pattern_count
+            || (arm->guard != SOL_AST_NONE && arm->guard >= syntax->expression_count)
             || arm->value >= syntax->expression_count
             || !sol_span_valid(resolver->source, arm->span)
             || (arm->next != SOL_AST_NONE && arm->next >= syntax->match_arm_count)) {
@@ -1355,10 +1357,10 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
         return false;
     }
     size_t local_capacity = syntax->parameter_count + syntax->statement_count;
-    if (local_capacity > SIZE_MAX - syntax->pattern_binding_count) {
+    if (local_capacity > SIZE_MAX - syntax->pattern_count) {
         return false;
     }
-    local_capacity += syntax->pattern_binding_count;
+    local_capacity += syntax->pattern_count;
     if (local_capacity > SIZE_MAX / sizeof(*resolver->module->locals)
         || local_capacity > SIZE_MAX / sizeof(*resolver->bindings)) {
         return false;
@@ -1538,6 +1540,39 @@ static bool sol_resolver_add_binding(
 
 static void sol_resolver_expression(SolResolver *resolver, SolExprId expression_id);
 
+static bool sol_resolver_pattern_bindings(
+    SolResolver *resolver,
+    SolPatternId pattern_id,
+    size_t depth
+) {
+    if (pattern_id >= resolver->syntax->pattern_count || depth >= 64) {
+        sol_resolver_malformed(resolver);
+        return false;
+    }
+    const SolPattern *pattern = &resolver->syntax->patterns[pattern_id];
+    if (pattern->kind == SOL_PATTERN_BINDING) {
+        return sol_resolver_add_binding(
+            resolver, pattern->name, SOL_LOCAL_PATTERN, pattern_id
+        );
+    }
+    SolPatternBindingId child_id = pattern->first_binding;
+    size_t child_count = 0;
+    while (child_id != SOL_AST_NONE) {
+        if (child_id >= resolver->syntax->pattern_binding_count
+            || child_count++ >= resolver->syntax->pattern_binding_count) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+        const SolPatternBinding *child
+            = &resolver->syntax->pattern_bindings[child_id];
+        if (!sol_resolver_pattern_bindings(resolver, child->pattern, depth + 1)) {
+            return false;
+        }
+        child_id = child->next;
+    }
+    return true;
+}
+
 static void sol_resolver_match(SolResolver *resolver, const SolExpr *expression) {
     sol_resolver_expression(resolver, expression->as.match_expr.scrutinee);
     SolMatchArmId arm_id = expression->as.match_expr.first_arm;
@@ -1548,25 +1583,10 @@ static void sol_resolver_match(SolResolver *resolver, const SolExpr *expression)
             return;
         }
         const SolMatchArm *arm = &resolver->syntax->match_arms[arm_id];
-        const SolPattern *pattern = &resolver->syntax->patterns[arm->pattern];
         size_t binding_mark = resolver->binding_count;
         ++resolver->scope_depth;
-        SolPatternBindingId binding_id = pattern->first_binding;
-        size_t binding_count = 0;
-        while (binding_id != SOL_AST_NONE) {
-            if (binding_count++ >= resolver->syntax->pattern_binding_count) {
-                sol_resolver_malformed(resolver);
-                break;
-            }
-            const SolPatternBinding *binding = &resolver->syntax->pattern_bindings[binding_id];
-            sol_resolver_add_binding(
-                resolver,
-                binding->name,
-                SOL_LOCAL_PATTERN,
-                binding_id
-            );
-            binding_id = binding->next;
-        }
+        sol_resolver_pattern_bindings(resolver, arm->pattern, 0);
+        if (arm->guard != SOL_AST_NONE) sol_resolver_expression(resolver, arm->guard);
         sol_resolver_expression(resolver, arm->value);
         resolver->binding_count = binding_mark;
         --resolver->scope_depth;

@@ -193,11 +193,14 @@ static void check_ast_links(const SolSyntaxTree *tree) {
             || tree->patterns[index].first_binding < tree->pattern_binding_count);
     }
     for (size_t index = 0; index < tree->pattern_binding_count; ++index) {
+        CHECK(tree->pattern_bindings[index].pattern < tree->pattern_count);
         CHECK(tree->pattern_bindings[index].next == SOL_AST_NONE
             || tree->pattern_bindings[index].next < tree->pattern_binding_count);
     }
     for (size_t index = 0; index < tree->match_arm_count; ++index) {
         CHECK(tree->match_arms[index].pattern < tree->pattern_count);
+        CHECK(tree->match_arms[index].guard == SOL_AST_NONE
+            || tree->match_arms[index].guard < tree->expression_count);
         CHECK(tree->match_arms[index].value < tree->expression_count);
         CHECK(tree->match_arms[index].next == SOL_AST_NONE
             || tree->match_arms[index].next < tree->match_arm_count);
@@ -1779,7 +1782,7 @@ static void test_malformed_syntax_structure_rejections(void) {
         SolPatternKind kind = tree.patterns[0].kind;
         tree.patterns[0].kind = (SolPatternKind)-1;
         CHECK(!sol_syntax_contracts_validate(&source, &tree));
-        tree.patterns[0].kind = (SolPatternKind)(SOL_PATTERN_BOOL + 1);
+        tree.patterns[0].kind = (SolPatternKind)(SOL_PATTERN_TUPLE + 1);
         CHECK(!sol_syntax_contracts_validate(&source, &tree));
         tree.patterns[0].kind = kind;
     }
@@ -1791,6 +1794,93 @@ static void test_malformed_syntax_structure_rejections(void) {
     }
     CHECK(sol_syntax_contracts_validate(&source, &tree));
 
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
+static void test_recursive_pattern_syntax(void) {
+    static const char valid[] =
+        "module patterns\n"
+        "function select(value: Int64, ready: Bool) -> Int64 { return match value { "
+        "some((left, Pair { first, second = some(inner) }, _)) "
+        "if ready && left == inner => left "
+        "Pair { first = _, second } => second true => 1 bare => bare } }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "patterns.sol", valid));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+    CHECK(tree.match_arm_count == 4);
+    CHECK(tree.pattern_count > tree.match_arm_count);
+    CHECK(tree.pattern_binding_count != 0);
+    bool tuple = false;
+    bool record = false;
+    bool binding = false;
+    for (size_t index = 0; index < tree.pattern_count; ++index) {
+        tuple = tuple || tree.patterns[index].kind == SOL_PATTERN_TUPLE;
+        record = record || tree.patterns[index].kind == SOL_PATTERN_RECORD;
+        binding = binding || tree.patterns[index].kind == SOL_PATTERN_BINDING;
+    }
+    CHECK(tuple && record && binding);
+    bool nested_bare_binding = false;
+    for (size_t index = 0; index < tree.pattern_count; ++index) {
+        nested_bare_binding = nested_bare_binding
+            || (tree.patterns[index].kind == SOL_PATTERN_BINDING
+                && span_text_equal(&source, tree.patterns[index].name, "inner"));
+    }
+    CHECK(nested_bare_binding);
+    CHECK(tree.match_arms[0].guard < tree.expression_count);
+    check_ast_links(&tree);
+
+    SolPatternBindingId child = tree.patterns[tree.match_arms[0].pattern].first_binding;
+    CHECK(child < tree.pattern_binding_count);
+    if (child < tree.pattern_binding_count) {
+        SolPatternId owned = tree.pattern_bindings[child].pattern;
+        tree.pattern_bindings[child].pattern = tree.match_arms[0].pattern;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.pattern_bindings[child].pattern = owned;
+    }
+    SolExprId guard = tree.match_arms[0].guard;
+    tree.match_arms[1].guard = guard;
+    CHECK(!sol_syntax_contracts_validate(&source, &tree));
+    tree.match_arms[1].guard = SOL_AST_NONE;
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+
+    static const char malformed[] =
+        "module bad_patterns\n"
+        "test \"unit\" match true { () => 0, true => 1 }\n"
+        "test \"singleton\" match true { (item,) => 0, false => 1 }\n"
+        "test \"large\" match true { "
+        "(a,b,c,d,e,f,g,h,i,j,k,l,m,n,o,p,q) => 0, true => 1 }\n"
+        "test \"separator\" match true { (left right) => 0, false => 1 }\n"
+        "function recovered() -> Int64 { return 1 }\n";
+    CHECK(sol_source_from_text(&source, "bad_patterns.sol", malformed));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    bool recovered = false;
+    for (size_t index = 0; index < tree.item_count; ++index) {
+        recovered = recovered || span_text_equal(&source, tree.items[index].name, "recovered");
+    }
+    CHECK(recovered);
+    CHECK(diagnostics.count == 4);
+    CHECK(tree.item_count == 5);
     sol_syntax_tree_free(&tree);
     sol_diagnostics_free(&diagnostics);
     sol_tokens_free(&tokens);
@@ -2485,6 +2575,7 @@ int main(void) {
     test_loop_statement_syntax();
     test_failure_statement_syntax();
     test_tuple_syntax();
+    test_recursive_pattern_syntax();
     if (failures != 0) {
         fprintf(stderr, "%d frontend test failure(s)\n", failures);
         return 1;

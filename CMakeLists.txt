@@ -335,7 +335,7 @@ if(BUILD_TESTING)
             -DINVALID_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid.sol
             -DCLI_IO_HELPER=${SOL_CLI_IO_HELPER}
             -DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}
-            -DSCHEMA_FILE=${CMAKE_CURRENT_SOURCE_DIR}/schemas/sol-inspection-2.schema.json
+            -DSCHEMA_FILE=${CMAKE_CURRENT_SOURCE_DIR}/schemas/sol-inspection-3.schema.json
             -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/tests/inspection_cli
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/inspection_cli/test_inspection_cli.cmake
     )

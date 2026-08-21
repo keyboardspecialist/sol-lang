@@ -2659,7 +2659,70 @@ static void test_tuple_effects_and_metadata(void) {
     free_compilation(&compilation);
 }
 
+static void test_match_guard_purity_and_pattern_metadata(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module pure_guards\n"
+        "function clean(value: Bool) -> Bool effects { pure } { return value }\n"
+        "function choose(value: Bool) -> Int64 effects { pure } { return match value {\n"
+        " true if clean(value) => 1 true => 2 false => 0 } }\n"));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source,
+            &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.effects.functions[1].count == 0);
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module impure_guards\n"
+        "function noisy() -> Bool effects { panic } { return true }\n"
+        "function choose(value: Bool) -> Int64 effects { pure } { return match value {\n"
+        " true if noisy() => 1 true => 2 false => 0 } }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-010"));
+    CHECK(!has_diagnostic(&compilation, "SOL-EFFECT-002"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module mutating_guards\n"
+        "function choose(value: Bool) -> Int64 effects { pure } { return match value {\n"
+        " true if { var flag = true flag = false flag } => 1 true => 2 false => 0 } }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-EFFECT-010"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module pattern_metadata\n"
+        "enum Box { box(value: (Bool, Int64)), }\n"
+        "function read(value: Box) -> Int64 effects { pure } { return match value {\n"
+        " box((true, number)) => number box((false, number)) => number } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolType *pattern_types = compilation.types.pattern_types;
+    compilation.types.pattern_types = NULL;
+    CHECK(!rerun_effectcheck(&compilation));
+    compilation.types.pattern_types = pattern_types;
+    compilation.types.pattern_child_resolution_count++;
+    CHECK(!rerun_effectcheck(&compilation));
+    compilation.types.pattern_child_resolution_count--;
+    size_t tuple_child = SOL_AST_NONE;
+    for (size_t child = 0;
+        child < compilation.types.pattern_child_resolution_count; ++child) {
+        if (compilation.types.pattern_tuple_ordinals[child] != SOL_AST_NONE) {
+            tuple_child = child;
+            break;
+        }
+    }
+    CHECK(tuple_child != SOL_AST_NONE);
+    if (tuple_child != SOL_AST_NONE) {
+        size_t ordinal = compilation.types.pattern_tuple_ordinals[tuple_child];
+        compilation.types.pattern_tuple_ordinals[tuple_child] = 16;
+        CHECK(!rerun_effectcheck(&compilation));
+        compilation.types.pattern_tuple_ordinals[tuple_child] = ordinal;
+    }
+    free_compilation(&compilation);
+}
+
 int main(void) {
+    test_match_guard_purity_and_pattern_metadata();
     test_tuple_effects_and_metadata();
     test_private_pure_inference();
     test_generic_closed_effect_rows();

@@ -1129,7 +1129,41 @@ static void test_tuple_contract_purity_and_metadata(void) {
     free_compilation(&compilation);
 }
 
+static void test_match_guard_contract_traversal(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module guard_contracts\n"
+        "function check(value: Bool) -> Bool effects { pure }\n"
+        "ensures { match value { true if old(value) => true true => true false => true } }\n"
+        "{ return value }\n"));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source,
+            &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    CHECK(compilation.contracts.snapshot_count == 1);
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module guard_pattern_metadata\n"
+        "enum Box { box(value: (Bool, Int64)), }\n"
+        "function check(value: Box) -> Bool effects { pure }\n"
+        "requires { match value { box((true, _)) => true box((false, _)) => true } }\n"
+        "{ return true }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    size_t *ordinals = compilation.types.pattern_tuple_ordinals;
+    compilation.types.pattern_tuple_ordinals = NULL;
+    sol_contract_table_free(&compilation.contracts);
+    sol_contract_table_init(&compilation.contracts);
+    CHECK(!sol_contract_lower(&compilation.source, &compilation.syntax,
+        &compilation.hir, &compilation.types, &compilation.effects,
+        &compilation.contracts, &compilation.diagnostics));
+    compilation.types.pattern_tuple_ordinals = ordinals;
+    free_compilation(&compilation);
+}
+
 int main(void) {
+    test_match_guard_contract_traversal();
     test_tuple_contract_purity_and_metadata();
     test_obligations_result_and_snapshots();
     test_member_contract_ownership();

@@ -603,8 +603,11 @@ static void sol_package_relocate_arenas(SolSyntaxTree *tree, SolArenaOffsets o, 
         );
     }
     for (size_t i = o.pattern_bindings; i < tree->pattern_binding_count; ++i) {
-        tree->pattern_bindings[i].name = sol_relocate_span(
-            tree->pattern_bindings[i].name, base
+        tree->pattern_bindings[i].pattern = sol_relocate_id(
+            tree->pattern_bindings[i].pattern, o.patterns
+        );
+        tree->pattern_bindings[i].field = sol_relocate_optional_span(
+            tree->pattern_bindings[i].field, base
         );
         tree->pattern_bindings[i].next = sol_relocate_id(
             tree->pattern_bindings[i].next, o.pattern_bindings
@@ -612,6 +615,9 @@ static void sol_package_relocate_arenas(SolSyntaxTree *tree, SolArenaOffsets o, 
     }
     for (size_t i = o.match_arms; i < tree->match_arm_count; ++i) {
         tree->match_arms[i].pattern = sol_relocate_id(tree->match_arms[i].pattern, o.patterns);
+        tree->match_arms[i].guard = sol_relocate_id(
+            tree->match_arms[i].guard, o.expressions
+        );
         tree->match_arms[i].value = sol_relocate_id(tree->match_arms[i].value, o.expressions);
         tree->match_arms[i].span = sol_relocate_span(tree->match_arms[i].span, base);
         tree->match_arms[i].next = sol_relocate_id(tree->match_arms[i].next, o.match_arms);

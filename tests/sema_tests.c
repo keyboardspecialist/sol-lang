@@ -791,6 +791,51 @@ static void test_malformed_arena_metadata_rejected(void) {
     sol_source_free(&source);
 }
 
+static void test_recursive_pattern_resolution(void) {
+    static const char text[] =
+        "module pattern_resolution\n"
+        "function choose(value: Int64, ready: Bool) -> Int64 { return match value { "
+        "some((left, Pair { first, second = some(inner) }, _)) "
+        "if ready && left == inner => first _ => 0 } }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    const char *expected[] = {"value", "ready", "left", "first", "inner"};
+    CHECK(compilation.hir.local_count == 5);
+    for (size_t index = 0; index < compilation.hir.local_count && index < 5; ++index) {
+        CHECK(span_text_equal(&compilation.source,
+            compilation.hir.locals[index].name, expected[index]));
+        if (index >= 2) {
+            CHECK(compilation.hir.locals[index].kind == SOL_LOCAL_PATTERN);
+            CHECK(compilation.hir.locals[index].syntax_id
+                < compilation.syntax.pattern_count);
+            CHECK(compilation.syntax.patterns[
+                compilation.hir.locals[index].syntax_id].kind == SOL_PATTERN_BINDING);
+        }
+    }
+    size_t resolved_pattern_uses = 0;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        const SolExpr *expression = &compilation.syntax.expressions[index];
+        if (expression->kind == SOL_EXPR_PATH
+            && (span_text_equal(&compilation.source, expression->as.name, "left")
+                || span_text_equal(&compilation.source, expression->as.name, "inner")
+                || span_text_equal(&compilation.source, expression->as.name, "first"))) {
+            CHECK(compilation.hir.resolutions[index].kind == SOL_RESOLUTION_LOCAL);
+            ++resolved_pattern_uses;
+        }
+    }
+    CHECK(resolved_pattern_uses == 3);
+    free_compilation(&compilation);
+
+    static const char duplicate[] =
+        "module duplicate_pattern\n"
+        "function choose(value: Int64) -> Int64 { return match value { "
+        "some((item, Pair { first = item })) => item } }\n";
+    CHECK(compile_source(&compilation, duplicate));
+    CHECK(has_diagnostic(&compilation, "SOL-RESOLVE-003"));
+    free_compilation(&compilation);
+}
+
 static void test_failure_statement_resolution(void) {
     static const char text[] =
         "module failure_resolution\n"
@@ -1247,6 +1292,7 @@ int main(void) {
     test_semantic_depth_limit();
     test_malformed_ast_rejected();
     test_tuple_resolution_and_ownership();
+    test_recursive_pattern_resolution();
     test_malformed_arena_metadata_rejected();
     test_failure_statement_resolution();
     test_scoped_package_resolution();

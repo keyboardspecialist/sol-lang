@@ -33,7 +33,7 @@ static bool compile_fixture(TestCompilation *compilation) {
     static const char source[] =
         "module fixture\n"
         "record Pair { left: Int64, right: Int64 }\n"
-        "enum Choice { yes(value: Int64), no }\n"
+        "enum Choice { yes(value: Pair), no }\n"
         "capability Read { function read() -> Int64 effects { service.read<Self> } }\n"
         "capability Mock { function read() -> Int64 effects { pure } }\n"
         "function identity<T>(value: T) -> T { return value }\n"
@@ -46,6 +46,9 @@ static bool compile_fixture(TestCompilation *compilation) {
         "let selected = if true { match false { true => 1 false => -pair.left } } "
         "else { 0 } return identity<Int64>(handle service.read<source> with mock "
         "{ source.read() }) + selected }\n"
+        "function patterns(value: (Choice, Bool)) -> Int64 { return match value { "
+        "(yes(Pair { left = item }), true) if item > 0 => item, "
+        "(yes(Pair { left = _ }), true) => 0, (_, false) => 0, (no(), true) => 0 } }\n"
         "function checked(value: Int64) -> Int64 "
         "ensures { result == old(value) } { var local = value local = value "
         "return local }\n"
@@ -121,12 +124,18 @@ static void test_expression_kind_spellings(TestCompilation *compilation) {
     CHECK(compilation->contracts.unreachable_obligation_count == 1);
     CHECK(strstr(output, "\"loopObligations\"") == NULL);
     CHECK(strstr(output, "\"unreachableObligations\"") == NULL);
-    CHECK(strstr(output, "\"schema\":\"sol.inspection\",\"version\":2") != NULL);
-    CHECK(strstr(output, "\"syntax\":{\"schema\":\"sol.inspection.syntax\",\"version\":2") != NULL);
-    CHECK(strstr(output, "\"types\":{\"schema\":\"sol.inspection.types\",\"version\":2") != NULL);
+    CHECK(strstr(output, "\"schema\":\"sol.inspection\",\"version\":3") != NULL);
+    CHECK(strstr(output, "\"syntax\":{\"schema\":\"sol.inspection.syntax\",\"version\":3") != NULL);
+    CHECK(strstr(output, "\"types\":{\"schema\":\"sol.inspection.types\",\"version\":3") != NULL);
     CHECK(strstr(output, "\"hir\":{\"schema\":\"sol.inspection.hir\",\"version\":1") != NULL);
     CHECK(strstr(output, "\"constructor\":\"tuple\"") != NULL);
     CHECK(strstr(output, "\"tupleProjections\":[") != NULL);
+    CHECK(strstr(output, "\"patterns\":[{\"id\":\"pattern:") != NULL);
+    CHECK(strstr(output, "\"matchArms\":[{\"id\":\"match-arm:") != NULL);
+    CHECK(strstr(output, "\"tupleOrdinal\":0") != NULL);
+    CHECK(strstr(output, "\"field\":\"field:") != NULL);
+    CHECK(strstr(output, "\"variants\":[{\"id\":\"variant:") != NULL);
+    CHECK(strstr(output, "\"fields\":[{\"id\":\"field:") != NULL);
     fclose(stream);
 }
 
@@ -310,7 +319,7 @@ static void test_mutable_projection(TestCompilation *compilation) {
             &compilation->hir, &compilation->types, &compilation->effects,
             &compilation->contracts, &compilation->diagnostics));
         rewind(stream);
-        char output[16384];
+        char output[65536];
         size_t length = fread(output, 1, sizeof(output) - 1, stream);
         output[length] = '\0';
         CHECK(strstr(output, "\"mutable\":true") != NULL);
@@ -388,6 +397,73 @@ static void test_semantic_reference_preflight(TestCompilation *compilation) {
     reference->target_id = target_id;
 }
 
+static void test_pattern_preflight(TestCompilation *compilation) {
+    SolSyntaxTree *syntax = &compilation->package.syntax;
+    SolTypeTable *types = &compilation->types;
+    CHECK(syntax->pattern_count != 0 && syntax->match_arm_count != 0);
+    size_t tuple_pattern = 0;
+    while (tuple_pattern < syntax->pattern_count
+        && syntax->patterns[tuple_pattern].kind != SOL_PATTERN_TUPLE) ++tuple_pattern;
+    CHECK(tuple_pattern < syntax->pattern_count);
+    if (tuple_pattern == syntax->pattern_count) return;
+    SolPatternBindingId child = syntax->patterns[tuple_pattern].first_binding;
+    CHECK(child != SOL_AST_NONE);
+    if (child == SOL_AST_NONE) return;
+
+    SolPatternId nested = syntax->pattern_bindings[child].pattern;
+    syntax->pattern_bindings[child].pattern = tuple_pattern;
+    check_rejected(compilation);
+    syntax->pattern_bindings[child].pattern = nested;
+
+    size_t ordinal = types->pattern_tuple_ordinals[child];
+    types->pattern_tuple_ordinals[child] = ordinal + 1;
+    check_rejected(compilation);
+    types->pattern_tuple_ordinals[child] = ordinal;
+
+    size_t pattern_count = types->pattern_resolution_count;
+    types->pattern_resolution_count = pattern_count - 1;
+    check_rejected(compilation);
+    types->pattern_resolution_count = pattern_count;
+
+    size_t guarded_arm = 0;
+    while (guarded_arm < syntax->match_arm_count
+        && syntax->match_arms[guarded_arm].guard == SOL_AST_NONE) ++guarded_arm;
+    CHECK(guarded_arm < syntax->match_arm_count);
+    if (guarded_arm < syntax->match_arm_count) {
+        SolExprId guard = syntax->match_arms[guarded_arm].guard;
+        SolType guard_type = types->expressions[guard];
+        types->expressions[guard] = (SolType){.kind = SOL_TYPE_INT64};
+        check_rejected(compilation);
+        types->expressions[guard] = guard_type;
+    }
+
+    size_t record_pattern = 0;
+    while (record_pattern < syntax->pattern_count
+        && syntax->patterns[record_pattern].kind != SOL_PATTERN_RECORD) ++record_pattern;
+    CHECK(record_pattern < syntax->pattern_count);
+    if (record_pattern < syntax->pattern_count) {
+        SolPatternBindingId record_child = syntax->patterns[record_pattern].first_binding;
+        CHECK(record_child != SOL_AST_NONE);
+        if (record_child != SOL_AST_NONE) {
+            SolFieldId field = types->pattern_field_resolutions[record_child];
+            types->pattern_field_resolutions[record_child] = SOL_AST_NONE;
+            check_rejected(compilation);
+            types->pattern_field_resolutions[record_child] = field;
+
+            SolPatternId record_nested = syntax->pattern_bindings[record_child].pattern;
+            SolType child_type = types->pattern_types[record_nested];
+            types->pattern_types[record_nested] = (SolType){.kind = SOL_TYPE_TEXT};
+            check_rejected(compilation);
+            types->pattern_types[record_nested] = child_type;
+        }
+    }
+
+    SolType *pattern_types = types->pattern_types;
+    types->pattern_types = NULL;
+    check_rejected(compilation);
+    types->pattern_types = pattern_types;
+}
+
 static void test_windows_package_path(TestCompilation *compilation) {
     SolPackageFile file = {
         .path = "C:\\root\\services\\fixture.sol",
@@ -433,6 +509,7 @@ int main(void) {
         test_mutable_projection(&compilation);
         test_tuple_projection_preflight(&compilation);
         test_semantic_reference_preflight(&compilation);
+        test_pattern_preflight(&compilation);
         test_windows_basename(&compilation);
         test_windows_package_path(&compilation);
     }

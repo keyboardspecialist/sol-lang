@@ -469,33 +469,53 @@ static bool sol_structure_statements(
 
 static bool sol_structure_pattern(
     SolStructureValidator *validator,
-    SolPatternId pattern_id
+    SolPatternId pattern_id,
+    size_t depth
 ) {
-    if (pattern_id >= validator->tree->pattern_count
+    if (pattern_id >= validator->tree->pattern_count || depth >= 64
         || validator->patterns[pattern_id]) return false;
     validator->patterns[pattern_id] = 1;
     const SolPattern *pattern = &validator->tree->patterns[pattern_id];
-    if ((int)pattern->kind < 0 || pattern->kind > SOL_PATTERN_BOOL
-        || !sol_structure_name_valid(validator, pattern->span)) return false;
-
-    if (pattern->kind != SOL_PATTERN_VARIANT) {
-        return pattern->first_binding == SOL_AST_NONE;
+    if ((int)pattern->kind < 0 || pattern->kind > SOL_PATTERN_TUPLE
+        || !sol_structure_name_valid(validator, pattern->span)
+        || (pattern->kind != SOL_PATTERN_BOOL && pattern->bool_value)) return false;
+    bool named = pattern->kind == SOL_PATTERN_VARIANT
+        || pattern->kind == SOL_PATTERN_BINDING
+        || pattern->kind == SOL_PATTERN_RECORD;
+    if (named) {
+        if (!sol_structure_name_valid(validator, pattern->name)
+            || pattern->name.start < pattern->span.start
+            || pattern->name.end > pattern->span.end) return false;
+    } else if (pattern->name.start != 0 || pattern->name.end != 0) {
+        return false;
     }
-    if (!sol_structure_name_valid(validator, pattern->name)
-        || pattern->name.start < pattern->span.start
-        || pattern->name.end > pattern->span.end) return false;
+    bool has_children = pattern->kind == SOL_PATTERN_VARIANT
+        || pattern->kind == SOL_PATTERN_RECORD || pattern->kind == SOL_PATTERN_TUPLE;
+    if (!has_children) return pattern->first_binding == SOL_AST_NONE;
+
     SolPatternBindingId binding = pattern->first_binding;
+    size_t child_count = 0;
+    size_t previous_end = pattern->name.end;
     while (binding != SOL_AST_NONE) {
         if (binding >= validator->tree->pattern_binding_count
             || validator->pattern_bindings[binding]) return false;
         validator->pattern_bindings[binding] = 1;
         const SolPatternBinding *current = &validator->tree->pattern_bindings[binding];
-        if (!sol_structure_name_valid(validator, current->name)
-            || current->name.start < pattern->span.start
-            || current->name.end > pattern->span.end) return false;
+        bool record = pattern->kind == SOL_PATTERN_RECORD;
+        if ((record && (!sol_structure_name_valid(validator, current->field)
+                || current->field.start < pattern->name.end
+                || current->field.end > pattern->span.end))
+            || (!record && (current->field.start != 0 || current->field.end != 0))
+            || current->pattern >= validator->tree->pattern_count
+            || validator->tree->patterns[current->pattern].span.start < previous_end
+            || validator->tree->patterns[current->pattern].span.end > pattern->span.end
+            || !sol_structure_pattern(validator, current->pattern, depth + 1)) return false;
+        previous_end = validator->tree->patterns[current->pattern].span.end;
+        ++child_count;
         binding = current->next;
     }
-    return true;
+    return pattern->kind != SOL_PATTERN_TUPLE
+        || (child_count >= 2 && child_count <= 16);
 }
 
 static bool sol_structure_arms(
@@ -509,7 +529,20 @@ static bool sol_structure_arms(
         validator->arms[arm] = 1;
         const SolMatchArm *current = &validator->tree->match_arms[arm];
         if (!sol_structure_span_valid(validator, current->span)
-            || !sol_structure_pattern(validator, current->pattern)
+            || !sol_structure_pattern(validator, current->pattern, 0)
+            || validator->tree->patterns[current->pattern].span.start
+                != current->span.start
+            || current->value >= validator->tree->expression_count
+            || (current->guard != SOL_AST_NONE
+                && current->guard >= validator->tree->expression_count)
+            || (current->guard != SOL_AST_NONE
+                && (validator->tree->expressions[current->guard].span.start
+                        < validator->tree->patterns[current->pattern].span.end
+                    || validator->tree->expressions[current->guard].span.end
+                        > validator->tree->expressions[current->value].span.start
+                    || !sol_structure_expression(
+                        validator, current->guard, context, depth)))
+            || validator->tree->expressions[current->value].span.end != current->span.end
             || !sol_structure_expression(validator, current->value, context, depth)) {
             return false;
         }

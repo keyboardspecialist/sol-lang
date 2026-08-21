@@ -47,6 +47,7 @@ static void sol_type_error(
     const char *message
 );
 static bool sol_type_span_equal(const SolSource *source, SolSpan span, const char *text);
+static bool sol_type_exact_equal(SolType left, SolType right);
 
 static bool sol_type_authority_free_effect(
     const SolTypeChecker *checker,
@@ -480,7 +481,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     }
     for (size_t index = 0; index < syntax->pattern_count; ++index) {
         const SolPattern *pattern = &syntax->patterns[index];
-        if ((int)pattern->kind < 0 || pattern->kind > SOL_PATTERN_BOOL
+        if ((int)pattern->kind < 0 || pattern->kind > SOL_PATTERN_TUPLE
             || !sol_type_span_valid(checker->source, pattern->span)
             || !sol_type_span_valid(checker->source, pattern->name)
             || (pattern->first_binding != SOL_AST_NONE
@@ -491,7 +492,8 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     }
     for (size_t index = 0; index < syntax->pattern_binding_count; ++index) {
         const SolPatternBinding *binding = &syntax->pattern_bindings[index];
-        if (!sol_type_span_valid(checker->source, binding->name)
+        if (binding->pattern >= syntax->pattern_count
+            || !sol_type_span_valid(checker->source, binding->field)
             || (binding->next != SOL_AST_NONE
                 && binding->next >= syntax->pattern_binding_count)) {
             sol_type_malformed(checker);
@@ -501,6 +503,8 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     for (size_t index = 0; index < syntax->match_arm_count; ++index) {
         const SolMatchArm *arm = &syntax->match_arms[index];
         if (arm->pattern >= syntax->pattern_count
+            || (arm->guard != SOL_AST_NONE
+                && arm->guard >= syntax->expression_count)
             || arm->value >= syntax->expression_count
             || !sol_type_span_valid(checker->source, arm->span)
             || (arm->next != SOL_AST_NONE && arm->next >= syntax->match_arm_count)) {
@@ -1007,7 +1011,9 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                         local->syntax_id].kind == SOL_STATEMENT_VAR)))
             || (local->kind != SOL_LOCAL_BINDING && local->mutable)
             || (local->kind == SOL_LOCAL_PATTERN
-                && local->syntax_id >= syntax->pattern_binding_count)) {
+                && (local->syntax_id >= syntax->pattern_count
+                    || syntax->patterns[local->syntax_id].kind
+                        != SOL_PATTERN_BINDING))) {
             sol_type_malformed(checker);
             return false;
         }
@@ -1077,6 +1083,9 @@ void sol_type_table_free(SolTypeTable *table) {
     free(table->variant_resolutions);
     free(table->tuple_projections);
     free(table->pattern_variant_resolutions);
+    free(table->pattern_types);
+    free(table->pattern_field_resolutions);
+    free(table->pattern_tuple_ordinals);
     free(table->argument_field_resolutions);
     free(table->implementation_targets);
     free(table->representations);
@@ -1347,27 +1356,90 @@ static bool sol_type_argument_chain_contains(
     return false;
 }
 
+static bool sol_type_metadata_span_equal(
+    const SolSource *source, SolSpan left, SolSpan right
+) {
+    size_t left_length = left.end >= left.start ? left.end - left.start : SIZE_MAX;
+    size_t right_length = right.end >= right.start ? right.end - right.start : SIZE_MAX;
+    return source != NULL && source->text != NULL && left_length == right_length
+        && left.end <= source->length && right.end <= source->length
+        && memcmp(source->text + left.start, source->text + right.start,
+            left_length) == 0;
+}
+
+static bool sol_type_metadata_substituted_equal(
+    const SolSyntaxTree *syntax, const SolTypeTable *table,
+    SolType actual, SolType template, SolType owner_type, SolDefId owner,
+    size_t depth
+) {
+    if (depth >= 64) return false;
+    if (template.kind == SOL_TYPE_PARAMETER && template.definition
+            < syntax->type_parameter_count
+        && syntax->type_parameters[template.definition].owner_item == owner) {
+        const SolTypeApplication *application = sol_type_application(table, owner_type);
+        if (application == NULL || application->constructor
+                != SOL_TYPE_CONSTRUCTOR_USER || application->definition != owner) {
+            return false;
+        }
+        SolTypeParameterId parameter = syntax->items[owner].first_type_parameter;
+        for (size_t ordinal = 0; ordinal < application->argument_count; ++ordinal) {
+            if (parameter == SOL_AST_NONE || parameter >= syntax->type_parameter_count) {
+                return false;
+            }
+            if (parameter == template.definition) {
+                return sol_type_exact_equal(actual, table->type_application_arguments[
+                    application->argument_offset + ordinal]);
+            }
+            parameter = syntax->type_parameters[parameter].next;
+        }
+        return false;
+    }
+    if (template.kind != SOL_TYPE_APPLICATION) return sol_type_exact_equal(actual, template);
+    const SolTypeApplication *expected_application = sol_type_application(table, template);
+    const SolTypeApplication *actual_application = sol_type_application(table, actual);
+    if (expected_application == NULL || actual_application == NULL
+        || expected_application->constructor != actual_application->constructor
+        || expected_application->definition != actual_application->definition
+        || expected_application->argument_count != actual_application->argument_count) {
+        return false;
+    }
+    for (size_t index = 0; index < expected_application->argument_count; ++index) {
+        if (!sol_type_metadata_substituted_equal(syntax, table,
+            table->type_application_arguments[actual_application->argument_offset + index],
+            table->type_application_arguments[expected_application->argument_offset + index],
+            owner_type, owner, depth + 1)) return false;
+    }
+    return true;
+}
+
 bool sol_type_resolution_metadata_valid(
+    const SolSource *source,
     const SolSyntaxTree *syntax,
     const SolTypeTable *table
 ) {
-    if (syntax == NULL || table == NULL
+    if (source == NULL || source->text == NULL || syntax == NULL || table == NULL
         || syntax->item_count > syntax->item_capacity
         || syntax->argument_count > syntax->argument_capacity
         || syntax->field_count > syntax->field_capacity
         || syntax->variant_count > syntax->variant_capacity
         || syntax->pattern_count > syntax->pattern_capacity
+        || syntax->pattern_binding_count > syntax->pattern_binding_capacity
         || syntax->match_arm_count > syntax->match_arm_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
         || table->member_resolution_count != syntax->expression_count
         || table->tuple_projection_count != syntax->expression_count
         || table->pattern_resolution_count != syntax->pattern_count
+        || table->pattern_child_resolution_count != syntax->pattern_binding_count
         || table->argument_resolution_count != syntax->argument_count
         || (table->member_resolution_count != 0
             && (table->field_resolutions == NULL || table->variant_resolutions == NULL))
         || (table->tuple_projection_count != 0 && table->tuple_projections == NULL)
         || (table->pattern_resolution_count != 0
-            && table->pattern_variant_resolutions == NULL)
+            && (table->pattern_variant_resolutions == NULL
+                || table->pattern_types == NULL))
+        || (table->pattern_child_resolution_count != 0
+            && (table->pattern_field_resolutions == NULL
+                || table->pattern_tuple_ordinals == NULL))
         || (table->argument_resolution_count != 0
             && table->argument_field_resolutions == NULL)
         || (syntax->expression_count != 0 && syntax->expressions == NULL)
@@ -1375,9 +1447,12 @@ bool sol_type_resolution_metadata_valid(
         || (syntax->field_count != 0 && syntax->fields == NULL)
         || (syntax->variant_count != 0 && syntax->variants == NULL)
         || (syntax->pattern_count != 0 && syntax->patterns == NULL)
+        || (syntax->pattern_binding_count != 0
+            && syntax->pattern_bindings == NULL)
         || (syntax->match_arm_count != 0 && syntax->match_arms == NULL)
         || table->expression_count != syntax->expression_count
         || table->declared_type_count != syntax->type_count
+        || (table->declared_type_count != 0 && table->declared_types == NULL)
         || table->type_application_count > table->type_application_capacity
         || table->type_application_argument_count
             > table->type_application_argument_capacity
@@ -1505,33 +1580,103 @@ bool sol_type_resolution_metadata_valid(
     }
     for (size_t pattern = 0; pattern < syntax->pattern_count; ++pattern) {
         SolVariantId variant = table->pattern_variant_resolutions[pattern];
-        if (variant == SOL_AST_NONE) continue;
+        SolType expected = table->pattern_types[pattern];
+        if (!sol_type_exact_reference_valid(syntax, table, expected)) return false;
+        if (variant == SOL_AST_NONE) {
+            if (syntax->patterns[pattern].kind == SOL_PATTERN_VARIANT) return false;
+            continue;
+        }
         if (variant >= syntax->variant_count
             || syntax->patterns[pattern].kind != SOL_PATTERN_VARIANT) return false;
-        bool found = false;
-        for (size_t arm = 0; arm < syntax->match_arm_count; ++arm) {
-            if (syntax->match_arms[arm].pattern != pattern) continue;
-            for (size_t expression = 0; expression < syntax->expression_count; ++expression) {
-                const SolExpr *candidate = &syntax->expressions[expression];
-                if (candidate->kind != SOL_EXPR_MATCH) continue;
-                SolMatchArmId current = candidate->as.match_expr.first_arm;
-                size_t traversed = 0;
-                while (current != SOL_AST_NONE) {
-                    if (current >= syntax->match_arm_count
-                        || traversed++ >= syntax->match_arm_count) return false;
-                    if (current == arm) {
-                        SolExprId scrutinee = candidate->as.match_expr.scrutinee;
-                        found = scrutinee < table->expression_count
-                            && syntax->variants[variant].owner_item
-                                == sol_type_metadata_nominal_definition(
-                                    table, table->expressions[scrutinee]
-                                );
+        if (syntax->variants[variant].owner_item
+            != sol_type_metadata_nominal_definition(table, expected)) return false;
+        if (!sol_type_metadata_span_equal(source, syntax->patterns[pattern].name,
+            syntax->variants[variant].name)) return false;
+    }
+    for (size_t child = 0; child < syntax->pattern_binding_count; ++child) {
+        SolFieldId field = table->pattern_field_resolutions[child];
+        size_t ordinal = table->pattern_tuple_ordinals[child];
+        if (field != SOL_AST_NONE && ordinal != SOL_AST_NONE) return false;
+        if (field != SOL_AST_NONE && field >= syntax->field_count) return false;
+        if (ordinal != SOL_AST_NONE && ordinal >= 16) return false;
+        size_t parent_count = 0;
+        for (size_t pattern = 0; pattern < syntax->pattern_count; ++pattern) {
+            SolPatternBindingId current = syntax->patterns[pattern].first_binding;
+            size_t traversed = 0;
+            size_t position = 0;
+            while (current != SOL_AST_NONE) {
+                if (current >= syntax->pattern_binding_count
+                    || traversed++ >= syntax->pattern_binding_count) return false;
+                if (current == child) {
+                    ++parent_count;
+                    SolPatternId nested = syntax->pattern_bindings[child].pattern;
+                    if (nested >= syntax->pattern_count) return false;
+                    SolType parent_type = table->pattern_types[pattern];
+                    SolType child_type = table->pattern_types[nested];
+                    SolDefId owner = sol_type_metadata_nominal_definition(table, parent_type);
+                    if (field != SOL_AST_NONE
+                        && syntax->patterns[pattern].kind != SOL_PATTERN_RECORD) return false;
+                    if (ordinal != SOL_AST_NONE
+                        && syntax->patterns[pattern].kind != SOL_PATTERN_TUPLE) return false;
+                    SolType template = {.kind = SOL_TYPE_UNKNOWN};
+                    if (syntax->patterns[pattern].kind == SOL_PATTERN_RECORD) {
+                        if (field == SOL_AST_NONE || owner >= syntax->item_count
+                            || syntax->items[owner].kind != SOL_ITEM_RECORD
+                            || !sol_type_metadata_span_equal(source,
+                                syntax->patterns[pattern].name, syntax->items[owner].name)
+                            || !sol_type_metadata_span_equal(source,
+                                syntax->pattern_bindings[child].field,
+                                syntax->fields[field].name)) return false;
+                        bool owned = false;
+                        for (SolFieldId entry = syntax->items[owner].first_field;
+                            entry != SOL_AST_NONE; entry = syntax->fields[entry].next) {
+                            if (entry >= syntax->field_count) return false;
+                            owned = owned || entry == field;
+                        }
+                        if (!owned) return false;
+                        template = table->declared_types[syntax->fields[field].type];
+                    } else if (syntax->patterns[pattern].kind == SOL_PATTERN_TUPLE) {
+                        const SolTypeApplication *tuple = sol_type_application(table,
+                            parent_type);
+                        if (tuple == NULL || tuple->constructor
+                                != SOL_TYPE_CONSTRUCTOR_TUPLE
+                            || ordinal != position || position >= tuple->argument_count) {
+                            return false;
+                        }
+                        if (!sol_type_exact_equal(child_type,
+                            table->type_application_arguments[
+                                tuple->argument_offset + position])) return false;
+                        template = child_type;
+                    } else if (syntax->patterns[pattern].kind
+                            == SOL_PATTERN_VARIANT) {
+                        SolVariantId parent_variant
+                            = table->pattern_variant_resolutions[pattern];
+                        if (field != SOL_AST_NONE || ordinal != SOL_AST_NONE
+                            || parent_variant >= syntax->variant_count
+                            || syntax->variants[parent_variant].owner_item != owner) return false;
+                        SolFieldId payload = syntax->variants[parent_variant].first_field;
+                        for (size_t index = 0; index < position; ++index) {
+                            if (payload == SOL_AST_NONE || payload >= syntax->field_count) {
+                                return false;
+                            }
+                            payload = syntax->fields[payload].next;
+                        }
+                        if (payload == SOL_AST_NONE || payload >= syntax->field_count) {
+                            return false;
+                        }
+                        template = table->declared_types[syntax->fields[payload].type];
+                    } else {
+                        return false;
                     }
-                    current = syntax->match_arms[current].next;
+                    if (template.kind != SOL_TYPE_UNKNOWN
+                        && !sol_type_metadata_substituted_equal(syntax, table,
+                            child_type, template, parent_type, owner, 0)) return false;
                 }
+                current = syntax->pattern_bindings[current].next;
+                ++position;
             }
         }
-        if (!found) return false;
+        if (parent_count != 1) return false;
     }
     return true;
 }
@@ -3341,6 +3486,12 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         || expression_count > SIZE_MAX / sizeof(*checker->types->tuple_projections)
         || checker->syntax->pattern_count > SIZE_MAX
             / sizeof(*checker->types->pattern_variant_resolutions)
+        || checker->syntax->pattern_count > SIZE_MAX
+            / sizeof(*checker->types->pattern_types)
+        || checker->syntax->pattern_binding_count > SIZE_MAX
+            / sizeof(*checker->types->pattern_field_resolutions)
+        || checker->syntax->pattern_binding_count > SIZE_MAX
+            / sizeof(*checker->types->pattern_tuple_ordinals)
         || checker->syntax->argument_count > SIZE_MAX
             / sizeof(*checker->types->argument_field_resolutions)
         || checker->syntax->statement_count > SIZE_MAX
@@ -3400,6 +3551,17 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         checker->syntax->pattern_count
             * sizeof(*checker->types->pattern_variant_resolutions)
     );
+    checker->types->pattern_types = calloc(
+        checker->syntax->pattern_count, sizeof(*checker->types->pattern_types)
+    );
+    checker->types->pattern_field_resolutions = malloc(
+        checker->syntax->pattern_binding_count
+            * sizeof(*checker->types->pattern_field_resolutions)
+    );
+    checker->types->pattern_tuple_ordinals = malloc(
+        checker->syntax->pattern_binding_count
+            * sizeof(*checker->types->pattern_tuple_ordinals)
+    );
     checker->types->argument_field_resolutions = malloc(
         checker->syntax->argument_count
             * sizeof(*checker->types->argument_field_resolutions)
@@ -3454,7 +3616,11 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         return false;
     }
     if (checker->syntax->pattern_count != 0
-        && checker->types->pattern_variant_resolutions == NULL) return false;
+        && (checker->types->pattern_variant_resolutions == NULL
+            || checker->types->pattern_types == NULL)) return false;
+    if (checker->syntax->pattern_binding_count != 0
+        && (checker->types->pattern_field_resolutions == NULL
+            || checker->types->pattern_tuple_ordinals == NULL)) return false;
     if (checker->syntax->argument_count != 0
         && checker->types->argument_field_resolutions == NULL) return false;
     if (checker->syntax->type_count != 0
@@ -3471,6 +3637,8 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     checker->types->member_resolution_count = expression_count;
     checker->types->tuple_projection_count = expression_count;
     checker->types->pattern_resolution_count = checker->syntax->pattern_count;
+    checker->types->pattern_child_resolution_count
+        = checker->syntax->pattern_binding_count;
     checker->types->argument_resolution_count = checker->syntax->argument_count;
     for (size_t index = 0; index < expression_count; ++index) {
         checker->types->field_resolutions[index] = SOL_AST_NONE;
@@ -3479,6 +3647,10 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     }
     for (size_t index = 0; index < checker->syntax->pattern_count; ++index) {
         checker->types->pattern_variant_resolutions[index] = SOL_AST_NONE;
+    }
+    for (size_t index = 0; index < checker->syntax->pattern_binding_count; ++index) {
+        checker->types->pattern_field_resolutions[index] = SOL_AST_NONE;
+        checker->types->pattern_tuple_ordinals[index] = SOL_AST_NONE;
     }
     for (size_t index = 0; index < checker->syntax->argument_count; ++index) {
         checker->types->argument_field_resolutions[index] = SOL_AST_NONE;
@@ -6515,50 +6687,695 @@ static SolType sol_type_record(SolTypeChecker *checker, const SolExpr *record) {
     return record_type;
 }
 
-static SolType sol_type_match(SolTypeChecker *checker, const SolExpr *match_expression) {
-    SolType scrutinee = sol_type_expression(checker, match_expression->as.match_expr.scrutinee);
-    SolDefId scrutinee_definition = sol_type_nominal_definition(checker, scrutinee);
-    size_t case_count = scrutinee.kind == SOL_TYPE_BOOL ? 2 : 0;
-    SolVariantId *variants = NULL;
-    if (scrutinee_definition < checker->syntax->item_count
-        && checker->syntax->items[scrutinee_definition].kind == SOL_ITEM_ENUM) {
-        SolVariantId variant = checker->syntax->items[scrutinee_definition].first_variant;
-        while (variant != SOL_AST_NONE) {
-            if (case_count++ >= checker->syntax->variant_count) {
-                sol_type_malformed(checker);
-                return (SolType){.kind = SOL_TYPE_ERROR};
+static bool sol_type_pattern_binding_safe(SolTypeChecker *checker, SolType type) {
+    if (type.kind == SOL_TYPE_FUNCTION || type.kind == SOL_TYPE_FUNCTION_SIGNATURE
+        || type.kind == SOL_TYPE_CAPABILITY_OPERATION || type.kind == SOL_TYPE_SELF
+        || type.kind == SOL_TYPE_PARAMETER) return false;
+    SolType expanded[256] = {0};
+    return !sol_type_representation_has_capability(
+        checker, type, 0, expanded, true, true
+    );
+}
+
+static size_t sol_type_pattern_child_count(
+    SolTypeChecker *checker,
+    SolPatternId pattern_id
+) {
+    size_t count = 0;
+    SolPatternBindingId child = checker->syntax->patterns[pattern_id].first_binding;
+    while (child != SOL_AST_NONE) {
+        if (child >= checker->syntax->pattern_binding_count
+            || count++ >= checker->syntax->pattern_binding_count) {
+            sol_type_malformed(checker);
+            return 0;
+        }
+        child = checker->syntax->pattern_bindings[child].next;
+    }
+    return count;
+}
+
+static bool sol_type_pattern(
+    SolTypeChecker *checker,
+    SolPatternId pattern_id,
+    SolType expected,
+    size_t depth
+) {
+    if (pattern_id >= checker->syntax->pattern_count || depth >= 64) {
+        if (pattern_id < checker->syntax->pattern_count) {
+            sol_type_error(checker, "SOL-MATCH-002",
+                checker->syntax->patterns[pattern_id].span,
+                "pattern structure exceeds the semantic limit of 64");
+        } else {
+            sol_type_malformed(checker);
+        }
+        return false;
+    }
+    checker->types->pattern_types[pattern_id] = expected;
+    const SolPattern *pattern = &checker->syntax->patterns[pattern_id];
+    if (pattern->kind == SOL_PATTERN_WILDCARD) return true;
+    if (pattern->kind == SOL_PATTERN_BINDING) {
+        SolLocalId local = sol_type_find_local(
+            checker, SOL_LOCAL_PATTERN, pattern_id
+        );
+        if (local != SOL_AST_NONE) checker->types->locals[local] = expected;
+        SolDefId definition = sol_type_nominal_definition(checker, expected);
+        if (definition < checker->syntax->item_count
+            && checker->syntax->items[definition].kind == SOL_ITEM_ENUM
+            && sol_type_find_variant(checker, definition, pattern->name) != SOL_AST_NONE) {
+            sol_type_error(checker, "SOL-MATCH-001", pattern->span,
+                "nested bare enum variant is a binding; write variant() to match the variant, or rename it to bind");
+            return false;
+        }
+        if (!sol_type_pattern_binding_safe(checker, expected)) {
+            sol_type_error(checker, "SOL-TYPE-028", pattern->span,
+                "a pattern binding requires a concrete authority-free value type");
+            return false;
+        }
+        return true;
+    }
+    if (pattern->kind == SOL_PATTERN_BOOL) {
+        if (expected.kind != SOL_TYPE_BOOL) {
+            sol_type_error(checker, "SOL-MATCH-001", pattern->span,
+                "boolean pattern requires an exact Bool value");
+            return false;
+        }
+        return true;
+    }
+
+    SolDefId definition = sol_type_nominal_definition(checker, expected);
+    if (pattern->kind == SOL_PATTERN_VARIANT) {
+        if (definition >= checker->syntax->item_count
+            || checker->syntax->items[definition].kind != SOL_ITEM_ENUM) {
+            sol_type_error(checker, "SOL-MATCH-001", pattern->span,
+                "variant pattern requires an exact enum value");
+            return false;
+        }
+        SolVariantId variant = sol_type_find_variant(checker, definition, pattern->name);
+        if (variant == SOL_AST_NONE) {
+            sol_type_error(checker, "SOL-MATCH-001", pattern->name,
+                "enum has no variant with this name");
+            return false;
+        }
+        checker->types->pattern_variant_resolutions[pattern_id] = variant;
+        SolPatternBindingId child = pattern->first_binding;
+        SolFieldId payload = checker->syntax->variants[variant].first_field;
+        bool valid = true;
+        while (child != SOL_AST_NONE && payload != SOL_AST_NONE) {
+            SolType child_type = sol_type_member_template(checker, expected,
+                sol_type_from_id(checker, checker->syntax->fields[payload].type));
+            valid = sol_type_pattern(checker,
+                checker->syntax->pattern_bindings[child].pattern,
+                child_type, depth + 1) && valid;
+            child = checker->syntax->pattern_bindings[child].next;
+            payload = checker->syntax->fields[payload].next;
+        }
+        if (child != SOL_AST_NONE || payload != SOL_AST_NONE) {
+            sol_type_error(checker, "SOL-MATCH-001", pattern->span,
+                "variant pattern has the wrong payload arity");
+            valid = false;
+            while (child != SOL_AST_NONE) {
+                SolPatternId nested = checker->syntax->pattern_bindings[child].pattern;
+                checker->types->pattern_types[nested] = (SolType){.kind = SOL_TYPE_ERROR};
+                child = checker->syntax->pattern_bindings[child].next;
             }
-            variant = checker->syntax->variants[variant].next;
         }
-        if (case_count > SIZE_MAX / sizeof(*variants)) {
-            checker->allocation_failed = true;
-            return (SolType){.kind = SOL_TYPE_ERROR};
+        return valid;
+    }
+    if (pattern->kind == SOL_PATTERN_TUPLE) {
+        const SolType *elements = NULL;
+        size_t element_count = 0;
+        const SolTypeApplication *tuple = sol_type_application(checker->types, expected);
+        if (tuple == NULL || tuple->constructor != SOL_TYPE_CONSTRUCTOR_TUPLE
+            || !sol_type_application_arguments(
+                checker->types, expected, &elements, &element_count)) {
+            sol_type_error(checker, "SOL-MATCH-001", pattern->span,
+                "tuple pattern requires an exact structural tuple value");
+            return false;
         }
-        variants = case_count == 0 ? NULL : malloc(case_count * sizeof(*variants));
-        if (case_count != 0 && variants == NULL) {
-            checker->allocation_failed = true;
-            return (SolType){.kind = SOL_TYPE_ERROR};
+        size_t child_count = sol_type_pattern_child_count(checker, pattern_id);
+        if (child_count != element_count || child_count < 2 || child_count > 16) {
+            sol_type_error(checker, "SOL-MATCH-001", pattern->span,
+                "tuple pattern has the wrong arity");
+            return false;
         }
-        variant = checker->syntax->items[scrutinee_definition].first_variant;
-        for (size_t index = 0; index < case_count; ++index) {
-            variants[index] = variant;
-            variant = checker->syntax->variants[variant].next;
+        SolPatternBindingId child = pattern->first_binding;
+        bool valid = true;
+        for (size_t ordinal = 0; ordinal < element_count; ++ordinal) {
+            checker->types->pattern_tuple_ordinals[child] = ordinal;
+            valid = sol_type_pattern(checker,
+                checker->syntax->pattern_bindings[child].pattern,
+                elements[ordinal], depth + 1) && valid;
+            child = checker->syntax->pattern_bindings[child].next;
+        }
+        return valid;
+    }
+
+    if (definition >= checker->syntax->item_count
+        || checker->syntax->items[definition].kind != SOL_ITEM_RECORD
+        || !sol_type_name_equal(checker->source,
+            checker->syntax->items[definition].name, pattern->name)) {
+        sol_type_error(checker, "SOL-MATCH-001", pattern->span,
+            "record pattern head must name the exact record type");
+        return false;
+    }
+    bool valid = true;
+    SolPatternBindingId child = pattern->first_binding;
+    size_t traversed = 0;
+    while (child != SOL_AST_NONE) {
+        if (traversed++ >= checker->syntax->pattern_binding_count) {
+            sol_type_malformed(checker);
+            return false;
+        }
+        const SolPatternBinding *entry = &checker->syntax->pattern_bindings[child];
+        SolFieldId field = sol_type_find_field(checker, definition, entry->field);
+        if (field == SOL_AST_NONE) {
+            sol_type_error(checker, "SOL-MATCH-001", entry->field,
+                "record pattern contains an unknown field");
+            valid = false;
+        } else {
+            for (SolPatternBindingId previous = pattern->first_binding;
+                previous != child;
+                previous = checker->syntax->pattern_bindings[previous].next) {
+                if (checker->types->pattern_field_resolutions[previous] == field) {
+                    sol_type_error(checker, "SOL-MATCH-001", entry->field,
+                        "record pattern supplies a field more than once");
+                    field = SOL_AST_NONE;
+                    valid = false;
+                    break;
+                }
+            }
+            if (field != SOL_AST_NONE) {
+                checker->types->pattern_field_resolutions[child] = field;
+                SolType child_type = sol_type_member_template(checker, expected,
+                    sol_type_from_id(checker, checker->syntax->fields[field].type));
+                valid = sol_type_pattern(checker, entry->pattern,
+                    child_type, depth + 1) && valid;
+            }
+        }
+        child = entry->next;
+    }
+    return valid;
+}
+
+typedef struct {
+    SolPatternId pattern;
+} SolMatchCell;
+
+typedef struct {
+    SolMatchCell *cells;
+    size_t row_count;
+    size_t column_count;
+} SolMatchMatrix;
+
+typedef struct {
+    unsigned kind;
+    size_t id;
+} SolMatchConstructor;
+
+static bool sol_type_pattern_constructor(
+    const SolTypeChecker *checker,
+    SolPatternId pattern_id,
+    SolMatchConstructor *constructor
+) {
+    if (pattern_id == SOL_AST_NONE) return false;
+    const SolPattern *pattern = &checker->syntax->patterns[pattern_id];
+    if (pattern->kind == SOL_PATTERN_BOOL) {
+        *constructor = (SolMatchConstructor){1, pattern->bool_value ? 1 : 0};
+        return true;
+    }
+    if (pattern->kind == SOL_PATTERN_VARIANT) {
+        *constructor = (SolMatchConstructor){
+            2, checker->types->pattern_variant_resolutions[pattern_id]
+        };
+        return constructor->id != SOL_AST_NONE;
+    }
+    if (pattern->kind == SOL_PATTERN_TUPLE
+        || pattern->kind == SOL_PATTERN_RECORD) {
+        *constructor = (SolMatchConstructor){3, 0};
+        return true;
+    }
+    return false;
+}
+
+static bool sol_type_match_constructor_fields(
+    SolTypeChecker *checker,
+    SolType type,
+    SolMatchConstructor constructor,
+    SolType **field_types,
+    SolFieldId **field_ids,
+    size_t *field_count
+) {
+    *field_types = NULL;
+    *field_ids = NULL;
+    *field_count = 0;
+    if (constructor.kind == 1) return type.kind == SOL_TYPE_BOOL;
+    const SolTypeApplication *application = sol_type_application(checker->types, type);
+    if (constructor.kind == 3 && application != NULL
+        && application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE) {
+        const SolType *arguments = NULL;
+        if (!sol_type_application_arguments(
+            checker->types, type, &arguments, field_count)) return false;
+        *field_types = malloc(*field_count * sizeof(**field_types));
+        if (*field_types == NULL) return false;
+        memcpy(*field_types, arguments, *field_count * sizeof(**field_types));
+        return true;
+    }
+    SolDefId definition = sol_type_nominal_definition(checker, type);
+    SolFieldId field = SOL_AST_NONE;
+    if (constructor.kind == 2 && constructor.id < checker->syntax->variant_count
+        && checker->syntax->variants[constructor.id].owner_item == definition) {
+        field = checker->syntax->variants[constructor.id].first_field;
+    } else if (constructor.kind == 3 && definition < checker->syntax->item_count
+        && checker->syntax->items[definition].kind == SOL_ITEM_RECORD) {
+        field = checker->syntax->items[definition].first_field;
+    } else {
+        return false;
+    }
+    SolFieldId current = field;
+    while (current != SOL_AST_NONE) {
+        if ((*field_count)++ >= checker->syntax->field_count) return false;
+        current = checker->syntax->fields[current].next;
+    }
+    if (*field_count == 0) return true;
+    *field_types = malloc(*field_count * sizeof(**field_types));
+    *field_ids = malloc(*field_count * sizeof(**field_ids));
+    if (*field_types == NULL || *field_ids == NULL) {
+        free(*field_types);
+        free(*field_ids);
+        *field_types = NULL;
+        *field_ids = NULL;
+        return false;
+    }
+    current = field;
+    for (size_t index = 0; index < *field_count; ++index) {
+        (*field_ids)[index] = current;
+        (*field_types)[index] = sol_type_member_template(checker, type,
+            sol_type_from_id(checker, checker->syntax->fields[current].type));
+        current = checker->syntax->fields[current].next;
+    }
+    return true;
+}
+
+typedef enum {
+    SOL_INHABITATION_EMPTY,
+    SOL_INHABITATION_INHABITED,
+    SOL_INHABITATION_CYCLE,
+    SOL_INHABITATION_INDETERMINATE,
+} SolInhabitation;
+
+static SolInhabitation sol_type_finite_inhabitation(
+    SolTypeChecker *checker,
+    SolType type,
+    SolType *stack,
+    size_t depth,
+    size_t *steps
+);
+
+static SolInhabitation sol_type_fields_inhabitation(
+    SolTypeChecker *checker,
+    SolType owner,
+    SolFieldId field,
+    SolType *stack,
+    size_t depth,
+    size_t *steps
+) {
+    SolInhabitation result = SOL_INHABITATION_INHABITED;
+    size_t traversed = 0;
+    while (field != SOL_AST_NONE) {
+        if (field >= checker->syntax->field_count
+            || traversed++ >= checker->syntax->field_count) {
+            return SOL_INHABITATION_INDETERMINATE;
+        }
+        SolType field_type = sol_type_member_template(checker, owner,
+            sol_type_from_id(checker, checker->syntax->fields[field].type));
+        SolInhabitation child = sol_type_finite_inhabitation(
+            checker, field_type, stack, depth, steps);
+        if (child == SOL_INHABITATION_EMPTY) return child;
+        if (child == SOL_INHABITATION_INDETERMINATE) {
+            result = SOL_INHABITATION_INDETERMINATE;
+        } else if (child == SOL_INHABITATION_CYCLE
+            && result == SOL_INHABITATION_INHABITED) {
+            result = SOL_INHABITATION_CYCLE;
+        }
+        field = checker->syntax->fields[field].next;
+    }
+    return result;
+}
+
+static SolInhabitation sol_type_finite_inhabitation(
+    SolTypeChecker *checker,
+    SolType type,
+    SolType *stack,
+    size_t depth,
+    size_t *steps
+) {
+    if (depth >= 64 || (*steps)++ >= 1024) {
+        return SOL_INHABITATION_INDETERMINATE;
+    }
+    if (type.kind == SOL_TYPE_NEVER) return SOL_INHABITATION_EMPTY;
+    if (type.kind == SOL_TYPE_UNKNOWN || type.kind == SOL_TYPE_ERROR
+        || type.kind == SOL_TYPE_PARAMETER || type.kind == SOL_TYPE_SELF) {
+        return SOL_INHABITATION_INDETERMINATE;
+    }
+    for (size_t index = 0; index < depth; ++index) {
+        if (sol_type_exact_equal(stack[index], type)) return SOL_INHABITATION_CYCLE;
+    }
+    stack[depth] = type;
+
+    const SolTypeApplication *application = sol_type_application(checker->types, type);
+    if (application != NULL && application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE) {
+        const SolType *arguments = NULL;
+        size_t count = 0;
+        if (!sol_type_application_arguments(
+            checker->types, type, &arguments, &count)) {
+            return SOL_INHABITATION_INDETERMINATE;
+        }
+        SolInhabitation result = SOL_INHABITATION_INHABITED;
+        for (size_t index = 0; index < count; ++index) {
+            SolInhabitation child = sol_type_finite_inhabitation(
+                checker, arguments[index], stack, depth + 1, steps);
+            if (child == SOL_INHABITATION_EMPTY) return child;
+            if (child == SOL_INHABITATION_INDETERMINATE) {
+                result = SOL_INHABITATION_INDETERMINATE;
+            } else if (child == SOL_INHABITATION_CYCLE
+                && result == SOL_INHABITATION_INHABITED) {
+                result = SOL_INHABITATION_CYCLE;
+            }
+        }
+        return result;
+    }
+    if (application != NULL
+        && application->constructor == SOL_TYPE_CONSTRUCTOR_OPTION) {
+        return SOL_INHABITATION_INHABITED;
+    }
+    if (application != NULL
+        && application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT) {
+        const SolType *arguments = NULL;
+        size_t count = 0;
+        if (!sol_type_application_arguments(checker->types, type, &arguments, &count)
+            || count != 2) return SOL_INHABITATION_INDETERMINATE;
+        SolInhabitation left = sol_type_finite_inhabitation(
+            checker, arguments[0], stack, depth + 1, steps);
+        SolInhabitation right = sol_type_finite_inhabitation(
+            checker, arguments[1], stack, depth + 1, steps);
+        if (left == SOL_INHABITATION_INHABITED
+            || right == SOL_INHABITATION_INHABITED) return SOL_INHABITATION_INHABITED;
+        if (left == SOL_INHABITATION_INDETERMINATE
+            || right == SOL_INHABITATION_INDETERMINATE) {
+            return SOL_INHABITATION_INDETERMINATE;
+        }
+        if (left == SOL_INHABITATION_CYCLE || right == SOL_INHABITATION_CYCLE) {
+            return SOL_INHABITATION_CYCLE;
+        }
+        return SOL_INHABITATION_EMPTY;
+    }
+
+    SolDefId definition = sol_type_nominal_definition(checker, type);
+    if (definition == SOL_AST_NONE) return SOL_INHABITATION_INHABITED;
+    if (definition >= checker->syntax->item_count) {
+        return SOL_INHABITATION_INDETERMINATE;
+    }
+    const SolSyntaxItem *item = &checker->syntax->items[definition];
+    if (item->kind == SOL_ITEM_RECORD) {
+        return sol_type_fields_inhabitation(checker, type, item->first_field,
+            stack, depth + 1, steps);
+    }
+    if (item->kind != SOL_ITEM_ENUM || item->is_open) {
+        return SOL_INHABITATION_INHABITED;
+    }
+    SolInhabitation result = SOL_INHABITATION_EMPTY;
+    SolVariantId variant = item->first_variant;
+    size_t traversed = 0;
+    while (variant != SOL_AST_NONE) {
+        if (variant >= checker->syntax->variant_count
+            || traversed++ >= checker->syntax->variant_count) {
+            return SOL_INHABITATION_INDETERMINATE;
+        }
+        SolInhabitation constructor = sol_type_fields_inhabitation(checker, type,
+            checker->syntax->variants[variant].first_field,
+            stack, depth + 1, steps);
+        if (constructor == SOL_INHABITATION_INHABITED) return constructor;
+        if (constructor == SOL_INHABITATION_INDETERMINATE) {
+            result = SOL_INHABITATION_INDETERMINATE;
+        } else if (constructor == SOL_INHABITATION_CYCLE
+            && result == SOL_INHABITATION_EMPTY) {
+            result = SOL_INHABITATION_CYCLE;
+        }
+        variant = checker->syntax->variants[variant].next;
+    }
+    return result;
+}
+
+static bool sol_type_maybe_finitely_inhabited(
+    SolTypeChecker *checker,
+    SolType type
+) {
+    SolType stack[64];
+    size_t steps = 0;
+    SolInhabitation result = sol_type_finite_inhabitation(
+        checker, type, stack, 0, &steps);
+    return result != SOL_INHABITATION_EMPTY && result != SOL_INHABITATION_CYCLE;
+}
+
+static bool sol_type_match_constructor_inhabited(
+    SolTypeChecker *checker,
+    SolType type,
+    SolMatchConstructor constructor
+) {
+    SolType *fields = NULL;
+    SolFieldId *field_ids = NULL;
+    size_t count = 0;
+    if (!sol_type_match_constructor_fields(
+        checker, type, constructor, &fields, &field_ids, &count)) {
+        return true;
+    }
+    bool inhabited = true;
+    for (size_t index = 0; inhabited && index < count; ++index) {
+        inhabited = sol_type_maybe_finitely_inhabited(checker, fields[index]);
+    }
+    free(fields);
+    free(field_ids);
+    return inhabited;
+}
+
+static SolPatternId sol_type_pattern_constructor_child(
+    const SolTypeChecker *checker,
+    SolPatternId pattern_id,
+    size_t ordinal,
+    SolFieldId field
+) {
+    const SolPattern *pattern = &checker->syntax->patterns[pattern_id];
+    SolPatternBindingId child = pattern->first_binding;
+    size_t index = 0;
+    while (child != SOL_AST_NONE) {
+        if ((pattern->kind == SOL_PATTERN_RECORD
+                && checker->types->pattern_field_resolutions[child] == field)
+            || (pattern->kind != SOL_PATTERN_RECORD && index == ordinal)) {
+            return checker->syntax->pattern_bindings[child].pattern;
+        }
+        child = checker->syntax->pattern_bindings[child].next;
+        ++index;
+    }
+    return SOL_AST_NONE;
+}
+
+static bool sol_type_match_specialize(
+    SolTypeChecker *checker,
+    const SolMatchMatrix *source,
+    SolMatchConstructor constructor,
+    size_t arity,
+    const SolFieldId *fields,
+    SolMatchMatrix *result,
+    bool *overflow
+) {
+    result->column_count = source->column_count - 1 + arity;
+    result->row_count = 0;
+    result->cells = NULL;
+    if (source->row_count != 0 && result->column_count > 8192 / source->row_count) {
+        *overflow = true;
+        return false;
+    }
+    size_t capacity = source->row_count * result->column_count;
+    result->cells = capacity == 0 ? NULL : malloc(capacity * sizeof(*result->cells));
+    if (capacity != 0 && result->cells == NULL) return false;
+    for (size_t row = 0; row < source->row_count; ++row) {
+        const SolMatchCell *input = source->cells + row * source->column_count;
+        SolMatchConstructor actual;
+        bool wildcard = !sol_type_pattern_constructor(
+            checker, input[0].pattern, &actual);
+        if (!wildcard && (actual.kind != constructor.kind
+                || actual.id != constructor.id)) continue;
+        SolMatchCell *output = result->column_count == 0 ? NULL
+            : result->cells + result->row_count * result->column_count;
+        ++result->row_count;
+        for (size_t index = 0; index < arity; ++index) {
+            output[index].pattern = wildcard ? SOL_AST_NONE
+                : sol_type_pattern_constructor_child(checker,
+                    input[0].pattern, index,
+                    fields == NULL ? SOL_AST_NONE : fields[index]);
+        }
+        if (source->column_count > 1) {
+            memcpy(output + arity, input + 1,
+                (source->column_count - 1) * sizeof(*output));
         }
     }
-    bool *covered = case_count == 0 ? NULL : calloc(case_count, sizeof(*covered));
-    if (case_count != 0 && covered == NULL) {
-        free(variants);
+    return true;
+}
+
+static bool sol_type_match_useful(
+    SolTypeChecker *checker,
+    const SolMatchMatrix *matrix,
+    const SolMatchCell *candidate,
+    const SolType *types,
+    size_t depth,
+    size_t *steps,
+    bool *overflow
+) {
+    if (*overflow) return false;
+    if (depth >= 64 || (*steps)++ >= 8192) {
+        *overflow = true;
+        return false;
+    }
+    if (matrix->column_count == 0) return matrix->row_count == 0;
+    if (!sol_type_maybe_finitely_inhabited(checker, types[0])) return false;
+    bool candidate_wildcards = true;
+    for (size_t column = 0; column < matrix->column_count; ++column) {
+        SolMatchConstructor ignored;
+        candidate_wildcards = candidate_wildcards
+            && !sol_type_pattern_constructor(checker, candidate[column].pattern, &ignored);
+    }
+    if (candidate_wildcards) {
+        for (size_t row = 0; row < matrix->row_count; ++row) {
+            bool row_wildcards = true;
+            for (size_t column = 0; column < matrix->column_count; ++column) {
+                SolMatchConstructor ignored;
+                row_wildcards = row_wildcards && !sol_type_pattern_constructor(checker,
+                    matrix->cells[row * matrix->column_count + column].pattern,
+                    &ignored);
+            }
+            if (row_wildcards) return false;
+        }
+    }
+    SolMatchConstructor direct;
+    bool has_direct = sol_type_pattern_constructor(
+        checker, candidate[0].pattern, &direct);
+    SolDefId definition = sol_type_nominal_definition(checker, types[0]);
+    bool product = sol_type_application(checker->types, types[0]) != NULL
+        && sol_type_application(checker->types, types[0])->constructor
+            == SOL_TYPE_CONSTRUCTOR_TUPLE;
+    product = product || (definition < checker->syntax->item_count
+        && checker->syntax->items[definition].kind == SOL_ITEM_RECORD);
+    bool closed_enum = definition < checker->syntax->item_count
+        && checker->syntax->items[definition].kind == SOL_ITEM_ENUM
+        && !checker->syntax->items[definition].is_open;
+    bool complete = types[0].kind == SOL_TYPE_BOOL || product || closed_enum;
+
+    SolMatchConstructor constructors[2] = {{0}};
+    size_t constructor_count = 0;
+    SolVariantId enum_constructor = SOL_AST_NONE;
+    if (has_direct) {
+        constructors[constructor_count++] = direct;
+    } else if (types[0].kind == SOL_TYPE_BOOL) {
+        constructors[0] = (SolMatchConstructor){1, 0};
+        constructors[1] = (SolMatchConstructor){1, 1};
+        constructor_count = 2;
+    } else if (product) {
+        constructors[constructor_count++] = (SolMatchConstructor){3, 0};
+    } else if (closed_enum) {
+        enum_constructor = checker->syntax->items[definition].first_variant;
+    }
+
+    if (has_direct || complete) {
+        for (;;) {
+            SolMatchConstructor constructor;
+            if (enum_constructor != SOL_AST_NONE) {
+                constructor = (SolMatchConstructor){2, enum_constructor};
+                enum_constructor = checker->syntax->variants[enum_constructor].next;
+            } else if (constructor_count != 0) {
+                constructor = constructors[--constructor_count];
+            } else {
+                break;
+            }
+            if (!sol_type_match_constructor_inhabited(
+                checker, types[0], constructor)) continue;
+            SolType *fields = NULL;
+            SolFieldId *field_ids = NULL;
+            size_t arity = 0;
+            if (!sol_type_match_constructor_fields(checker, types[0], constructor,
+                    &fields, &field_ids, &arity)) {
+                checker->allocation_failed = true;
+                return false;
+            }
+            size_t columns = matrix->column_count - 1 + arity;
+            SolType *specialized_types = columns == 0 ? NULL
+                : malloc(columns * sizeof(*specialized_types));
+            SolMatchCell *specialized_candidate = columns == 0 ? NULL
+                : malloc(columns * sizeof(*specialized_candidate));
+            SolMatchMatrix specialized;
+            bool allocated = (columns == 0
+                    || (specialized_types != NULL && specialized_candidate != NULL))
+                && sol_type_match_specialize(checker, matrix, constructor,
+                    arity, field_ids, &specialized, overflow);
+            if (!allocated) {
+                free(fields); free(field_ids); free(specialized_types);
+                free(specialized_candidate);
+                if (!*overflow) checker->allocation_failed = true;
+                return false;
+            }
+            if (arity != 0) {
+                memcpy(specialized_types, fields, arity * sizeof(*fields));
+            }
+            if (matrix->column_count > 1) {
+                memcpy(specialized_types + arity, types + 1,
+                    (matrix->column_count - 1) * sizeof(*types));
+            }
+            for (size_t index = 0; index < arity; ++index) {
+                specialized_candidate[index].pattern = has_direct
+                    ? sol_type_pattern_constructor_child(checker,
+                        candidate[0].pattern, index,
+                        field_ids == NULL ? SOL_AST_NONE : field_ids[index])
+                    : SOL_AST_NONE;
+            }
+            if (matrix->column_count > 1) {
+                memcpy(specialized_candidate + arity, candidate + 1,
+                    (matrix->column_count - 1) * sizeof(*candidate));
+            }
+            bool useful = sol_type_match_useful(checker, &specialized,
+                specialized_candidate, specialized_types,
+                depth + 1, steps, overflow);
+            free(fields); free(field_ids); free(specialized_types);
+            free(specialized_candidate); free(specialized.cells);
+            if (useful) return true;
+        }
+        return false;
+    }
+
+    SolMatchConstructor fallback = {0, 0};
+    SolMatchMatrix defaults;
+    if (!sol_type_match_specialize(checker, matrix, fallback, 0,
+            NULL, &defaults, overflow)) {
+        if (!*overflow) checker->allocation_failed = true;
+        return false;
+    }
+    bool useful = sol_type_match_useful(checker, &defaults,
+        candidate + 1, types + 1, depth + 1, steps, overflow);
+    free(defaults.cells);
+    return useful;
+}
+
+static SolType sol_type_match(SolTypeChecker *checker, const SolExpr *match_expression) {
+    SolType scrutinee = sol_type_expression(
+        checker, match_expression->as.match_expr.scrutinee
+    );
+    SolPatternId *rows = checker->syntax->match_arm_count == 0 ? NULL
+        : malloc(checker->syntax->match_arm_count * sizeof(*rows));
+    if (checker->syntax->match_arm_count != 0 && rows == NULL) {
         checker->allocation_failed = true;
         return (SolType){.kind = SOL_TYPE_ERROR};
     }
-
-    bool wildcard = false;
-    bool enum_scrutinee = scrutinee_definition < checker->syntax->item_count
-        && checker->syntax->items[scrutinee_definition].kind == SOL_ITEM_ENUM;
-    bool open_enum = enum_scrutinee
-        && checker->syntax->items[scrutinee_definition].is_open;
-    bool finite_domain = scrutinee.kind == SOL_TYPE_BOOL || (enum_scrutinee && !open_enum);
+    size_t row_count = 0;
     bool have_result = false;
+    bool overflow_reported = false;
     SolType result = {.kind = SOL_TYPE_UNKNOWN};
     SolMatchArmId arm_id = match_expression->as.match_expr.first_arm;
     size_t arm_count = 0;
@@ -6568,150 +7385,91 @@ static SolType sol_type_match(SolTypeChecker *checker, const SolExpr *match_expr
             break;
         }
         const SolMatchArm *arm = &checker->syntax->match_arms[arm_id];
-        const SolPattern *pattern = &checker->syntax->patterns[arm->pattern];
-        bool complete_before_arm = case_count != 0 && !open_enum;
-        for (size_t index = 0; index < case_count; ++index) {
-            complete_before_arm = complete_before_arm && covered[index];
-        }
-        if (wildcard || complete_before_arm) {
-            sol_type_error(
-                checker,
-                "SOL-MATCH-001",
-                pattern->span,
-                "match arm is unreachable because previous arms are exhaustive"
-            );
-        }
-        SolVariantId matched_variant = SOL_AST_NONE;
-        if (pattern->kind == SOL_PATTERN_WILDCARD) {
-            wildcard = true;
-        } else if (pattern->kind == SOL_PATTERN_BOOL) {
-            if (scrutinee.kind != SOL_TYPE_BOOL) {
-                sol_type_error(
-                    checker,
-                    "SOL-MATCH-001",
-                    pattern->span,
-                    "boolean pattern requires a Bool match value"
-                );
+        bool pattern_valid = sol_type_pattern(
+            checker, arm->pattern, scrutinee, 0
+        );
+        if (pattern_valid) {
+            SolMatchCell *matrix_cells = row_count == 0 ? NULL
+                : malloc(row_count * sizeof(*matrix_cells));
+            if (row_count != 0 && matrix_cells == NULL) {
+                checker->allocation_failed = true;
             } else {
-                size_t index = pattern->bool_value ? 1 : 0;
-                if (covered[index]) {
-                    sol_type_error(
-                        checker,
-                        "SOL-MATCH-001",
-                        pattern->span,
-                        "duplicate match case"
-                    );
+                for (size_t index = 0; index < row_count; ++index) {
+                    matrix_cells[index].pattern = rows[index];
                 }
-                covered[index] = true;
-            }
-        } else if (enum_scrutinee) {
-            matched_variant = sol_type_find_variant(
-                checker,
-                scrutinee_definition,
-                pattern->name
-            );
-            if (matched_variant == SOL_AST_NONE) {
-                sol_type_error(
-                    checker,
-                    "SOL-MATCH-001",
-                    pattern->name,
-                    "enum has no variant with this name"
-                );
-            } else {
-                checker->types->pattern_variant_resolutions[arm->pattern] = matched_variant;
-                for (size_t index = 0; index < case_count; ++index) {
-                    if (variants[index] == matched_variant) {
-                        if (covered[index]) {
-                            sol_type_error(
-                                checker,
-                                "SOL-MATCH-001",
-                                pattern->span,
-                                "duplicate match case"
-                            );
-                        }
-                        covered[index] = true;
-                        break;
-                    }
+                SolMatchMatrix matrix = {matrix_cells, row_count, 1};
+                SolMatchCell candidate = {arm->pattern};
+                size_t steps = 0;
+                bool overflow = false;
+                bool useful = sol_type_match_useful(checker, &matrix,
+                    &candidate, &scrutinee, 0, &steps, &overflow);
+                if (overflow && !overflow_reported) {
+                    sol_type_error(checker, "SOL-MATCH-002",
+                        checker->syntax->patterns[arm->pattern].span,
+                        "nested match analysis exceeds the deterministic complexity limit");
+                    overflow_reported = true;
+                } else if (!overflow && !useful) {
+                    sol_type_error(checker, "SOL-MATCH-001",
+                        checker->syntax->patterns[arm->pattern].span,
+                        "match arm is structurally unreachable");
                 }
+                free(matrix_cells);
             }
-        } else {
-            sol_type_error(
-                checker,
-                "SOL-MATCH-001",
-                pattern->span,
-                "variant pattern requires an enum match value"
-            );
+            if (arm->guard == SOL_AST_NONE) rows[row_count++] = arm->pattern;
         }
-
-        SolPatternBindingId binding = pattern->first_binding;
-        SolFieldId payload = matched_variant == SOL_AST_NONE
-            ? SOL_AST_NONE
-            : checker->syntax->variants[matched_variant].first_field;
-        size_t binding_count = 0;
-        while (binding != SOL_AST_NONE && payload != SOL_AST_NONE) {
-            if (binding_count++ >= checker->syntax->pattern_binding_count) {
-                sol_type_malformed(checker);
-                break;
+        if (arm->guard != SOL_AST_NONE) {
+            SolType guard = sol_type_expression_expected(checker, arm->guard,
+                (SolType){.kind = SOL_TYPE_BOOL});
+            if (guard.kind != SOL_TYPE_BOOL && guard.kind != SOL_TYPE_ERROR) {
+                sol_type_error(checker, "SOL-TYPE-003",
+                    checker->syntax->expressions[arm->guard].span,
+                    "match guard must have exact type Bool");
             }
-            SolLocalId local = sol_type_find_local(checker, SOL_LOCAL_PATTERN, binding);
-            if (local != SOL_AST_NONE) {
-                checker->types->locals[local] = sol_type_member_template(
-                    checker,
-                    scrutinee,
-                    sol_type_from_id(checker, checker->syntax->fields[payload].type)
-                );
-            }
-            binding = checker->syntax->pattern_bindings[binding].next;
-            payload = checker->syntax->fields[payload].next;
         }
-        if (binding != SOL_AST_NONE || payload != SOL_AST_NONE) {
-            sol_type_error(
-                checker,
-                "SOL-MATCH-001",
-                pattern->span,
-                "pattern binding count does not match variant payload"
-            );
-        }
-
         SolType arm_type = checker->contextual_expected.kind == SOL_TYPE_UNKNOWN
             ? sol_type_expression(checker, arm->value)
             : sol_type_expression_expected(
-                checker, arm->value, checker->contextual_expected
-            );
+                checker, arm->value, checker->contextual_expected);
         if (!have_result || result.kind == SOL_TYPE_NEVER) {
             result = arm_type;
             have_result = true;
-        } else if (arm_type.kind != SOL_TYPE_NEVER && !sol_type_equal(result, arm_type)) {
-            sol_type_error(
-                checker,
-                "SOL-TYPE-008",
-                arm->span,
-                "match arms must produce the same type"
-            );
+        } else if (arm_type.kind != SOL_TYPE_NEVER
+            && !sol_type_equal(result, arm_type)) {
+            sol_type_error(checker, "SOL-TYPE-008", arm->span,
+                "match arms must produce the same type");
             result = (SolType){.kind = SOL_TYPE_ERROR};
         }
         arm_id = arm->next;
     }
-    if (!wildcard) {
-        bool exhaustive = finite_domain;
-        for (size_t index = 0; index < case_count; ++index) exhaustive = exhaustive && covered[index];
-        if (open_enum) {
-            exhaustive = false;
-        }
-        if (!exhaustive) {
-            sol_type_error(
-                checker,
-                "SOL-MATCH-001",
-                match_expression->span,
-                "match expression is not exhaustive"
-            );
+    bool uninhabited = !sol_type_maybe_finitely_inhabited(checker, scrutinee);
+    if (!uninhabited) {
+        SolMatchCell *matrix_cells = row_count == 0 ? NULL
+            : malloc(row_count * sizeof(*matrix_cells));
+        if (row_count != 0 && matrix_cells == NULL) {
+            checker->allocation_failed = true;
+        } else {
+            for (size_t index = 0; index < row_count; ++index) {
+                matrix_cells[index].pattern = rows[index];
+            }
+            SolMatchMatrix matrix = {matrix_cells, row_count, 1};
+            SolMatchCell wildcard = {SOL_AST_NONE};
+            size_t steps = 0;
+            bool overflow = false;
+            bool missing = sol_type_match_useful(checker, &matrix,
+                &wildcard, &scrutinee, 0, &steps, &overflow);
+            if (overflow && !overflow_reported) {
+                sol_type_error(checker, "SOL-MATCH-002", match_expression->span,
+                    "nested match analysis exceeds the deterministic complexity limit");
+            } else if (!overflow && missing) {
+                sol_type_error(checker, "SOL-MATCH-001", match_expression->span,
+                    "match expression is not exhaustive");
+            }
+            free(matrix_cells);
         }
     }
-    free(covered);
-    free(variants);
+    free(rows);
     if (have_result) return result;
-    return finite_domain && case_count == 0
-        ? (SolType){.kind = SOL_TYPE_NEVER}
+    return uninhabited ? (SolType){.kind = SOL_TYPE_NEVER}
         : (SolType){.kind = SOL_TYPE_ERROR};
 }
 
@@ -7509,6 +8267,9 @@ bool sol_type_check(
         || types->variant_resolutions != NULL
         || types->tuple_projections != NULL
         || types->pattern_variant_resolutions != NULL
+        || types->pattern_types != NULL
+        || types->pattern_field_resolutions != NULL
+        || types->pattern_tuple_ordinals != NULL
         || types->argument_field_resolutions != NULL
         || types->implementation_targets != NULL
         || types->representations != NULL || types->constructions != NULL
@@ -7532,6 +8293,7 @@ bool sol_type_check(
         || types->member_resolution_count != 0
         || types->tuple_projection_count != 0
         || types->pattern_resolution_count != 0
+        || types->pattern_child_resolution_count != 0
         || types->argument_resolution_count != 0
         || types->loop_fact_count != 0 || types->unreachable_fact_count != 0
         || types->implementation_target_count != 0
