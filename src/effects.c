@@ -143,6 +143,11 @@ static bool sol_effects_collect_callable(
                     PUSH(ir->operands[expression->as.record.fields.offset + index].value);
                 }
                 break;
+            case SOL_IR_EXPR_TUPLE:
+                for (size_t index = 0; index < expression->as.tuple.operands.count; ++index) {
+                    PUSH(ir->operands[expression->as.tuple.operands.offset + index].value);
+                }
+                break;
             case SOL_IR_EXPR_PLACE: {
                 const SolIrPlace *place = &ir->places[expression->as.place];
                 if (place->root_kind == SOL_IR_PLACE_ROOT_TEMPORARY) {

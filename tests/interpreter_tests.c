@@ -2156,6 +2156,129 @@ static void test_terminating_statements_runtime(void) {
     sol_diagnostics_free(&compilation.diagnostics);
 }
 
+static void test_tuple_runtime_and_host_values(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module tuple_runtime\n"
+        "capability Token {}\n"
+        "function project(value: ((Int64, Bool), Text)) -> Bool "
+        "{ return value.0.1 }\n"
+        "function update() -> Int64 { var value = ((1, 2,), 3,) "
+        "value.0.1 = 7 value.0.0 += 4 return value.0.0 + value.0.1 }\n"
+        "function ordered() -> Int64 { var state = 0 "
+        "let value = ({ state = 1 state }, { state = state + 1 state },) "
+        "return value.0 * 10 + value.1 }\n"
+        "function identity(value: (Int64, Bool)) -> (Int64, Bool) "
+        "{ return value }\n"
+        "function partial(value: (capability Token, Int64)) -> Int64 "
+        "{ let moved = value.0 return value.1 }\n"));
+
+    SolInterpreterValue inner_fields[2];
+    SolInterpreterValue outer_fields[2];
+    sol_interpreter_value_int64(&inner_fields[0], 9);
+    sol_interpreter_value_bool(&inner_fields[1], true);
+    inner_fields[0].kind = SOL_INTERPRETER_VALUE_INT64;
+    SolInterpreterValue argument = {
+        .kind = SOL_INTERPRETER_VALUE_TUPLE,
+        .as.aggregate = {
+            .definition = SOL_IR_NONE,
+            .variant = SOL_IR_NONE,
+            .fields = outer_fields,
+            .field_count = 2,
+        },
+    };
+    outer_fields[0] = (SolInterpreterValue){
+        .kind = SOL_INTERPRETER_VALUE_TUPLE,
+        .as.aggregate = {
+            .definition = SOL_IR_NONE,
+            .variant = SOL_IR_NONE,
+            .fields = inner_fields,
+            .field_count = 2,
+        },
+    };
+    CHECK(sol_interpreter_value_text(&outer_fields[1], "text", 4));
+    SolInterpreterResult result;
+    CHECK(run(&compilation.ir, "project", &argument, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_BOOL
+        && result.value.as.boolean);
+    sol_interpreter_result_free(&result);
+
+    SolIrDefinitionId token = SOL_IR_NONE;
+    for (size_t index = 0; index < compilation.ir.definition_count; ++index) {
+        if (strcmp(compilation.ir.definitions[index].name, "Token") == 0) token = index;
+    }
+    int root;
+    SolInterpreterValue affine_fields[2];
+    CHECK(sol_interpreter_value_capability(&affine_fields[0], token, &root, NULL));
+    sol_interpreter_value_int64(&affine_fields[1], 8);
+    SolInterpreterValue affine_tuple = {
+        .kind = SOL_INTERPRETER_VALUE_TUPLE,
+        .as.aggregate = {SOL_IR_NONE, SOL_IR_NONE, affine_fields, 2},
+    };
+    CHECK(run(&compilation.ir, "partial", &affine_tuple, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 8);
+    sol_interpreter_result_free(&result);
+
+    CHECK(run(&compilation.ir, "update", NULL, 0,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 12);
+    sol_interpreter_result_free(&result);
+    CHECK(run(&compilation.ir, "ordered", NULL, 0,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 12);
+    sol_interpreter_result_free(&result);
+
+    SolInterpreterValue host_fields[2];
+    sol_interpreter_value_int64(&host_fields[0], 3);
+    sol_interpreter_value_bool(&host_fields[1], false);
+    SolInterpreterValue host_tuple = {
+        .kind = SOL_INTERPRETER_VALUE_TUPLE,
+        .as.aggregate = {SOL_IR_NONE, SOL_IR_NONE, host_fields, 2},
+    };
+    CHECK(run(&compilation.ir, "identity", &host_tuple, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_TUPLE
+        && result.value.as.aggregate.field_count == 2
+        && result.value.as.aggregate.fields[0].as.integer == 3
+        && !result.value.as.aggregate.fields[1].as.boolean);
+    sol_interpreter_result_free(&result);
+    host_tuple.as.aggregate.definition = 0;
+    CHECK(!run(&compilation.ir, "identity", &host_tuple, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_INVALID_REQUEST);
+    sol_interpreter_result_free(&result);
+    SolInterpreterValue shared_fields[2];
+    sol_interpreter_value_int64(&shared_fields[0], 1);
+    sol_interpreter_value_bool(&shared_fields[1], true);
+    SolInterpreterValue aliased_fields[2] = {
+        {.kind = SOL_INTERPRETER_VALUE_TUPLE,
+            .as.aggregate = {SOL_IR_NONE, SOL_IR_NONE, shared_fields, 2}},
+        {.kind = SOL_INTERPRETER_VALUE_TUPLE,
+            .as.aggregate = {SOL_IR_NONE, SOL_IR_NONE, shared_fields, 2}},
+    };
+    SolInterpreterValue aliased = {
+        .kind = SOL_INTERPRETER_VALUE_TUPLE,
+        .as.aggregate = {SOL_IR_NONE, SOL_IR_NONE, aliased_fields, 2},
+    };
+    SolInterpreterValue clone;
+    sol_interpreter_value_init(&clone);
+    CHECK(!sol_interpreter_value_clone(&clone, &aliased));
+    sol_interpreter_value_free(&clone);
+    sol_interpreter_value_free(&outer_fields[1]);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_primitives_control_and_lifetime();
     test_place_projection_execution();
@@ -2175,6 +2298,7 @@ int main(void) {
     test_malformed_top_level_requests();
     test_loop_execution_and_cleanup();
     test_terminating_statements_runtime();
+    test_tuple_runtime_and_host_values();
     if (failures != 0) fprintf(stderr, "%d interpreter test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

@@ -2622,7 +2622,45 @@ static void test_loop_specifications_are_effect_erased(void) {
     free_compilation(&compilation);
 }
 
+static void test_tuple_effects_and_metadata(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module tuple_effects\n"
+        "function noisy() -> Int64 effects { panic } { return 1 }\n"
+        "function good() -> (Int64, Bool) effects { panic } { return (noisy(), true) }\n"
+        "function bad() -> (Int64, Bool) effects { pure } { return (noisy(), true) }\n"));
+    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-002") == 1);
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module tuple_capability_roots\n"
+        "capability Clock { function now() -> Int64 effects { clock.read<Self> } }\n"
+        "function read(clock: capability Clock) -> Int64 effects { clock.read<clock> } "
+            "{ let pair = (clock, true) return pair.0.now() }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module tuple_effect_metadata\n"
+        "function value(input: (Int64, Bool)) -> Int64 { return input.0 }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolExprId projection = SOL_AST_NONE;
+    for (SolExprId expression = 0; expression < compilation.syntax.expression_count;
+        ++expression) {
+        if (compilation.types.tuple_projections[expression] != SOL_AST_NONE) {
+            projection = expression;
+        }
+    }
+    CHECK(projection != SOL_AST_NONE);
+    if (projection != SOL_AST_NONE) {
+        compilation.types.tuple_projections[projection] = 1;
+        CHECK(!rerun_effectcheck(&compilation));
+    }
+    free_compilation(&compilation);
+}
+
 int main(void) {
+    test_tuple_effects_and_metadata();
     test_private_pure_inference();
     test_generic_closed_effect_rows();
     test_effect_row_generic_instantiation();

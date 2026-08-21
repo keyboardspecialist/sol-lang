@@ -69,6 +69,9 @@ static void check_ast_links(const SolSyntaxTree *tree) {
             case SOL_EXPR_FIELD:
                 CHECK(expression->as.field.base < tree->expression_count);
                 break;
+            case SOL_EXPR_TUPLE:
+                CHECK(expression->as.tuple.first_element < tree->argument_count);
+                break;
             case SOL_EXPR_RECORD:
                 CHECK(expression->as.record.type < tree->expression_count);
                 CHECK(expression->as.record.first_field == SOL_AST_NONE
@@ -2300,6 +2303,141 @@ static void test_failure_statement_syntax(void) {
     sol_source_free(&source);
 }
 
+static void test_tuple_syntax(void) {
+    static const char valid[] =
+        "module tuples\n"
+        "function pair(value: Int64, flag: Bool) -> ((Int64, Bool,), ()) {\n"
+        "let grouped = (((value)))\n"
+        "let nested = ((grouped, flag,), ((), value))\n"
+        "let projected = nested.0.1\n"
+        "return (projected, (),)\n"
+        "}\n"
+        "function wide(value: Int64) -> Int64 { return "
+        "(value,value,value,value,value,value,value,value,"
+        "value,value,value,value,value,value,value,value,).15 }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "tuples.sol", valid));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+    check_ast_links(&tree);
+
+    size_t tuples = 0;
+    size_t numeric_fields = 0;
+    SolExprId first_tuple = SOL_AST_NONE;
+    SolExprId second_tuple = SOL_AST_NONE;
+    for (size_t index = 0; index < tree.expression_count; ++index) {
+        const SolExpr *expression = &tree.expressions[index];
+        if (expression->kind == SOL_EXPR_TUPLE) {
+            if (first_tuple == SOL_AST_NONE) first_tuple = index;
+            else if (second_tuple == SOL_AST_NONE) second_tuple = index;
+            ++tuples;
+        } else if (expression->kind == SOL_EXPR_FIELD
+            && (span_text_equal(&source, expression->as.field.name, "0")
+                || span_text_equal(&source, expression->as.field.name, "1")
+                || span_text_equal(&source, expression->as.field.name, "15"))) {
+            ++numeric_fields;
+        }
+    }
+    CHECK(tuples == 5);
+    CHECK(numeric_fields == 3);
+    size_t tuple_types = 0;
+    SolTypeId first_tuple_type = SOL_AST_NONE;
+    for (size_t index = 0; index < tree.type_count; ++index) {
+        if (tree.types[index].kind == SOL_SYNTAX_TYPE_TUPLE) {
+            if (first_tuple_type == SOL_AST_NONE) first_tuple_type = index;
+            ++tuple_types;
+        }
+    }
+    CHECK(tuple_types == 2);
+
+    if (first_tuple < tree.expression_count) {
+        SolArgumentId first = tree.expressions[first_tuple].as.tuple.first_element;
+        CHECK(first < tree.argument_count);
+        if (first < tree.argument_count) {
+            SolArgumentId second = tree.arguments[first].next;
+            SolArgument saved = tree.arguments[first];
+            tree.arguments[first].next = first;
+            CHECK(!sol_syntax_contracts_validate(&source, &tree));
+            tree.arguments[first] = saved;
+            tree.arguments[first].is_named = true;
+            tree.arguments[first].name = tree.expressions[tree.arguments[first].value].span;
+            CHECK(!sol_syntax_contracts_validate(&source, &tree));
+            tree.arguments[first] = saved;
+            if (second < tree.argument_count) {
+                tree.expressions[first_tuple].as.tuple.first_element = second;
+                CHECK(!sol_syntax_contracts_validate(&source, &tree));
+                tree.expressions[first_tuple].as.tuple.first_element = first;
+            }
+        }
+    }
+    if (first_tuple < tree.expression_count && second_tuple < tree.expression_count) {
+        SolArgumentId saved = tree.expressions[second_tuple].as.tuple.first_element;
+        tree.expressions[second_tuple].as.tuple.first_element
+            = tree.expressions[first_tuple].as.tuple.first_element;
+        CHECK(!sol_syntax_contracts_validate(&source, &tree));
+        tree.expressions[second_tuple].as.tuple.first_element = saved;
+    }
+    if (first_tuple_type < tree.type_count) {
+        SolTypeArgumentId first = tree.types[first_tuple_type].first_argument;
+        CHECK(first < tree.type_argument_count);
+        if (first < tree.type_argument_count) {
+            SolTypeArgumentId next = tree.type_arguments[first].next;
+            tree.type_arguments[first].next = first;
+            CHECK(!sol_syntax_contracts_validate(&source, &tree));
+            tree.type_arguments[first].next = next;
+        }
+    }
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+
+    static const char malformed[] =
+        "module bad_tuples\n"
+        "function expression_singleton() -> () { let bad = (1,) }\n"
+        "function type_singleton(value: (Int64,)) -> () {}\n"
+        "function named(value: (left: Int64, Bool)) -> () { let bad = (left = 1, 2) }\n"
+        "function too_many() -> () { let bad = "
+        "(1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17) }\n"
+        "function too_many_types(value: "
+        "(Int64,Int64,Int64,Int64,Int64,Int64,Int64,Int64,Int64,"
+        "Int64,Int64,Int64,Int64,Int64,Int64,Int64,Int64)) -> () {}\n"
+        "function leading_zero(value: (Int64, Int64)) -> Int64 { return value.00 }\n"
+        "function delimiter() -> () { let bad = (1, 2] }\n"
+        "function recovered() -> () { let good = (1, 2,) }\n";
+    CHECK(sol_source_from_text(&source, "bad_tuples.sol", malformed));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    size_t tuple_errors = 0;
+    for (size_t index = 0; index < diagnostics.count; ++index) {
+        tuple_errors += strcmp(diagnostics.items[index].code, "SOL-PARSE-024") == 0;
+    }
+    CHECK(tuple_errors >= 7);
+    bool recovered = false;
+    for (size_t index = 0; index < tree.item_count; ++index) {
+        recovered = recovered || span_text_equal(&source, tree.items[index].name, "recovered");
+    }
+    CHECK(recovered);
+    CHECK(!sol_syntax_contracts_validate(&source, &tree));
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
 int main(void) {
     test_type_declaration_syntax();
     test_invalid_type_declarations_and_recovery();
@@ -2346,6 +2484,7 @@ int main(void) {
     test_projected_mutation_frontend();
     test_loop_statement_syntax();
     test_failure_statement_syntax();
+    test_tuple_syntax();
     if (failures != 0) {
         fprintf(stderr, "%d frontend test failure(s)\n", failures);
         return 1;

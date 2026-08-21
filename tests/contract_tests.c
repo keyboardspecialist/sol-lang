@@ -1095,7 +1095,42 @@ static void test_unreachable_obligations_and_firewall(void) {
     free_compilation(&compilation);
 }
 
+static void test_tuple_contract_purity_and_metadata(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module tuple_contracts\n"
+        "function valid(value: (Int64, Bool)) -> Bool "
+            "requires { (value.0, value.1) == (1, true) } { return true }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolExprId projection = SOL_AST_NONE;
+    for (SolExprId expression = 0; expression < compilation.syntax.expression_count;
+        ++expression) {
+        if (compilation.types.tuple_projections[expression] != SOL_AST_NONE) {
+            projection = expression;
+            break;
+        }
+    }
+    CHECK(projection != SOL_AST_NONE);
+    if (projection != SOL_AST_NONE) {
+        compilation.types.tuple_projections[projection] = 1;
+        sol_contract_table_free(&compilation.contracts);
+        sol_contract_table_init(&compilation.contracts);
+        CHECK(!sol_contract_lower(&compilation.source, &compilation.syntax,
+            &compilation.hir, &compilation.types, &compilation.effects,
+            &compilation.contracts, &compilation.diagnostics));
+    }
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module tuple_contract_effect\n"
+        "function noisy() -> Int64 effects { panic } { return 1 }\n"
+        "function bad() -> Bool requires { (noisy(), true).0 == 1 } { return true }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-002"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
+    test_tuple_contract_purity_and_metadata();
     test_obligations_result_and_snapshots();
     test_member_contract_ownership();
     test_generic_contract_templates();

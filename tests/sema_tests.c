@@ -729,6 +729,44 @@ static void test_malformed_ast_rejected(void) {
     free_compilation(&compilation);
 }
 
+static void test_tuple_resolution_and_ownership(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module tuple_resolution\n"
+        "function pair(left: Int64, right: Bool) -> (Int64, Bool) { "
+        "let nested = ((left, right,), ((), left)) return nested.0 }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolExprId tuple = SOL_AST_NONE;
+    size_t local_paths = 0;
+    for (size_t index = 0; index < compilation.syntax.expression_count; ++index) {
+        const SolExpr *expression = &compilation.syntax.expressions[index];
+        if (expression->kind == SOL_EXPR_TUPLE && tuple == SOL_AST_NONE) tuple = index;
+        if (expression->kind == SOL_EXPR_PATH
+            && (span_text_equal(&compilation.source, expression->as.name, "left")
+                || span_text_equal(&compilation.source, expression->as.name, "right"))) {
+            CHECK(compilation.hir.resolutions[index].kind == SOL_RESOLUTION_LOCAL);
+            CHECK(compilation.hir.expression_owners[index] != SOL_AST_NONE);
+            ++local_paths;
+        }
+    }
+    CHECK(local_paths == 3);
+    CHECK(tuple < compilation.syntax.expression_count);
+    if (tuple < compilation.syntax.expression_count) {
+        SolArgumentId first = compilation.syntax.expressions[tuple].as.tuple.first_element;
+        CHECK(first < compilation.syntax.argument_count);
+        if (first < compilation.syntax.argument_count) {
+            SolArgumentId next = compilation.syntax.arguments[first].next;
+            compilation.syntax.arguments[first].next = first;
+            reset_hir_diagnostics(&compilation);
+            CHECK(!sol_hir_lower(&compilation.source, &compilation.syntax,
+                &compilation.hir, &compilation.diagnostics));
+            CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+            compilation.syntax.arguments[first].next = next;
+        }
+    }
+    free_compilation(&compilation);
+}
+
 static void test_malformed_arena_metadata_rejected(void) {
     SolSource source;
     SolSyntaxTree syntax;
@@ -1208,6 +1246,7 @@ int main(void) {
     test_qualified_duplicate_normalization();
     test_semantic_depth_limit();
     test_malformed_ast_rejected();
+    test_tuple_resolution_and_ownership();
     test_malformed_arena_metadata_rejected();
     test_failure_statement_resolution();
     test_scoped_package_resolution();

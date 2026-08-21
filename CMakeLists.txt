@@ -330,11 +330,12 @@ if(BUILD_TESTING)
             -DSOURCE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/valid.sol
             -DPACKAGE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/packages/valid
             -DGENERIC_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/inspection_cli/generic.sol
+            -DTUPLE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/inspection_cli/tuple.sol
             -DMUTABLE_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/mutable.sol
             -DINVALID_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid.sol
             -DCLI_IO_HELPER=${SOL_CLI_IO_HELPER}
             -DPYTHON_EXECUTABLE=${Python3_EXECUTABLE}
-            -DSCHEMA_FILE=${CMAKE_CURRENT_SOURCE_DIR}/schemas/sol-inspection-1.schema.json
+            -DSCHEMA_FILE=${CMAKE_CURRENT_SOURCE_DIR}/schemas/sol-inspection-2.schema.json
             -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/tests/inspection_cli
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/inspection_cli/test_inspection_cli.cmake
     )

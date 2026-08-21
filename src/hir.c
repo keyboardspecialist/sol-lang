@@ -597,7 +597,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     }
     for (size_t index = 0; index < syntax->type_count; ++index) {
         const SolSyntaxType *type = &syntax->types[index];
-        if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_FUNCTION
+        if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_TUPLE
             || !sol_span_valid(resolver->source, type->span)
             || !sol_span_valid(resolver->source, type->name)
             || type->owner_item >= syntax->item_count
@@ -613,7 +613,9 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || (type->kind == SOL_SYNTAX_TYPE_FUNCTION
                 && (type->return_type >= syntax->type_count
                     || (type->first_effect != SOL_AST_NONE
-                        && type->first_effect >= syntax->effect_count)))) {
+                        && type->first_effect >= syntax->effect_count)))
+            || (type->kind == SOL_SYNTAX_TYPE_TUPLE
+                && type->first_argument == SOL_AST_NONE)) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -1078,6 +1080,10 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                     && expression->as.call.callee < syntax->expression_count
                     && (expression->as.call.first_argument == SOL_AST_NONE
                         || expression->as.call.first_argument < syntax->argument_count);
+                break;
+            case SOL_EXPR_TUPLE:
+                valid = valid
+                    && expression->as.tuple.first_element < syntax->argument_count;
                 break;
             case SOL_EXPR_TYPE_APPLICATION:
                 valid = valid
@@ -1740,6 +1746,9 @@ static void sol_resolver_expression(SolResolver *resolver, SolExprId expression_
         case SOL_EXPR_CALL:
             sol_resolver_expression(resolver, expression->as.call.callee);
             sol_resolver_arguments(resolver, expression->as.call.first_argument);
+            break;
+        case SOL_EXPR_TUPLE:
+            sol_resolver_arguments(resolver, expression->as.tuple.first_element);
             break;
         case SOL_EXPR_TYPE_APPLICATION:
             sol_resolver_expression(resolver, expression->as.type_application.base);

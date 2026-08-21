@@ -480,6 +480,28 @@ static void test_failure_statement_formatting(void) {
     sol_formatted_free(&formatted);
 }
 
+static void test_tuple_formatting(void) {
+    static const char source[] =
+        "module tuples\nfunction project(value:(Int64,Bool,))->Int64{\n"
+        "let pair=((value.0, value.1,),())\nreturn pair.0.0\n}\n";
+    static const char expected[] =
+        "module tuples\n"
+        "function project(value: (Int64, Bool,)) -> Int64 {\n"
+        "    let pair = ((value.0, value.1,), ())\n"
+        "    return pair.0.0\n"
+        "}\n";
+    SolFormatted formatted;
+    SolDiagnostics diagnostics;
+    sol_formatted_init(&formatted);
+    sol_diagnostics_init(&diagnostics);
+    CHECK(format_text(source, &formatted, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    check_output(&formatted, expected);
+    check_second_pass(&formatted);
+    sol_diagnostics_free(&diagnostics);
+    sol_formatted_free(&formatted);
+}
+
 int main(void) {
     test_golden_formatting();
     test_comments_and_preserved_bytes();
@@ -495,6 +517,7 @@ int main(void) {
     test_loop_formatting();
     test_construct_golden_formatting();
     test_failure_statement_formatting();
+    test_tuple_formatting();
 
     if (failures != 0) {
         fprintf(stderr, "%d formatter test(s) failed\n", failures);

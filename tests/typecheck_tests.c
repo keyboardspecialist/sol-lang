@@ -2201,7 +2201,104 @@ static void test_termination_statement_types_and_facts(void) {
     free_compilation(&compilation);
 }
 
+static void test_tuple_types_expressions_and_projections(void) {
+    static const char text[] =
+        "module semantic_tuples\n"
+        "function id<T>(value: (T, Bool)) -> (T, Bool) { return value }\n"
+        "function contextual() -> (Option<Int64>, Bool) { return (none(), true) }\n"
+        "function nested(value: ((Int64, Bool), Text)) -> Bool { return value.0.1 }\n"
+        "function inferred() -> Int64 { return id((7, true)).0 }\n"
+        "function equal() -> Bool { return (1, true) == (1, true) }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, text));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    size_t tuple_expressions = 0;
+    size_t projections = 0;
+    SolType first_tuple = {.kind = SOL_TYPE_UNKNOWN};
+    for (SolExprId expression = 0; expression < compilation.syntax.expression_count;
+        ++expression) {
+        if (compilation.syntax.expressions[expression].kind == SOL_EXPR_TUPLE) {
+            SolType type = compilation.types.expressions[expression];
+            const SolTypeApplication *application = sol_type_application(
+                &compilation.types, type);
+            CHECK(application != NULL);
+            if (application != NULL) {
+                CHECK(application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE);
+                CHECK(application->definition == SOL_AST_NONE);
+                CHECK(application->argument_count == 2);
+            }
+            if (first_tuple.kind == SOL_TYPE_UNKNOWN) first_tuple = type;
+            ++tuple_expressions;
+        }
+        if (compilation.types.tuple_projections[expression] != SOL_AST_NONE) {
+            CHECK(compilation.syntax.expressions[expression].kind == SOL_EXPR_FIELD);
+            ++projections;
+        }
+    }
+    CHECK(tuple_expressions == 4);
+    CHECK(projections == 3);
+    CHECK(compilation.types.tuple_projection_count
+        == compilation.syntax.expression_count);
+    CHECK(sol_type_resolution_metadata_valid(&compilation.syntax, &compilation.types));
+    CHECK(first_tuple.kind == SOL_TYPE_APPLICATION);
+    if (first_tuple.kind == SOL_TYPE_APPLICATION) {
+        SolTypeApplication *application
+            = &compilation.types.type_applications[first_tuple.definition];
+        SolDefId definition = application->definition;
+        application->definition = 0;
+        CHECK(sol_type_application(&compilation.types, first_tuple) == NULL);
+        application->definition = definition;
+    }
+    --compilation.types.tuple_projection_count;
+    CHECK(!sol_type_resolution_metadata_valid(&compilation.syntax, &compilation.types));
+    ++compilation.types.tuple_projection_count;
+    free_compilation(&compilation);
+
+    static const char invalid[] =
+        "module invalid_tuple_fields\n"
+        "record Pair { value: Int64 }\n"
+        "function named(value: (Int64, Bool)) -> Int64 { return value.left }\n"
+        "function ranged(value: (Int64, Bool)) -> Int64 { return value.2 }\n"
+        "function numeric(value: Pair) -> Int64 { return value.0 }\n";
+    CHECK(compile_source(&compilation, invalid));
+    CHECK(diagnostic_count(&compilation, "SOL-TYPE-021") == 3);
+    free_compilation(&compilation);
+
+    static const char no_tuple_equality[] =
+        "module tuple_equality\n"
+        "function callback() -> Int64 { return 1 }\n"
+        "function bad() -> Bool { return (callback, true) == (callback, true) }\n";
+    CHECK(compile_source(&compilation, no_tuple_equality));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-027"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module tuple_contextual_equality\n"
+        "function equal() -> Bool { return (none(), true) == (some(1), true) }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module tuple_generic_context\n"
+        "function consume<T>(value: (Option<T>, Bool)) -> () { () }\n"
+        "function bad() -> () { consume((none(), true)) }\n"));
+    CHECK(sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+
+    static const char no_tuple_impl[] =
+        "module tuple_impl\n"
+        "trait Show { function show(self: Self) -> Bool effects { pure } }\n"
+        "implementation Show for (Int64, Bool) { function show(self: Self) -> Bool effects { pure } { return true } }\n";
+    CHECK(compile_source(&compilation, no_tuple_impl));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-023"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
+    test_tuple_types_expressions_and_projections();
     test_valid_types();
     test_invalid_operator();
     test_invalid_return_and_condition();

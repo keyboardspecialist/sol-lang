@@ -2327,6 +2327,7 @@ static void test_exhaustive_validation_domains(void) {
         "var pending: Int64 pending = 0 let fixed = 4 modify fixed { fixed += 1 } "
         "value = identity(-value + 2) let pair = Pair { left = value, right = 3 } "
         "let selected = if true { pair.left } else { 0 } "
+        "let tuple = (selected, flag,) let tuple_item = tuple.0 "
         "region scratch { let scoped = selected } "
         "return match Choice<Int64>.yes(selected) { yes(item) => item _ => 0 } }\n"
         "function propagated(value: Option<Int64>) -> Option<Int64> "
@@ -3139,6 +3140,94 @@ static void test_terminating_statement_ir(void) {
     free_compilation(&repeated);
 }
 
+static void test_tuple_ir_ownership_and_validation(void) {
+    TestCompilation compilation;
+    CHECK(compile_ir(&compilation,
+        "module tuple_ir\n"
+        "capability Token { function read() -> Int64 effects { token.read<Self> } }\n"
+        "function construct() -> (Int64, Bool) { return (1, true,) }\n"
+        "function nested(value: ((Int64, Bool), Text)) -> Bool "
+        "{ return value.0.1 }\n"
+        "function partial(value: (capability Token, Int64)) -> Int64 { "
+        "let moved = value.0 return value.1 }\n"
+        "function authority(token: capability Token) -> Int64 "
+            "effects { token.read<token> } { let pair = (token, 1) "
+            "return pair.0.read() }\n"));
+    SolIrExpression *tuple = NULL;
+    SolIrProjection *projection = NULL;
+    SolIrType *tuple_type = NULL;
+    for (size_t index = 0; index < compilation.ir.type_count; ++index) {
+        if (compilation.ir.types[index].kind == SOL_IR_TYPE_TUPLE) {
+            tuple_type = &compilation.ir.types[index];
+            break;
+        }
+    }
+    for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
+        if (compilation.ir.expressions[index].kind == SOL_IR_EXPR_TUPLE) {
+            tuple = &compilation.ir.expressions[index];
+        }
+    }
+    for (size_t index = 0; index < compilation.ir.projection_count; ++index) {
+        if (compilation.ir.projections[index].kind
+            == SOL_IR_PROJECTION_TUPLE_FIELD) {
+            projection = &compilation.ir.projections[index];
+            break;
+        }
+    }
+    CHECK(tuple != NULL && projection != NULL && tuple_type != NULL);
+    if (tuple_type != NULL) {
+        SolIrType saved = *tuple_type;
+        tuple_type->definition = 0;
+        CHECK(validate_rejected(&compilation.ir));
+        *tuple_type = saved;
+        tuple_type->argument_count = 1;
+        CHECK(validate_rejected(&compilation.ir));
+        *tuple_type = saved;
+        tuple_type->argument_count = 17;
+        CHECK(validate_rejected(&compilation.ir));
+        *tuple_type = saved;
+    }
+    if (tuple != NULL) {
+        CHECK(tuple->type < compilation.ir.type_count
+            && compilation.ir.types[tuple->type].kind == SOL_IR_TYPE_TUPLE);
+        CHECK(tuple->as.tuple.operands.count == 2);
+        SolIrSlice saved = tuple->as.tuple.operands;
+        tuple->as.tuple.operands.count = 1;
+        CHECK(validate_rejected(&compilation.ir));
+        tuple->as.tuple.operands = saved;
+        SolIrOperand *operand = &compilation.ir.operands[saved.offset];
+        SolIrOperand saved_operand = *operand;
+        operand->formal = 1;
+        CHECK(validate_rejected(&compilation.ir));
+        *operand = saved_operand;
+        operand->access = SOL_ACCESS_SHARED;
+        CHECK(validate_rejected(&compilation.ir));
+        *operand = saved_operand;
+    }
+    if (projection != NULL) {
+        SolIrProjection saved = *projection;
+        CHECK(projection->field == SOL_IR_NONE && projection->index == SOL_IR_NONE);
+        projection->field = 0;
+        CHECK(validate_rejected(&compilation.ir));
+        *projection = saved;
+        projection->ordinal = 16;
+        CHECK(validate_rejected(&compilation.ir));
+        *projection = saved;
+        projection->type = projection->type == 0 ? 1 : 0;
+        CHECK(validate_rejected(&compilation.ir));
+        *projection = saved;
+    }
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+    free_compilation(&compilation);
+
+    CHECK(!compile_ir(&compilation,
+        "module tuple_partial_bad\n"
+        "function bad<T>(value: (T, Int64)) -> Int64 { "
+        "let moved = value.0 let whole = value return whole.1 }\n"));
+    CHECK(has_code(&compilation, "SOL-OWNERSHIP-001"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_geometric_growth();
     test_complete_ir_and_lifetime();
@@ -3163,6 +3252,7 @@ int main(void) {
     test_loop_ir_and_ownership();
     test_loop_obligation_ir();
     test_terminating_statement_ir();
+    test_tuple_ir_ownership_and_validation();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

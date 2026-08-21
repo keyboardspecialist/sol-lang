@@ -377,7 +377,7 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     }
     for (size_t index = 0; index < syntax->type_count; ++index) {
         const SolSyntaxType *type = &syntax->types[index];
-        if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_FUNCTION
+        if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_TUPLE
             || !sol_type_span_valid(checker->source, type->span)
             || !sol_type_span_valid(checker->source, type->name)
             || type->owner_item >= syntax->item_count
@@ -393,7 +393,9 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || (type->kind == SOL_SYNTAX_TYPE_FUNCTION
                 && (type->return_type >= syntax->type_count
                     || (type->first_effect != SOL_AST_NONE
-                        && type->first_effect >= syntax->effect_count)))) {
+                        && type->first_effect >= syntax->effect_count)))
+            || (type->kind == SOL_SYNTAX_TYPE_TUPLE
+                && type->first_argument == SOL_AST_NONE)) {
             sol_type_malformed(checker);
             return false;
         }
@@ -747,6 +749,10 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                     && (expression->as.call.first_argument == SOL_AST_NONE
                         || expression->as.call.first_argument < syntax->argument_count);
                 break;
+            case SOL_EXPR_TUPLE:
+                valid = valid
+                    && expression->as.tuple.first_element < syntax->argument_count;
+                break;
             case SOL_EXPR_TYPE_APPLICATION:
                 valid = valid
                     && expression->as.type_application.base < syntax->expression_count
@@ -754,7 +760,9 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                         < syntax->type_argument_count;
                 break;
             case SOL_EXPR_FIELD:
-                valid = valid && expression->as.field.base < syntax->expression_count;
+                valid = valid && expression->as.field.base < syntax->expression_count
+                    && sol_type_span_valid(checker->source, expression->as.field.name)
+                    && expression->as.field.name.start < expression->as.field.name.end;
                 break;
             case SOL_EXPR_RECORD:
                 valid = valid
@@ -1067,6 +1075,7 @@ void sol_type_table_free(SolTypeTable *table) {
     free(table->method_resolutions);
     free(table->field_resolutions);
     free(table->variant_resolutions);
+    free(table->tuple_projections);
     free(table->pattern_variant_resolutions);
     free(table->argument_field_resolutions);
     free(table->implementation_targets);
@@ -1082,10 +1091,28 @@ const SolTypeApplication *sol_type_application(
     SolType type
 ) {
     if (table == NULL || type.kind != SOL_TYPE_APPLICATION
+        || table->type_application_count > table->type_application_capacity
+        || (table->type_application_capacity != 0 && table->type_applications == NULL)
         || type.definition >= table->type_application_count) {
         return NULL;
     }
-    return &table->type_applications[type.definition];
+    const SolTypeApplication *application = &table->type_applications[type.definition];
+    if ((int)application->constructor < 0
+        || application->constructor > SOL_TYPE_CONSTRUCTOR_TUPLE
+        || application->argument_count == 0
+        || (application->constructor == SOL_TYPE_CONSTRUCTOR_OPTION
+            && (application->definition != SOL_AST_NONE
+                || application->argument_count != 1))
+        || (application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT
+            && (application->definition != SOL_AST_NONE
+                || application->argument_count != 2))
+        || (application->constructor == SOL_TYPE_CONSTRUCTOR_USER
+            && application->definition == SOL_AST_NONE)
+        || (application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE
+            && (application->definition != SOL_AST_NONE
+                || application->argument_count < 2
+                || application->argument_count > 16))) return NULL;
+    return application;
 }
 
 bool sol_type_application_arguments(
@@ -1333,10 +1360,12 @@ bool sol_type_resolution_metadata_valid(
         || syntax->match_arm_count > syntax->match_arm_capacity
         || (syntax->item_count != 0 && syntax->items == NULL)
         || table->member_resolution_count != syntax->expression_count
+        || table->tuple_projection_count != syntax->expression_count
         || table->pattern_resolution_count != syntax->pattern_count
         || table->argument_resolution_count != syntax->argument_count
         || (table->member_resolution_count != 0
             && (table->field_resolutions == NULL || table->variant_resolutions == NULL))
+        || (table->tuple_projection_count != 0 && table->tuple_projections == NULL)
         || (table->pattern_resolution_count != 0
             && table->pattern_variant_resolutions == NULL)
         || (table->argument_resolution_count != 0
@@ -1362,6 +1391,23 @@ bool sol_type_resolution_metadata_valid(
     for (size_t expression = 0; expression < syntax->expression_count; ++expression) {
         SolFieldId field = table->field_resolutions[expression];
         SolVariantId variant = table->variant_resolutions[expression];
+        size_t projection = table->tuple_projections[expression];
+        if (projection != SOL_AST_NONE) {
+            if (syntax->expressions[expression].kind != SOL_EXPR_FIELD) return false;
+            SolExprId base = syntax->expressions[expression].as.field.base;
+            const SolTypeApplication *tuple = base < table->expression_count
+                ? sol_type_application(table, table->expressions[base]) : NULL;
+            if (tuple == NULL || tuple->constructor != SOL_TYPE_CONSTRUCTOR_TUPLE
+                || tuple->definition != SOL_AST_NONE
+                || tuple->argument_count < 2 || tuple->argument_count > 16
+                || projection >= tuple->argument_count
+                || field != SOL_AST_NONE || variant != SOL_AST_NONE) return false;
+        } else if (syntax->expressions[expression].kind == SOL_EXPR_FIELD) {
+            SolExprId base = syntax->expressions[expression].as.field.base;
+            const SolTypeApplication *tuple = base < table->expression_count
+                ? sol_type_application(table, table->expressions[base]) : NULL;
+            if (tuple != NULL && tuple->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE) return false;
+        }
         if (field != SOL_AST_NONE) {
             if (syntax->expressions[expression].kind != SOL_EXPR_FIELD
                 || field >= syntax->field_count) return false;
@@ -2279,7 +2325,13 @@ static SolType sol_type_intern_application(
     SolType *arguments,
     size_t argument_count
 ) {
-    if (argument_count == 0 || arguments == NULL) {
+    bool tuple = constructor == SOL_TYPE_CONSTRUCTOR_TUPLE;
+    if (argument_count == 0 || arguments == NULL
+        || (tuple && (definition != SOL_AST_NONE
+                || argument_count < 2 || argument_count > 16))
+        || (!tuple && constructor != SOL_TYPE_CONSTRUCTOR_OPTION
+            && constructor != SOL_TYPE_CONSTRUCTOR_RESULT
+            && constructor != SOL_TYPE_CONSTRUCTOR_USER)) {
         free(arguments);
         sol_type_malformed(checker);
         return (SolType){.kind = SOL_TYPE_ERROR};
@@ -2434,7 +2486,41 @@ static SolType sol_type_from_id(SolTypeChecker *checker, SolTypeId type_id) {
     checker->declared_states[type_id] = 1;
     const SolSyntaxType *syntax_type = &checker->syntax->types[type_id];
     SolType type = {.kind = SOL_TYPE_ERROR};
-    if (syntax_type->kind == SOL_SYNTAX_TYPE_FUNCTION) {
+    if (syntax_type->kind == SOL_SYNTAX_TYPE_TUPLE) {
+        size_t count = 0;
+        SolTypeArgumentId argument = syntax_type->first_argument;
+        while (argument != SOL_AST_NONE) {
+            if (argument >= checker->syntax->type_argument_count
+                || count++ >= checker->syntax->type_argument_count) {
+                sol_type_malformed(checker);
+                break;
+            }
+            argument = checker->syntax->type_arguments[argument].next;
+        }
+        if (count < 2 || count > 16 || checker->malformed) {
+            sol_type_malformed(checker);
+        } else {
+            SolType *elements = malloc(count * sizeof(*elements));
+            if (elements == NULL) {
+                checker->allocation_failed = true;
+            } else {
+                argument = syntax_type->first_argument;
+                bool valid = true;
+                for (size_t index = 0; index < count; ++index) {
+                    elements[index] = sol_type_from_id(
+                        checker, checker->syntax->type_arguments[argument].type);
+                    valid = valid && elements[index].kind != SOL_TYPE_ERROR;
+                    argument = checker->syntax->type_arguments[argument].next;
+                }
+                if (valid) {
+                    type = sol_type_intern_application(checker,
+                        SOL_TYPE_CONSTRUCTOR_TUPLE, SOL_AST_NONE, elements, count);
+                } else {
+                    free(elements);
+                }
+            }
+        }
+    } else if (syntax_type->kind == SOL_SYNTAX_TYPE_FUNCTION) {
         size_t parameter_count = 0;
         SolTypeArgumentId argument_id = syntax_type->first_argument;
         while (argument_id != SOL_AST_NONE) {
@@ -2864,7 +2950,8 @@ static bool sol_type_equality_supported_recursive(
                 return false;
             }
             if (application->constructor == SOL_TYPE_CONSTRUCTOR_OPTION
-                || application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT) {
+                || application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT
+                || application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE) {
                 for (size_t index = 0; index < argument_count; ++index) {
                     if (!sol_type_equality_supported_recursive(
                         checker, arguments[index], active)) return false;
@@ -3251,6 +3338,7 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         || expression_count > SIZE_MAX / sizeof(*checker->types->method_resolutions)
         || expression_count > SIZE_MAX / sizeof(*checker->types->field_resolutions)
         || expression_count > SIZE_MAX / sizeof(*checker->types->variant_resolutions)
+        || expression_count > SIZE_MAX / sizeof(*checker->types->tuple_projections)
         || checker->syntax->pattern_count > SIZE_MAX
             / sizeof(*checker->types->pattern_variant_resolutions)
         || checker->syntax->argument_count > SIZE_MAX
@@ -3305,6 +3393,9 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     checker->types->variant_resolutions = malloc(
         expression_count * sizeof(*checker->types->variant_resolutions)
     );
+    checker->types->tuple_projections = malloc(
+        expression_count * sizeof(*checker->types->tuple_projections)
+    );
     checker->types->pattern_variant_resolutions = malloc(
         checker->syntax->pattern_count
             * sizeof(*checker->types->pattern_variant_resolutions)
@@ -3347,6 +3438,7 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
                 || checker->types->method_resolutions == NULL
                 || checker->types->field_resolutions == NULL
                 || checker->types->variant_resolutions == NULL
+                || checker->types->tuple_projections == NULL
                 || checker->types->constructions == NULL
                 || checker->states == NULL))
         || (checker->syntax->statement_count != 0
@@ -3377,11 +3469,13 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
     checker->types->call_instantiation_count = expression_count;
     checker->types->method_resolution_count = expression_count;
     checker->types->member_resolution_count = expression_count;
+    checker->types->tuple_projection_count = expression_count;
     checker->types->pattern_resolution_count = checker->syntax->pattern_count;
     checker->types->argument_resolution_count = checker->syntax->argument_count;
     for (size_t index = 0; index < expression_count; ++index) {
         checker->types->field_resolutions[index] = SOL_AST_NONE;
         checker->types->variant_resolutions[index] = SOL_AST_NONE;
+        checker->types->tuple_projections[index] = SOL_AST_NONE;
     }
     for (size_t index = 0; index < checker->syntax->pattern_count; ++index) {
         checker->types->pattern_variant_resolutions[index] = SOL_AST_NONE;
@@ -3440,8 +3534,21 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
 static bool sol_type_contextual_builtin_expression(
     const SolTypeChecker *checker, SolExprId expression
 ) {
-    if (expression >= checker->syntax->expression_count
-        || checker->syntax->expressions[expression].kind != SOL_EXPR_CALL) return false;
+    if (expression >= checker->syntax->expression_count) return false;
+    if (checker->syntax->expressions[expression].kind == SOL_EXPR_TUPLE) {
+        SolArgumentId element
+            = checker->syntax->expressions[expression].as.tuple.first_element;
+        size_t traversed = 0;
+        while (element != SOL_AST_NONE
+            && element < checker->syntax->argument_count
+            && traversed++ < checker->syntax->argument_count) {
+            if (sol_type_contextual_builtin_expression(
+                    checker, checker->syntax->arguments[element].value)) return true;
+            element = checker->syntax->arguments[element].next;
+        }
+        return false;
+    }
+    if (checker->syntax->expressions[expression].kind != SOL_EXPR_CALL) return false;
     SolExprId callee = checker->syntax->expressions[expression].as.call.callee;
     while (callee < checker->syntax->expression_count
         && checker->syntax->expressions[callee].kind == SOL_EXPR_TYPE_APPLICATION) {
@@ -3457,6 +3564,30 @@ static bool sol_type_contextual_builtin_expression(
         && sol_type_contextual_builtin_expression(
             checker, checker->syntax->arguments[argument].value
         );
+}
+
+static bool sol_type_context_available(
+    const SolTypeChecker *checker,
+    SolType type,
+    size_t depth
+) {
+    if (depth >= 256) return false;
+    if (type.kind == SOL_TYPE_PARAMETER) {
+        return type.definition < checker->syntax->type_parameter_count
+            && checker->syntax->type_parameters[type.definition].owner_item
+                == checker->current_definition;
+    }
+    if (type.kind != SOL_TYPE_APPLICATION) return type.kind != SOL_TYPE_UNKNOWN;
+    const SolType *arguments = NULL;
+    size_t count = 0;
+    if (!sol_type_application_arguments(
+            checker->types, type, &arguments, &count)) return false;
+    for (size_t index = 0; index < count; ++index) {
+        if (!sol_type_context_available(checker, arguments[index], depth + 1)) {
+            return false;
+        }
+    }
+    return true;
 }
 static SolType sol_type_expression_expected(
     SolTypeChecker *checker, SolExprId expression_id, SolType expected
@@ -4311,8 +4442,11 @@ static SolProvenanceId sol_type_expression_origin(
     SolType type,
     bool capability
 ) {
-    if (capability ? !sol_type_is_capability(checker, type)
-                   : type.kind != SOL_TYPE_CAPABILITY_OPERATION) {
+    const SolTypeApplication *application = sol_type_application(checker->types, type);
+    bool tuple = application != NULL
+        && application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE;
+    if (capability ? !sol_type_is_capability(checker, type) && !tuple
+                   : type.kind != SOL_TYPE_CAPABILITY_OPERATION && !tuple) {
         return SOL_PROVENANCE_NONE;
     }
     const SolExpr *expression = &checker->syntax->expressions[expression_id];
@@ -4343,8 +4477,34 @@ static SolProvenanceId sol_type_expression_origin(
             ].result_authority_parameter
         );
     }
-    if (!capability && expression->kind == SOL_EXPR_FIELD) {
-        return checker->types->expression_capability_origins[expression->as.field.base];
+    if (expression->kind == SOL_EXPR_TUPLE) {
+        SolProvenanceId origin = SOL_PROVENANCE_NONE;
+        SolArgumentId element = expression->as.tuple.first_element;
+        size_t traversed = 0;
+        while (element != SOL_AST_NONE
+            && element < checker->syntax->argument_count
+            && traversed++ < checker->syntax->argument_count) {
+            SolExprId value = checker->syntax->arguments[element].value;
+            if (value >= checker->types->expression_count) return SOL_PROVENANCE_NONE;
+            SolProvenanceId value_origin = expression_origins[value];
+            if (value_origin != SOL_PROVENANCE_NONE) {
+                origin = origin == SOL_PROVENANCE_NONE
+                    ? value_origin
+                    : sol_type_union_provenance(checker, origin, value_origin);
+            }
+            element = checker->syntax->arguments[element].next;
+        }
+        return origin;
+    }
+    if (expression->kind == SOL_EXPR_FIELD) {
+        if (expression_id < checker->types->tuple_projection_count
+            && checker->types->tuple_projections[expression_id] != SOL_AST_NONE) {
+            return expression_origins[expression->as.field.base];
+        }
+        if (!capability) {
+            return checker->types->expression_capability_origins[
+                expression->as.field.base];
+        }
     }
     if (capability && expression->kind == SOL_EXPR_CALL) {
         SolExprId callee = expression->as.call.callee;
@@ -4430,7 +4590,8 @@ static bool sol_type_assignment_root(SolTypeChecker *checker, SolExprId expressi
     SolExprId current = expression_id;
     *projected = false;
     while (checker->syntax->expressions[current].kind == SOL_EXPR_FIELD) {
-        if (checker->types->field_resolutions[current] == SOL_AST_NONE) return false;
+        if (checker->types->field_resolutions[current] == SOL_AST_NONE
+            && checker->types->tuple_projections[current] == SOL_AST_NONE) return false;
         *projected = true;
         current = checker->syntax->expressions[current].as.field.base;
         if (current >= checker->syntax->expression_count) return false;
@@ -6569,6 +6730,85 @@ static bool sol_type_expression_is_definition_head(
         && resolution.target == definition;
 }
 
+static bool sol_type_field_ordinal(
+    const SolTypeChecker *checker,
+    SolSpan span,
+    size_t *ordinal
+) {
+    if (span.start >= span.end || span.end > checker->source->length) return false;
+    if (span.end - span.start > 1 && checker->source->text[span.start] == '0') return false;
+    size_t value = 0;
+    for (size_t index = span.start; index < span.end; ++index) {
+        unsigned char byte = (unsigned char)checker->source->text[index];
+        if (byte < '0' || byte > '9') return false;
+        size_t digit = (size_t)(byte - '0');
+        if (value > (SIZE_MAX - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    *ordinal = value;
+    return true;
+}
+
+static SolType sol_type_tuple_expression(
+    SolTypeChecker *checker,
+    const SolExpr *expression
+) {
+    const SolType *expected_elements = NULL;
+    SolType expected_copy[16];
+    size_t expected_count = 0;
+    const SolTypeApplication *expected = sol_type_application(
+        checker->types, checker->contextual_expected);
+    if (expected == NULL || expected->constructor != SOL_TYPE_CONSTRUCTOR_TUPLE
+        || !sol_type_application_arguments(checker->types,
+            checker->contextual_expected, &expected_elements, &expected_count)) {
+        expected_elements = NULL;
+        expected_count = 0;
+    } else {
+        memcpy(expected_copy, expected_elements, expected_count * sizeof(*expected_copy));
+        expected_elements = expected_copy;
+    }
+    size_t count = 0;
+    SolArgumentId element = expression->as.tuple.first_element;
+    while (element != SOL_AST_NONE) {
+        if (element >= checker->syntax->argument_count
+            || count++ >= checker->syntax->argument_count) {
+            sol_type_malformed(checker);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        element = checker->syntax->arguments[element].next;
+    }
+    if (count < 2 || count > 16) {
+        sol_type_malformed(checker);
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    SolType *elements = malloc(count * sizeof(*elements));
+    if (elements == NULL) {
+        checker->allocation_failed = true;
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    element = expression->as.tuple.first_element;
+    bool valid = true;
+    for (size_t index = 0; index < count; ++index) {
+        const SolArgument *entry = &checker->syntax->arguments[element];
+        if (entry->is_named) {
+            sol_type_malformed(checker);
+            valid = false;
+        }
+        elements[index] = expected_elements != NULL && expected_count == count
+                && sol_type_context_available(checker, expected_elements[index], 0)
+            ? sol_type_expression_expected(checker, entry->value, expected_elements[index])
+            : sol_type_expression(checker, entry->value);
+        valid = valid && elements[index].kind != SOL_TYPE_ERROR;
+        element = entry->next;
+    }
+    if (!valid) {
+        free(elements);
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
+    return sol_type_intern_application(checker, SOL_TYPE_CONSTRUCTOR_TUPLE,
+        SOL_AST_NONE, elements, count);
+}
+
 static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression_id) {
     if (expression_id >= checker->syntax->expression_count) {
         return (SolType){.kind = SOL_TYPE_ERROR};
@@ -6723,6 +6963,9 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
         case SOL_EXPR_CALL:
             type = sol_type_call(checker, expression_id, expression);
             break;
+        case SOL_EXPR_TUPLE:
+            type = sol_type_tuple_expression(checker, expression);
+            break;
         case SOL_EXPR_TYPE_APPLICATION:
             type = sol_type_expression_application(checker, expression);
             break;
@@ -6734,9 +6977,39 @@ static SolType sol_type_expression(SolTypeChecker *checker, SolExprId expression
                     : checker->types->definitions[definition];
             } else {
                 SolType base = sol_type_expression(checker, expression->as.field.base);
+                const SolTypeApplication *base_application = sol_type_application(
+                    checker->types, base);
+                size_t ordinal = SOL_AST_NONE;
+                bool numeric = sol_type_field_ordinal(
+                    checker, expression->as.field.name, &ordinal);
+                if (base_application != NULL
+                    && base_application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE) {
+                    const SolType *elements = NULL;
+                    size_t count = 0;
+                    if (!numeric || !sol_type_application_arguments(
+                            checker->types, base, &elements, &count)) {
+                        sol_type_error(checker, "SOL-TYPE-021", expression->as.field.name,
+                            "tuple fields require a canonical numeric index");
+                        type = (SolType){.kind = SOL_TYPE_ERROR};
+                    } else if (ordinal >= count) {
+                        sol_type_error(checker, "SOL-TYPE-021", expression->as.field.name,
+                            "tuple projection index is out of range");
+                        type = (SolType){.kind = SOL_TYPE_ERROR};
+                    } else {
+                        checker->types->tuple_projections[expression_id] = ordinal;
+                        type = elements[ordinal];
+                    }
+                    break;
+                }
                 SolDefId base_definition = sol_type_nominal_definition(checker, base);
                 if (base_definition < checker->syntax->item_count
                     && checker->syntax->items[base_definition].kind == SOL_ITEM_RECORD) {
+                    if (numeric) {
+                        sol_type_error(checker, "SOL-TYPE-021", expression->as.field.name,
+                            "record fields cannot use numeric tuple indices");
+                        type = (SolType){.kind = SOL_TYPE_ERROR};
+                        break;
+                    }
                     SolFieldId field = sol_type_find_field(
                         checker,
                         base_definition,
@@ -7234,6 +7507,7 @@ bool sol_type_check(
         || types->variant_constructors != NULL
         || types->method_resolutions != NULL || types->field_resolutions != NULL
         || types->variant_resolutions != NULL
+        || types->tuple_projections != NULL
         || types->pattern_variant_resolutions != NULL
         || types->argument_field_resolutions != NULL
         || types->implementation_targets != NULL
@@ -7256,6 +7530,7 @@ bool sol_type_check(
         || types->variant_constructor_capacity != 0
         || types->method_resolution_count != 0
         || types->member_resolution_count != 0
+        || types->tuple_projection_count != 0
         || types->pattern_resolution_count != 0
         || types->argument_resolution_count != 0
         || types->loop_fact_count != 0 || types->unreachable_fact_count != 0

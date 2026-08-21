@@ -55,8 +55,33 @@ static void value_clear(SolInterpreterValue *value) {
     memset(value, 0, sizeof(*value));
 }
 
+typedef struct {
+    const void **items;
+    size_t count;
+    size_t capacity;
+} ShapePointers;
+
+static bool shape_pointer_add(ShapePointers *pointers, const void *pointer) {
+    if (pointer == NULL) return true;
+    for (size_t index = 0; index < pointers->count; ++index) {
+        if (pointers->items[index] == pointer) return false;
+    }
+    if (pointers->count == pointers->capacity) {
+        size_t capacity = pointers->capacity == 0 ? 16 : pointers->capacity * 2;
+        if (capacity < pointers->capacity
+            || capacity > SIZE_MAX / sizeof(*pointers->items)) return false;
+        const void **items = realloc(pointers->items,
+            capacity * sizeof(*items));
+        if (items == NULL) return false;
+        pointers->items = items;
+        pointers->capacity = capacity;
+    }
+    pointers->items[pointers->count++] = pointer;
+    return true;
+}
+
 static bool value_shape_valid_recursive(const SolInterpreterValue *value,
-    const SolInterpreterValue **ancestors, size_t depth) {
+    const SolInterpreterValue **ancestors, ShapePointers *owned, size_t depth) {
     if (value == NULL || depth >= 256 || (int)value->kind < 0
         || value->kind > SOL_INTERPRETER_VALUE_BOUND_OPERATION) return false;
     for (size_t index = 0; index < depth; ++index) {
@@ -65,46 +90,64 @@ static bool value_shape_valid_recursive(const SolInterpreterValue *value,
     ancestors[depth] = value;
     switch (value->kind) {
         case SOL_INTERPRETER_VALUE_INVALID: return false;
-        case SOL_INTERPRETER_VALUE_TEXT: return value->as.text.bytes != NULL;
+        case SOL_INTERPRETER_VALUE_TEXT:
+            return value->as.text.bytes != NULL
+                && shape_pointer_add(owned, value->as.text.bytes);
+        case SOL_INTERPRETER_VALUE_TUPLE:
+            if (value->as.aggregate.definition != SOL_IR_NONE
+                || value->as.aggregate.variant != SOL_IR_NONE
+                || value->as.aggregate.field_count < 2
+                || value->as.aggregate.field_count > 16) return false;
+            /* fall through */
         case SOL_INTERPRETER_VALUE_RECORD:
         case SOL_INTERPRETER_VALUE_ENUM:
             if ((value->as.aggregate.field_count == 0)
                 != (value->as.aggregate.fields == NULL)) return false;
+            if (!shape_pointer_add(owned, value->as.aggregate.fields)) return false;
             for (size_t index = 0; index < value->as.aggregate.field_count; ++index) {
                 if (!value_shape_valid_recursive(&value->as.aggregate.fields[index],
-                    ancestors, depth + 1)) return false;
+                    ancestors, owned, depth + 1)) return false;
             }
             return true;
         case SOL_INTERPRETER_VALUE_OPTION:
             if (value->as.sum.is_error
                 || value->as.sum.has_value != (value->as.sum.value != NULL)) return false;
-            return value->as.sum.value == NULL || value_shape_valid_recursive(
-                value->as.sum.value, ancestors, depth + 1);
+            return value->as.sum.value == NULL
+                || (shape_pointer_add(owned, value->as.sum.value)
+                    && value_shape_valid_recursive(
+                        value->as.sum.value, ancestors, owned, depth + 1));
         case SOL_INTERPRETER_VALUE_RESULT:
             return value->as.sum.has_value && value->as.sum.value != NULL
+                && shape_pointer_add(owned, value->as.sum.value)
                 && value_shape_valid_recursive(value->as.sum.value,
-                    ancestors, depth + 1);
+                    ancestors, owned, depth + 1);
         case SOL_INTERPRETER_VALUE_DISTINCT:
             return value->as.distinct.value != NULL
+                && shape_pointer_add(owned, value->as.distinct.value)
                 && value_shape_valid_recursive(value->as.distinct.value,
-                    ancestors, depth + 1);
+                    ancestors, owned, depth + 1);
         case SOL_INTERPRETER_VALUE_CAPABILITY:
             return value->as.capability.source == NULL
-                || value_shape_valid_recursive(value->as.capability.source,
-                    ancestors, depth + 1);
+                || (shape_pointer_add(owned, value->as.capability.source)
+                    && value_shape_valid_recursive(value->as.capability.source,
+                        ancestors, owned, depth + 1));
         case SOL_INTERPRETER_VALUE_FUNCTION:
             return value->as.callable.receiver == NULL;
         case SOL_INTERPRETER_VALUE_BOUND_OPERATION:
             return value->as.callable.receiver != NULL
+                && shape_pointer_add(owned, value->as.callable.receiver)
                 && value_shape_valid_recursive(value->as.callable.receiver,
-                    ancestors, depth + 1);
+                    ancestors, owned, depth + 1);
         default: return true;
     }
 }
 
 static bool value_shape_valid(const SolInterpreterValue *value) {
     const SolInterpreterValue *ancestors[256];
-    return value_shape_valid_recursive(value, ancestors, 0);
+    ShapePointers owned = {0};
+    bool valid = value_shape_valid_recursive(value, ancestors, &owned, 0);
+    free(owned.items);
+    return valid;
 }
 
 void sol_interpreter_value_init(SolInterpreterValue *value) {
@@ -141,6 +184,7 @@ static void value_free_recursive(SolInterpreterValue *value, ValuePointers *poin
         case SOL_INTERPRETER_VALUE_TEXT:
             free(value->as.text.bytes);
             break;
+        case SOL_INTERPRETER_VALUE_TUPLE:
         case SOL_INTERPRETER_VALUE_RECORD:
         case SOL_INTERPRETER_VALUE_ENUM: {
             size_t before = pointers->count;
@@ -226,6 +270,7 @@ bool sol_interpreter_value_clone(SolInterpreterValue *destination,
             return sol_interpreter_value_text(destination, source->as.text.bytes,
                 source->as.text.length);
         case SOL_INTERPRETER_VALUE_UNIT: return true;
+        case SOL_INTERPRETER_VALUE_TUPLE:
         case SOL_INTERPRETER_VALUE_RECORD:
         case SOL_INTERPRETER_VALUE_ENUM:
             destination->as.aggregate = source->as.aggregate;
@@ -427,6 +472,7 @@ static bool value_metrics(const SolInterpreterValue *value,
             if (value->as.text.length > SIZE_MAX - *text_bytes) return false;
             *text_bytes += value->as.text.length;
             break;
+        case SOL_INTERPRETER_VALUE_TUPLE:
         case SOL_INTERPRETER_VALUE_RECORD:
         case SOL_INTERPRETER_VALUE_ENUM:
             for (size_t index = 0; index < value->as.aggregate.field_count; ++index) {
@@ -598,6 +644,11 @@ static bool update_local(Interpreter *interpreter, SolIrLocalId local,
 static SolInterpreterValue *place_field(Interpreter *interpreter,
     SolInterpreterValue *base, const SolIrProjection *projection) {
     const SolIr *ir = interpreter->request->ir;
+    if (base != NULL && projection->kind == SOL_IR_PROJECTION_TUPLE_FIELD) {
+        if (base->kind != SOL_INTERPRETER_VALUE_TUPLE
+            || projection->ordinal >= base->as.aggregate.field_count) return NULL;
+        return &base->as.aggregate.fields[projection->ordinal];
+    }
     if (base == NULL || base->kind != SOL_INTERPRETER_VALUE_RECORD
         || base->as.aggregate.definition >= ir->definition_count) return NULL;
     SolIrSlice fields = ir->definitions[base->as.aggregate.definition].fields;
@@ -687,6 +738,7 @@ static bool value_equal(const SolInterpreterValue *left,
                 && memcmp(left->as.text.bytes, right->as.text.bytes,
                     left->as.text.length) == 0;
         case SOL_INTERPRETER_VALUE_UNIT: return true;
+        case SOL_INTERPRETER_VALUE_TUPLE:
         case SOL_INTERPRETER_VALUE_RECORD:
         case SOL_INTERPRETER_VALUE_ENUM:
             if (left->as.aggregate.definition != right->as.aggregate.definition
@@ -865,6 +917,18 @@ static bool value_matches_type(Interpreter *interpreter,
             return value_matches_type(interpreter, value->as.sum.value,
                 ir->type_ids[type->argument_offset + (value->as.sum.is_error ? 1u : 0u)],
                 self, depth + 1);
+        case SOL_IR_TYPE_TUPLE:
+            if (value->kind != SOL_INTERPRETER_VALUE_TUPLE
+                || value->as.aggregate.definition != SOL_IR_NONE
+                || value->as.aggregate.variant != SOL_IR_NONE
+                || value->as.aggregate.field_count != type->argument_count) return false;
+            for (size_t index = 0; index < type->argument_count; ++index) {
+                if (!value_matches_type(interpreter, &value->as.aggregate.fields[index],
+                    ir->type_ids[type->argument_offset + index], self, depth + 1)) {
+                    return false;
+                }
+            }
+            return true;
         case SOL_IR_TYPE_NOMINAL: {
             if (type->definition >= ir->definition_count) return false;
             const SolIrDefinition *definition = &ir->definitions[type->definition];
@@ -2169,6 +2233,30 @@ static Flow evaluate(Interpreter *interpreter, SolIrExpressionId expression_id) 
                 output.value.as.aggregate.fields = fields;
                 output.value.as.aggregate.field_count = count;
             }
+            return output;
+        }
+        case SOL_IR_EXPR_TUPLE: {
+            size_t count = expression->as.tuple.operands.count;
+            SolInterpreterValue *elements = calloc(count, sizeof(*elements));
+            if (elements == NULL) return flow_new(FLOW_ERROR);
+            for (size_t index = 0; index < count; ++index) {
+                Flow element = evaluate(interpreter, ir->operands[
+                    expression->as.tuple.operands.offset + index].value);
+                if (element.kind != FLOW_VALUE) {
+                    free_values(elements, index);
+                    return element;
+                }
+                elements[index] = element.value;
+            }
+            if (!new_value(interpreter, expression->span)) {
+                free_values(elements, count);
+                return flow_new(FLOW_ERROR);
+            }
+            output.value.kind = SOL_INTERPRETER_VALUE_TUPLE;
+            output.value.as.aggregate.definition = SOL_IR_NONE;
+            output.value.as.aggregate.variant = SOL_IR_NONE;
+            output.value.as.aggregate.fields = elements;
+            output.value.as.aggregate.field_count = count;
             return output;
         }
         case SOL_IR_EXPR_VARIANT:

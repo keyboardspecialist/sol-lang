@@ -445,7 +445,9 @@ static SolIrTypeId sol_ir_type(SolIrLowerer *lowerer, SolType type) {
             candidate.kind = application->constructor == SOL_TYPE_CONSTRUCTOR_OPTION
                 ? SOL_IR_TYPE_OPTION
                 : application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT
-                    ? SOL_IR_TYPE_RESULT : SOL_IR_TYPE_NOMINAL;
+                    ? SOL_IR_TYPE_RESULT
+                    : application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE
+                        ? SOL_IR_TYPE_TUPLE : SOL_IR_TYPE_NOMINAL;
             candidate.definition = application->constructor == SOL_TYPE_CONSTRUCTOR_USER
                 ? application->definition : SOL_IR_NONE;
             candidate.argument_count = count;
@@ -2074,7 +2076,8 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
             case SOL_EXPR_FIELD:
                 {
                 SolCapabilityMemberId bound_member = sol_ir_bound_member(lowerer, source);
-                if (lowerer->types->field_resolutions[id] != SOL_AST_NONE) {
+                if (lowerer->types->field_resolutions[id] != SOL_AST_NONE
+                    || lowerer->types->tuple_projections[id] != SOL_AST_NONE) {
                     size_t chain_count = 0;
                     SolExprId current = id;
                     SolExprId *chain = lowerer->syntax->expression_count == 0 ? NULL
@@ -2083,7 +2086,8 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
                     if (chain == NULL) return false;
                     while (current < lowerer->syntax->expression_count
                         && lowerer->syntax->expressions[current].kind == SOL_EXPR_FIELD
-                        && lowerer->types->field_resolutions[current] != SOL_AST_NONE) {
+                        && (lowerer->types->field_resolutions[current] != SOL_AST_NONE
+                            || lowerer->types->tuple_projections[current] != SOL_AST_NONE)) {
                         if (chain_count >= lowerer->syntax->expression_count) {
                             free(chain);
                             return false;
@@ -2117,13 +2121,20 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
                         SolExprId field_expression = chain[projection - 1];
                         SolIrFieldId field
                             = lowerer->types->field_resolutions[field_expression];
+                        size_t ordinal
+                            = lowerer->types->tuple_projections[field_expression];
                         SolIrTypeId type = sol_ir_type(lowerer,
                             lowerer->types->expressions[field_expression]);
-                        if (field >= lowerer->syntax->field_count || type == SOL_IR_NONE
+                        bool tuple = ordinal != SOL_AST_NONE;
+                        if ((!tuple && field >= lowerer->syntax->field_count)
+                            || (tuple && field != SOL_AST_NONE)
+                            || type == SOL_IR_NONE
                             || !sol_ir_append_projection(lowerer, (SolIrProjection){
-                                .kind = SOL_IR_PROJECTION_FIELD,
+                                .kind = tuple ? SOL_IR_PROJECTION_TUPLE_FIELD
+                                    : SOL_IR_PROJECTION_FIELD,
                                 .type = type,
                                 .field = field,
+                                .ordinal = tuple ? ordinal : SOL_IR_NONE,
                                 .index = SOL_IR_NONE,
                                 .span = lowerer->syntax->expressions[field_expression].span,
                             })) {
@@ -2178,6 +2189,11 @@ static bool sol_ir_lower_expressions(SolIrLowerer *lowerer) {
                     : sol_ir_field_arguments(lowerer, source->as.record.first_field);
                 break;
             }
+            case SOL_EXPR_TUPLE:
+                output->kind = SOL_IR_EXPR_TUPLE;
+                output->as.tuple.operands = sol_ir_positional_arguments(
+                    lowerer, source->as.tuple.first_element);
+                break;
             case SOL_EXPR_IF:
                 output->kind = SOL_IR_EXPR_IF;
                 output->as.if_expr.condition = source->as.if_expr.condition;
@@ -2753,6 +2769,9 @@ static bool sol_ir_type_shape_valid(const SolIr *ir, const SolIrType *type) {
         case SOL_IR_TYPE_RESULT:
             return type->definition == SOL_IR_NONE && type->argument_count == 2
                 && no_function_shape;
+        case SOL_IR_TYPE_TUPLE:
+            return type->definition == SOL_IR_NONE && type->argument_count >= 2
+                && type->argument_count <= 16 && no_function_shape;
         case SOL_IR_TYPE_FUNCTION:
             if (type->definition != SOL_IR_NONE) {
                 return type->definition < ir->definition_count && no_arguments
@@ -3029,7 +3048,8 @@ static bool sol_ir_type_may_carry_authority_inner(
     }
     if (type->kind == SOL_IR_TYPE_FUNCTION || type->kind == SOL_IR_TYPE_SELF) return true;
     if (sol_ir_type_is_capability(ir, type_id)) return true;
-    if (type->kind == SOL_IR_TYPE_OPTION || type->kind == SOL_IR_TYPE_RESULT) {
+    if (type->kind == SOL_IR_TYPE_OPTION || type->kind == SOL_IR_TYPE_RESULT
+        || type->kind == SOL_IR_TYPE_TUPLE) {
         for (size_t index = 0; index < type->argument_count; ++index) {
             if (sol_ir_type_may_carry_authority_inner(ir,
                 ir->type_ids[type->argument_offset + index], depth + 1,
@@ -3093,6 +3113,36 @@ static bool sol_ir_roots_equal(const SolIr *ir, SolIrSlice left, SolIrSlice righ
     return true;
 }
 
+static bool sol_ir_tuple_roots_valid(const SolIr *ir, const SolIrExpression *expression,
+    bool capability) {
+    SolIrSlice aggregate = capability
+        ? expression->capability_roots : expression->operation_roots;
+    SolIrSlice operands = expression->as.tuple.operands;
+    for (size_t root = 0; root < aggregate.count; ++root) {
+        SolIrLocalId value = ir->roots[aggregate.offset + root];
+        bool found = false;
+        for (size_t index = 0; !found && index < operands.count; ++index) {
+            const SolIrExpression *operand
+                = &ir->expressions[ir->operands[operands.offset + index].value];
+            SolIrSlice roots = capability
+                ? operand->capability_roots : operand->operation_roots;
+            found = sol_ir_root_slice_contains(ir, roots, value);
+        }
+        if (!found) return false;
+    }
+    for (size_t index = 0; index < operands.count; ++index) {
+        const SolIrExpression *operand
+            = &ir->expressions[ir->operands[operands.offset + index].value];
+        SolIrSlice roots = capability
+            ? operand->capability_roots : operand->operation_roots;
+        for (size_t root = 0; root < roots.count; ++root) {
+            if (!sol_ir_root_slice_contains(ir, aggregate,
+                ir->roots[roots.offset + root])) return false;
+        }
+    }
+    return true;
+}
+
 static const SolIrPlace *sol_ir_expression_place(
     const SolIr *ir, SolIrExpressionId expression
 ) {
@@ -3138,8 +3188,21 @@ static bool sol_ir_place_types_valid(
         if ((int)projection->kind < 0
             || projection->kind > SOL_IR_PROJECTION_DEREFERENCE
             || projection->type >= ir->type_count) return false;
+        if (projection->kind == SOL_IR_PROJECTION_TUPLE_FIELD) {
+            if (projection->field != SOL_IR_NONE || projection->index != SOL_IR_NONE
+                || current >= ir->type_count) return false;
+            const SolIrType *tuple = &ir->types[current];
+            if (tuple->kind != SOL_IR_TYPE_TUPLE
+                || projection->ordinal >= tuple->argument_count
+                || projection->type
+                    != ir->type_ids[tuple->argument_offset + projection->ordinal]) {
+                return false;
+            }
+            current = projection->type;
+            continue;
+        }
         if (projection->kind != SOL_IR_PROJECTION_FIELD
-            || projection->index != SOL_IR_NONE
+            || projection->index != SOL_IR_NONE || projection->ordinal != SOL_IR_NONE
             || projection->field >= ir->field_count) return false;
         const SolIrField *field = &ir->fields[projection->field];
         if (field->owner >= ir->definition_count
@@ -3374,6 +3437,23 @@ static bool sol_ir_expression_types_valid(
             }
             return true;
         }
+        case SOL_IR_EXPR_TUPLE: {
+            if (expression->type >= ir->type_count) return false;
+            const SolIrType *tuple = &ir->types[expression->type];
+            if (tuple->kind != SOL_IR_TYPE_TUPLE
+                || expression->as.tuple.operands.count != tuple->argument_count) return false;
+            for (size_t index = 0; index < tuple->argument_count; ++index) {
+                const SolIrOperand *operand
+                    = &ir->operands[expression->as.tuple.operands.offset + index];
+                if (operand->formal != index || operand->access != SOL_ACCESS_OWNED
+                    || operand->value >= ir->expression_count
+                    || !sol_ir_type_assignable(ir, ir->expressions[operand->value].type,
+                        ir->type_ids[tuple->argument_offset + index],
+                        (SolIrSlice){0}, (SolIrSlice){0}, SOL_IR_NONE)) return false;
+            }
+            return sol_ir_tuple_roots_valid(ir, expression, true)
+                && sol_ir_tuple_roots_valid(ir, expression, false);
+        }
         case SOL_IR_EXPR_VARIANT:
             return expression->as.variant.variant < ir->variant_count
                 && ir->variants[expression->as.variant.variant].owner
@@ -3574,6 +3654,11 @@ static bool sol_ir_executable_expression(
         case SOL_IR_EXPR_RECORD:
             for (size_t index = 0; index < expression->as.record.fields.count; ++index) {
                 SOL_IR_EXEC(ir->operands[expression->as.record.fields.offset + index].value);
+            }
+            break;
+        case SOL_IR_EXPR_TUPLE:
+            for (size_t index = 0; index < expression->as.tuple.operands.count; ++index) {
+                SOL_IR_EXEC(ir->operands[expression->as.tuple.operands.offset + index].value);
             }
             break;
         case SOL_IR_EXPR_IF:
@@ -3844,15 +3929,18 @@ static bool sol_ir_validate_arena_ownership(
         : calloc(ir->place_count, sizeof(*places));
     size_t *projections = ir->projection_count == 0 ? NULL
         : calloc(ir->projection_count, sizeof(*projections));
+    size_t *operands = ir->operand_count == 0 ? NULL
+        : calloc(ir->operand_count, sizeof(*operands));
     if ((ir->statement_id_count != 0 && statement_slots == NULL)
         || (ir->statement_count != 0 && statements == NULL)
         || (ir->arm_id_count != 0 && arm_slots == NULL)
         || (ir->arm_count != 0 && arms == NULL)
         || (ir->cleanup_local_count != 0 && cleanups == NULL)
         || (ir->place_count != 0 && places == NULL)
-        || (ir->projection_count != 0 && projections == NULL)) {
+        || (ir->projection_count != 0 && projections == NULL)
+        || (ir->operand_count != 0 && operands == NULL)) {
         free(statement_slots); free(statements); free(arm_slots); free(arms);
-        free(cleanups); free(places); free(projections);
+        free(cleanups); free(places); free(projections); free(operands);
         return sol_ir_error(diagnostics, "IR arena ownership allocation failed");
     }
     for (size_t index = 0; index < ir->expression_count; ++index) {
@@ -3860,7 +3948,7 @@ static bool sol_ir_validate_arena_ownership(
         if (expression->kind == SOL_IR_EXPR_PLACE) {
             if (expression->as.place >= ir->place_count) {
                 free(statement_slots); free(statements); free(arm_slots); free(arms);
-                free(cleanups); free(places); free(projections);
+                free(cleanups); free(places); free(projections); free(operands);
                 return sol_ir_error(diagnostics, "IR place ID is out of range");
             }
             const SolIrPlace *place = &ir->places[expression->as.place];
@@ -3883,6 +3971,22 @@ static bool sol_ir_validate_arena_ownership(
                 ++arm_slots[position];
                 ++arms[ir->arm_ids[position]];
             }
+        }
+        SolIrSlice operand_slice = {0};
+        if (expression->kind == SOL_IR_EXPR_CALL) {
+            operand_slice = expression->as.call.operands;
+        } else if (expression->kind == SOL_IR_EXPR_RECORD) {
+            operand_slice = expression->as.record.fields;
+        } else if (expression->kind == SOL_IR_EXPR_TUPLE) {
+            operand_slice = expression->as.tuple.operands;
+        }
+        if (!sol_ir_slice_valid(operand_slice, ir->operand_count)) {
+            free(statement_slots); free(statements); free(arm_slots); free(arms);
+            free(cleanups); free(places); free(projections); free(operands);
+            return sol_ir_error(diagnostics, "IR operand slice is out of range");
+        }
+        for (size_t slot = 0; slot < operand_slice.count; ++slot) {
+            ++operands[operand_slice.offset + slot];
         }
     }
     for (size_t index = 0; index < ir->arm_count; ++index) {
@@ -3912,10 +4016,13 @@ static bool sol_ir_validate_arena_ownership(
     for (size_t index = 0; valid && index < ir->projection_count; ++index) {
         valid = projections[index] == 1;
     }
+    for (size_t index = 0; valid && index < ir->operand_count; ++index) {
+        valid = operands[index] == 1;
+    }
     free(statement_slots); free(statements); free(arm_slots); free(arms);
-    free(cleanups); free(places); free(projections);
+    free(cleanups); free(places); free(projections); free(operands);
     return valid || sol_ir_error(diagnostics,
-        "IR statement, arm, cleanup, place, or projection entry is orphaned or shared");
+        "IR statement, arm, cleanup, place, projection, or operand entry is orphaned or shared");
 }
 
 static bool sol_ir_proof_call_is_pure(
@@ -4017,6 +4124,12 @@ static bool sol_ir_expression_reaches(
             for (size_t index = 0; index < expression->as.record.fields.count; ++index) {
                 SOL_IR_REACHES(ir->operands[
                     expression->as.record.fields.offset + index].value);
+            }
+            break;
+        case SOL_IR_EXPR_TUPLE:
+            for (size_t index = 0; index < expression->as.tuple.operands.count; ++index) {
+                SOL_IR_REACHES(ir->operands[
+                    expression->as.tuple.operands.offset + index].value);
             }
             break;
         case SOL_IR_EXPR_BOUND_OPERATION:
@@ -4146,6 +4259,12 @@ static bool sol_ir_proof_expression_non_executable(
             for (size_t index = 0; index < expression->as.record.fields.count; ++index) {
                 SOL_IR_PROOF(ir->operands[
                     expression->as.record.fields.offset + index].value);
+            }
+            break;
+        case SOL_IR_EXPR_TUPLE:
+            for (size_t index = 0; index < expression->as.tuple.operands.count; ++index) {
+                SOL_IR_PROOF(ir->operands[
+                    expression->as.tuple.operands.offset + index].value);
             }
             break;
         case SOL_IR_EXPR_BOUND_OPERATION:
@@ -4706,12 +4825,21 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
         }
         if (projection->kind == SOL_IR_PROJECTION_FIELD) {
             if (projection->field >= ir->field_count
+                || projection->ordinal != SOL_IR_NONE
                 || projection->index != SOL_IR_NONE) {
                 return sol_ir_error(diagnostics,
                     "malformed canonical IR field projection");
             }
+        } else if (projection->kind == SOL_IR_PROJECTION_TUPLE_FIELD) {
+            if (projection->field != SOL_IR_NONE
+                || projection->ordinal >= 16
+                || projection->index != SOL_IR_NONE) {
+                return sol_ir_error(diagnostics,
+                    "malformed canonical IR tuple projection");
+            }
         } else if (projection->kind == SOL_IR_PROJECTION_INDEX) {
             if (projection->field != SOL_IR_NONE
+                || projection->ordinal != SOL_IR_NONE
                 || projection->index >= ir->expression_count) {
                 return sol_ir_error(diagnostics,
                     "malformed canonical IR index projection");
@@ -4720,6 +4848,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                 "index projections are not canonical in the current IR");
         } else {
             if (projection->field != SOL_IR_NONE
+                || projection->ordinal != SOL_IR_NONE
                 || projection->index != SOL_IR_NONE) {
                 return sol_ir_error(diagnostics,
                     "malformed canonical IR dereference projection");
@@ -5133,6 +5262,20 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                         return sol_ir_error(diagnostics,
                             "IR record fields are not complete and canonical");
                     }
+                }
+            }
+        } else if (expression->kind == SOL_IR_EXPR_TUPLE) {
+            SolIrSlice operands = expression->as.tuple.operands;
+            if (!sol_ir_slice_valid(operands, ir->operand_count)
+                || operands.count < 2 || operands.count > 16) {
+                return sol_ir_error(diagnostics, "IR tuple constructor is malformed");
+            }
+            for (size_t ordinal = 0; ordinal < operands.count; ++ordinal) {
+                const SolIrOperand *operand = &ir->operands[operands.offset + ordinal];
+                if (operand->formal != ordinal || operand->access != SOL_ACCESS_OWNED
+                    || operand->value >= ir->expression_count) {
+                    return sol_ir_error(diagnostics,
+                        "IR tuple operands are not complete and canonical");
                 }
             }
         } else if (expression->kind == SOL_IR_EXPR_HANDLE) {

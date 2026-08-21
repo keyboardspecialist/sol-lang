@@ -47,6 +47,7 @@ typedef enum {
     SOL_EXPR_BINARY,
     SOL_EXPR_CALL,
     SOL_EXPR_FIELD,
+    SOL_EXPR_TUPLE,
     SOL_EXPR_RECORD,
     SOL_EXPR_IF,
     SOL_EXPR_MATCH,
@@ -85,6 +86,9 @@ typedef struct {
             SolExprId base;
             SolSpan name;
         } field;
+        struct {
+            SolArgumentId first_element;
+        } tuple;
         struct {
             SolExprId type;
             SolArgumentId first_field;
@@ -202,6 +206,7 @@ typedef enum {
     SOL_SYNTAX_TYPE_PATH,
     SOL_SYNTAX_TYPE_UNIT,
     SOL_SYNTAX_TYPE_FUNCTION,
+    SOL_SYNTAX_TYPE_TUPLE,
 } SolSyntaxTypeKind;
 
 typedef struct {

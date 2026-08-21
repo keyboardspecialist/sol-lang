@@ -207,6 +207,22 @@ static bool sol_effect_span_text_equal(
         && memcmp(source->text + span.start, text, length) == 0;
 }
 
+static bool sol_effect_projection_name(
+    const SolSource *source, SolSpan span, size_t expected
+) {
+    if (!sol_effect_span_valid(source, span) || span.start == span.end
+        || (span.end - span.start > 1 && source->text[span.start] == '0')) return false;
+    size_t value = 0;
+    for (size_t index = span.start; index < span.end; ++index) {
+        unsigned char byte = (unsigned char)source->text[index];
+        if (byte < '0' || byte > '9') return false;
+        size_t digit = (size_t)(byte - '0');
+        if (value > (SIZE_MAX - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    return value == expected;
+}
+
 static bool sol_effect_authority_free_atom(
     const SolEffectChecker *checker,
     const SolEffect *effect
@@ -1385,6 +1401,9 @@ static void sol_effect_expression(SolEffectChecker *checker, SolExprId expressio
         case SOL_EXPR_TYPE_APPLICATION:
             sol_effect_expression(checker, expression->as.type_application.base);
             break;
+        case SOL_EXPR_TUPLE:
+            sol_effect_arguments(checker, expression->as.tuple.first_element);
+            break;
         case SOL_EXPR_FIELD:
             sol_effect_expression(checker, expression->as.field.base);
             break;
@@ -1708,6 +1727,10 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
                     && expression->as.type_application.base < syntax->expression_count
                     && expression->as.type_application.first_argument
                         < syntax->type_argument_count;
+                break;
+            case SOL_EXPR_TUPLE:
+                valid = valid
+                    && expression->as.tuple.first_element < syntax->argument_count;
                 break;
             case SOL_EXPR_FIELD:
                 valid = valid
@@ -2142,6 +2165,18 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
                         &stack_count
                     );
                     break;
+                case SOL_EXPR_TUPLE:
+                    valid = sol_effect_schedule_argument_expressions(
+                        checker,
+                        owner,
+                        expression_id,
+                        expression->as.tuple.first_element,
+                        states,
+                        argument_owners,
+                        stack,
+                        &stack_count
+                    );
+                    break;
                 case SOL_EXPR_FIELD:
                     valid = sol_effect_schedule_owned_expression(
                         checker,
@@ -2388,6 +2423,15 @@ static bool sol_effect_type_is_capability(
         && checker->syntax->items[type.definition].kind == SOL_ITEM_CAPABILITY;
 }
 
+static bool sol_effect_type_is_tuple(
+    const SolEffectChecker *checker,
+    SolType type
+) {
+    const SolTypeApplication *application = sol_type_application(checker->types, type);
+    return application != NULL
+        && application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE;
+}
+
 static SolProvenanceId sol_effect_block_origin(
     const SolEffectChecker *checker,
     const SolExpr *block,
@@ -2607,8 +2651,9 @@ static SolProvenanceId sol_effect_expected_expression_origin(
     bool capability
 ) {
     SolType type = checker->types->expressions[expression_id];
-    if (capability ? !sol_effect_type_is_capability(checker, type)
-                   : type.kind != SOL_TYPE_CAPABILITY_OPERATION) {
+    bool tuple = sol_effect_type_is_tuple(checker, type);
+    if (capability ? !sol_effect_type_is_capability(checker, type) && !tuple
+                   : type.kind != SOL_TYPE_CAPABILITY_OPERATION && !tuple) {
         return SOL_PROVENANCE_NONE;
     }
     const SolExpr *expression = &checker->syntax->expressions[expression_id];
@@ -2618,8 +2663,34 @@ static SolProvenanceId sol_effect_expected_expression_origin(
     const SolProvenanceId *local_origins = capability
         ? checker->types->local_capability_origins
         : checker->types->local_operation_origins;
-    if (!capability && expression->kind == SOL_EXPR_FIELD) {
-        return checker->types->expression_capability_origins[expression->as.field.base];
+    if (expression->kind == SOL_EXPR_TUPLE) {
+        SolProvenanceId origin = SOL_PROVENANCE_NONE;
+        SolArgumentId element = expression->as.tuple.first_element;
+        size_t traversed = 0;
+        while (element != SOL_AST_NONE
+            && element < checker->syntax->argument_count
+            && traversed++ < checker->syntax->argument_count) {
+            SolExprId value = checker->syntax->arguments[element].value;
+            if (value >= checker->types->expression_count) return SOL_PROVENANCE_NONE;
+            SolProvenanceId value_origin = expression_origins[value];
+            if (value_origin != SOL_PROVENANCE_NONE) {
+                origin = origin == SOL_PROVENANCE_NONE
+                    ? value_origin
+                    : sol_effect_union_provenance(checker, origin, value_origin);
+            }
+            element = checker->syntax->arguments[element].next;
+        }
+        return origin;
+    }
+    if (expression->kind == SOL_EXPR_FIELD) {
+        if (expression_id < checker->types->tuple_projection_count
+            && checker->types->tuple_projections[expression_id] != SOL_AST_NONE) {
+            return expression_origins[expression->as.field.base];
+        }
+        if (!capability) {
+            return checker->types->expression_capability_origins[
+                expression->as.field.base];
+        }
     }
     if (capability && expression->kind == SOL_EXPR_CALL) {
         SolExprId callee = expression->as.call.callee;
@@ -2727,9 +2798,8 @@ static bool sol_effect_origin_matches_type(
         SolType parameter_type = checker->types->declared_types[parameter->type_id];
         if (!sol_effect_type_is_capability(checker, parameter_type)) return false;
     }
-    if (!operation) {
-        return sol_effect_type_is_capability(checker, value_type);
-    }
+    if (sol_effect_type_is_tuple(checker, value_type)) return true;
+    if (!operation) return sol_effect_type_is_capability(checker, value_type);
     return value_type.kind == SOL_TYPE_CAPABILITY_OPERATION
         && value_type.definition < checker->syntax->capability_member_count;
 }
@@ -2788,7 +2858,9 @@ static bool sol_effect_provenance_node_relevant(
         : checker->types->locals[node - expression_count];
     return capability
         ? sol_effect_type_is_capability(checker, type)
-        : type.kind == SOL_TYPE_CAPABILITY_OPERATION;
+            || sol_effect_type_is_tuple(checker, type)
+        : type.kind == SOL_TYPE_CAPABILITY_OPERATION
+            || sol_effect_type_is_tuple(checker, type);
 }
 
 static void sol_effect_push_provenance_dependency(
@@ -2808,7 +2880,17 @@ static void sol_effect_push_expression_provenance_dependencies(
 ) {
     const SolExpr *expression = &checker->syntax->expressions[expression_id];
     size_t expression_count = checker->syntax->expression_count;
-    if (expression->kind == SOL_EXPR_PATH) {
+    if (expression->kind == SOL_EXPR_TUPLE) {
+        SolArgumentId element = expression->as.tuple.first_element;
+        size_t traversed = 0;
+        while (element != SOL_AST_NONE
+            && element < checker->syntax->argument_count
+            && traversed++ < checker->syntax->argument_count) {
+            sol_effect_push_provenance_dependency(
+                stack, stack_count, checker->syntax->arguments[element].value);
+            element = checker->syntax->arguments[element].next;
+        }
+    } else if (expression->kind == SOL_EXPR_PATH) {
         SolResolution resolution = checker->hir->resolutions[expression_id];
         if (resolution.kind == SOL_RESOLUTION_LOCAL) {
             sol_effect_push_provenance_dependency(
@@ -3446,6 +3528,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || types->variant_constructor_count > types->variant_constructor_capacity
         || types->method_resolution_count != syntax->expression_count
         || types->member_resolution_count != syntax->expression_count
+        || types->tuple_projection_count != syntax->expression_count
         || types->pattern_resolution_count != syntax->pattern_count
         || types->argument_resolution_count != syntax->argument_count
         || types->implementation_target_count != syntax->item_count
@@ -3481,6 +3564,7 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         || (types->method_resolution_count != 0 && types->method_resolutions == NULL)
         || (types->member_resolution_count != 0
             && (types->field_resolutions == NULL || types->variant_resolutions == NULL))
+        || (types->tuple_projection_count != 0 && types->tuple_projections == NULL)
         || (types->pattern_resolution_count != 0
             && types->pattern_variant_resolutions == NULL)
         || (types->argument_resolution_count != 0
@@ -3496,6 +3580,13 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
     }
     if (!sol_syntax_contracts_validate(source, syntax)
         || !sol_type_resolution_metadata_valid(syntax, types)) return false;
+    for (SolExprId expression = 0; expression < types->tuple_projection_count;
+        ++expression) {
+        size_t ordinal = types->tuple_projections[expression];
+        if (ordinal != SOL_AST_NONE
+            && !sol_effect_projection_name(source,
+                syntax->expressions[expression].as.field.name, ordinal)) return false;
+    }
     size_t provenance_root_offset = 0;
     for (size_t index = 0; index < types->provenance_count; ++index) {
         SolProvenance provenance;
@@ -3528,7 +3619,9 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
         size_t argument_count = 0;
         size_t expected = application->constructor == SOL_TYPE_CONSTRUCTOR_OPTION
             ? 1
-            : application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT ? 2 : 0;
+            : application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT ? 2
+            : application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE
+                ? application->argument_count : 0;
         if (application->constructor == SOL_TYPE_CONSTRUCTOR_USER
             && application->definition < syntax->item_count) {
             SolTypeParameterId parameter
@@ -3553,6 +3646,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || argument_count != expected
             || (application->constructor != SOL_TYPE_CONSTRUCTOR_USER
                 && application->definition != SOL_AST_NONE)
+            || (application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE
+                && (expected < 2 || expected > 16))
             || (application->constructor == SOL_TYPE_CONSTRUCTOR_USER
                 && (application->definition >= syntax->item_count
                     || (syntax->items[application->definition].kind != SOL_ITEM_RECORD

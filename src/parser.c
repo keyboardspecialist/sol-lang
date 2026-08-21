@@ -750,12 +750,85 @@ static bool sol_parser_type(SolParser *parser, SolSpan *span, SolTypeId *type_id
             );
         }
     } else if (sol_parser_match(parser, SOL_TOKEN_LEFT_PAREN)) {
-        kind = SOL_SYNTAX_TYPE_UNIT;
-        parsed = sol_parser_expect(
-            parser,
-            SOL_TOKEN_RIGHT_PAREN,
-            "expected ')' to complete the unit type"
-        );
+        if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+            kind = SOL_SYNTAX_TYPE_UNIT;
+            parsed = true;
+        } else {
+            bool named = sol_parser_kind(parser) == SOL_TOKEN_IDENTIFIER
+                && sol_parser_peek_kind(parser, 1) == SOL_TOKEN_COLON;
+            if (named) {
+                sol_parser_error(parser, "SOL-PARSE-024", sol_parser_current(parser),
+                    "tuple type elements cannot be named");
+                sol_parser_advance(parser);
+                sol_parser_advance(parser);
+            }
+            SolTypeId element = SOL_AST_NONE;
+            parsed = sol_parser_type(parser, NULL, &element);
+            if (parsed && sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+                SolToken closing = parser->tokens->items[parser->cursor - 1];
+                --parser->type_depth;
+                if (span != NULL) {
+                    *span = (SolSpan){.start = first.span.start, .end = closing.span.end};
+                }
+                if (type_id != NULL) *type_id = element;
+                return true;
+            }
+
+            kind = SOL_SYNTAX_TYPE_TUPLE;
+            size_t arity = 1;
+            SolTypeArgumentId last_argument = parsed
+                ? sol_parser_add_type_argument(
+                    parser,
+                    (SolTypeArgument){.type = element, .next = SOL_AST_NONE}
+                )
+                : SOL_AST_NONE;
+            first_argument = last_argument;
+            parsed = parsed && last_argument != SOL_AST_NONE
+                && sol_parser_expect(parser, SOL_TOKEN_COMMA,
+                    "expected ',' or ')' after tuple type element");
+            if (parsed && sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+                sol_parser_error(parser, "SOL-PARSE-024",
+                    parser->tokens->items[parser->cursor - 1],
+                    "single-element tuple types are reserved");
+            } else {
+                while (parsed) {
+                    named = sol_parser_kind(parser) == SOL_TOKEN_IDENTIFIER
+                        && sol_parser_peek_kind(parser, 1) == SOL_TOKEN_COLON;
+                    if (named) {
+                        sol_parser_error(parser, "SOL-PARSE-024", sol_parser_current(parser),
+                            "tuple type elements cannot be named");
+                        sol_parser_advance(parser);
+                        sol_parser_advance(parser);
+                    }
+                    if (!sol_parser_type(parser, NULL, &element)) {
+                        parsed = false;
+                        break;
+                    }
+                    SolTypeArgumentId argument = sol_parser_add_type_argument(
+                        parser,
+                        (SolTypeArgument){.type = element, .next = SOL_AST_NONE}
+                    );
+                    if (argument == SOL_AST_NONE) {
+                        parsed = false;
+                        break;
+                    }
+                    parser->tree->type_arguments[last_argument].next = argument;
+                    last_argument = argument;
+                    ++arity;
+                    if (arity == 17) {
+                        sol_parser_error(parser, "SOL-PARSE-024", sol_parser_current(parser),
+                            "tuple types cannot contain more than 16 elements");
+                    }
+                    if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) break;
+                    if (!sol_parser_expect(parser, SOL_TOKEN_COMMA,
+                        "expected ',' between tuple type elements")) {
+                        parsed = false;
+                        break;
+                    }
+                    if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) break;
+                }
+            }
+        }
     } else {
         kind = SOL_SYNTAX_TYPE_PATH;
         is_capability = sol_parser_match(parser, SOL_TOKEN_CAPABILITY);
@@ -1311,6 +1384,89 @@ static SolExprId sol_parser_match_expression(SolParser *parser) {
     });
 }
 
+static SolExprId sol_parser_parenthesized_expression(SolParser *parser) {
+    SolToken opening = sol_parser_advance(parser);
+    if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+        SolToken closing = parser->tokens->items[parser->cursor - 1];
+        return sol_parser_add_expression(parser, (SolExpr){
+            .kind = SOL_EXPR_UNIT,
+            .span = {.start = opening.span.start, .end = closing.span.end},
+        });
+    }
+
+    SolSpan name = {0};
+    bool named = sol_parser_kind(parser) == SOL_TOKEN_IDENTIFIER
+        && sol_parser_peek_kind(parser, 1) == SOL_TOKEN_EQUAL;
+    if (named) {
+        name = sol_parser_advance(parser).span;
+        sol_parser_advance(parser);
+        sol_parser_error(parser, "SOL-PARSE-024", (SolToken){.span = name},
+            "tuple expression elements cannot be named");
+    }
+    SolExprId value = sol_parser_nested_expression(parser, 1);
+    if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) return value;
+
+    SolArgumentId first_element = sol_parser_add_argument(parser, (SolArgument){
+        .name = name,
+        .value = value,
+        .next = SOL_AST_NONE,
+        .is_named = named,
+    });
+    SolArgumentId last_element = first_element;
+    size_t arity = 1;
+    bool valid = first_element != SOL_AST_NONE
+        && sol_parser_expect(parser, SOL_TOKEN_COMMA,
+            "expected ',' or ')' after tuple expression element");
+    SolToken closing = sol_parser_current(parser);
+    if (valid && sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+        closing = parser->tokens->items[parser->cursor - 1];
+        sol_parser_error(parser, "SOL-PARSE-024", closing,
+            "single-element tuple expressions are reserved");
+    } else {
+        while (valid) {
+            name = (SolSpan){0};
+            named = sol_parser_kind(parser) == SOL_TOKEN_IDENTIFIER
+                && sol_parser_peek_kind(parser, 1) == SOL_TOKEN_EQUAL;
+            if (named) {
+                name = sol_parser_advance(parser).span;
+                sol_parser_advance(parser);
+                sol_parser_error(parser, "SOL-PARSE-024", (SolToken){.span = name},
+                    "tuple expression elements cannot be named");
+            }
+            value = sol_parser_nested_expression(parser, 1);
+            SolArgumentId element = sol_parser_add_argument(parser, (SolArgument){
+                .name = name,
+                .value = value,
+                .next = SOL_AST_NONE,
+                .is_named = named,
+            });
+            if (element == SOL_AST_NONE) break;
+            parser->tree->arguments[last_element].next = element;
+            last_element = element;
+            ++arity;
+            if (arity == 17) {
+                sol_parser_error(parser, "SOL-PARSE-024", sol_parser_current(parser),
+                    "tuple expressions cannot contain more than 16 elements");
+            }
+            if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+                closing = parser->tokens->items[parser->cursor - 1];
+                break;
+            }
+            if (!sol_parser_expect(parser, SOL_TOKEN_COMMA,
+                "expected ',' between tuple expression elements")) break;
+            if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
+                closing = parser->tokens->items[parser->cursor - 1];
+                break;
+            }
+        }
+    }
+    return sol_parser_add_expression(parser, (SolExpr){
+        .kind = SOL_EXPR_TUPLE,
+        .span = {.start = opening.span.start, .end = closing.span.end},
+        .as.tuple.first_element = first_element,
+    });
+}
+
 static SolExprId sol_parser_primary_expression(SolParser *parser) {
     SolToken token = sol_parser_current(parser);
     if (token.kind == SOL_TOKEN_REGION) {
@@ -1409,17 +1565,7 @@ static SolExprId sol_parser_primary_expression(SolParser *parser) {
         return sol_parser_block_expression(parser);
     }
     if (token.kind == SOL_TOKEN_LEFT_PAREN) {
-        SolToken opening = sol_parser_advance(parser);
-        if (sol_parser_match(parser, SOL_TOKEN_RIGHT_PAREN)) {
-            SolToken closing = parser->tokens->items[parser->cursor - 1];
-            return sol_parser_add_expression(parser, (SolExpr){
-                .kind = SOL_EXPR_UNIT,
-                .span = {.start = opening.span.start, .end = closing.span.end},
-            });
-        }
-        SolExprId expression = sol_parser_nested_expression(parser, 1);
-        sol_parser_expect(parser, SOL_TOKEN_RIGHT_PAREN, "expected ')' after expression");
-        return expression;
+        return sol_parser_parenthesized_expression(parser);
     }
     if (token.kind == SOL_TOKEN_IF) {
         SolToken if_token = sol_parser_advance(parser);
@@ -1539,8 +1685,16 @@ static SolExprId sol_parser_postfix_expression(SolParser *parser) {
         } else if (kind == SOL_TOKEN_DOT) {
             sol_parser_advance(parser);
             SolToken name = sol_parser_current(parser);
-            if (!sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER, "expected a field name after '.'")) {
+            if (name.kind != SOL_TOKEN_IDENTIFIER && name.kind != SOL_TOKEN_INTEGER) {
+                sol_parser_error(parser, "SOL-PARSE-001", name,
+                    "expected a field name or tuple index after '.'");
                 return expression;
+            }
+            sol_parser_advance(parser);
+            if (name.kind == SOL_TOKEN_INTEGER && name.span.end - name.span.start > 1
+                && parser->source->text[name.span.start] == '0') {
+                sol_parser_error(parser, "SOL-PARSE-024", name,
+                    "tuple projection indices cannot contain leading zeros");
             }
             expression = sol_parser_add_expression(parser, (SolExpr){
                 .kind = SOL_EXPR_FIELD,

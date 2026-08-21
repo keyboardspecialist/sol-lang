@@ -40,6 +40,7 @@ typedef enum {
     SOL_IR_TYPE_NOMINAL,
     SOL_IR_TYPE_OPTION,
     SOL_IR_TYPE_RESULT,
+    SOL_IR_TYPE_TUPLE,
     SOL_IR_TYPE_FUNCTION,
     SOL_IR_TYPE_PARAMETER,
     SOL_IR_TYPE_SELF,
@@ -193,6 +194,7 @@ typedef enum {
 
 typedef enum {
     SOL_IR_PROJECTION_FIELD,
+    SOL_IR_PROJECTION_TUPLE_FIELD,
     SOL_IR_PROJECTION_INDEX,
     SOL_IR_PROJECTION_DEREFERENCE,
 } SolIrProjectionKind;
@@ -201,6 +203,7 @@ typedef struct {
     SolIrProjectionKind kind;
     SolIrTypeId type;
     SolIrFieldId field;
+    size_t ordinal;
     SolIrExpressionId index;
     SolSpan span;
 } SolIrProjection;
@@ -226,6 +229,7 @@ typedef enum {
     SOL_IR_EXPR_BINARY,
     SOL_IR_EXPR_CALL,
     SOL_IR_EXPR_RECORD,
+    SOL_IR_EXPR_TUPLE,
     SOL_IR_EXPR_VARIANT,
     SOL_IR_EXPR_IF,
     SOL_IR_EXPR_MATCH,
@@ -305,6 +309,7 @@ typedef struct {
             SolIrSlice evidence;
         } call;
         struct { SolIrDefinitionId definition; SolIrSlice fields; } record;
+        struct { SolIrSlice operands; } tuple;
         struct { SolIrVariantId variant; } variant;
         struct { SolIrExpressionId receiver; SolIrCallableId callable; } operation;
         struct {

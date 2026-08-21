@@ -359,6 +359,11 @@ static void sol_package_relocate_expressions(
                     expression->as.call.first_argument, offsets.arguments
                 );
                 break;
+            case SOL_EXPR_TUPLE:
+                expression->as.tuple.first_element = sol_relocate_id(
+                    expression->as.tuple.first_element, offsets.arguments
+                );
+                break;
             case SOL_EXPR_TYPE_APPLICATION:
                 expression->as.type_application.base = sol_relocate_id(
                     expression->as.type_application.base, offsets.expressions

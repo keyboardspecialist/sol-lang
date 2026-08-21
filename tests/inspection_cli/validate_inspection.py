@@ -26,7 +26,7 @@ TYPE_SNAPSHOTS = {
 SEMANTIC_TYPES = {"nominal", "function", "self"}
 PRIMITIVE_TYPES = {"unknown", "error", "int64", "bool", "text", "unit", "never"}
 ITEM_KINDS = {"record", "enum", "type", "capability", "function", "trait", "implementation", "test"}
-EXPRESSION_KINDS = {"error", "integer", "string", "bool", "unit", "path", "unary", "binary", "call", "field", "record", "if", "match", "block", "propagate", "handle", "result", "old", "type_application"}
+EXPRESSION_KINDS = {"error", "integer", "string", "bool", "unit", "path", "unary", "binary", "call", "field", "tuple", "record", "if", "match", "block", "propagate", "handle", "result", "old", "type_application"}
 OCCURRENCE_KINDS = {"declaration", "import", "expression", "type", "trait", "bound"}
 ARTIFACT_TAGS = {
     "syntax": "sol.inspection.syntax",
@@ -36,6 +36,8 @@ ARTIFACT_TAGS = {
     "contracts": "sol.inspection.contracts",
     "diagnostics": "sol.inspection.diagnostics",
 }
+ARTIFACT_VERSIONS = {"syntax": 2, "types": 2, "hir": 1, "effects": 1,
+                     "contracts": 1, "diagnostics": 1}
 
 
 def require_object(value, fields, where):
@@ -57,10 +59,11 @@ def walk(value):
 def validate_schema(schema):
     require_object(schema, ["$schema", "$id", "required", "properties", "$defs"], "schema")
     assert schema["properties"]["schema"] == {"const": "sol.inspection"}
-    assert schema["properties"]["version"] == {"const": 1}
+    assert schema["properties"]["version"] == {"const": 2}
     for name, tag in ARTIFACT_TAGS.items():
         artifact = schema["$defs"][name]
         assert tag == artifact["properties"]["schema"]["const"]
+        assert artifact["properties"]["version"] == {"const": ARTIFACT_VERSIONS[name]}
         assert "schema" in artifact["required"] and "version" in artifact["required"]
         missing = set(artifact["required"]) - set(artifact["properties"])
         assert not missing, f"schema {name} required fields lack definitions: {sorted(missing)}"
@@ -117,9 +120,25 @@ def validate_schema(schema):
     assert position["line"] == position["column"] == {"$ref": "#/$defs/positiveInteger"}
     byte_span = schema["$defs"]["byteSpan"]["properties"]
     assert byte_span["start"] == byte_span["end"] == {"$ref": "#/$defs/nonnegative"}
+    assert "tuple" in schema["$defs"]["syntax"]["properties"]["expressions"]["items"]["properties"]["kind"]["enum"]
+    assert schema["$defs"]["types"]["properties"]["applications"]["items"] == {
+        "$ref": "#/$defs/typeApplication"
+    }
+    applications = schema["$defs"]["typeApplication"]["properties"]
+    assert "tuple" in applications["constructor"]["enum"]
+    assert schema["$defs"]["types"]["properties"]["tupleProjections"] == {
+        "$ref": "#/$defs/tupleProjections"
+    }
+    for node in walk(schema):
+        if isinstance(node, dict) and isinstance(node.get("$ref"), str):
+            reference = node["$ref"]
+            assert reference.startswith("#/$defs/"), f"schema has external reference {reference!r}"
+            assert reference.removeprefix("#/$defs/") in schema["$defs"], (
+                f"schema has unresolved reference {reference!r}"
+            )
 
 
-def validate_type(value, semantic_ids):
+def validate_type(value, semantic_ids, snapshot_ids):
     require_object(value, ["kind", "definition", "snapshotRef"], "type")
     kind = value["kind"]
     definition = value["definition"]
@@ -132,12 +151,13 @@ def validate_type(value, semantic_ids):
         assert definition is None, f"{kind}: semantic definition leaks identity domain"
         assert isinstance(snapshot, str) and snapshot.startswith(TYPE_SNAPSHOTS[kind] + ":")
         assert IDS.fullmatch(snapshot), f"{kind}: invalid snapshotRef"
+        assert snapshot in snapshot_ids, f"{kind}: unknown snapshotRef {snapshot!r}"
     else:
         assert kind in PRIMITIVE_TYPES, f"unknown type kind {kind!r}"
         assert definition is None and snapshot is None, f"{kind}: unexpected identity"
 
 
-def validate(path, schema_path, require_generic):
+def validate(path, schema_path, require_generic, require_tuple):
     text = path.read_text(encoding="utf-8")
     assert "18446744073709551615" not in text, "64-bit SIZE_MAX leaked"
     assert "4294967295" not in text, "32-bit SIZE_MAX leaked"
@@ -147,7 +167,7 @@ def validate(path, schema_path, require_generic):
     validate_schema(schema)
 
     require_object(data, ["schema", "version", "producer", "package", "artifacts"], "root")
-    assert data["schema"] == "sol.inspection" and data["version"] == 1
+    assert data["schema"] == "sol.inspection" and data["version"] == 2
     require_object(data["producer"], ["name", "version"], "producer")
     assert data["producer"]["name"] == "sol"
     require_object(data["package"], ["kind", "edition", "fileCount"], "package")
@@ -159,14 +179,15 @@ def validate(path, schema_path, require_generic):
     required_arrays = {
         "syntax": ["files", "declarations", "expressions"],
         "hir": ["definitions", "locals", "expressionResolutions", "typeResolutions", "effectResolutions", "occurrences"],
-        "types": ["expressions", "locals", "definitions", "declaredSyntaxTypes", "applications", "functionSignatures", "provenanceRoots", "callInstantiations", "coercions", "handlers", "methodResolutions", "representations", "constructions", "variantConstructors", "patternVariantResolutions", "argumentFieldResolutions", "implementationTargets"],
+        "types": ["expressions", "locals", "definitions", "declaredSyntaxTypes", "applications", "functionSignatures", "provenanceRoots", "callInstantiations", "coercions", "handlers", "methodResolutions", "tupleProjections", "representations", "constructions", "variantConstructors", "patternVariantResolutions", "argumentFieldResolutions", "implementationTargets"],
         "effects": ["rows", "callInstantiations"],
         "contracts": ["obligations", "snapshots", "expressionSnapshots"],
         "diagnostics": ["items"],
     }
     for name, tag in ARTIFACT_TAGS.items():
         require_object(artifacts[name], ["schema", "version", *required_arrays[name]], name)
-        assert artifacts[name]["schema"] == tag and artifacts[name]["version"] == 1
+        assert artifacts[name]["schema"] == tag
+        assert artifacts[name]["version"] == ARTIFACT_VERSIONS[name]
         for field in required_arrays[name]:
             assert isinstance(artifacts[name][field], list), f"{name}.{field}: expected array"
 
@@ -174,6 +195,7 @@ def validate(path, schema_path, require_generic):
     files = syntax["files"]
     assert data["package"]["fileCount"] == len(files) and files
     lengths = {}
+    sources = {}
     for entry in files:
         require_object(entry, ["path", "byteLength", "sourceBase64", "module"], "syntax.files[]")
         package_path = entry["path"]
@@ -186,6 +208,7 @@ def validate(path, schema_path, require_generic):
             raise AssertionError(f"invalid source base64 for {package_path}: {error}") from error
         assert len(source) == entry["byteLength"] >= 0
         lengths[package_path] = len(source)
+        sources[package_path] = source
 
     declarations = syntax["declarations"]
     semantic_ids = {entry["semanticId"] for entry in declarations}
@@ -199,6 +222,9 @@ def validate(path, schema_path, require_generic):
     assert [entry["id"] for entry in expressions] == [f"expr:{index}" for index in range(len(expressions))]
     assert all(entry["kind"] in EXPRESSION_KINDS for entry in expressions)
     expression_ids = {entry["id"] for entry in expressions}
+    for entry in expressions:
+        if entry["kind"] == "field":
+            assert entry.get("base") in expression_ids, "field has an invalid base reference"
 
     hir = artifacts["hir"]
     assert {entry["semanticId"] for entry in hir["definitions"]} == semantic_ids
@@ -207,7 +233,7 @@ def validate(path, schema_path, require_generic):
                for entry in hir["locals"])
     for occurrence in hir["occurrences"]:
         assert occurrence["kind"] in OCCURRENCE_KINDS
-        assert SEMANTIC.fullmatch(occurrence["target"])
+        assert occurrence["target"] in semantic_ids
     for resolution in hir["effectResolutions"]:
         require_object(resolution, ["ownerKind", "ownerIndex", "kind", "snapshotTarget"], "effect resolution")
         assert resolution["kind"] in ("atom", "parameter", "error")
@@ -216,9 +242,18 @@ def validate(path, schema_path, require_generic):
         else:
             assert resolution["snapshotTarget"] is None, "effect atom/error invented a target"
 
+    types = artifacts["types"]
+    snapshot_ids = {
+        entry["id"] for field in ("applications", "functionSignatures", "provenanceRoots")
+        for entry in types[field]
+    }
+    snapshot_ids.update(f"capability-member:{index}" for index in range(syntax["arenaCounts"]["capabilityMembers"]))
+    snapshot_ids.update(f"variant:{index}" for index in range(len(types["variantConstructors"])))
+    snapshot_ids.update(f"type-parameter:{index}" for index in range(syntax["arenaCounts"]["typeParameters"]))
+    snapshot_ids.update(f"trait-method:{index}" for index in range(syntax["arenaCounts"]["traitMethods"]))
     for node in walk(data):
         if isinstance(node, dict) and set(("kind", "definition", "snapshotRef")) <= set(node):
-            validate_type(node, semantic_ids)
+            validate_type(node, semantic_ids, snapshot_ids)
         if (isinstance(node, dict) and set(("file", "start", "end")) <= set(node)
                 and "byteSpan" not in node):
             assert node["file"] in lengths, f"span references unknown file {node['file']!r}"
@@ -227,7 +262,45 @@ def validate(path, schema_path, require_generic):
         if isinstance(node, str) and (node.startswith("sem:") or re.match(r"^[a-z-]+:[0-9]", node)):
             assert SEMANTIC.fullmatch(node) or IDS.fullmatch(node) or node.startswith(("builtin:", "builtin-type:")), f"invalid reference {node!r}"
 
-    types = artifacts["types"]
+    applications_by_id = {entry["id"]: entry for entry in types["applications"]}
+    assert len(applications_by_id) == len(types["applications"])
+    for index, application in enumerate(types["applications"]):
+        require_object(application, ["id", "constructor", "definition", "arguments"], "type application")
+        assert application["id"] == f"type-app:{index}"
+        assert application["constructor"] in ("option", "result", "user", "tuple")
+        if application["constructor"] == "tuple":
+            assert application["definition"] is None
+            assert 2 <= len(application["arguments"]) <= 16
+    projections = types["tupleProjections"]
+    assert len(projections) == len(expressions)
+    expression_types = {entry["subject"]: entry["type"] for entry in types["expressions"]}
+    assert len(expression_types) == len(expressions) and set(expression_types) == expression_ids
+    for index, ordinal in enumerate(projections):
+        assert ordinal is None or type(ordinal) is int and 0 <= ordinal < 16
+        expression = expressions[index]
+        if expression["kind"] != "field":
+            assert ordinal is None, "non-field expression has a tuple projection"
+            continue
+        base_type = expression_types[expression["base"]]
+        application = applications_by_id.get(base_type.get("snapshotRef"))
+        tuple_application = application is not None and application["constructor"] == "tuple"
+        if tuple_application:
+            assert ordinal is not None and ordinal < len(application["arguments"]), (
+                "tuple field has a missing or out-of-range projection"
+            )
+            base = expressions[int(expression["base"].split(":")[1])]
+            assert base["span"]["file"] == expression["span"]["file"]
+            selector = sources[expression["span"]["file"]][
+                base["span"]["end"]:expression["span"]["end"]
+            ]
+            assert selector == f".{ordinal}".encode("ascii"), (
+                "tuple projection does not match its source selector"
+            )
+            assert expression_types[expression["id"]] == application["arguments"][ordinal], (
+                "tuple projection type does not match its selected element"
+            )
+        else:
+            assert ordinal is None, "non-tuple field has a tuple projection"
     for signature in types["functionSignatures"]:
         assert len(signature.get("accesses", [])) == len(signature["parameters"])
         assert all(access in ("owned", "shared", "exclusive")
@@ -316,14 +389,22 @@ def validate(path, schema_path, require_generic):
         assert all(node["definition"] is None and re.fullmatch(r"type-parameter:[0-9]+", node["snapshotRef"]) for node in parameters)
         assert types["applications"] and types["callInstantiations"], "generic fixture lacks exact type artifacts"
 
+    if require_tuple:
+        assert any(entry["kind"] == "tuple" for entry in expressions), "tuple syntax kind missing"
+        tuples = [entry for entry in types["applications"] if entry["constructor"] == "tuple"]
+        assert tuples, "tuple application type missing"
+        ordinals = [ordinal for ordinal in projections if ordinal is not None]
+        assert ordinals, "tuple projection is missing"
+
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output", type=Path)
     parser.add_argument("schema", type=Path)
     parser.add_argument("--require-generic", action="store_true")
+    parser.add_argument("--require-tuple", action="store_true")
     args = parser.parse_args()
-    validate(args.output, args.schema, args.require_generic)
+    validate(args.output, args.schema, args.require_generic, args.require_tuple)
 
 
 if __name__ == "__main__":

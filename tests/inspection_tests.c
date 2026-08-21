@@ -41,6 +41,7 @@ static bool compile_fixture(TestCompilation *compilation) {
         "{ let item = value? return some(item) }\n"
         "function expressions(source: capability Read, mock: capability Mock) -> Int64 "
         "effects { pure } { let text = \"fixture\" let unit = () "
+        "let tuple = (text, 7,) let projected = tuple.1 "
         "let pair = Pair { left = 1, right = 2 } "
         "let selected = if true { match false { true => 1 false => -pair.left } } "
         "else { 0 } return identity<Int64>(handle service.read<source> with mock "
@@ -82,7 +83,7 @@ static bool compile_fixture(TestCompilation *compilation) {
 static void test_expression_kind_spellings(TestCompilation *compilation) {
     static const char *const spellings[] = {
         "error", "integer", "string", "bool", "unit", "path", "unary",
-        "binary", "call", "field", "record", "if", "match", "block",
+        "binary", "call", "field", "tuple", "record", "if", "match", "block",
         "propagate", "handle", "result", "old", "type_application",
     };
     size_t census[sizeof(spellings) / sizeof(spellings[0])] = {0};
@@ -120,6 +121,12 @@ static void test_expression_kind_spellings(TestCompilation *compilation) {
     CHECK(compilation->contracts.unreachable_obligation_count == 1);
     CHECK(strstr(output, "\"loopObligations\"") == NULL);
     CHECK(strstr(output, "\"unreachableObligations\"") == NULL);
+    CHECK(strstr(output, "\"schema\":\"sol.inspection\",\"version\":2") != NULL);
+    CHECK(strstr(output, "\"syntax\":{\"schema\":\"sol.inspection.syntax\",\"version\":2") != NULL);
+    CHECK(strstr(output, "\"types\":{\"schema\":\"sol.inspection.types\",\"version\":2") != NULL);
+    CHECK(strstr(output, "\"hir\":{\"schema\":\"sol.inspection.hir\",\"version\":1") != NULL);
+    CHECK(strstr(output, "\"constructor\":\"tuple\"") != NULL);
+    CHECK(strstr(output, "\"tupleProjections\":[") != NULL);
     fclose(stream);
 }
 
@@ -320,6 +327,67 @@ static void test_mutable_projection(TestCompilation *compilation) {
     }
 }
 
+static void test_tuple_projection_preflight(TestCompilation *compilation) {
+    SolTypeTable *table = &compilation->types;
+    size_t expression = 0;
+    while (expression < table->tuple_projection_count
+        && table->tuple_projections[expression] == SOL_AST_NONE) ++expression;
+    CHECK(expression < table->tuple_projection_count);
+    if (expression == table->tuple_projection_count) return;
+
+    size_t count = table->tuple_projection_count;
+    table->tuple_projection_count = count - 1;
+    check_rejected(compilation);
+    table->tuple_projection_count = count;
+
+    size_t *projections = table->tuple_projections;
+    table->tuple_projections = NULL;
+    check_rejected(compilation);
+    table->tuple_projections = projections;
+
+    size_t ordinal = projections[expression];
+    projections[expression] = ordinal == 0 ? 1 : 0;
+    check_rejected(compilation);
+    projections[expression] = ordinal;
+    projections[expression] = 16;
+    check_rejected(compilation);
+    projections[expression] = SOL_AST_NONE;
+    check_rejected(compilation);
+    projections[expression] = ordinal;
+
+    SolExprId base = compilation->package.syntax.expressions[expression].as.field.base;
+    CHECK(table->expressions[base].kind == SOL_TYPE_APPLICATION);
+    SolTypeApplication *application
+        = &table->type_applications[table->expressions[base].definition];
+    CHECK(application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE);
+    SolType projected_type = table->expressions[expression];
+    table->expressions[expression] = table->type_application_arguments[
+        application->argument_offset + (ordinal == 0 ? 1 : 0)];
+    check_rejected(compilation);
+    table->expressions[expression] = projected_type;
+    size_t argument_count = application->argument_count;
+    application->argument_count = 17;
+    check_rejected(compilation);
+    application->argument_count = argument_count;
+    application->definition = 0;
+    check_rejected(compilation);
+    application->definition = SOL_AST_NONE;
+}
+
+static void test_semantic_reference_preflight(TestCompilation *compilation) {
+    CHECK(compilation->hir.semantic_reference_count != 0);
+    if (compilation->hir.semantic_reference_count == 0) return;
+    SolSemanticReference *reference = &compilation->hir.semantic_references[0];
+    SolDefId target = reference->target;
+    SolSemanticId target_id = reference->target_id;
+    reference->target = compilation->hir.definition_count;
+    check_rejected(compilation);
+    reference->target = target;
+    reference->target_id.low ^= UINT64_C(1);
+    check_rejected(compilation);
+    reference->target_id = target_id;
+}
+
 static void test_windows_package_path(TestCompilation *compilation) {
     SolPackageFile file = {
         .path = "C:\\root\\services\\fixture.sol",
@@ -363,6 +431,8 @@ int main(void) {
         test_source_line_preflight(&compilation);
         test_contract_preflight(&compilation);
         test_mutable_projection(&compilation);
+        test_tuple_projection_preflight(&compilation);
+        test_semantic_reference_preflight(&compilation);
         test_windows_basename(&compilation);
         test_windows_package_path(&compilation);
     }

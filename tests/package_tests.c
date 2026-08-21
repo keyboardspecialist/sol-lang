@@ -387,6 +387,9 @@ static void test_composite_relocation(void) {
                 && expression->as.type_application.first_argument != 0);
         } else if (expression->kind == SOL_EXPR_FIELD) {
             children[0] = expression->as.field.base;
+        } else if (expression->kind == SOL_EXPR_TUPLE) {
+            CHECK(expression->as.tuple.first_element != SOL_AST_NONE
+                && expression->as.tuple.first_element >= seed.syntax.argument_count);
         } else if (expression->kind == SOL_EXPR_RECORD) {
             children[0] = expression->as.record.type;
             CHECK(expression->as.record.first_field != SOL_AST_NONE
@@ -427,6 +430,7 @@ static void test_composite_relocation(void) {
     CHECK(kinds[SOL_EXPR_CALL]);
     CHECK(kinds[SOL_EXPR_TYPE_APPLICATION]);
     CHECK(kinds[SOL_EXPR_FIELD]);
+    CHECK(kinds[SOL_EXPR_TUPLE]);
     CHECK(kinds[SOL_EXPR_RECORD]);
     CHECK(kinds[SOL_EXPR_IF]);
     CHECK(kinds[SOL_EXPR_MATCH]);
@@ -494,6 +498,15 @@ static void test_composite_relocation(void) {
         CHECK(argument->next == SOL_AST_NONE
             || argument->next >= seed.syntax.type_argument_count);
     }
+    bool relocated_tuple_type = false;
+    for (size_t index = seed.syntax.type_count; index < package.syntax.type_count; ++index) {
+        const SolSyntaxType *type = &package.syntax.types[index];
+        if (type->kind != SOL_SYNTAX_TYPE_TUPLE) continue;
+        relocated_tuple_type = true;
+        CHECK(type->first_argument >= seed.syntax.type_argument_count);
+        CHECK(type->span.start >= package.files[1].aggregate_start);
+    }
+    CHECK(relocated_tuple_type);
     CHECK(package.syntax.match_arm_count > seed.syntax.match_arm_count);
     for (size_t index = seed.syntax.match_arm_count;
         index < package.syntax.match_arm_count; ++index) {

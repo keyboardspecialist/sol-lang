@@ -84,20 +84,26 @@ static bool sol_structure_expression(
 
 static bool sol_structure_type_arguments(
     SolStructureValidator *validator,
-    SolTypeArgumentId argument
+    SolTypeArgumentId argument,
+    bool allow_access,
+    size_t minimum_count,
+    size_t maximum_count
 ) {
+    size_t count = 0;
     while (argument != SOL_AST_NONE) {
         if (argument >= validator->tree->type_argument_count
             || validator->type_arguments[argument]) return false;
         validator->type_arguments[argument] = 1;
         const SolTypeArgument *current = &validator->tree->type_arguments[argument];
         if (current->type >= validator->tree->type_count
-            || (int)current->access < 0 || current->access > SOL_ACCESS_EXCLUSIVE) {
+            || (int)current->access < 0 || current->access > SOL_ACCESS_EXCLUSIVE
+            || (!allow_access && current->access != SOL_ACCESS_OWNED)) {
             return false;
         }
+        ++count;
         argument = current->next;
     }
-    return true;
+    return count >= minimum_count && count <= maximum_count;
 }
 
 static bool sol_structure_parameters(
@@ -233,24 +239,30 @@ static bool sol_structure_arguments(
     SolStructureValidator *validator,
     SolArgumentId argument,
     SolExpressionContext context,
-    size_t depth
+    size_t depth,
+    bool allow_named,
+    size_t minimum_count,
+    size_t maximum_count
 ) {
+    size_t count = 0;
     while (argument != SOL_AST_NONE) {
         if (argument >= validator->tree->argument_count || validator->arguments[argument]) {
             return false;
         }
         validator->arguments[argument] = 1;
         const SolArgument *current = &validator->tree->arguments[argument];
-        if ((current->is_named
+        if ((!allow_named && current->is_named)
+            || (current->is_named
                 && !sol_structure_name_valid(validator, current->name))
             || (!current->is_named
                 && (current->name.start != 0 || current->name.end != 0))
             || !sol_structure_expression(validator, current->value, context, depth)) {
             return false;
         }
+        ++count;
         argument = current->next;
     }
-    return true;
+    return count >= minimum_count && count <= maximum_count;
 }
 
 static bool sol_structure_statements(
@@ -564,7 +576,10 @@ static bool sol_structure_expression(
                     validator,
                     expression->as.call.first_argument,
                     context,
-                    depth + 1
+                    depth + 1,
+                    true,
+                    0,
+                    SIZE_MAX
                 );
             break;
         case SOL_EXPR_TYPE_APPLICATION:
@@ -577,7 +592,10 @@ static bool sol_structure_expression(
                 )
                 && sol_structure_type_arguments(
                     validator,
-                    expression->as.type_application.first_argument
+                    expression->as.type_application.first_argument,
+                    false,
+                    1,
+                    SIZE_MAX
                 );
             break;
         case SOL_EXPR_FIELD:
@@ -589,6 +607,17 @@ static bool sol_structure_expression(
                     context,
                     depth + 1
                 );
+            break;
+        case SOL_EXPR_TUPLE:
+            valid = valid && sol_structure_arguments(
+                validator,
+                expression->as.tuple.first_element,
+                context,
+                depth + 1,
+                false,
+                2,
+                16
+            );
             break;
         case SOL_EXPR_RECORD:
             valid = valid
@@ -602,7 +631,10 @@ static bool sol_structure_expression(
                     validator,
                     expression->as.record.first_field,
                     context,
-                    depth + 1
+                    depth + 1,
+                    true,
+                    0,
+                    SIZE_MAX
                 );
             break;
         case SOL_EXPR_IF:
@@ -800,26 +832,35 @@ static bool sol_structure_all_marked(const unsigned char *items, size_t count) {
 static bool sol_structure_types_valid(SolStructureValidator *validator) {
     for (size_t index = 0; index < validator->tree->type_count; ++index) {
         const SolSyntaxType *type = &validator->tree->types[index];
-        if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_FUNCTION
+        if ((int)type->kind < 0 || type->kind > SOL_SYNTAX_TYPE_TUPLE
             || !sol_structure_name_valid(validator, type->span)
             || type->owner_item >= validator->tree->item_count
             || (type->first_argument != SOL_AST_NONE
-                && type->first_argument >= validator->tree->type_argument_count)
-            || !sol_structure_type_arguments(validator, type->first_argument)) {
+                && type->first_argument >= validator->tree->type_argument_count)) {
             return false;
         }
         if (type->kind == SOL_SYNTAX_TYPE_PATH) {
             if (!sol_structure_name_valid(validator, type->name)
                 || type->return_type != SOL_AST_NONE
-                || type->first_effect != SOL_AST_NONE || type->has_effect_tail) return false;
+                || type->first_effect != SOL_AST_NONE || type->has_effect_tail
+                || !sol_structure_type_arguments(validator, type->first_argument,
+                    false, 0, SIZE_MAX)) return false;
         } else if (type->kind == SOL_SYNTAX_TYPE_UNIT) {
             if (type->first_argument != SOL_AST_NONE || type->return_type != SOL_AST_NONE
                 || type->first_effect != SOL_AST_NONE || type->has_effect_tail
                 || type->is_capability) return false;
+        } else if (type->kind == SOL_SYNTAX_TYPE_TUPLE) {
+            if (type->name.start != 0 || type->name.end != 0
+                || type->return_type != SOL_AST_NONE || type->first_effect != SOL_AST_NONE
+                || type->has_effect_tail || type->is_capability
+                || !sol_structure_type_arguments(validator, type->first_argument,
+                    false, 2, 16)) return false;
         } else if (type->return_type >= validator->tree->type_count
             || (type->has_effect_tail
                 && !sol_structure_name_valid(validator, type->effect_tail))
             || type->is_capability
+            || !sol_structure_type_arguments(validator, type->first_argument,
+                true, 0, SIZE_MAX)
             || !sol_structure_effects(validator, type->first_effect,
                 SOL_EFFECT_OWNER_TYPE, index)) {
             return false;

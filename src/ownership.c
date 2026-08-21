@@ -65,7 +65,8 @@ static bool type_is_copy(Ownership *analysis, SolIrTypeId id) {
 
 static bool copy_dependencies_hold(Ownership *analysis, SolIrTypeId id) {
     const SolIrType *type = &analysis->ir->types[id];
-    if (type->kind == SOL_IR_TYPE_OPTION || type->kind == SOL_IR_TYPE_RESULT) {
+    if (type->kind == SOL_IR_TYPE_OPTION || type->kind == SOL_IR_TYPE_RESULT
+        || type->kind == SOL_IR_TYPE_TUPLE) {
         for (size_t index = 0; index < type->argument_count; ++index) {
             if (!type_is_copy(analysis,
                 analysis->ir->type_ids[type->argument_offset + index])) return false;
@@ -100,7 +101,8 @@ static void compute_copy_states(Ownership *analysis) {
         bool candidate = type->kind == SOL_IR_TYPE_INT64
             || type->kind == SOL_IR_TYPE_BOOL || type->kind == SOL_IR_TYPE_TEXT
             || type->kind == SOL_IR_TYPE_UNIT || type->kind == SOL_IR_TYPE_NEVER
-            || type->kind == SOL_IR_TYPE_OPTION || type->kind == SOL_IR_TYPE_RESULT;
+            || type->kind == SOL_IR_TYPE_OPTION || type->kind == SOL_IR_TYPE_RESULT
+            || type->kind == SOL_IR_TYPE_TUPLE;
         if (type->kind == SOL_IR_TYPE_NOMINAL
             && type->definition < analysis->ir->definition_count) {
             const SolIrDefinition *definition
@@ -170,8 +172,14 @@ static bool path_prefix(const SolIr *ir, const SolIrPlace *prefix,
     if (prefix->local != path->local
         || prefix->projections.count > path->projections.count) return false;
     for (size_t index = 0; index < prefix->projections.count; ++index) {
-        if (ir->projections[prefix->projections.offset + index].field
-            != ir->projections[path->projections.offset + index].field) return false;
+        const SolIrProjection *left
+            = &ir->projections[prefix->projections.offset + index];
+        const SolIrProjection *right
+            = &ir->projections[path->projections.offset + index];
+        if (left->kind != right->kind
+            || (left->kind == SOL_IR_PROJECTION_FIELD && left->field != right->field)
+            || (left->kind == SOL_IR_PROJECTION_TUPLE_FIELD
+                && left->ordinal != right->ordinal)) return false;
     }
     return true;
 }
@@ -989,6 +997,14 @@ call_complete:
                 && index < expression->as.record.fields.count; ++index) {
                 if (!analyze_expression(analysis, analysis->ir->operands[
                     expression->as.record.fields.offset + index].value,
+                    unavailable, SOL_ACCESS_OWNED, reachable)) return false;
+            }
+            return true;
+        case SOL_IR_EXPR_TUPLE:
+            for (size_t index = 0; *reachable
+                && index < expression->as.tuple.operands.count; ++index) {
+                if (!analyze_expression(analysis, analysis->ir->operands[
+                    expression->as.tuple.operands.offset + index].value,
                     unavailable, SOL_ACCESS_OWNED, reachable)) return false;
             }
             return true;

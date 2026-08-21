@@ -53,6 +53,7 @@ typedef enum {
     SOL_TYPE_CONSTRUCTOR_OPTION,
     SOL_TYPE_CONSTRUCTOR_RESULT,
     SOL_TYPE_CONSTRUCTOR_USER,
+    SOL_TYPE_CONSTRUCTOR_TUPLE,
 } SolTypeConstructor;
 
 typedef struct {
@@ -188,6 +189,9 @@ typedef struct {
     SolFieldId *field_resolutions;
     SolVariantId *variant_resolutions;
     size_t member_resolution_count;
+    /* Indexed by SolExprId; tuple projections contain an ordinal, SOL_AST_NONE otherwise. */
+    size_t *tuple_projections;
+    size_t tuple_projection_count;
     /* Indexed by SolPatternId; non-variant patterns use SOL_AST_NONE. */
     SolVariantId *pattern_variant_resolutions;
     size_t pattern_resolution_count;

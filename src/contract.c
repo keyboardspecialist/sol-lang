@@ -76,6 +76,22 @@ static bool sol_contract_span_text_equal(
         && memcmp(source->text + span.start, text, length) == 0;
 }
 
+static bool sol_contract_projection_name(
+    const SolSource *source, SolSpan span, size_t expected
+) {
+    if (!sol_contract_span_valid(source, span) || span.start == span.end
+        || (span.end - span.start > 1 && source->text[span.start] == '0')) return false;
+    size_t value = 0;
+    for (size_t index = span.start; index < span.end; ++index) {
+        unsigned char byte = (unsigned char)source->text[index];
+        if (byte < '0' || byte > '9') return false;
+        size_t digit = (size_t)(byte - '0');
+        if (value > (SIZE_MAX - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    return value == expected;
+}
+
 static bool sol_contract_trait_method_reachable(
     const SolContractLowerer *lowerer,
     SolDefId owner,
@@ -282,6 +298,7 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || types->variant_constructor_count > types->variant_constructor_capacity
         || types->method_resolution_count != syntax->expression_count
         || types->member_resolution_count != syntax->expression_count
+        || types->tuple_projection_count != syntax->expression_count
         || types->pattern_resolution_count != syntax->pattern_count
         || types->argument_resolution_count != syntax->argument_count
         || types->implementation_target_count != syntax->item_count
@@ -327,6 +344,7 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         || (types->method_resolution_count != 0 && types->method_resolutions == NULL)
         || (types->member_resolution_count != 0
             && (types->field_resolutions == NULL || types->variant_resolutions == NULL))
+        || (types->tuple_projection_count != 0 && types->tuple_projections == NULL)
         || (types->pattern_resolution_count != 0
             && types->pattern_variant_resolutions == NULL)
         || (types->argument_resolution_count != 0
@@ -454,6 +472,13 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
                         && !predicate_contains_unreachable)))) return false;
     }
     if (!sol_type_resolution_metadata_valid(syntax, types)) return false;
+    for (SolExprId expression = 0; expression < types->tuple_projection_count;
+        ++expression) {
+        size_t ordinal = types->tuple_projections[expression];
+        if (ordinal != SOL_AST_NONE
+            && !sol_contract_projection_name(lowerer->source,
+                syntax->expressions[expression].as.field.name, ordinal)) return false;
+    }
     for (size_t index = 0; index < syntax->effect_parameter_count; ++index) {
         const SolEffectParameter *parameter = &syntax->effect_parameters[index];
         if (!sol_contract_span_valid(lowerer->source, parameter->name)
@@ -538,7 +563,9 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         size_t argument_count = 0;
         size_t expected = application->constructor == SOL_TYPE_CONSTRUCTOR_OPTION
             ? 1
-            : application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT ? 2 : 0;
+            : application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT ? 2
+            : application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE
+                ? application->argument_count : 0;
         if (application->constructor == SOL_TYPE_CONSTRUCTOR_USER
             && application->definition < syntax->item_count) {
             SolTypeParameterId parameter
@@ -560,6 +587,8 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
             || argument_count != expected
             || (application->constructor != SOL_TYPE_CONSTRUCTOR_USER
                 && application->definition != SOL_AST_NONE)
+            || (application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE
+                && (expected < 2 || expected > 16))
             || (application->constructor == SOL_TYPE_CONSTRUCTOR_USER
                 && (application->definition >= syntax->item_count
                     || (syntax->items[application->definition].kind != SOL_ITEM_RECORD
@@ -1233,6 +1262,9 @@ static void sol_contract_expression(
                 expression->as.type_application.base,
                 in_old
             );
+            break;
+        case SOL_EXPR_TUPLE:
+            sol_contract_arguments(lowerer, expression->as.tuple.first_element, in_old);
             break;
         case SOL_EXPR_FIELD:
             sol_contract_expression(lowerer, expression->as.field.base, in_old);

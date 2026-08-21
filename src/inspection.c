@@ -242,7 +242,7 @@ static const char *sol_inspection_item_kind(SolItemKind kind) {
 static const char *sol_inspection_expr_kind(SolExprKind kind) {
     static const char *const names[] = {
         "error", "integer", "string", "bool", "unit", "path", "unary",
-        "binary", "call", "field", "record", "if", "match", "block",
+        "binary", "call", "field", "tuple", "record", "if", "match", "block",
         "propagate", "handle", "result", "old", "type_application"
     };
     return (size_t)kind < sizeof(names) / sizeof(names[0]) ? names[kind] : "unknown";
@@ -338,7 +338,7 @@ static void sol_inspection_base64(
 
 static void sol_inspection_syntax(SolInspector *inspector) {
     SolInspectionBuffer *out = inspector->output;
-    sol_inspection_text(out, "\"syntax\":{\"schema\":\"sol.inspection.syntax\",\"version\":1,\"edition\":");
+    sol_inspection_text(out, "\"syntax\":{\"schema\":\"sol.inspection.syntax\",\"version\":2,\"edition\":");
     sol_inspection_format(out, "%u,\"files\":[", inspector->syntax->edition);
     size_t file_count = inspector->package->is_directory ? inspector->package->file_count : 1;
     for (size_t index = 0; index < file_count; ++index) {
@@ -380,6 +380,10 @@ static void sol_inspection_syntax(SolInspector *inspector) {
         sol_inspection_string(out, sol_inspection_expr_kind(inspector->syntax->expressions[index].kind));
         sol_inspection_text(out, ",\"span\":");
         sol_inspection_span(inspector, inspector->syntax->expressions[index].span);
+        if (inspector->syntax->expressions[index].kind == SOL_EXPR_FIELD) {
+            sol_inspection_format(out, ",\"base\":\"expr:%zu\"",
+                inspector->syntax->expressions[index].as.field.base);
+        }
         sol_inspection_text(out, "}");
     }
     sol_inspection_format(out,
@@ -545,7 +549,7 @@ static void sol_inspection_type_facts(
 
 static void sol_inspection_types(SolInspector *inspector) {
     SolInspectionBuffer *out = inspector->output;
-    sol_inspection_text(out, "\"types\":{\"schema\":\"sol.inspection.types\",\"version\":1,");
+    sol_inspection_text(out, "\"types\":{\"schema\":\"sol.inspection.types\",\"version\":2,");
     sol_inspection_type_facts(inspector, "expressions", "expr", inspector->types->expressions,
         inspector->types->expression_count, false); sol_inspection_text(out, ",");
     sol_inspection_type_facts(inspector, "locals", "local", inspector->types->locals,
@@ -559,7 +563,8 @@ static void sol_inspection_types(SolInspector *inspector) {
         const SolTypeApplication *application = &inspector->types->type_applications[index];
         if (index != 0) sol_inspection_text(out, ",");
         const char *constructor = application->constructor == SOL_TYPE_CONSTRUCTOR_OPTION ? "option"
-            : application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT ? "result" : "user";
+            : application->constructor == SOL_TYPE_CONSTRUCTOR_RESULT ? "result"
+            : application->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE ? "tuple" : "user";
         sol_inspection_format(out, "{\"id\":\"type-app:%zu\",\"constructor\":", index);
         sol_inspection_string(out, constructor); sol_inspection_text(out, ",\"definition\":");
         if (application->constructor == SOL_TYPE_CONSTRUCTOR_USER) {
@@ -668,7 +673,14 @@ static void sol_inspection_types(SolInspector *inspector) {
         sol_inspection_format(out, "{\"expression\":\"expr:%zu\",\"variantIndex\":%zu}",
             index, inspector->types->variant_resolutions[index]);
     }
-    sol_inspection_text(out, "]},\"representations\":["); emitted = 0;
+    sol_inspection_text(out, "]},\"tupleProjections\":[");
+    for (size_t index = 0; index < inspector->types->tuple_projection_count; ++index) {
+        if (index != 0) sol_inspection_text(out, ",");
+        size_t ordinal = inspector->types->tuple_projections[index];
+        if (ordinal == SOL_AST_NONE) sol_inspection_text(out, "null");
+        else sol_inspection_format(out, "%zu", ordinal);
+    }
+    sol_inspection_text(out, "],\"representations\":["); emitted = 0;
     for (size_t index = 0; index < inspector->types->representation_count; ++index) {
         const SolTypeRepresentation *representation = &inspector->types->representations[index];
         if (representation->flavor == SOL_TYPE_DECLARATION_NONE) continue;
@@ -900,6 +912,25 @@ static bool sol_inspection_span_valid(SolSpan span, size_t length) {
     return span.start <= span.end && span.end <= length;
 }
 
+static bool sol_inspection_tuple_ordinal(
+    const SolSource *source,
+    SolSpan span,
+    size_t *ordinal
+) {
+    if (source == NULL || span.start >= span.end || span.end > source->length
+        || (span.end - span.start > 1 && source->text[span.start] == '0')) return false;
+    size_t value = 0;
+    for (size_t index = span.start; index < span.end; ++index) {
+        unsigned char byte = (unsigned char)source->text[index];
+        if (byte < '0' || byte > '9') return false;
+        size_t digit = (size_t)(byte - '0');
+        if (value > (SIZE_MAX - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    *ordinal = value;
+    return true;
+}
+
 static bool sol_inspection_source_valid(const SolSource *source) {
     if (source->path == NULL || source->text == NULL
         || source->line_count == 0 || source->line_starts == NULL
@@ -1045,7 +1076,9 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
         if ((int)syntax->expressions[index].kind < 0
             || syntax->expressions[index].kind > SOL_EXPR_TYPE_APPLICATION
             || !sol_inspection_span_valid(syntax->expressions[index].span,
-                package->source.length)) {
+                package->source.length)
+            || (syntax->expressions[index].kind == SOL_EXPR_FIELD
+                && syntax->expressions[index].as.field.base >= syntax->expression_count)) {
             return false;
         }
     }
@@ -1064,9 +1097,15 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
         }
     }
     for (size_t index = 0; index < hir->semantic_reference_count; ++index) {
-        if ((int)hir->semantic_references[index].kind < 0
-            || hir->semantic_references[index].kind > SOL_SEMANTIC_REFERENCE_BOUND
-            || !sol_inspection_span_valid(hir->semantic_references[index].span,
+        const SolSemanticReference *reference = &hir->semantic_references[index];
+        if ((int)reference->kind < 0
+            || reference->kind > SOL_SEMANTIC_REFERENCE_BOUND
+            || reference->target >= hir->definition_count
+            || reference->target_id.high
+                != hir->definitions[reference->target].semantic_id.high
+            || reference->target_id.low
+                != hir->definitions[reference->target].semantic_id.low
+            || !sol_inspection_span_valid(reference->span,
                 package->source.length)) return false;
     }
     for (size_t index = 0; index < hir->resolution_count; ++index) {
@@ -1108,6 +1147,7 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
         || types->definition_count != hir->definition_count
         || types->declared_type_count != syntax->type_count
         || types->member_resolution_count != syntax->expression_count
+        || types->tuple_projection_count != syntax->expression_count
         || types->pattern_resolution_count != syntax->pattern_count
         || types->argument_resolution_count != syntax->argument_count
         || types->implementation_target_count != syntax->item_count
@@ -1146,6 +1186,8 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
         || !SOL_INSPECTION_TABLE_SLICE(types->method_resolutions, types->method_resolution_count)
         || !SOL_INSPECTION_TABLE_SLICE(types->field_resolutions, types->member_resolution_count)
         || !SOL_INSPECTION_TABLE_SLICE(types->variant_resolutions, types->member_resolution_count)
+        || !SOL_INSPECTION_TABLE_SLICE(types->tuple_projections,
+            types->tuple_projection_count)
         || !SOL_INSPECTION_TABLE_SLICE(types->representations, types->representation_count)
         || !SOL_INSPECTION_TABLE_SLICE(types->implementation_targets,
             types->implementation_target_count)
@@ -1181,9 +1223,13 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
         types->implementation_target_count);
     for (size_t index = 0; index < types->type_application_count; ++index) {
         const SolTypeApplication *entry = &types->type_applications[index];
-        if ((int)entry->constructor < 0 || entry->constructor > SOL_TYPE_CONSTRUCTOR_USER
+        if ((int)entry->constructor < 0 || entry->constructor > SOL_TYPE_CONSTRUCTOR_TUPLE
             || (entry->constructor == SOL_TYPE_CONSTRUCTOR_USER
                 && entry->definition >= hir->definition_count)
+            || (entry->constructor != SOL_TYPE_CONSTRUCTOR_USER
+                && entry->definition != SOL_AST_NONE)
+            || (entry->constructor == SOL_TYPE_CONSTRUCTOR_TUPLE
+                && (entry->argument_count < 2 || entry->argument_count > 16))
             || !sol_inspection_slice(entry->argument_offset, entry->argument_count,
                 types->type_application_argument_count)) return false;
     }
@@ -1260,6 +1306,40 @@ static bool sol_inspection_preflight(SolInspector *inspector) {
                 && types->field_resolutions[index] >= syntax->field_count)
             || (types->variant_resolutions[index] != SOL_AST_NONE
                 && types->variant_resolutions[index] >= syntax->variant_count)) return false;
+        size_t ordinal = types->tuple_projections[index];
+        if (ordinal != SOL_AST_NONE) {
+            if (syntax->expressions[index].kind != SOL_EXPR_FIELD
+                || types->field_resolutions[index] != SOL_AST_NONE
+                || types->variant_resolutions[index] != SOL_AST_NONE) return false;
+            SolExprId base = syntax->expressions[index].as.field.base;
+            if (base >= types->expression_count
+                || types->expressions[base].kind != SOL_TYPE_APPLICATION
+                || types->expressions[base].definition >= types->type_application_count) {
+                return false;
+            }
+            const SolTypeApplication *tuple
+                = &types->type_applications[types->expressions[base].definition];
+            size_t source_ordinal = SOL_AST_NONE;
+            if (tuple->constructor != SOL_TYPE_CONSTRUCTOR_TUPLE
+                || ordinal >= tuple->argument_count
+                || !sol_inspection_tuple_ordinal(&package->source,
+                    syntax->expressions[index].as.field.name, &source_ordinal)
+                || source_ordinal != ordinal
+                || tuple->argument_offset > types->type_application_argument_count
+                || tuple->argument_count > types->type_application_argument_count
+                    - tuple->argument_offset) return false;
+            SolType selected
+                = types->type_application_arguments[tuple->argument_offset + ordinal];
+            if (types->expressions[index].kind != selected.kind
+                || types->expressions[index].definition != selected.definition) return false;
+        } else if (syntax->expressions[index].kind == SOL_EXPR_FIELD) {
+            SolExprId base = syntax->expressions[index].as.field.base;
+            if (base < types->expression_count
+                && types->expressions[base].kind == SOL_TYPE_APPLICATION
+                && types->expressions[base].definition < types->type_application_count
+                && types->type_applications[types->expressions[base].definition].constructor
+                    == SOL_TYPE_CONSTRUCTOR_TUPLE) return false;
+        }
     }
     for (size_t index = 0; index < types->pattern_resolution_count; ++index) {
         if (types->pattern_variant_resolutions[index] != SOL_AST_NONE
@@ -1478,7 +1558,7 @@ bool sol_inspection_render(
         .contracts = contracts, .diagnostics = diagnostics,
     };
     if (!sol_inspection_preflight(&inspector)) return false;
-    sol_inspection_text(&output, "{\"schema\":\"sol.inspection\",\"version\":1,"
+    sol_inspection_text(&output, "{\"schema\":\"sol.inspection\",\"version\":2,"
         "\"producer\":{\"name\":\"sol\",\"version\":\"0.1.0-dev\"},\"package\":{\"kind\":");
     sol_inspection_string(&output, package->is_directory ? "directory" : "file");
     sol_inspection_format(&output, ",\"edition\":%u,\"fileCount\":%zu},\"artifacts\":{",
