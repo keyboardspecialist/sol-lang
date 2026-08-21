@@ -461,9 +461,6 @@ static void test_user_generics_and_instantiations(void) {
         "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
-    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
-        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
-    }
     CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
     size_t generic_calls = 0;
     bool saw_explicit = false;
@@ -1261,6 +1258,23 @@ static void test_invalid_return_authority_contract(void) {
     CHECK(compile_source(&compilation, mixed_text));
     CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
     free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module projected_function_authority\n"
+        "function callback() -> Int64 effects { pure } { return 1 }\n"
+        "record Holder { value: function() -> Int64 effects { pure } }\n"
+        "function replace(target: inout Holder, source: Holder) -> () { "
+        "target.value = source.value }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module projected_provenance\ncapability Token {}\n"
+        "record Holder { token: capability Token }\n"
+        "function bad(left: capability Token, right: capability Token) -> Int64 { "
+        "var value = Holder { token = left } value.token = right return 0 }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
+    free_compilation(&compilation);
 }
 
 static void test_invalid_derived_capabilities(void) {
@@ -1527,27 +1541,60 @@ static void test_mutable_local_types_and_targets(void) {
         "function good(flag: Bool) -> Int64 { var value = 1 { var value = 2 "
         "value = 3 } value = if flag { 2 } else { 3 } return value }\n"
         "function contextual() -> Option<Int64> { var value = some(1) "
-        "value = none() return value }\n"));
+        "value = none() return value }\n"
+        "record Box<T> { value: T }\nrecord Outer<T> { box: Box<T> }\n"
+        "function nested(value: Int64, other: Int64) -> Int64 { "
+        "var outer = Outer<Int64> { box = Box<Int64> { value = value } } "
+        "outer.box.value = other return outer.box.value }\n"
+        "function inout_direct(value: inout Int64) -> () { value = 2 }\n"
+        "function inout_field(value: inout Outer<Int64>) -> () { "
+        "value.box.value = 3 }\n"));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
     CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
     size_t mutable_count = 0;
     for (size_t index = 0; index < compilation.hir.local_count; ++index) {
         mutable_count += compilation.hir.locals[index].mutable;
     }
-    CHECK(mutable_count == 3);
+    CHECK(mutable_count == 4);
     free_compilation(&compilation);
 
     static const char *invalid[] = {
         "module immutable\nfunction f() -> Int64 { let value = 1 value = 2 return value }\n",
         "module parameter\nfunction f(value: Int64) -> Int64 { value = 2 return value }\n",
-        ("module field\nrecord Pair { left: Int64 }\nfunction f() -> Int64 { "
-            "var value = Pair { left = 1 } value.left = 2 return value.left }\n"),
+        ("module owned_parameter\nrecord Pair { left: Int64 }\n"
+            "function f(value: Pair) -> Int64 { value.left = 2 return value.left }\n"),
         "module mismatch\nfunction f() -> Int64 { var value = 1 value = true return value }\n",
+        ("module shared_parameter\nrecord Pair { left: Int64 }\n"
+            "function f(value: borrow Pair) -> Int64 { value.left = 2 return value.left }\n"),
+        ("module projected_authority\ncapability Token {}\n"
+            "record Box { token: capability Token }\n"
+            "function replace(target: inout Box, source: Box) -> () { "
+            "target.token = source.token }\n"),
+        ("module computed_target\nrecord Pair { left: Int64 }\n"
+            "function make() -> Pair { return Pair { left = 1 } }\n"
+            "function f() -> () { make().left = 2 }\n"),
+        ("module leaf_mismatch\nrecord Pair { left: Int64 }\nfunction f() -> () { "
+            "var value = Pair { left = 1 } value.left = true }\n"),
+        ("module pattern_target\nenum Choice { item(value: Int64) }\n"
+            "function f(choice: Choice) -> () { match choice { "
+            "item(value) => { value = 2 } } }\n"),
     };
     for (size_t index = 0; index < sizeof(invalid) / sizeof(invalid[0]); ++index) {
         CHECK(compile_source(&compilation, invalid[index]));
-        CHECK(has_diagnostic(&compilation, index == 3 ? "SOL-TYPE-002" : "SOL-TYPE-025"));
+        CHECK(has_diagnostic(&compilation,
+            index == 5 ? "SOL-AUTHORITY-001"
+                : index == 3 || index == 7 ? "SOL-TYPE-002" : "SOL-TYPE-025"));
         free_compilation(&compilation);
     }
+
+    CHECK(compile_source(&compilation,
+        "module generic_projected_authority\nrecord Box<T> { value: T }\n"
+        "function replace<T>(target: inout Box<T>, source: T) -> () { "
+        "target.value = source }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-AUTHORITY-001"));
+    free_compilation(&compilation);
 
     CHECK(compile_source(&compilation,
         "module provenance\ncapability Token {}\n"

@@ -1394,7 +1394,7 @@ static void test_affine_ownership(void) {
             "function clash(left: inout capability Token, "
             "right: borrow capability Token) -> Int64 { return 0 }\n"
             "function bad(value: capability Token) -> Int64 "
-            "{ return clash(value, value) }\n",
+            "{ var local = value return clash(local, local) }\n",
             "SOL-OWNERSHIP-002"
         },
         {
@@ -1409,7 +1409,8 @@ static void test_affine_ownership(void) {
         {
             "module exclusive_copy\n"
             "function clash(left: inout Text, right: Text) -> Int64 { return 0 }\n"
-            "function bad(value: Text) -> Int64 { return clash(value, value) }\n",
+            "function bad(value: Text) -> Int64 { var local = value "
+            "return clash(local, local) }\n",
             "SOL-OWNERSHIP-003"
         },
         {
@@ -2052,22 +2053,167 @@ static void test_place_representation_and_validation(void) {
     CHECK(sol_ir_validate(&compilation.ir, NULL));
     free_compilation(&compilation);
 
-    CHECK(!frontend(&compilation,
+    CHECK(compile_ir(&compilation,
         "module projected_assignment\nrecord Pair { value: Int64 }\n"
-        "function bad() -> Int64 { var pair = Pair { value = 1 } "
+        "function good() -> Int64 { var pair = Pair { value = 1 } "
         "pair.value = 2 return pair.value }\n"));
-    CHECK(sol_diagnostics_has_errors(&compilation.diagnostics));
-    CHECK(has_code(&compilation, "SOL-TYPE-025"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
     free_compilation(&compilation);
 
-    CHECK(frontend(&compilation,
+    CHECK(compile_ir(&compilation,
         "module projected_borrow\nrecord Pair { value: Text }\n"
         "function inspect(value: borrow Text) -> Int64 { return 0 }\n"
-        "function bad(pair: Pair) -> Int64 { return inspect(pair.value) }\n"));
-    CHECK(!sol_ir_lower(&compilation.source, &compilation.syntax,
-        &compilation.hir, &compilation.types, &compilation.effects,
-        &compilation.contracts, &compilation.ir, &compilation.diagnostics));
-    CHECK(has_code(&compilation, "SOL-OWNERSHIP-004"));
+        "function good(pair: Pair) -> Int64 { return inspect(pair.value) }\n"));
+    free_compilation(&compilation);
+}
+
+static void test_projected_ownership(void) {
+    TestCompilation compilation;
+    const char *valid[] = {
+        "module partial_move\ncapability Token {}\n"
+        "record Pair { left: capability Token, right: capability Token }\n"
+        "function sibling(value: Pair) -> capability Token { let moved = value.left "
+        "return value.right }\n",
+        "module copy_leaf\nrecord Pair { left: Int64, right: Int64 }\n"
+        "function repeated(value: Pair) -> Int64 { return value.left + value.left }\n",
+        "module projected_reinit\nrecord Pair<T> { left: T, right: T }\n"
+        "record Box<T> { value: T }\nrecord Outer<T> { box: Box<T>, other: T }\n"
+        "function exact(input: Pair<Box<Int64>>) -> Pair<Box<Int64>> { var value = input "
+        "let moved = value.left value.left = moved return value }\n"
+        "function ancestor(input: Outer<Box<Int64>>, replacement: Box<Box<Int64>>) "
+        "-> Outer<Box<Int64>> { "
+        "var value = input let moved = value.box.value value.box = replacement "
+        "return value }\n",
+        "module projected_loans\nrecord Pair { left: Text, right: Text }\n"
+        "function both(left: inout Text, right: inout Text) -> () {}\n"
+        "function read2(left: borrow Pair, right: borrow Text) -> () {}\n"
+        "function apply(callback: function(inout Text) -> () effects { pure }, "
+        "value: inout Text) -> () effects { pure } { callback(value) }\n"
+        "function set(value: inout Text) -> () effects { pure } { value = \"set\" }\n"
+        "function good(callback: function(inout Text) -> () effects { pure }) -> () "
+        "effects { pure } { var pair = Pair { left = \"a\", right = \"b\" } "
+        "both(pair.left, pair.right) read2(pair, pair.left) callback(pair.left) "
+        "apply(set, pair.right) }\n",
+        "module terminated_partial\nrecord Pair<T> { left: T, right: T }\n"
+        "function keep<T>(flag: Bool, value: Pair<T>) -> T { if flag { "
+        "return value.left } else { () } return value.left }\n",
+        "module recursive_projected\nenum Chain { end, next(value: Chain) }\n"
+        "record Holder { value: Chain }\n"
+        "function replace(target: inout Holder, source: Chain) -> () { "
+        "target.value = source }\n",
+        "module phantom_projected\ncapability Token {}\nrecord Phantom<T> {}\n"
+        "record Holder { value: Phantom<capability Token> }\n"
+        "function replace(target: inout Holder, "
+        "source: Phantom<capability Token>) -> () { target.value = source }\n",
+    };
+    for (size_t index = 0; index < sizeof(valid) / sizeof(valid[0]); ++index) {
+        CHECK(compile_ir(&compilation, valid[index]));
+        free_compilation(&compilation);
+    }
+
+    const char *invalid[] = {
+        "module partial_parent\nrecord Pair<T> { left: T, right: T }\n"
+        "function bad<T>(value: Pair<T>) -> Pair<T> { let moved = value.left return value }\n",
+        "module partial_repeat\nrecord Pair<T> { left: T, right: T }\n"
+        "function bad<T>(value: Pair<T>) -> T { let moved = value.left return value.left }\n",
+        "module below_parent\nrecord Payload<T> { value: T }\n"
+        "record Box<T> { value: T }\nrecord Outer<T> { box: Box<T> }\n"
+        "function bad(input: Outer<Payload<Int64>>, replacement: Payload<Int64>) "
+        "-> () { var value = input "
+        "let moved = value.box value.box.value = replacement }\n",
+        "module branch_partial\nrecord Pair<T> { left: T, right: T }\n"
+        "function bad<T>(flag: Bool, value: Pair<T>, other: T) -> T { "
+        "let choice = if flag { value.left } else { other } return value.left }\n",
+        "module match_partial\nrecord Pair<T> { left: T, right: T }\n"
+        "function bad<T>(flag: Bool, value: Pair<T>, other: T) -> T { "
+        "let choice = match flag { true => value.left false => other } "
+        "return value.left }\n",
+        "module short_partial\nrecord Pair<T> { left: T, right: T }\n"
+        "function consume<T>(value: T) -> Bool { return true }\n"
+        "function bad<T>(flag: Bool, value: Pair<T>) -> T { "
+        "let choice = flag && consume(value.left) return value.left }\n",
+        "module prefix_loan\nrecord Box { value: Text }\n"
+        "function clash(left: borrow Box, right: inout Text) -> () {}\n"
+        "function bad(value: Box) -> () { var local = value clash(local, local.value) }\n",
+        "module computed_loan\nrecord Pair { value: Text }\n"
+        "function make() -> Pair { return Pair { value = \"x\" } }\n"
+        "function inspect(value: borrow Text) -> () {}\n"
+        "function bad() -> () { inspect(make().value) }\n",
+        "module immutable_inout\nfunction set(value: inout Text) -> () {}\n"
+        "function bad() -> () { let value = \"x\" set(value) }\n",
+        "module owned_inout\nfunction set(value: inout Text) -> () {}\n"
+        "function bad(value: Text) -> () { set(value) }\n",
+        "module region_inout\nrecord Box<T> { value: T }\n"
+        "function set(value: inout Box<Text>) -> () { value.value = \"set\" }\n"
+        "function bad(input: Box<Text>) -> () { var value = input "
+        "region r { set(value) } }\n",
+    };
+    for (size_t index = 0; index < sizeof(invalid) / sizeof(invalid[0]); ++index) {
+        CHECK(frontend(&compilation, invalid[index]));
+        CHECK(!sol_ir_lower(&compilation.source, &compilation.syntax,
+            &compilation.hir, &compilation.types, &compilation.effects,
+            &compilation.contracts, &compilation.ir, &compilation.diagnostics));
+        const char *code = index < 6 ? "SOL-OWNERSHIP-001"
+            : index == 6 ? "SOL-OWNERSHIP-002"
+            : index < 10 ? "SOL-OWNERSHIP-004" : "SOL-REGION-001";
+        CHECK(has_code(&compilation, code));
+        free_compilation(&compilation);
+    }
+
+    CHECK(compile_ir(&compilation,
+        "module malformed_projected_target\ncapability Token {}\n"
+        "record Pair { left: Int64, right: Int64 }\n"
+        "function update(input: Pair, token: capability Token) -> Int64 { "
+        "var value = input value.left = 3 return value.left }\n"));
+    SolIrStatement *assignment = NULL;
+    for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
+        if (compilation.ir.statements[index].kind == SOL_IR_STATEMENT_ASSIGNMENT) {
+            assignment = &compilation.ir.statements[index];
+            break;
+        }
+    }
+    CHECK(assignment != NULL);
+    if (assignment != NULL) {
+        SolIrExpression *target = &compilation.ir.expressions[assignment->target];
+        SolIrPlace *place = &compilation.ir.places[target->as.place];
+        SolIrLocal *local = &compilation.ir.locals[place->local];
+        bool saved_mutable = local->mutable;
+        local->mutable = false;
+        CHECK(validate_rejected(&compilation.ir));
+        local->mutable = saved_mutable;
+        SolAccessMode saved_access = local->access;
+        local->access = SOL_ACCESS_SHARED;
+        CHECK(validate_rejected(&compilation.ir));
+        local->access = saved_access;
+        SolIrLocalUse saved_use = target->local_use;
+        target->local_use = SOL_IR_LOCAL_USE_COPY;
+        CHECK(validate_rejected(&compilation.ir));
+        target->local_use = saved_use;
+        SolIrTypeId saved_type = target->type;
+        for (size_t type = 0; type < compilation.ir.type_count; ++type) {
+            if (compilation.ir.types[type].kind != SOL_IR_TYPE_BOOL) continue;
+            target->type = type;
+            CHECK(validate_rejected(&compilation.ir));
+            target->type = saved_type;
+            break;
+        }
+        SolIrPlaceRootKind saved_root = place->root_kind;
+        SolIrLocalId saved_local = place->local;
+        SolIrExpressionId saved_temporary = place->temporary;
+        place->root_kind = SOL_IR_PLACE_ROOT_TEMPORARY;
+        place->local = SOL_IR_NONE;
+        place->temporary = assignment->expression;
+        CHECK(validate_rejected(&compilation.ir));
+        place->root_kind = saved_root;
+        place->local = saved_local;
+        place->temporary = saved_temporary;
+        if (compilation.ir.root_count != 0) {
+            SolIrSlice saved = target->capability_roots;
+            target->capability_roots = (SolIrSlice){0, 1};
+            CHECK(validate_rejected(&compilation.ir));
+            target->capability_roots = saved;
+        }
+    }
     free_compilation(&compilation);
 }
 
@@ -2410,6 +2556,7 @@ int main(void) {
     test_region_cleanup_metadata();
     test_mutable_assignment_ir_and_ownership();
     test_place_representation_and_validation();
+    test_projected_ownership();
     test_exhaustive_validation_domains();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

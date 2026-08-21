@@ -2787,6 +2787,145 @@ static bool sol_ir_type_is_capability(const SolIr *ir, SolIrTypeId type_id) {
             == SOL_IR_DEFINITION_CAPABILITY;
 }
 
+typedef struct SolIrAuthorityEnvironment SolIrAuthorityEnvironment;
+struct SolIrAuthorityEnvironment {
+    SolIrDefinitionId definition;
+    const SolIrType *application;
+    const SolIrAuthorityEnvironment *parent;
+};
+
+typedef struct {
+    SolIrTypeId type;
+    const SolIrAuthorityEnvironment *environment;
+} SolIrAuthorityExpansion;
+
+static bool sol_ir_authority_types_equal(
+    const SolIr *ir, SolIrTypeId left_id,
+    const SolIrAuthorityEnvironment *left_environment, SolIrTypeId right_id,
+    const SolIrAuthorityEnvironment *right_environment, size_t depth
+) {
+    if (left_id >= ir->type_count || right_id >= ir->type_count || depth >= 256) {
+        return false;
+    }
+    const SolIrType *left = &ir->types[left_id];
+    const SolIrType *right = &ir->types[right_id];
+    if (left->kind == SOL_IR_TYPE_PARAMETER) {
+        for (const SolIrAuthorityEnvironment *entry = left_environment;
+            entry != NULL; entry = entry->parent) {
+            SolIrSlice parameters = ir->definitions[entry->definition].generic_parameters;
+            if (left->definition < parameters.offset
+                || left->definition - parameters.offset >= parameters.count) continue;
+            size_t ordinal = left->definition - parameters.offset;
+            return ordinal < entry->application->argument_count
+                && sol_ir_authority_types_equal(ir,
+                    ir->type_ids[entry->application->argument_offset + ordinal],
+                    entry->parent, right_id, right_environment, depth + 1);
+        }
+    }
+    if (right->kind == SOL_IR_TYPE_PARAMETER) {
+        for (const SolIrAuthorityEnvironment *entry = right_environment;
+            entry != NULL; entry = entry->parent) {
+            SolIrSlice parameters = ir->definitions[entry->definition].generic_parameters;
+            if (right->definition < parameters.offset
+                || right->definition - parameters.offset >= parameters.count) continue;
+            size_t ordinal = right->definition - parameters.offset;
+            return ordinal < entry->application->argument_count
+                && sol_ir_authority_types_equal(ir, left_id, left_environment,
+                    ir->type_ids[entry->application->argument_offset + ordinal],
+                    entry->parent, depth + 1);
+        }
+    }
+    if (left->kind != right->kind || left->definition != right->definition
+        || left->argument_count != right->argument_count) return false;
+    for (size_t index = 0; index < left->argument_count; ++index) {
+        if (!sol_ir_authority_types_equal(ir,
+            ir->type_ids[left->argument_offset + index], left_environment,
+            ir->type_ids[right->argument_offset + index], right_environment,
+            depth + 1)) return false;
+    }
+    return true;
+}
+
+static bool sol_ir_type_may_carry_authority_inner(
+    const SolIr *ir, SolIrTypeId type_id, size_t depth, bool unresolved_parameters,
+    const SolIrAuthorityEnvironment *environment, SolIrAuthorityExpansion *expanded,
+    size_t expanded_count
+) {
+    if (type_id >= ir->type_count || depth >= 256 || expanded_count >= 256) return true;
+    const SolIrType *type = &ir->types[type_id];
+    if (type->kind == SOL_IR_TYPE_PARAMETER) {
+        for (const SolIrAuthorityEnvironment *entry = environment; entry != NULL;
+            entry = entry->parent) {
+            if (entry->definition >= ir->definition_count) return true;
+            SolIrSlice parameters = ir->definitions[entry->definition].generic_parameters;
+            if (type->definition < parameters.offset
+                || type->definition - parameters.offset >= parameters.count) continue;
+            size_t ordinal = type->definition - parameters.offset;
+            if (entry->application == NULL
+                || ordinal >= entry->application->argument_count) return true;
+            return sol_ir_type_may_carry_authority_inner(ir,
+                ir->type_ids[entry->application->argument_offset + ordinal],
+                depth + 1, unresolved_parameters, entry->parent, expanded,
+                expanded_count);
+        }
+        return unresolved_parameters;
+    }
+    if (type->kind == SOL_IR_TYPE_FUNCTION || type->kind == SOL_IR_TYPE_SELF) return true;
+    if (sol_ir_type_is_capability(ir, type_id)) return true;
+    if (type->kind == SOL_IR_TYPE_OPTION || type->kind == SOL_IR_TYPE_RESULT) {
+        for (size_t index = 0; index < type->argument_count; ++index) {
+            if (sol_ir_type_may_carry_authority_inner(ir,
+                ir->type_ids[type->argument_offset + index], depth + 1,
+                unresolved_parameters, environment, expanded,
+                expanded_count)) return true;
+        }
+    }
+    if (type->kind != SOL_IR_TYPE_NOMINAL
+        || type->definition >= ir->definition_count) return false;
+    const SolIrDefinition *definition = &ir->definitions[type->definition];
+    for (size_t index = 0; index < expanded_count; ++index) {
+        if (sol_ir_authority_types_equal(ir, type_id, environment,
+            expanded[index].type, expanded[index].environment, 0)) return false;
+    }
+    expanded[expanded_count] = (SolIrAuthorityExpansion){type_id, environment};
+    SolIrAuthorityEnvironment nested = {
+        .definition = type->definition,
+        .application = type,
+        .parent = environment,
+    };
+    if (definition->kind == SOL_IR_DEFINITION_RECORD) {
+        for (size_t index = 0; index < definition->fields.count; ++index) {
+            if (sol_ir_type_may_carry_authority_inner(ir,
+                ir->fields[definition->fields.offset + index].type, depth + 1,
+                unresolved_parameters, &nested, expanded,
+                expanded_count + 1)) return true;
+        }
+    } else if (definition->kind == SOL_IR_DEFINITION_ENUM) {
+        for (size_t variant = 0; variant < definition->variants.count; ++variant) {
+            SolIrSlice fields = ir->variants[definition->variants.offset + variant].fields;
+            for (size_t field = 0; field < fields.count; ++field) {
+                if (sol_ir_type_may_carry_authority_inner(ir,
+                    ir->fields[fields.offset + field].type, depth + 1,
+                    unresolved_parameters, &nested, expanded,
+                    expanded_count + 1)) return true;
+            }
+        }
+    } else if ((definition->kind == SOL_IR_DEFINITION_DISTINCT
+            || definition->kind == SOL_IR_DEFINITION_REFINED)
+        && sol_ir_type_may_carry_authority_inner(ir, definition->representation,
+            depth + 1, unresolved_parameters, &nested, expanded,
+            expanded_count + 1)) return true;
+    return false;
+}
+
+static bool sol_ir_type_may_carry_authority(
+    const SolIr *ir, SolIrTypeId type_id, bool unresolved_parameters
+) {
+    SolIrAuthorityExpansion expanded[256];
+    return sol_ir_type_may_carry_authority_inner(
+        ir, type_id, 0, unresolved_parameters, NULL, expanded, 0);
+}
+
 static bool sol_ir_roots_equal(const SolIr *ir, SolIrSlice left, SolIrSlice right) {
     if (!sol_ir_slice_valid(left, ir->root_count)
         || !sol_ir_slice_valid(right, ir->root_count)
@@ -2806,12 +2945,12 @@ static const SolIrPlace *sol_ir_expression_place(
     return &ir->places[ir->expressions[expression].as.place];
 }
 
-static bool sol_ir_direct_local_place(
+static bool sol_ir_local_place(
     const SolIr *ir, SolIrExpressionId expression, SolIrLocalId *local
 ) {
     const SolIrPlace *place = sol_ir_expression_place(ir, expression);
     if (place == NULL || place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
-        || place->projections.count != 0 || place->local >= ir->local_count) return false;
+        || place->local >= ir->local_count) return false;
     if (local != NULL) *local = place->local;
     return true;
 }
@@ -3297,7 +3436,7 @@ static bool sol_ir_executable_expression(
                         || ir->locals[statement->local].owner != owner)) return false;
                 if (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT) {
                     SolIrLocalId target_local = SOL_IR_NONE;
-                    if (!sol_ir_direct_local_place(ir, statement->target,
+                    if (!sol_ir_local_place(ir, statement->target,
                             &target_local)
                         || !introduced[target_local]
                         || ir->locals[target_local].owner != owner) return false;
@@ -4179,7 +4318,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             }
             if (validate_ownership && expression->as.call.kind == SOL_IR_CALL_METHOD
                 && expression->as.call.receiver_access != SOL_ACCESS_OWNED
-                && !sol_ir_direct_local_place(ir,
+                && !sol_ir_local_place(ir,
                     expression->as.call.receiver, NULL)) {
                 return sol_ir_error(diagnostics,
                     "borrowed IR method receiver is not a direct local");
@@ -4208,7 +4347,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                 SolIrExpressionId receiver = ir->expressions[
                     expression->as.call.callee].as.operation.receiver;
                 if (receiver >= ir->expression_count
-                    || !sol_ir_direct_local_place(ir, receiver, NULL)) {
+                    || !sol_ir_local_place(ir, receiver, NULL)) {
                     return sol_ir_error(diagnostics,
                         "borrowed capability receiver is not a direct local");
                 }
@@ -4260,7 +4399,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                         "IR call operand access does not match its formal");
                 }
                 if (validate_ownership && entry->access != SOL_ACCESS_OWNED
-                    && !sol_ir_direct_local_place(ir, entry->value, NULL)) {
+                    && !sol_ir_local_place(ir, entry->value, NULL)) {
                     return sol_ir_error(diagnostics,
                         "borrowed IR operand is not a direct local");
                 }
@@ -4392,9 +4531,9 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                 || expression->as.handler.provider_callable >= ir->callable_count
                 || expression->as.handler.root >= ir->local_count
                 || (validate_ownership
-                    && (!sol_ir_direct_local_place(ir,
+                    && (!sol_ir_local_place(ir,
                             expression->as.handler.authority, NULL)
-                        || !sol_ir_direct_local_place(ir,
+                        || !sol_ir_local_place(ir,
                             expression->as.handler.provider, NULL)))
                 || ir->callables[expression->as.handler.source].kind
                     != SOL_IR_CALLABLE_CAPABILITY
@@ -4556,22 +4695,36 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             const SolIrExpression *target = &ir->expressions[statement->target];
             const SolIrExpression *value = &ir->expressions[statement->expression];
             SolIrLocalId local_id = SOL_IR_NONE;
-            if (!sol_ir_direct_local_place(ir, statement->target, &local_id)) {
+            if (!sol_ir_local_place(ir, statement->target, &local_id)) {
                 return sol_ir_error(diagnostics,
-                    "IR assignment target is not a direct local place");
+                    "IR assignment target is not a local field place");
             }
             const SolIrLocal *local = &ir->locals[local_id];
+            const SolIrPlace *place = sol_ir_expression_place(ir, statement->target);
+            bool writable = (local->kind == SOL_IR_LOCAL_BINDING && local->mutable
+                    && local->access == SOL_ACCESS_OWNED)
+                || (local->kind == SOL_IR_LOCAL_PARAMETER
+                    && local->access == SOL_ACCESS_EXCLUSIVE);
             if (statement->target == statement->expression
                 || !sol_ir_slice_valid(local->capability_roots, ir->root_count)
                 || !sol_ir_slice_valid(local->operation_roots, ir->root_count)
-                || local->kind != SOL_IR_LOCAL_BINDING || !local->mutable
-                || local->access != SOL_ACCESS_OWNED
+                || !writable
                 || target->kind != SOL_IR_EXPR_PLACE
-                || target->type != local->type
-                || (value->type != local->type
+                || place == NULL || target->type != place->type
+                || (value->type != target->type
                     && ir->types[value->type].kind != SOL_IR_TYPE_NEVER)
                 || target->capability_roots.count != local->capability_roots.count
                 || target->operation_roots.count != local->operation_roots.count
+                || (place->projections.count != 0
+                    && (target->capability_roots.count != 0
+                        || target->operation_roots.count != 0
+                        || sol_ir_type_may_carry_authority(
+                            ir, target->type, true)
+                        || (ir->types[value->type].kind != SOL_IR_TYPE_NEVER
+                            && (sol_ir_type_may_carry_authority(
+                                    ir, value->type, true)
+                                || value->capability_roots.count != 0
+                                || value->operation_roots.count != 0))))
                 || (ir->types[value->type].kind != SOL_IR_TYPE_NEVER
                     && (value->capability_roots.count
                             != local->capability_roots.count

@@ -367,6 +367,124 @@ static void test_assignment_replacement_and_failure(void) {
     sol_diagnostics_free(&compilation.diagnostics);
 }
 
+static void test_projected_moves_assignments_and_inout(void) {
+    Compilation compilation;
+    bool compiled = compile(&compilation,
+        "module projected_runtime\n"
+        "record Payload<T> { value: T }\n"
+        "record AffinePair { payload: Payload<Int64>, right: Int64 }\n"
+        "record Pair { left: Int64, right: Int64 }\n"
+        "trait Bump { function bump(self: inout Self) -> () effects { pure } }\n"
+        "implementation Bump for Pair { function bump(self: inout Self) -> () "
+        "effects { pure } { self.left = 6 } }\n"
+        "trait SetValue { function set_value(self: inout Self) -> () effects { pure } }\n"
+        "implementation SetValue for Int64 { function set_value(self: inout Self) -> () "
+        "effects { pure } { self = 12 } }\n"
+        "function hole() -> Int64 effects { pure } { let pair = AffinePair { "
+        "payload = Payload<Int64> { value = 1 }, right = 9 } "
+        "let moved = pair.payload return pair.right }\n"
+        "function reinit() -> Int64 effects { pure } { var pair = AffinePair { "
+        "payload = Payload<Int64> { value = 1 }, right = 4 } "
+        "let moved = pair.payload pair.payload = moved "
+        "return pair.payload.value + pair.right }\n"
+        "function replaced() -> Int64 { var pair = Pair { left = 1, right = 3 } "
+        "pair.left = 2 return pair.left + pair.right }\n"
+        "function failed() -> Int64 { var pair = Pair { left = 1, right = 3 } "
+        "pair.left = 1 / 0 return pair.left }\n"
+        "function set(value: inout Int64) -> () { value = 7 }\n"
+        "function set_both(left: inout Int64, right: inout Int64) -> () { "
+        "left = 7 right = 8 }\n"
+        "function early(value: inout Int64) -> () { value = 10 return () }\n"
+        "function changed(value: inout Int64) -> Result<(), Text> { value = 11 "
+        "return err(\"stop\") }\n"
+        "function forward(value: inout Int64) -> () { set(value) }\n"
+        "function apply(callback: function(inout Int64) -> () effects { pure }, "
+        "value: inout Int64) -> () effects { pure } { callback(value) }\n"
+        "function fail(value: inout Int64) -> () { value = 8 let bad = 1 / 0 }\n"
+        "function scalar() -> Int64 { var value = 1 set(value) return value }\n"
+        "function early_return() -> Int64 { var value = 1 early(value) return value }\n"
+        "function propagation() -> Result<Int64, Text> { var value = 1 "
+        "changed(value)? return ok(value) }\n"
+        "function nested() -> Int64 { var pair = Pair { left = 1, right = 2 } "
+        "set(pair.left) return pair.left + pair.right }\n"
+        "function recursive() -> Int64 { var value = 1 forward(value) return value }\n"
+        "function callback() -> Int64 effects { pure } { var value = 1 "
+        "apply(set, value) return value }\n"
+        "function method() -> Int64 effects { pure } { var pair = Pair { "
+        "left = 1, right = 2 } pair.bump() return pair.left + pair.right }\n"
+        "function projected_method() -> Int64 effects { pure } { var pair = Pair { "
+        "left = 1, right = 2 } pair.left.set_value() return pair.left + pair.right }\n"
+        "function failed_writeback() -> Int64 { var value = 1 fail(value) return value }\n"
+        "function projected_only() -> () { var pair = Pair { left = 1, right = 2 } "
+        "pair.left = 3 }\n"
+        "function atomic_writeback() -> () { var pair = Pair { left = 1, right = 2 } "
+        "set_both(pair.left, pair.right) }\n");
+    if (!compiled) {
+        sol_diagnostics_render_human(stderr, &compilation.source,
+            &compilation.diagnostics);
+    }
+    CHECK(compiled);
+    free_frontend(&compilation);
+    SolInterpreterResult result;
+    const struct { const char *name; int64_t expected; } values[] = {
+        {"hole", 9}, {"reinit", 5}, {"replaced", 5}, {"scalar", 7},
+        {"early_return", 10}, {"nested", 9}, {"recursive", 7}, {"callback", 7},
+        {"method", 8},
+        {"projected_method", 14},
+    };
+    for (size_t index = 0; index < sizeof(values) / sizeof(values[0]); ++index) {
+        CHECK(run(&compilation.ir, values[index].name, NULL, 0,
+            SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+            NULL, NULL, &result));
+        CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+            && result.value.as.integer == values[index].expected);
+        sol_interpreter_result_free(&result);
+    }
+    CleanupLog log;
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "reinit", NULL, 0, &log, &result));
+    CHECK(log.count == 1);
+    sol_interpreter_result_free(&result);
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "propagation", NULL, 0, &log, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_RESULT
+        && result.value.as.sum.is_error && log.count == 2);
+    sol_interpreter_result_free(&result);
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(run_observed(&compilation.ir, "replaced", NULL, 0, &log, &result));
+    CHECK(log.count == 2);
+    sol_interpreter_result_free(&result);
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(!run_observed(&compilation.ir, "failed", NULL, 0, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_DIVISION_BY_ZERO
+        && log.count == 1);
+    sol_interpreter_result_free(&result);
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(!run_observed(&compilation.ir, "failed_writeback", NULL, 0, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_DIVISION_BY_ZERO
+        && log.count == 1);
+    sol_interpreter_result_free(&result);
+    const char *metered[] = {"projected_only", "atomic_writeback"};
+    for (size_t index = 0; index < sizeof(metered) / sizeof(metered[0]); ++index) {
+        CHECK(run(&compilation.ir, metered[index], NULL, 0,
+            SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+            NULL, NULL, &result));
+        size_t steps = result.used.steps;
+        sol_interpreter_result_free(&result);
+        memset(&log, 0, sizeof(log));
+        log.ir = &compilation.ir;
+        CHECK(!run_observed_limits(&compilation.ir, metered[index],
+            (SolInterpreterLimits){steps - 1, SIZE_MAX, SIZE_MAX, SIZE_MAX,
+                SIZE_MAX}, &log, &result));
+        CHECK(result.diagnostic.code == SOL_INTERPRETER_STEP_LIMIT);
+        CHECK(result.used.steps == steps - 1);
+        CHECK(log.count == 1 && strcmp(log.names[0], "pair") == 0);
+        sol_interpreter_result_free(&result);
+    }
+    sol_ir_free(&compilation.ir);
+    sol_diagnostics_free(&compilation.diagnostics);
+}
+
 static void check_invalid_request(const SolInterpreterRequest *request) {
     SolInterpreterResult result;
     CHECK(!sol_interpret(request, &result));
@@ -380,6 +498,7 @@ static void test_malformed_top_level_requests(void) {
     CHECK(compile(&compilation,
         "module malformed_requests\n"
         "function value() -> Int64 { return 1 }\n"
+        "function mutate(value: inout Int64) -> () { value = 2 }\n"
         "test \"truth\" true\n"));
     SolIrCallableId function = callable(&compilation.ir, "value");
     SolIrCallableId test = SOL_IR_NONE;
@@ -436,6 +555,17 @@ static void test_malformed_top_level_requests(void) {
     request.definition = test_definition;
     check_invalid_request(&request);
     CHECK(!sol_interpret(&request, NULL));
+
+    SolInterpreterValue input;
+    sol_interpreter_value_int64(&input, 1);
+    CHECK(!run(&compilation.ir, "mutate", &input, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_INVALID_REQUEST);
+    CHECK(result.cleanup_actions == 0);
+    CHECK(input.kind == SOL_INTERPRETER_VALUE_INT64 && input.as.integer == 1);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&input);
 
     free_compilation(&compilation);
 }
@@ -1115,6 +1245,8 @@ static void test_capability_policy_and_malformed(void) {
     bool compiled = compile(&compilation,
         "module host\n"
         "capability Read { function read() -> Int64 effects { service.read<Self> } }\n"
+        "capability Write { function write(value: inout Int64) -> () "
+        "effects { service.write<Self> } }\n"
         "capability Wrapped derives_from private_source: capability Read { "
         "function read() -> Int64 effects { service.read<Self> } "
         "{ return private_source.read() } }\n"
@@ -1125,7 +1257,10 @@ static void test_capability_policy_and_malformed(void) {
         "effects { service.read<source> } { let wrapper = Wrapped { private_source = source } "
         "return wrapper.read() }\n"
         "function invoke_wrapped_value(value: capability Wrapped) -> Int64 "
-        "effects { service.read<value> } { return value.read() }\n");
+        "effects { service.read<value> } { return value.read() }\n"
+        "function invoke_write(source: capability Write) -> Int64 "
+        "effects { service.write<source> } { var value = 1 source.write(value) "
+        "return value }\n");
     CHECK(compiled);
     if (!compiled) {
         sol_diagnostics_render_human(stderr, &compilation.source,
@@ -1134,10 +1269,14 @@ static void test_capability_policy_and_malformed(void) {
         return;
     }
     SolIrDefinitionId capability_definition = SOL_IR_NONE;
+    SolIrDefinitionId write_definition = SOL_IR_NONE;
     for (size_t index = 0; index < compilation.ir.definition_count; ++index) {
         if (compilation.ir.definitions[index].kind == SOL_IR_DEFINITION_CAPABILITY
             && strcmp(compilation.ir.definitions[index].name, "Read") == 0) {
             capability_definition = index;
+        } else if (compilation.ir.definitions[index].kind == SOL_IR_DEFINITION_CAPABILITY
+            && strcmp(compilation.ir.definitions[index].name, "Write") == 0) {
+            write_definition = index;
         }
     }
     int root;
@@ -1151,6 +1290,16 @@ static void test_capability_policy_and_malformed(void) {
         host_read, &host, &result));
     CHECK(result.value.as.integer == 41 && host.calls == 1);
     sol_interpreter_result_free(&result);
+    SolInterpreterValue write_argument;
+    CHECK(sol_interpreter_value_capability(&write_argument, write_definition,
+        &root, NULL));
+    CHECK(!run(&compilation.ir, "invoke_write", &write_argument, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        host_read, &host, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_UNBOUND_OPERATION);
+    CHECK(host.calls == 1);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&write_argument);
     CHECK(!run(&compilation.ir, "invoke_read", &argument, 1,
         SOL_INTERPRETER_CONTRACTS_IGNORE,
         (SolInterpreterLimits){100, 100, 100, 100, 0},
@@ -1678,6 +1827,7 @@ int main(void) {
     test_callable_borrow_execution();
     test_regions_and_deterministic_cleanup();
     test_assignment_replacement_and_failure();
+    test_projected_moves_assignments_and_inout();
     test_malformed_top_level_requests();
     if (failures != 0) fprintf(stderr, "%d interpreter test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

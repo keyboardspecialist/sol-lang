@@ -569,6 +569,87 @@ static bool update_local(Interpreter *interpreter, SolIrLocalId local,
     return true;
 }
 
+static SolInterpreterValue *place_field(Interpreter *interpreter,
+    SolInterpreterValue *base, const SolIrProjection *projection) {
+    const SolIr *ir = interpreter->request->ir;
+    if (base == NULL || base->kind != SOL_INTERPRETER_VALUE_RECORD
+        || base->as.aggregate.definition >= ir->definition_count) return NULL;
+    SolIrSlice fields = ir->definitions[base->as.aggregate.definition].fields;
+    if (projection->field < fields.offset
+        || projection->field - fields.offset >= fields.count) return NULL;
+    size_t ordinal = projection->field - fields.offset;
+    if (ordinal >= base->as.aggregate.field_count) return NULL;
+    return &base->as.aggregate.fields[ordinal];
+}
+
+static SolInterpreterValue *local_place_slot(Interpreter *interpreter,
+    const SolIrPlace *place, Frame **owner) {
+    SolInterpreterValue *slot = lookup_local(interpreter, place->local, owner);
+    const SolIr *ir = interpreter->request->ir;
+    for (size_t index = 0; slot != NULL && index < place->projections.count; ++index) {
+        if (slot->kind == SOL_INTERPRETER_VALUE_INVALID) return NULL;
+        slot = place_field(interpreter, slot,
+            &ir->projections[place->projections.offset + index]);
+    }
+    return slot != NULL && slot->kind != SOL_INTERPRETER_VALUE_INVALID ? slot : NULL;
+}
+
+static const SolIrPlace *runtime_expression_place(const SolIr *ir,
+    SolIrExpressionId expression) {
+    if (expression >= ir->expression_count
+        || ir->expressions[expression].kind != SOL_IR_EXPR_PLACE
+        || ir->expressions[expression].as.place >= ir->place_count) return NULL;
+    return &ir->places[ir->expressions[expression].as.place];
+}
+
+static bool update_place(Interpreter *interpreter, const SolIrPlace *place,
+    SolInterpreterValue *value, SolSpan span) {
+    if (place->projections.count == 0) {
+        return update_local(interpreter, place->local, value, span);
+    }
+    Frame *owner = NULL;
+    SolInterpreterValue *root = lookup_local(interpreter, place->local, &owner);
+    SolInterpreterValue *slot = root;
+    const SolIr *ir = interpreter->request->ir;
+    for (size_t index = 0; slot != NULL && index < place->projections.count; ++index) {
+        if (slot->kind == SOL_INTERPRETER_VALUE_INVALID) slot = NULL;
+        else slot = place_field(interpreter, slot,
+            &ir->projections[place->projections.offset + index]);
+    }
+    if (owner == NULL || slot == NULL) {
+        diagnostic(interpreter, SOL_INTERPRETER_INTERNAL_INVARIANT, span,
+            "assignment target has a missing strict ancestor");
+        return false;
+    }
+    if (slot->kind != SOL_INTERPRETER_VALUE_INVALID) {
+        const SolIrLocal *metadata = &ir->locals[place->local];
+        if (metadata->access == SOL_ACCESS_OWNED) {
+            size_t ordinal = interpreter->result->cleanup_actions++;
+            if (interpreter->request->cleanup_observer != NULL) {
+                interpreter->request->cleanup_observer(
+                    interpreter->request->cleanup_context, place->local, ordinal);
+            }
+        }
+        sol_interpreter_value_free(slot);
+    }
+    *slot = *value;
+    sol_interpreter_value_init(value);
+    return true;
+}
+
+static bool charge_place_update(Interpreter *interpreter, const SolIrPlace *place,
+    SolSpan fallback_span) {
+    if (place == NULL) return false;
+    const SolIr *ir = interpreter->request->ir;
+    for (size_t index = 0; index < place->projections.count; ++index) {
+        SolSpan span = ir->projections[place->projections.offset + index].span;
+        if (!consume(interpreter, &interpreter->result->used.steps,
+            interpreter->request->limits.steps, SOL_INTERPRETER_STEP_LIMIT,
+            span.end <= span.start ? fallback_span : span, "step")) return false;
+    }
+    return true;
+}
+
 static bool value_equal(const SolInterpreterValue *left,
     const SolInterpreterValue *right, bool *supported) {
     if (left->kind != right->kind) return false;
@@ -820,7 +901,8 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable,
     const SolInterpreterValue *receiver, const SolInterpreterValue *arguments,
     size_t argument_count, const SolIrTypeId *type_arguments,
     size_t type_argument_count, const SolIrDispatchEvidence *evidence,
-    size_t evidence_count, SolSpan span);
+    size_t evidence_count, SolInterpreterValue *receiver_writeback,
+    SolInterpreterValue *argument_writebacks, SolSpan span);
 static bool validate_authority(Interpreter *interpreter,
     const SolIrCallable *callable, const SolInterpreterValue *receiver,
     const SolInterpreterValue *result, SolSpan span);
@@ -833,7 +915,8 @@ static void free_values(SolInterpreterValue *values, size_t count) {
 
 static Flow invoke_operation(Interpreter *interpreter,
     const SolInterpreterValue *receiver, SolIrCallableId callable,
-    const SolInterpreterValue *arguments, size_t argument_count, SolSpan span) {
+    const SolInterpreterValue *arguments, size_t argument_count,
+    SolInterpreterValue *argument_writebacks, SolSpan span) {
     Flow error = flow_new(FLOW_ERROR);
     const SolIr *ir = interpreter->request->ir;
     if (callable >= ir->callable_count || !capability_value_valid(ir, receiver, 0)
@@ -857,14 +940,23 @@ static Flow invoke_operation(Interpreter *interpreter,
             Handler *saved = interpreter->handler;
             interpreter->handler = handler->parent;
             Flow result = invoke_operation(interpreter, &handler->provider,
-                handler->provider_callable, arguments, argument_count, span);
+                handler->provider_callable, arguments, argument_count,
+                argument_writebacks, span);
             interpreter->handler = saved;
             return result;
         }
     }
     if (operation->body != SOL_IR_NONE) {
         return invoke(interpreter, callable, receiver, arguments, argument_count,
-            NULL, 0, NULL, 0, span);
+            NULL, 0, NULL, 0, NULL, argument_writebacks, span);
+    }
+    for (size_t index = 0; index < operation->parameters.count; ++index) {
+        SolIrLocalId local = ir->roots[operation->parameters.offset + index];
+        if (ir->locals[local].access == SOL_ACCESS_EXCLUSIVE) {
+            diagnostic(interpreter, SOL_INTERPRETER_UNBOUND_OPERATION, span,
+                "bodyless capability operations do not support inout writeback");
+            return error;
+        }
     }
     if (interpreter->request->host_operation == NULL) {
         diagnostic(interpreter, SOL_INTERPRETER_UNBOUND_OPERATION, span,
@@ -1069,7 +1161,8 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
     const SolInterpreterValue *receiver, const SolInterpreterValue *arguments,
     size_t argument_count, const SolIrTypeId *type_arguments,
     size_t type_argument_count, const SolIrDispatchEvidence *evidence,
-    size_t evidence_count, SolSpan span) {
+    size_t evidence_count, SolInterpreterValue *receiver_writeback,
+    SolInterpreterValue *argument_writebacks, SolSpan span) {
     Flow error = flow_new(FLOW_ERROR);
     const SolIr *ir = interpreter->request->ir;
     if (callable_id >= ir->callable_count) {
@@ -1181,6 +1274,39 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
         && !validate_authority(interpreter, callable, receiver, &result.value, span)) {
         sol_interpreter_value_free(&result.value);
         result.kind = FLOW_ERROR;
+    }
+    if (result.kind != FLOW_ERROR && callable->receiver != SOL_IR_NONE
+        && callable->receiver_access == SOL_ACCESS_EXCLUSIVE) {
+        SolIrLocalId local = callable->receiver;
+        if (receiver_writeback == NULL || !frame.bound[local]
+            || !value_matches_type(interpreter, &frame.locals[local],
+                ir->locals[local].type, receiver, 0)) {
+            diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT, span,
+                "exclusive receiver did not remain complete for writeback");
+            sol_interpreter_value_free(&result.value);
+            result.kind = FLOW_ERROR;
+        } else {
+            *receiver_writeback = frame.locals[local];
+            sol_interpreter_value_init(&frame.locals[local]);
+            frame.bound[local] = false;
+        }
+    }
+    for (size_t index = 0; result.kind != FLOW_ERROR && index < argument_count;
+        ++index) {
+        SolIrLocalId local = ir->roots[callable->parameters.offset + index];
+        if (ir->locals[local].access != SOL_ACCESS_EXCLUSIVE) continue;
+        if (argument_writebacks == NULL || !frame.bound[local]
+            || !value_matches_type(interpreter, &frame.locals[local],
+                ir->locals[local].type, receiver, 0)) {
+            diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT, span,
+                "exclusive parameter did not remain complete for writeback");
+            sol_interpreter_value_free(&result.value);
+            result.kind = FLOW_ERROR;
+            break;
+        }
+        argument_writebacks[index] = frame.locals[local];
+        sol_interpreter_value_init(&frame.locals[local]);
+        frame.bound[local] = false;
     }
     while (frame.binding_count != 0) {
         cleanup_local(interpreter, &frame,
@@ -1316,11 +1442,16 @@ static Flow evaluate_call(Interpreter *interpreter,
     }
     size_t count = expression->as.call.operands.count;
     SolInterpreterValue *arguments = count == 0 ? NULL : calloc(count, sizeof(*arguments));
-    if (count != 0 && arguments == NULL) {
+    SolInterpreterValue *writebacks = count == 0 ? NULL : calloc(count, sizeof(*writebacks));
+    SolInterpreterValue receiver_writeback;
+    sol_interpreter_value_init(&receiver_writeback);
+    if (count != 0 && (arguments == NULL || writebacks == NULL)) {
         diagnostic(interpreter, SOL_INTERPRETER_INTERNAL_INVARIANT, expression->span,
             "argument allocation failed");
         sol_interpreter_value_free(&callee.value);
         sol_interpreter_value_free(&receiver.value);
+        free(arguments);
+        free(writebacks);
         return flow_new(FLOW_ERROR);
     }
     for (size_t index = 0; index < count; ++index) {
@@ -1330,6 +1461,7 @@ static Flow evaluate_call(Interpreter *interpreter,
         Flow argument = evaluate(interpreter, value);
         if (argument.kind != FLOW_VALUE) {
             free_values(arguments, index);
+            free_values(writebacks, count);
             sol_interpreter_value_free(&callee.value);
             sol_interpreter_value_free(&receiver.value);
             return argument;
@@ -1370,7 +1502,6 @@ static Flow evaluate_call(Interpreter *interpreter,
                 output.value.as.aggregate.fields = arguments;
                 output.value.as.aggregate.field_count = count;
                 arguments = NULL;
-                count = 0;
             }
             break;
         case SOL_IR_CALL_DISTINCT_CONSTRUCTOR:
@@ -1392,21 +1523,35 @@ static Flow evaluate_call(Interpreter *interpreter,
                 && ir->callables[callee.value.as.callable.callable].kind
                     == SOL_IR_CALLABLE_FUNCTION) {
                 output = invoke(interpreter, callee.value.as.callable.callable, NULL,
-                    arguments, count, NULL, 0, NULL, 0, expression->span);
+                    arguments, count, NULL, 0, NULL, 0, NULL, writebacks,
+                    expression->span);
             } else if (callee.value.kind == SOL_INTERPRETER_VALUE_BOUND_OPERATION) {
-                output = invoke_operation(interpreter, callee.value.as.callable.receiver,
-                    callee.value.as.callable.callable, arguments, count, expression->span);
+                bool exclusive = false;
+                for (size_t index = 0; index < count; ++index) {
+                    exclusive = exclusive || ir->operands[
+                        expression->as.call.operands.offset + index].access
+                            == SOL_ACCESS_EXCLUSIVE;
+                }
+                if (exclusive && callee.value.as.callable.callable >= ir->callable_count) {
+                    diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT,
+                        expression->span, "capability callback metadata is invalid");
+                } else output = invoke_operation(interpreter,
+                    callee.value.as.callable.receiver,
+                    callee.value.as.callable.callable, arguments, count,
+                    writebacks, expression->span);
             } else diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT,
                 expression->span, "callback callee is not executable");
             break;
         case SOL_IR_CALL_CAPABILITY:
+            {
             if (callee.value.kind != SOL_INTERPRETER_VALUE_BOUND_OPERATION) {
                 diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT,
                     expression->span, "capability callee is not a bound operation");
             } else output = invoke_operation(interpreter,
                 callee.value.as.callable.receiver, callee.value.as.callable.callable,
-                arguments, count, expression->span);
+                arguments, count, writebacks, expression->span);
             break;
+            }
         case SOL_IR_CALL_METHOD: {
             const SolIrDispatchEvidence *selected = NULL;
             for (size_t index = 0; index < expression->as.call.evidence.count; ++index) {
@@ -1422,7 +1567,10 @@ static Flow evaluate_call(Interpreter *interpreter,
                 SOL_INTERPRETER_TYPE_INVARIANT, expression->span,
                 "method invocation evidence is unavailable");
             else output = invoke(interpreter, selected->method, &receiver.value,
-                arguments, count, NULL, 0, NULL, 0, expression->span);
+                arguments, count, NULL, 0, NULL, 0,
+                expression->as.call.receiver_access == SOL_ACCESS_EXCLUSIVE
+                    ? &receiver_writeback : NULL,
+                writebacks, expression->span);
             break;
         }
         case SOL_IR_CALL_FUNCTION:
@@ -1433,10 +1581,54 @@ static Flow evaluate_call(Interpreter *interpreter,
                 expression->as.call.type_arguments.count,
                 expression->as.call.evidence.count == 0 ? NULL
                     : ir->evidence + expression->as.call.evidence.offset,
-                expression->as.call.evidence.count, expression->span);
+                expression->as.call.evidence.count, NULL, writebacks,
+                expression->span);
             break;
     }
+    if (output.kind != FLOW_ERROR) {
+        if (receiver_writeback.kind != SOL_INTERPRETER_VALUE_INVALID) {
+            const SolIrPlace *place = runtime_expression_place(ir,
+                expression->as.call.receiver);
+            if (!charge_place_update(interpreter, place, expression->span)) {
+                sol_interpreter_value_free(&output.value);
+                output = flow_new(FLOW_ERROR);
+            }
+        }
+        for (size_t index = 0; output.kind != FLOW_ERROR && index < count; ++index) {
+            if (writebacks[index].kind == SOL_INTERPRETER_VALUE_INVALID) continue;
+            SolIrExpressionId actual = ir->operands[
+                expression->as.call.operands.offset + index].value;
+            if (!charge_place_update(interpreter, runtime_expression_place(ir, actual),
+                    expression->span)) {
+                sol_interpreter_value_free(&output.value);
+                output = flow_new(FLOW_ERROR);
+            }
+        }
+    }
+    if (output.kind != FLOW_ERROR
+        && receiver_writeback.kind != SOL_INTERPRETER_VALUE_INVALID) {
+        const SolIrPlace *place = runtime_expression_place(ir,
+            expression->as.call.receiver);
+        if (place == NULL || !update_place(interpreter, place,
+                &receiver_writeback, expression->span)) {
+            sol_interpreter_value_free(&output.value);
+            output = flow_new(FLOW_ERROR);
+        }
+    }
+    for (size_t index = 0; output.kind != FLOW_ERROR && index < count; ++index) {
+        if (writebacks[index].kind == SOL_INTERPRETER_VALUE_INVALID) continue;
+        SolIrExpressionId actual = ir->operands[
+            expression->as.call.operands.offset + index].value;
+        const SolIrPlace *place = runtime_expression_place(ir, actual);
+        if (place == NULL || !update_place(interpreter, place,
+                &writebacks[index], expression->span)) {
+            sol_interpreter_value_free(&output.value);
+            output = flow_new(FLOW_ERROR);
+        }
+    }
     free_values(arguments, count);
+    free_values(writebacks, count);
+    sol_interpreter_value_free(&receiver_writeback);
     sol_interpreter_value_free(&callee.value);
     sol_interpreter_value_free(&receiver.value);
     return output;
@@ -1475,7 +1667,8 @@ static Flow evaluate_block(Interpreter *interpreter,
         } else if (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT) {
             const SolIrExpression *target = &ir->expressions[statement->target];
             const SolIrPlace *place = &ir->places[target->as.place];
-            if (!update_local(interpreter, place->local, &value.value,
+            if (!charge_place_update(interpreter, place, statement->span)
+                || !update_place(interpreter, place, &value.value,
                 statement->span)) {
                 sol_interpreter_value_free(&value.value);
                 sol_interpreter_value_free(&last.value);
@@ -1549,16 +1742,35 @@ static Flow evaluate(Interpreter *interpreter, SolIrExpressionId expression_id) 
             if (place->root_kind == SOL_IR_PLACE_ROOT_TEMPORARY) {
                 output = evaluate(interpreter, place->temporary);
                 if (output.kind != FLOW_VALUE) return output;
+                for (size_t index = 0; index < place->projections.count; ++index) {
+                    const SolIrProjection *projection
+                        = &ir->projections[place->projections.offset + index];
+                    SolInterpreterValue *slot = place_field(interpreter,
+                        &output.value, projection);
+                    if (slot == NULL || slot->kind == SOL_INTERPRETER_VALUE_INVALID) {
+                        sol_interpreter_value_free(&output.value);
+                        diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT,
+                            projection->span, "field projection base is invalid");
+                        return flow_new(FLOW_ERROR);
+                    }
+                    SolInterpreterValue selected = *slot;
+                    sol_interpreter_value_init(slot);
+                    sol_interpreter_value_free(&output.value);
+                    output.value = selected;
+                }
+                return output;
             } else {
                 Frame *owner = NULL;
-                SolInterpreterValue *value = lookup_local(interpreter, place->local, &owner);
+                SolInterpreterValue *value = place->projections.count == 0
+                    ? lookup_local(interpreter, place->local, &owner)
+                    : local_place_slot(interpreter, place, &owner);
                 bool move = expression->local_use == SOL_IR_LOCAL_USE_MOVE;
                 bool copied = value != NULL && !move
                     && clone_runtime(interpreter, place->root_span, &output.value, value);
                 if (value != NULL && move) {
                     output.value = *value;
                     sol_interpreter_value_init(value);
-                    owner->bound[place->local] = false;
+                    if (place->projections.count == 0) owner->bound[place->local] = false;
                     copied = true;
                 }
                 if (!copied) {
@@ -1567,33 +1779,8 @@ static Flow evaluate(Interpreter *interpreter, SolIrExpressionId expression_id) 
                         "local is not bound in the active frame");
                     return flow_new(FLOW_ERROR);
                 }
+                return output;
             }
-            for (size_t index = 0; index < place->projections.count; ++index) {
-                const SolIrProjection *projection
-                    = &ir->projections[place->projections.offset + index];
-                if ((output.value.kind != SOL_INTERPRETER_VALUE_RECORD
-                        && output.value.kind != SOL_INTERPRETER_VALUE_ENUM)) {
-                    sol_interpreter_value_free(&output.value);
-                    if (interpreter->result->diagnostic.code == SOL_INTERPRETER_OK) {
-                        diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT,
-                            projection->span, "field projection base is invalid");
-                    }
-                    return flow_new(FLOW_ERROR);
-                }
-                SolIrSlice fields = output.value.kind == SOL_INTERPRETER_VALUE_RECORD
-                    ? ir->definitions[output.value.as.aggregate.definition].fields
-                    : ir->variants[output.value.as.aggregate.variant].fields;
-                size_t ordinal = projection->field - fields.offset;
-                SolInterpreterValue selected;
-                sol_interpreter_value_init(&selected);
-                bool cloned = ordinal < output.value.as.aggregate.field_count
-                    && clone_runtime(interpreter, projection->span, &selected,
-                        &output.value.as.aggregate.fields[ordinal]);
-                sol_interpreter_value_free(&output.value);
-                if (!cloned) return flow_new(FLOW_ERROR);
-                output.value = selected;
-            }
-            return output;
         }
         case SOL_IR_EXPR_DEFINITION: {
             SolIrDefinitionId definition = expression->as.definition;
@@ -1926,9 +2113,19 @@ bool sol_interpret(const SolInterpreterRequest *request, SolInterpreterResult *r
                 : "request must select a free-function callable");
         return false;
     }
+    const SolIrCallable *entry = &request->ir->callables[callable];
+    for (size_t index = 0; index < entry->parameters.count; ++index) {
+        SolIrLocalId local = request->ir->roots[entry->parameters.offset + index];
+        if (request->ir->locals[local].access == SOL_ACCESS_EXCLUSIVE) {
+            diagnostic(&interpreter, SOL_INTERPRETER_INVALID_REQUEST,
+                entry->span,
+                "top-level exclusive parameters require a mutable argument ABI");
+            return false;
+        }
+    }
     Flow flow = invoke(&interpreter, callable, NULL, request->arguments,
         request->argument_count, request->type_arguments, request->type_argument_count,
-        request->evidence.items, request->evidence.count,
+        request->evidence.items, request->evidence.count, NULL, NULL,
         request->ir->callables[callable].span);
     if (flow.kind == FLOW_ERROR) {
         if (result->diagnostic.code == SOL_INTERPRETER_OK) {

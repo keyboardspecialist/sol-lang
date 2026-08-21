@@ -3454,10 +3454,12 @@ static bool sol_type_representation_has_capability(
     SolTypeChecker *checker,
     SolType type,
     size_t depth,
-    SolType *expanded
+    SolType *expanded,
+    bool unresolved_parameters,
+    bool function_shapes
 ) {
     if (depth >= 256) return true;
-    if (type.kind == SOL_TYPE_PARAMETER) return false;
+    if (type.kind == SOL_TYPE_PARAMETER) return unresolved_parameters;
     SolDefId definition = sol_type_nominal_definition(checker, type);
     const SolTypeApplication *application = NULL;
     const SolType *arguments = NULL;
@@ -3470,7 +3472,8 @@ static bool sol_type_representation_has_capability(
         if (application->constructor != SOL_TYPE_CONSTRUCTOR_USER) {
             for (size_t index = 0; index < count; ++index) {
                 if (sol_type_representation_has_capability(
-                    checker, arguments[index], depth + 1, expanded
+                    checker, arguments[index], depth + 1, expanded,
+                    unresolved_parameters, function_shapes
                 )) return true;
             }
         }
@@ -3495,7 +3498,8 @@ static bool sol_type_representation_has_capability(
                 ? sol_type_member_template(checker, type, representation->representation)
                 : representation->representation;
             bool result = sol_type_representation_has_capability(
-                checker, next, depth + 1, expanded
+                checker, next, depth + 1, expanded,
+                unresolved_parameters, function_shapes
             );
             return result;
         }
@@ -3512,7 +3516,8 @@ static bool sol_type_representation_has_capability(
                     sol_type_from_id(checker, checker->syntax->fields[field].type)
                 );
                 if (sol_type_representation_has_capability(
-                    checker, field_type, depth + 1, expanded
+                    checker, field_type, depth + 1, expanded,
+                    unresolved_parameters, function_shapes
                 )) return true;
                 field = checker->syntax->fields[field].next;
             }
@@ -3535,24 +3540,27 @@ static bool sol_type_representation_has_capability(
                         sol_type_from_id(checker, checker->syntax->fields[field].type)
                     );
                     if (sol_type_representation_has_capability(
-                        checker, field_type, depth + 1, expanded
+                        checker, field_type, depth + 1, expanded,
+                        unresolved_parameters, function_shapes
                     )) return true;
                     field = checker->syntax->fields[field].next;
                 }
                 variant = checker->syntax->variants[variant].next;
             }
         }
-    } else if (type.kind == SOL_TYPE_FUNCTION_SIGNATURE) {
+    } else if (type.kind == SOL_TYPE_FUNCTION_SIGNATURE && function_shapes) {
         if (type.definition >= checker->types->function_type_count) return true;
         const SolFunctionType *function = &checker->types->function_types[type.definition];
         if (sol_type_representation_has_capability(
-            checker, function->result, depth + 1, expanded
+            checker, function->result, depth + 1, expanded,
+            unresolved_parameters, function_shapes
         )) {
             return true;
         }
         for (size_t index = 0; index < function->parameter_count; ++index) {
             if (sol_type_representation_has_capability(
-                checker, function->parameters[index], depth + 1, expanded
+                checker, function->parameters[index], depth + 1, expanded,
+                unresolved_parameters, function_shapes
             )) return true;
         }
     }
@@ -3653,7 +3661,8 @@ static bool sol_type_concrete_representation_has_capability(
         checker->allocation_failed = true;
         return true;
     }
-    bool result = sol_type_representation_has_capability(checker, type, 0, expanded);
+    bool result = sol_type_representation_has_capability(
+        checker, type, 0, expanded, false, true);
     free(expanded);
     return result;
 }
@@ -4272,6 +4281,34 @@ static SolType sol_type_arguments(SolTypeChecker *checker, SolArgumentId argumen
     return last;
 }
 
+static bool sol_type_assignment_root(SolTypeChecker *checker, SolExprId expression_id,
+    SolResolution *resolution, bool *projected) {
+    if (expression_id >= checker->syntax->expression_count) return false;
+    SolExprId current = expression_id;
+    *projected = false;
+    while (checker->syntax->expressions[current].kind == SOL_EXPR_FIELD) {
+        if (checker->types->field_resolutions[current] == SOL_AST_NONE) return false;
+        *projected = true;
+        current = checker->syntax->expressions[current].as.field.base;
+        if (current >= checker->syntax->expression_count) return false;
+    }
+    if (checker->syntax->expressions[current].kind != SOL_EXPR_PATH
+        || current >= checker->hir->resolution_count) return false;
+    *resolution = checker->hir->resolutions[current];
+    return resolution->kind == SOL_RESOLUTION_LOCAL
+        && resolution->target < checker->hir->local_count;
+}
+
+static bool sol_type_projected_assignment_has_authority(
+    SolTypeChecker *checker, SolType type
+) {
+    if (type.kind == SOL_TYPE_SELF || type.kind == SOL_TYPE_CAPABILITY_OPERATION) return true;
+    if (type.kind == SOL_TYPE_FUNCTION_SIGNATURE) return true;
+    SolType expanded[256] = {0};
+    return sol_type_representation_has_capability(
+        checker, type, 0, expanded, true, false);
+}
+
 static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
     SolType result = {.kind = SOL_TYPE_UNIT};
     bool terminated = false;
@@ -4307,24 +4344,27 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
         } else if (statement->kind == SOL_STATEMENT_ASSIGNMENT) {
             SolExprId target_id = statement->as.assignment.target;
             SolExprId value_id = statement->as.assignment.value;
+            SolResolution resolution = {.kind = SOL_RESOLUTION_ERROR};
+            bool projected = false;
             SolType target_type = sol_type_expression(checker, target_id);
-            SolResolution resolution = target_id < checker->hir->resolution_count
-                ? checker->hir->resolutions[target_id]
-                : (SolResolution){.kind = SOL_RESOLUTION_ERROR};
-            bool valid_target = target_id < checker->syntax->expression_count
-                && checker->syntax->expressions[target_id].kind == SOL_EXPR_PATH
-                && resolution.kind == SOL_RESOLUTION_LOCAL
-                && resolution.target < checker->hir->local_count
-                && checker->hir->locals[resolution.target].owner
-                    == checker->current_definition
-                && checker->hir->locals[resolution.target].kind == SOL_LOCAL_BINDING
-                && checker->hir->locals[resolution.target].mutable;
+            bool has_root = sol_type_assignment_root(checker, target_id,
+                &resolution, &projected);
+            const SolHirLocal *root = has_root
+                ? &checker->hir->locals[resolution.target] : NULL;
+            bool mutable_binding = root != NULL
+                && root->kind == SOL_LOCAL_BINDING && root->mutable
+                && root->access == SOL_ACCESS_OWNED;
+            bool exclusive_parameter = root != NULL
+                && root->kind == SOL_LOCAL_PARAMETER
+                && root->access == SOL_ACCESS_EXCLUSIVE;
+            bool valid_target = root != NULL
+                && root->owner == checker->current_definition
+                && (mutable_binding || exclusive_parameter);
             if (!valid_target) {
                 sol_type_error(checker, "SOL-TYPE-025", statement->span,
-                    "assignment target must be a direct mutable local binding");
+                    "assignment target must be a mutable local or inout parameter place");
             }
-            SolType expected = valid_target && resolution.target < checker->types->local_count
-                ? checker->types->locals[resolution.target] : target_type;
+            SolType expected = target_type;
             SolType value = sol_type_expression_expected(checker, value_id, expected);
             bool assignable = valid_target
                 && sol_type_assignable(checker, expected, value, value_id);
@@ -4332,7 +4372,20 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
                 sol_type_error(checker, "SOL-TYPE-002", statement->span,
                     "assignment value is not assignable to the mutable local's fixed type");
             }
-            if (assignable && value.kind != SOL_TYPE_NEVER
+            if (assignable && projected && value.kind != SOL_TYPE_NEVER
+                && (sol_type_projected_assignment_has_authority(checker, target_type)
+                    || sol_type_projected_assignment_has_authority(checker, value)
+                    || checker->types->expression_capability_origins[target_id]
+                        != SOL_PROVENANCE_NONE
+                    || checker->types->expression_operation_origins[target_id]
+                        != SOL_PROVENANCE_NONE
+                    || checker->types->expression_capability_origins[value_id]
+                        != SOL_PROVENANCE_NONE
+                    || checker->types->expression_operation_origins[value_id]
+                        != SOL_PROVENANCE_NONE)) {
+                sol_type_error(checker, "SOL-AUTHORITY-001", statement->span,
+                    "projected assignment of authority-bearing values is unsupported");
+            } else if (assignable && !projected && value.kind != SOL_TYPE_NEVER
                 && (checker->types->expression_capability_origins[value_id]
                         != checker->types->local_capability_origins[resolution.target]
                     || checker->types->expression_operation_origins[value_id]

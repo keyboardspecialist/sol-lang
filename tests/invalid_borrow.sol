@@ -9,5 +9,6 @@ function conflict(left: inout capability Token, right: borrow capability Token) 
 }
 
 function invalid(value: capability Token) -> Int64 {
-    return conflict(value, value)
+    var local = value
+    return conflict(local, local)
 }
