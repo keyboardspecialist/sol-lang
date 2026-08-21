@@ -2262,6 +2262,7 @@ static bool sol_ir_lower_statements_arms(SolIrLowerer *lowerer) {
         output->target = SOL_IR_NONE;
         output->region_label = NULL;
         output->expression = SOL_IR_NONE;
+        output->condition = SOL_IR_NONE;
         output->operator_kind = SOL_TOKEN_EOF;
         if (source->kind == SOL_STATEMENT_LET || source->kind == SOL_STATEMENT_VAR) {
             bool initialized = source->as.let_statement.value != SOL_AST_NONE;
@@ -2287,6 +2288,16 @@ static bool sol_ir_lower_statements_arms(SolIrLowerer *lowerer) {
             output->kind = SOL_IR_STATEMENT_MODIFY;
             output->target = source->as.modify.target;
             output->expression = source->as.modify.body;
+        } else if (source->kind == SOL_STATEMENT_LOOP
+            || source->kind == SOL_STATEMENT_WHILE) {
+            output->kind = source->kind == SOL_STATEMENT_LOOP
+                ? SOL_IR_STATEMENT_LOOP : SOL_IR_STATEMENT_WHILE;
+            output->expression = source->as.loop_statement.body;
+            output->condition = source->as.loop_statement.condition;
+        } else if (source->kind == SOL_STATEMENT_BREAK
+            || source->kind == SOL_STATEMENT_CONTINUE) {
+            output->kind = source->kind == SOL_STATEMENT_BREAK
+                ? SOL_IR_STATEMENT_BREAK : SOL_IR_STATEMENT_CONTINUE;
         } else {
             output->kind = source->kind == SOL_STATEMENT_RETURN
                 ? SOL_IR_STATEMENT_RETURN : SOL_IR_STATEMENT_EXPRESSION;
@@ -3327,7 +3338,9 @@ static bool sol_ir_executable_expression(
     SolIrCallableId callable_id,
     SolIrTypeId callable_result,
     unsigned char *states,
-    bool *introduced
+    bool *introduced,
+    size_t loop_depth,
+    bool *loop_break
 ) {
     if (id >= ir->expression_count || states[id] != 0) return false;
     states[id] = 1;
@@ -3350,7 +3363,8 @@ static bool sol_ir_executable_expression(
     }
 #define SOL_IR_EXEC(child) \
     do { if (!sol_ir_executable_expression( \
-        ir, (child), owner, callable_id, callable_result, states, introduced)) \
+        ir, (child), owner, callable_id, callable_result, states, introduced, \
+        loop_depth, loop_break)) \
         return false; } while (0)
     switch (expression->kind) {
         case SOL_IR_EXPR_REFINEMENT_SELF:
@@ -3440,6 +3454,12 @@ static bool sol_ir_executable_expression(
             for (size_t index = 0; index < expression->as.block.statements.count; ++index) {
                 const SolIrStatement *statement = &ir->statements[ir->statement_ids[
                     expression->as.block.statements.offset + index]];
+                bool unreachable_loop_transfer = terminated && loop_break != NULL;
+                bool saved_loop_break = unreachable_loop_transfer ? *loop_break : false;
+                bool saw_break = false;
+                if ((statement->kind == SOL_IR_STATEMENT_BREAK
+                        || statement->kind == SOL_IR_STATEMENT_CONTINUE)
+                    && loop_depth == 0) return false;
                 if ((statement->kind == SOL_IR_STATEMENT_LET
                         || statement->kind == SOL_IR_STATEMENT_DECLARE)
                     && (statement->local >= ir->local_count
@@ -3455,7 +3475,19 @@ static bool sol_ir_executable_expression(
                 if (statement->kind == SOL_IR_STATEMENT_MODIFY) {
                     SOL_IR_EXEC(statement->target);
                 }
-                if (statement->kind != SOL_IR_STATEMENT_DECLARE) {
+                if (statement->kind == SOL_IR_STATEMENT_LOOP
+                    || statement->kind == SOL_IR_STATEMENT_WHILE) {
+                    if (statement->kind == SOL_IR_STATEMENT_WHILE) {
+                        if (!sol_ir_executable_expression(ir, statement->condition,
+                                owner, callable_id, callable_result, states,
+                                introduced, loop_depth + 1, &saw_break)) return false;
+                    }
+                    if (!sol_ir_executable_expression(ir, statement->expression,
+                            owner, callable_id, callable_result, states,
+                            introduced, loop_depth + 1, &saw_break)) return false;
+                } else if (statement->kind != SOL_IR_STATEMENT_DECLARE
+                    && statement->kind != SOL_IR_STATEMENT_BREAK
+                    && statement->kind != SOL_IR_STATEMENT_CONTINUE) {
                     SOL_IR_EXEC(statement->expression);
                 }
                 SolIrTypeId value_type = statement->expression == SOL_IR_NONE
@@ -3476,11 +3508,30 @@ static bool sol_ir_executable_expression(
                     && !sol_ir_type_assignable(ir, value_type, callable_result,
                         (SolIrSlice){0}, (SolIrSlice){0}, SOL_IR_NONE)) return false;
                 if (!terminated) {
-                    if (statement->kind == SOL_IR_STATEMENT_RETURN) {
+                    if (statement->kind == SOL_IR_STATEMENT_RETURN
+                        || statement->kind == SOL_IR_STATEMENT_BREAK
+                        || statement->kind == SOL_IR_STATEMENT_CONTINUE) {
+                        if ((statement->kind == SOL_IR_STATEMENT_BREAK
+                                || statement->kind == SOL_IR_STATEMENT_CONTINUE)
+                            && loop_depth == 0) return false;
+                        if (statement->kind == SOL_IR_STATEMENT_BREAK
+                            && loop_break != NULL) *loop_break = true;
                         computed = SOL_IR_NONE;
                         computed_unit = false;
                         computed_never = true;
                         terminated = true;
+                    } else if (statement->kind == SOL_IR_STATEMENT_WHILE) {
+                        computed = SOL_IR_NONE;
+                        computed_unit = !sol_ir_type_is(
+                            ir, ir->expressions[statement->condition].type,
+                            SOL_IR_TYPE_NEVER) || saw_break;
+                        computed_never = !computed_unit;
+                        terminated = computed_never;
+                    } else if (statement->kind == SOL_IR_STATEMENT_LOOP) {
+                        computed = SOL_IR_NONE;
+                        computed_unit = saw_break;
+                        computed_never = !saw_break;
+                        terminated = !saw_break;
                     } else if (sol_ir_type_is(ir, value_type, SOL_IR_TYPE_NEVER)) {
                         computed = value_type;
                         computed_unit = false;
@@ -3498,6 +3549,7 @@ static bool sol_ir_executable_expression(
                     || statement->kind == SOL_IR_STATEMENT_DECLARE) {
                     introduced[statement->local] = true;
                 }
+                if (unreachable_loop_transfer) *loop_break = saved_loop_break;
             }
             for (size_t index = 0; index < expression->as.block.statements.count; ++index) {
                 const SolIrStatement *statement = &ir->statements[ir->statement_ids[
@@ -4637,6 +4689,12 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                     }
                 }
                 const SolIrStatement *statement = &ir->statements[statement_id];
+                if ((statement->kind == SOL_IR_STATEMENT_BREAK
+                        || statement->kind == SOL_IR_STATEMENT_CONTINUE)
+                    && item + 1 != expression->as.block.statements.count) {
+                    return sol_ir_error(diagnostics,
+                        "IR loop exit is not final in its block");
+                }
                 if (statement->kind == SOL_IR_STATEMENT_LET
                     || statement->kind == SOL_IR_STATEMENT_DECLARE) {
                     if (cleanup >= expression->as.block.cleanup.count
@@ -4677,14 +4735,18 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             || statement->kind == SOL_IR_STATEMENT_DECLARE;
         bool assignment = statement->kind == SOL_IR_STATEMENT_ASSIGNMENT;
         bool modify = statement->kind == SOL_IR_STATEMENT_MODIFY;
-        bool has_expression = statement->kind != SOL_IR_STATEMENT_DECLARE;
+        bool loop = statement->kind == SOL_IR_STATEMENT_LOOP
+            || statement->kind == SOL_IR_STATEMENT_WHILE;
+        bool exit = statement->kind == SOL_IR_STATEMENT_BREAK
+            || statement->kind == SOL_IR_STATEMENT_CONTINUE;
+        bool has_expression = statement->kind != SOL_IR_STATEMENT_DECLARE && !exit;
         bool assignment_operator = statement->operator_kind == SOL_TOKEN_EQUAL
             || statement->operator_kind == SOL_TOKEN_PLUS_EQUAL
             || statement->operator_kind == SOL_TOKEN_MINUS_EQUAL
             || statement->operator_kind == SOL_TOKEN_STAR_EQUAL
             || statement->operator_kind == SOL_TOKEN_SLASH_EQUAL
             || statement->operator_kind == SOL_TOKEN_PERCENT_EQUAL;
-        if ((int)statement->kind < 0 || statement->kind > SOL_IR_STATEMENT_MODIFY
+        if ((int)statement->kind < 0 || statement->kind > SOL_IR_STATEMENT_CONTINUE
             || statement->span.start > statement->span.end
             || statement->span.end > ir->source_length
             || (has_expression ? statement->expression >= ir->expression_count
@@ -4697,6 +4759,23 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                 : statement->target != SOL_IR_NONE)
             || (assignment ? !assignment_operator
                 : statement->operator_kind != SOL_TOKEN_EOF)
+            || (statement->kind == SOL_IR_STATEMENT_WHILE
+                ? statement->condition >= ir->expression_count
+                    || (!sol_ir_type_is(ir,
+                            ir->expressions[statement->condition].type,
+                            SOL_IR_TYPE_BOOL)
+                        && !sol_ir_type_is(ir,
+                            ir->expressions[statement->condition].type,
+                            SOL_IR_TYPE_NEVER))
+                : statement->condition != SOL_IR_NONE)
+            || (loop
+                && (ir->expressions[statement->expression].kind
+                        != SOL_IR_EXPR_BLOCK
+                    || ir->expressions[statement->expression].type >= ir->type_count
+                    || (ir->types[ir->expressions[statement->expression].type].kind
+                            != SOL_IR_TYPE_UNIT
+                        && ir->types[ir->expressions[statement->expression].type].kind
+                            != SOL_IR_TYPE_NEVER)))
             || (statement->kind == SOL_IR_STATEMENT_REGION
                 ? !sol_ir_region_label_valid(ir, statement)
                     || statement->region_label_span.start
@@ -5061,7 +5140,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             && (!sol_ir_type_assignable(ir, ir->expressions[body].type,
                     callable->result, (SolIrSlice){0}, (SolIrSlice){0}, SOL_IR_NONE)
                 || !sol_ir_executable_expression(ir, body, callable->owner,
-                    index, callable->result, states, introduced))) {
+                    index, callable->result, states, introduced, 0, NULL))) {
             free(states);
             free(introduced);
             char message[192];

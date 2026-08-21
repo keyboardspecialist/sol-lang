@@ -29,6 +29,7 @@ typedef struct {
     unsigned char *trait_methods;
     unsigned char *clauses;
     unsigned char *conditions;
+    size_t loop_depth;
 } SolStructureValidator;
 
 static bool sol_structure_span_valid(const SolStructureValidator *validator, SolSpan span) {
@@ -263,10 +264,14 @@ static bool sol_structure_statements(
         }
         validator->statements[statement] = 1;
         const SolStatement *current = &validator->tree->statements[statement];
-        if ((int)current->kind < 0 || current->kind > SOL_STATEMENT_MODIFY
+        if ((int)current->kind < 0 || current->kind > SOL_STATEMENT_CONTINUE
             || !sol_structure_span_valid(validator, current->span)
             || ((current->kind == SOL_STATEMENT_REGION
-                    || current->kind == SOL_STATEMENT_MODIFY)
+                    || current->kind == SOL_STATEMENT_MODIFY
+                    || current->kind == SOL_STATEMENT_LOOP
+                    || current->kind == SOL_STATEMENT_WHILE
+                    || current->kind == SOL_STATEMENT_BREAK
+                    || current->kind == SOL_STATEMENT_CONTINUE)
                 && context != SOL_EXPRESSION_CONTEXT_BODY)) return false;
         if ((current->kind == SOL_STATEMENT_LET
                 || current->kind == SOL_STATEMENT_VAR)
@@ -289,7 +294,10 @@ static bool sol_structure_statements(
             : current->kind == SOL_STATEMENT_REGION
                 ? current->as.region_statement.body
             : current->kind == SOL_STATEMENT_MODIFY
-                ? current->as.modify.body : current->as.expression;
+                ? current->as.modify.body
+            : current->kind == SOL_STATEMENT_LOOP
+                    || current->kind == SOL_STATEMENT_WHILE
+                ? SOL_AST_NONE : current->as.expression;
         if (current->kind == SOL_STATEMENT_REGION
             && (!sol_structure_span_valid(validator,
                     current->as.region_statement.label)
@@ -310,6 +318,27 @@ static bool sol_structure_statements(
                     != SOL_EXPR_BLOCK
                 || !sol_structure_expression(validator, current->as.modify.target,
                     context, depth))) return false;
+        if (current->kind == SOL_STATEMENT_LOOP
+            || current->kind == SOL_STATEMENT_WHILE) {
+            SolExprId condition = current->as.loop_statement.condition;
+            SolExprId body = current->as.loop_statement.body;
+            ++validator->loop_depth;
+            if ((current->kind == SOL_STATEMENT_LOOP && condition != SOL_AST_NONE)
+                || (current->kind == SOL_STATEMENT_WHILE
+                    && !sol_structure_expression(validator, condition, context, depth))
+                || body >= validator->tree->expression_count
+                || validator->tree->expressions[body].kind != SOL_EXPR_BLOCK) {
+                --validator->loop_depth;
+                return false;
+            }
+            bool body_valid = sol_structure_expression(validator, body, context, depth);
+            --validator->loop_depth;
+            if (!body_valid) return false;
+        }
+        if ((current->kind == SOL_STATEMENT_BREAK
+                || current->kind == SOL_STATEMENT_CONTINUE)
+            && (validator->loop_depth == 0 || current->next != SOL_AST_NONE
+                || current->as.expression != SOL_AST_NONE)) return false;
         if (value != SOL_AST_NONE
             && !sol_structure_expression(validator, value, context, depth)) return false;
         statement = current->next;

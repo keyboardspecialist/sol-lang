@@ -18,6 +18,7 @@ typedef struct {
     size_t cursor;
     size_t type_depth;
     size_t expression_depth;
+    size_t loop_depth;
     SolParserContractContext contract_context;
     bool suppress_record_literal;
     bool allocation_failed;
@@ -1672,7 +1673,10 @@ static bool sol_parser_assignment_operator(SolTokenKind kind) {
 
 static SolStatementId sol_parser_statement(SolParser *parser) {
     SolToken start = sol_parser_current(parser);
-    SolStatement statement = {.next = SOL_AST_NONE};
+    SolStatement statement = {
+        .next = SOL_AST_NONE,
+        .as.expression = SOL_AST_NONE,
+    };
     if (sol_parser_kind(parser) == SOL_TOKEN_LET
         || sol_parser_kind(parser) == SOL_TOKEN_VAR) {
         bool mutable = sol_parser_kind(parser) == SOL_TOKEN_VAR;
@@ -1743,6 +1747,52 @@ static SolStatementId sol_parser_statement(SolParser *parser) {
             .end = body == SOL_AST_NONE ? start.span.end
                 : parser->tree->expressions[body].span.end,
         };
+    } else if (sol_parser_kind(parser) == SOL_TOKEN_LOOP
+        || sol_parser_kind(parser) == SOL_TOKEN_WHILE) {
+        bool conditional = sol_parser_kind(parser) == SOL_TOKEN_WHILE;
+        sol_parser_advance(parser);
+        ++parser->loop_depth;
+        SolExprId condition = SOL_AST_NONE;
+        if (conditional) {
+            bool previous_suppression = parser->suppress_record_literal;
+            parser->suppress_record_literal = true;
+            condition = sol_parser_expression(parser, 1);
+            parser->suppress_record_literal = previous_suppression;
+        }
+        SolExprId body = sol_parser_block_expression(parser);
+        --parser->loop_depth;
+        statement.kind = conditional ? SOL_STATEMENT_WHILE : SOL_STATEMENT_LOOP;
+        statement.as.loop_statement.condition = condition;
+        statement.as.loop_statement.body = body;
+        statement.span = (SolSpan){
+            .start = start.span.start,
+            .end = body == SOL_AST_NONE ? start.span.end
+                : parser->tree->expressions[body].span.end,
+        };
+    } else if (sol_parser_kind(parser) == SOL_TOKEN_BREAK
+        || sol_parser_kind(parser) == SOL_TOKEN_CONTINUE) {
+        bool is_break = sol_parser_kind(parser) == SOL_TOKEN_BREAK;
+        sol_parser_advance(parser);
+        statement.kind = is_break ? SOL_STATEMENT_BREAK : SOL_STATEMENT_CONTINUE;
+        statement.span = start.span;
+        if (parser->loop_depth == 0) {
+            sol_parser_error(
+                parser,
+                "SOL-PARSE-001",
+                start,
+                is_break ? "'break' is only valid inside a loop"
+                         : "'continue' is only valid inside a loop"
+            );
+        }
+        if (sol_parser_kind(parser) != SOL_TOKEN_RIGHT_BRACE) {
+            sol_parser_error(
+                parser,
+                "SOL-PARSE-001",
+                sol_parser_current(parser),
+                is_break ? "'break' must be the final statement in its block"
+                         : "'continue' must be the final statement in its block"
+            );
+        }
     } else {
         SolExprId value = sol_parser_expression(parser, 1);
         sol_parser_check_multiline_record(parser, value);

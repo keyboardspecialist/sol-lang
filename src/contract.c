@@ -920,6 +920,32 @@ static void sol_contract_statements(
             return;
         }
         const SolStatement *entry = &lowerer->syntax->statements[statement];
+        if ((int)entry->kind < 0 || entry->kind > SOL_STATEMENT_CONTINUE) {
+            lowerer->malformed = true;
+            return;
+        }
+        if ((entry->kind == SOL_STATEMENT_LOOP
+                || entry->kind == SOL_STATEMENT_WHILE)
+            && (entry->as.loop_statement.body
+                    >= lowerer->syntax->expression_count
+                || lowerer->syntax->expressions[
+                    entry->as.loop_statement.body
+                ].kind != SOL_EXPR_BLOCK
+                || (entry->kind == SOL_STATEMENT_LOOP
+                    && entry->as.loop_statement.condition != SOL_AST_NONE)
+                || (entry->kind == SOL_STATEMENT_WHILE
+                    && entry->as.loop_statement.condition
+                        >= lowerer->syntax->expression_count))) {
+            lowerer->malformed = true;
+            return;
+        }
+        if ((entry->kind == SOL_STATEMENT_BREAK
+                || entry->kind == SOL_STATEMENT_CONTINUE)
+            && (entry->next != SOL_AST_NONE
+                || entry->as.expression != SOL_AST_NONE)) {
+            lowerer->malformed = true;
+            return;
+        }
         if (entry->kind == SOL_STATEMENT_RETURN) {
             sol_contract_error(
                 lowerer,
@@ -951,7 +977,27 @@ static void sol_contract_statements(
                     ? "uninitialized bindings are not allowed in contract or refinement predicates"
                     : "mutable bindings are not allowed in contract or refinement predicates");
         }
-        SolExprId value = entry->kind == SOL_STATEMENT_LET
+        if (entry->kind == SOL_STATEMENT_LOOP
+            || entry->kind == SOL_STATEMENT_WHILE
+            || entry->kind == SOL_STATEMENT_BREAK
+            || entry->kind == SOL_STATEMENT_CONTINUE) {
+            sol_contract_error(
+                lowerer,
+                "SOL-CONTRACT-002",
+                entry->span,
+                entry->kind == SOL_STATEMENT_LOOP
+                    || entry->kind == SOL_STATEMENT_WHILE
+                    ? "loops are not allowed in contract or refinement predicates"
+                    : "loop exits are not allowed in contract or refinement predicates"
+            );
+        }
+        SolExprId value = entry->kind == SOL_STATEMENT_LOOP
+                || entry->kind == SOL_STATEMENT_WHILE
+            ? entry->as.loop_statement.body
+            : entry->kind == SOL_STATEMENT_BREAK
+                    || entry->kind == SOL_STATEMENT_CONTINUE
+                ? SOL_AST_NONE
+            : entry->kind == SOL_STATEMENT_LET
                 || entry->kind == SOL_STATEMENT_VAR
             ? entry->as.let_statement.value
             : entry->kind == SOL_STATEMENT_ASSIGNMENT
@@ -960,6 +1006,11 @@ static void sol_contract_statements(
                 ? entry->as.region_statement.body
             : entry->kind == SOL_STATEMENT_MODIFY
                 ? entry->as.modify.body : entry->as.expression;
+        if (entry->kind == SOL_STATEMENT_WHILE) {
+            sol_contract_expression(
+                lowerer, entry->as.loop_statement.condition, in_old
+            );
+        }
         if (value != SOL_AST_NONE) sol_contract_expression(lowerer, value, in_old);
         statement = entry->next;
     }

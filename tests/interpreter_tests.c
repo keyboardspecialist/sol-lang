@@ -1892,6 +1892,101 @@ static void test_regions_and_deterministic_cleanup(void) {
     free_compilation(&compilation);
 }
 
+static void test_loop_execution_and_cleanup(void) {
+    Compilation compilation;
+    bool compiled = compile(&compilation,
+        "module loop_runtime\n"
+        "function count() -> Int64 { var n = 0 while n < 4 { n += 1 } return n }\n"
+        "function continued() -> Int64 { var n = 0 var total = 0 while n < 4 { "
+            "n += 1 if n == 2 { continue } else { () } total += n } return total }\n"
+        "function nested() -> Int64 { var n = 0 loop { loop { break } n += 1 break } "
+            "return n }\n"
+        "function condition_exit(flag: Bool) -> Int64 { var n = 0 loop { "
+            "while if flag { { break } } else { false } {} n = 1 break } return n }\n"
+        "function condition_break(flag: Bool) -> Int64 { var n = 0 "
+            "while if flag { { break } } else { false } {} n = 1 return n }\n"
+        "function direct_condition_break() -> Int64 { while { break } {} return 6 }\n"
+        "function fallthrough_cleanup() -> Int64 { var n = 0 while n < 3 { "
+            "let item = \"x\" n += 1 } return n }\n"
+        "function continue_cleanup() -> Int64 { var n = 0 while n < 3 { "
+            "let item = \"x\" n += 1 continue } return n }\n"
+        "function break_cleanup() -> Int64 { loop { let item = \"x\" break } return 1 }\n"
+        "function return_cleanup() -> Int64 { loop { let item = \"x\" return 2 } }\n"
+        "function error_cleanup() -> Int64 { loop { let item = \"x\" return 1 / 0 } }\n"
+        "function declarations() -> Int64 { var n = 0 while n < 3 { "
+            "var item: Int64 item = n n += 1 } return n }\n"
+        "function endless() -> () effects { diverge } { loop {} }\n");
+    CHECK(compiled);
+    if (!compiled) {
+        sol_diagnostics_render_human(stderr, &compilation.source,
+            &compilation.diagnostics);
+        free_compilation(&compilation);
+        return;
+    }
+    free_frontend(&compilation);
+    SolInterpreterResult result;
+    const struct { const char *name; int64_t expected; } values[] = {
+        {"count", 4}, {"continued", 8}, {"nested", 1}, {"declarations", 3},
+        {"direct_condition_break", 6},
+    };
+    for (size_t index = 0; index < sizeof(values) / sizeof(values[0]); ++index) {
+        CHECK(run(&compilation.ir, values[index].name, NULL, 0,
+            SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+            NULL, NULL, &result));
+        CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+            && result.value.as.integer == values[index].expected);
+        sol_interpreter_result_free(&result);
+    }
+    SolInterpreterValue flag;
+    sol_interpreter_value_bool(&flag, true);
+    CHECK(run(&compilation.ir, "condition_exit", &flag, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 1);
+    sol_interpreter_result_free(&result);
+    CHECK(run(&compilation.ir, "condition_break", &flag, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 1);
+    sol_interpreter_result_free(&result);
+    flag.as.boolean = false;
+    CHECK(run(&compilation.ir, "condition_exit", &flag, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 1);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&flag);
+    const struct { const char *name; size_t cleanups; int64_t expected; } cleanup[] = {
+        {"fallthrough_cleanup", 7, 3}, {"continue_cleanup", 7, 3},
+        {"break_cleanup", 1, 1}, {"return_cleanup", 1, 2},
+    };
+    for (size_t index = 0; index < sizeof(cleanup) / sizeof(cleanup[0]); ++index) {
+        CleanupLog log = {.ir = &compilation.ir};
+        CHECK(run_observed(&compilation.ir, cleanup[index].name, NULL, 0,
+            &log, &result));
+        CHECK(log.count == cleanup[index].cleanups);
+        CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+            && result.value.as.integer == cleanup[index].expected);
+        sol_interpreter_result_free(&result);
+    }
+    CleanupLog log = {.ir = &compilation.ir};
+    CHECK(!run_observed(&compilation.ir, "error_cleanup", NULL, 0, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_DIVISION_BY_ZERO);
+    CHECK(log.count == 1);
+    sol_interpreter_result_free(&result);
+
+    memset(&log, 0, sizeof(log)); log.ir = &compilation.ir;
+    CHECK(!run_observed_limits(&compilation.ir, "endless",
+        (SolInterpreterLimits){12, 100, 1000, 1000, 100}, &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_STEP_LIMIT);
+    CHECK(result.used.steps == 12);
+    sol_interpreter_result_free(&result);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_primitives_control_and_lifetime();
     test_place_projection_execution();
@@ -1909,6 +2004,7 @@ int main(void) {
     test_declaration_modify_and_compound_runtime();
     test_projected_moves_assignments_and_inout();
     test_malformed_top_level_requests();
+    test_loop_execution_and_cleanup();
     if (failures != 0) fprintf(stderr, "%d interpreter test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

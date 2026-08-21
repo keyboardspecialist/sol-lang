@@ -93,7 +93,7 @@ static bool sol_format_break(SolFormatWriter *writer, size_t count) {
 }
 
 static bool sol_format_is_word(SolTokenKind kind) {
-    return (kind >= SOL_TOKEN_IDENTIFIER && kind <= SOL_TOKEN_FALSE);
+    return (kind >= SOL_TOKEN_IDENTIFIER && kind <= SOL_TOKEN_CONTINUE);
 }
 
 static bool sol_format_is_binary(SolTokenKind kind) {

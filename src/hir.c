@@ -21,6 +21,7 @@ typedef struct {
     size_t binding_capacity;
     size_t scope_depth;
     size_t traversal_depth;
+    size_t loop_depth;
     SolDefId current_definition;
     SolDefId refinement_self_definition;
     const SolHirFileScope *scopes;
@@ -930,11 +931,17 @@ static bool sol_resolver_validate(SolResolver *resolver) {
     }
     for (size_t index = 0; index < syntax->statement_count; ++index) {
         const SolStatement *statement = &syntax->statements[index];
-        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_MODIFY) {
+        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_CONTINUE) {
             sol_resolver_malformed(resolver);
             return false;
         }
-        SolExprId value = statement->kind == SOL_STATEMENT_LET
+        SolExprId value = statement->kind == SOL_STATEMENT_LOOP
+                || statement->kind == SOL_STATEMENT_WHILE
+            ? statement->as.loop_statement.body
+            : statement->kind == SOL_STATEMENT_BREAK
+                    || statement->kind == SOL_STATEMENT_CONTINUE
+                ? SOL_AST_NONE
+            : statement->kind == SOL_STATEMENT_LET
                 || statement->kind == SOL_STATEMENT_VAR
             ? statement->as.let_statement.value
             : statement->kind == SOL_STATEMENT_ASSIGNMENT
@@ -945,10 +952,14 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                 ? statement->as.modify.body : statement->as.expression;
         bool binding = statement->kind == SOL_STATEMENT_LET
             || statement->kind == SOL_STATEMENT_VAR;
+        bool loop_exit = statement->kind == SOL_STATEMENT_BREAK
+            || statement->kind == SOL_STATEMENT_CONTINUE;
         bool uninitialized = binding && value == SOL_AST_NONE;
         if (!sol_span_valid(resolver->source, statement->span)
-            || (!uninitialized && value >= syntax->expression_count)
+            || (!loop_exit && !uninitialized && value >= syntax->expression_count)
             || (statement->next != SOL_AST_NONE && statement->next >= syntax->statement_count)
+            || (loop_exit && statement->next != SOL_AST_NONE)
+            || (loop_exit && statement->as.expression != SOL_AST_NONE)
             || (binding
                 && !sol_span_valid(resolver->source, statement->as.let_statement.name))
             || (binding && (uninitialized
@@ -977,6 +988,18 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             || (statement->kind == SOL_STATEMENT_MODIFY
                 && (statement->as.modify.target >= syntax->expression_count
                     || syntax->expressions[value].kind != SOL_EXPR_BLOCK))) {
+            sol_resolver_malformed(resolver);
+            return false;
+        }
+        if ((statement->kind == SOL_STATEMENT_LOOP
+                || statement->kind == SOL_STATEMENT_WHILE)
+            && (value >= syntax->expression_count
+                || syntax->expressions[value].kind != SOL_EXPR_BLOCK
+                || (statement->kind == SOL_STATEMENT_LOOP
+                    && statement->as.loop_statement.condition != SOL_AST_NONE)
+                || (statement->kind == SOL_STATEMENT_WHILE
+                    && statement->as.loop_statement.condition
+                        >= syntax->expression_count))) {
             sol_resolver_malformed(resolver);
             return false;
         }
@@ -1519,7 +1542,30 @@ static void sol_resolver_block(SolResolver *resolver, const SolExpr *block) {
             break;
         }
         const SolStatement *statement = &resolver->syntax->statements[statement_id];
-        if (statement->kind == SOL_STATEMENT_LET
+        if (statement->kind == SOL_STATEMENT_LOOP
+            || statement->kind == SOL_STATEMENT_WHILE) {
+            ++resolver->loop_depth;
+            if (statement->kind == SOL_STATEMENT_WHILE) {
+                sol_resolver_expression(
+                    resolver, statement->as.loop_statement.condition
+                );
+            }
+            sol_resolver_expression(resolver, statement->as.loop_statement.body);
+            --resolver->loop_depth;
+        } else if (statement->kind == SOL_STATEMENT_BREAK
+            || statement->kind == SOL_STATEMENT_CONTINUE) {
+            if (resolver->loop_depth == 0) {
+                sol_diagnostics_add(
+                    resolver->diagnostics,
+                    "SOL-RESOLVE-012",
+                    SOL_SEVERITY_ERROR,
+                    statement->span,
+                    statement->kind == SOL_STATEMENT_BREAK
+                        ? "break is only valid inside a loop"
+                        : "continue is only valid inside a loop"
+                );
+            }
+        } else if (statement->kind == SOL_STATEMENT_LET
             || statement->kind == SOL_STATEMENT_VAR) {
             if (statement->as.let_statement.value != SOL_AST_NONE) {
                 sol_resolver_expression(resolver, statement->as.let_statement.value);

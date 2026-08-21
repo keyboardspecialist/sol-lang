@@ -340,6 +340,10 @@ typedef enum {
     SOL_IR_STATEMENT_EXPRESSION,
     SOL_IR_STATEMENT_REGION,
     SOL_IR_STATEMENT_MODIFY,
+    SOL_IR_STATEMENT_LOOP,
+    SOL_IR_STATEMENT_WHILE,
+    SOL_IR_STATEMENT_BREAK,
+    SOL_IR_STATEMENT_CONTINUE,
 } SolIrStatementKind;
 
 typedef struct {
@@ -348,6 +352,7 @@ typedef struct {
     SolIrLocalId local;
     SolIrExpressionId target;
     SolIrExpressionId expression;
+    SolIrExpressionId condition;
     SolTokenKind operator_kind;
     char *region_label;
     SolSpan region_label_span;

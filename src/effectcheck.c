@@ -1401,7 +1401,13 @@ static void sol_effect_expression(SolEffectChecker *checker, SolExprId expressio
                     break;
                 }
                 const SolStatement *statement = &checker->syntax->statements[statement_id];
-                SolExprId value = statement->kind == SOL_STATEMENT_LET
+                SolExprId value = statement->kind == SOL_STATEMENT_LOOP
+                        || statement->kind == SOL_STATEMENT_WHILE
+                    ? statement->as.loop_statement.body
+                    : statement->kind == SOL_STATEMENT_BREAK
+                            || statement->kind == SOL_STATEMENT_CONTINUE
+                        ? SOL_AST_NONE
+                    : statement->kind == SOL_STATEMENT_LET
                         || statement->kind == SOL_STATEMENT_VAR
                     ? statement->as.let_statement.value
                     : statement->kind == SOL_STATEMENT_ASSIGNMENT
@@ -1414,6 +1420,10 @@ static void sol_effect_expression(SolEffectChecker *checker, SolExprId expressio
                     sol_effect_expression(checker, statement->as.assignment.target);
                 } else if (statement->kind == SOL_STATEMENT_MODIFY) {
                     sol_effect_expression(checker, statement->as.modify.target);
+                } else if (statement->kind == SOL_STATEMENT_WHILE) {
+                    sol_effect_expression(
+                        checker, statement->as.loop_statement.condition
+                    );
                 }
                 if (value != SOL_AST_NONE) sol_effect_expression(checker, value);
                 statement_id = statement->next;
@@ -1527,7 +1537,7 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
     }
     for (size_t index = 0; index < syntax->statement_count; ++index) {
         const SolStatement *statement = &syntax->statements[index];
-        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_MODIFY
+        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_CONTINUE
             || !sol_effect_span_valid(source, statement->span)
             || ((statement->kind == SOL_STATEMENT_LET
                     || statement->kind == SOL_STATEMENT_VAR)
@@ -1541,7 +1551,13 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
                 && statement->next >= syntax->statement_count)) {
             return false;
         }
-        SolExprId value = statement->kind == SOL_STATEMENT_LET
+        SolExprId value = statement->kind == SOL_STATEMENT_LOOP
+                || statement->kind == SOL_STATEMENT_WHILE
+            ? statement->as.loop_statement.body
+            : statement->kind == SOL_STATEMENT_BREAK
+                    || statement->kind == SOL_STATEMENT_CONTINUE
+                ? SOL_AST_NONE
+            : statement->kind == SOL_STATEMENT_LET
                 || statement->kind == SOL_STATEMENT_VAR
             ? statement->as.let_statement.value
             : statement->kind == SOL_STATEMENT_ASSIGNMENT
@@ -1552,8 +1568,12 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
                 ? statement->as.modify.body : statement->as.expression;
         bool binding = statement->kind == SOL_STATEMENT_LET
             || statement->kind == SOL_STATEMENT_VAR;
+        bool loop_exit = statement->kind == SOL_STATEMENT_BREAK
+            || statement->kind == SOL_STATEMENT_CONTINUE;
         bool uninitialized = binding && value == SOL_AST_NONE;
-        if ((!uninitialized && value >= syntax->expression_count)
+        if ((!loop_exit && !uninitialized && value >= syntax->expression_count)
+            || (loop_exit && statement->next != SOL_AST_NONE)
+            || (loop_exit && statement->as.expression != SOL_AST_NONE)
             || (binding && (uninitialized
                     ? statement->as.let_statement.type_id >= syntax->type_count
                     : statement->as.let_statement.type_id != SOL_AST_NONE))
@@ -1576,6 +1596,15 @@ static bool sol_effect_validate_expression_arena(SolEffectChecker *checker) {
         if (statement->kind == SOL_STATEMENT_MODIFY
             && (statement->as.modify.target >= syntax->expression_count
                 || syntax->expressions[value].kind != SOL_EXPR_BLOCK)) return false;
+        if ((statement->kind == SOL_STATEMENT_LOOP
+                || statement->kind == SOL_STATEMENT_WHILE)
+            && (value >= syntax->expression_count
+                || syntax->expressions[value].kind != SOL_EXPR_BLOCK
+                || (statement->kind == SOL_STATEMENT_LOOP
+                    && statement->as.loop_statement.condition != SOL_AST_NONE)
+                || (statement->kind == SOL_STATEMENT_WHILE
+                    && statement->as.loop_statement.condition
+                        >= syntax->expression_count))) return false;
     }
     for (size_t index = 0; index < syntax->match_arm_count; ++index) {
         const SolMatchArm *arm = &syntax->match_arms[index];
@@ -2138,7 +2167,13 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
                         }
                         statement_owners[statement] = expression_id;
                         const SolStatement *current = &checker->syntax->statements[statement];
-                        SolExprId value = current->kind == SOL_STATEMENT_LET
+                        SolExprId value = current->kind == SOL_STATEMENT_LOOP
+                                || current->kind == SOL_STATEMENT_WHILE
+                            ? current->as.loop_statement.body
+                            : current->kind == SOL_STATEMENT_BREAK
+                                    || current->kind == SOL_STATEMENT_CONTINUE
+                                ? SOL_AST_NONE
+                            : current->kind == SOL_STATEMENT_LET
                                 || current->kind == SOL_STATEMENT_VAR
                             ? current->as.let_statement.value
                             : current->kind == SOL_STATEMENT_ASSIGNMENT
@@ -2155,6 +2190,11 @@ static bool sol_effect_build_expression_owners(SolEffectChecker *checker) {
                         } else if (current->kind == SOL_STATEMENT_MODIFY) {
                             valid = sol_effect_schedule_owned_expression(
                                 checker, owner, current->as.modify.target,
+                                states, stack, &stack_count);
+                        } else if (current->kind == SOL_STATEMENT_WHILE) {
+                            valid = sol_effect_schedule_owned_expression(
+                                checker, owner,
+                                current->as.loop_statement.condition,
                                 states, stack, &stack_count);
                         }
                         valid = valid && (value == SOL_AST_NONE
@@ -2256,7 +2296,13 @@ static SolProvenanceId sol_effect_block_origin(
     size_t traversed = 0;
     while (statement != SOL_AST_NONE && traversed++ < checker->syntax->statement_count) {
         const SolStatement *current = &checker->syntax->statements[statement];
-        SolExprId value_id = current->kind == SOL_STATEMENT_LET
+        SolExprId value_id = current->kind == SOL_STATEMENT_LOOP
+                || current->kind == SOL_STATEMENT_WHILE
+            ? current->as.loop_statement.body
+            : current->kind == SOL_STATEMENT_BREAK
+                    || current->kind == SOL_STATEMENT_CONTINUE
+                ? SOL_AST_NONE
+            : current->kind == SOL_STATEMENT_LET
                 || current->kind == SOL_STATEMENT_VAR
             ? current->as.let_statement.value
             : current->kind == SOL_STATEMENT_ASSIGNMENT
@@ -2267,6 +2313,10 @@ static SolProvenanceId sol_effect_block_origin(
                 ? current->as.modify.body : current->as.expression;
         if (value_id == SOL_AST_NONE) {
             if (!terminated) result = SOL_PROVENANCE_NONE;
+            if (!terminated && (current->kind == SOL_STATEMENT_BREAK
+                    || current->kind == SOL_STATEMENT_CONTINUE)) {
+                terminated = true;
+            }
             statement = current->next;
             continue;
         }
@@ -2658,7 +2708,13 @@ static void sol_effect_push_expression_provenance_dependencies(
         SolStatementId statement = expression->as.block.first_statement;
         while (statement != SOL_AST_NONE) {
             const SolStatement *current = &checker->syntax->statements[statement];
-            SolExprId value = current->kind == SOL_STATEMENT_LET
+            SolExprId value = current->kind == SOL_STATEMENT_LOOP
+                    || current->kind == SOL_STATEMENT_WHILE
+                ? current->as.loop_statement.body
+                : current->kind == SOL_STATEMENT_BREAK
+                        || current->kind == SOL_STATEMENT_CONTINUE
+                    ? SOL_AST_NONE
+                : current->kind == SOL_STATEMENT_LET
                     || current->kind == SOL_STATEMENT_VAR
                 ? current->as.let_statement.value
                 : current->kind == SOL_STATEMENT_ASSIGNMENT
@@ -2669,6 +2725,11 @@ static void sol_effect_push_expression_provenance_dependencies(
                     ? current->as.modify.body : current->as.expression;
             if (value != SOL_AST_NONE) {
                 sol_effect_push_provenance_dependency(stack, stack_count, value);
+            }
+            if (current->kind == SOL_STATEMENT_WHILE) {
+                sol_effect_push_provenance_dependency(
+                    stack, stack_count, current->as.loop_statement.condition
+                );
             }
             statement = current->next;
         }

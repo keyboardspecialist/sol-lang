@@ -4,6 +4,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef struct OwnershipLoop OwnershipLoop;
+
+struct OwnershipLoop {
+    OwnershipLoop *parent;
+    bool *entry_introduced;
+    bool *break_unavailable;
+    bool *break_initialized;
+    bool *back_unavailable;
+    bool *back_initialized;
+    bool has_break;
+    bool has_back;
+};
+
 typedef struct {
     const SolIr *ir;
     SolDiagnostics *diagnostics;
@@ -19,6 +32,7 @@ typedef struct {
     SolIrDefinitionId owner;
     size_t region_depth;
     bool validating;
+    OwnershipLoop *loop;
 } Ownership;
 
 static bool ownership_error_code(Ownership *analysis, SolSpan span,
@@ -112,8 +126,21 @@ static void compute_copy_states(Ownership *analysis) {
     } while (changed);
 }
 
-static bool analyze_expression(Ownership *analysis, SolIrExpressionId id,
+static bool analyze_expression_inner(Ownership *analysis, SolIrExpressionId id,
     bool *unavailable, SolAccessMode access, bool *reachable);
+
+static bool analyze_expression(Ownership *analysis, SolIrExpressionId id,
+    bool *unavailable, SolAccessMode access, bool *reachable) {
+    bool valid = analyze_expression_inner(
+        analysis, id, unavailable, access, reachable);
+    if (valid && *reachable && id < analysis->ir->expression_count
+        && analysis->ir->expressions[id].type < analysis->ir->type_count
+        && analysis->ir->types[analysis->ir->expressions[id].type].kind
+            == SOL_IR_TYPE_NEVER) {
+        *reachable = false;
+    }
+    return valid;
+}
 
 static bool analyze_child(Ownership *analysis, SolIrExpressionId id,
     bool *unavailable, SolAccessMode access, bool *reachable) {
@@ -435,6 +462,242 @@ static void intersect_states(bool *destination, const bool *left,
     }
 }
 
+static void join_edge(Ownership *analysis, bool *joined_unavailable,
+    bool *joined_initialized, bool *has_edge, const bool *unavailable) {
+    size_t place_count = analysis->ir->place_count;
+    size_t local_count = analysis->ir->local_count;
+    for (size_t place = 0; place < place_count; ++place) {
+        const SolIrPlace *metadata = &analysis->ir->places[place];
+        bool lexical = metadata->root_kind == SOL_IR_PLACE_ROOT_LOCAL
+            && analysis->introduced[metadata->local]
+            && !analysis->loop->entry_introduced[metadata->local];
+        bool edge = lexical ? false : unavailable[place];
+        joined_unavailable[place] = *has_edge
+            ? joined_unavailable[place] || edge : edge;
+    }
+    for (size_t local = 0; local < local_count; ++local) {
+        bool lexical = analysis->introduced[local]
+            && !analysis->loop->entry_introduced[local];
+        bool edge = lexical ? false : analysis->initialized[local];
+        joined_initialized[local] = *has_edge
+            ? joined_initialized[local] && edge : edge;
+    }
+    *has_edge = true;
+}
+
+static bool states_equal(const bool *left, const bool *right, size_t count) {
+    return count == 0 || memcmp(left, right, count * sizeof(*left)) == 0;
+}
+
+static bool analyze_loop(Ownership *analysis, const SolIrStatement *statement,
+    bool *unavailable, bool *reachable) {
+    size_t place_count = analysis->ir->place_count;
+    size_t local_count = analysis->ir->local_count;
+#define LOOP_ALLOC(name, count) \
+    bool *name = (count) == 0 ? NULL : malloc((count) * sizeof(*name))
+    LOOP_ALLOC(entry_unavailable, place_count);
+    LOOP_ALLOC(header_unavailable, place_count);
+    LOOP_ALLOC(next_unavailable, place_count);
+    LOOP_ALLOC(break_unavailable, place_count);
+    LOOP_ALLOC(back_unavailable, place_count);
+    LOOP_ALLOC(false_unavailable, place_count);
+    LOOP_ALLOC(entry_initialized, local_count);
+    LOOP_ALLOC(header_initialized, local_count);
+    LOOP_ALLOC(next_initialized, local_count);
+    LOOP_ALLOC(break_initialized, local_count);
+    LOOP_ALLOC(back_initialized, local_count);
+    LOOP_ALLOC(false_initialized, local_count);
+    LOOP_ALLOC(entry_introduced, local_count);
+    size_t *entry_depths = local_count == 0 ? NULL
+        : malloc(local_count * sizeof(*entry_depths));
+#undef LOOP_ALLOC
+    if ((place_count != 0 && (entry_unavailable == NULL
+            || header_unavailable == NULL || next_unavailable == NULL
+            || break_unavailable == NULL || back_unavailable == NULL
+            || false_unavailable == NULL))
+        || (local_count != 0 && (entry_initialized == NULL
+            || header_initialized == NULL || next_initialized == NULL
+            || break_initialized == NULL || back_initialized == NULL
+            || false_initialized == NULL || entry_introduced == NULL
+            || entry_depths == NULL))) {
+        free(entry_unavailable); free(header_unavailable); free(next_unavailable);
+        free(break_unavailable); free(back_unavailable); free(false_unavailable);
+        free(entry_initialized); free(header_initialized); free(next_initialized);
+        free(break_initialized); free(back_initialized); free(false_initialized);
+        free(entry_introduced); free(entry_depths);
+        return ownership_internal(analysis, statement->span,
+            "ownership loop allocation failed");
+    }
+    if (place_count != 0) {
+        memcpy(entry_unavailable, unavailable, place_count * sizeof(*unavailable));
+        memcpy(header_unavailable, unavailable, place_count * sizeof(*unavailable));
+    }
+    if (local_count != 0) {
+        memcpy(entry_initialized, analysis->initialized,
+            local_count * sizeof(*entry_initialized));
+        memcpy(header_initialized, analysis->initialized,
+            local_count * sizeof(*header_initialized));
+        memcpy(entry_introduced, analysis->introduced,
+            local_count * sizeof(*entry_introduced));
+        memcpy(entry_depths, analysis->introduction_depths,
+            local_count * sizeof(*entry_depths));
+    }
+    SolDiagnostics *diagnostics = analysis->diagnostics;
+    bool valid = true;
+    bool converged = false;
+    size_t limit = place_count + local_count + 1;
+    for (size_t iteration = 0; valid && iteration < limit; ++iteration) {
+        if (place_count != 0) memcpy(unavailable, header_unavailable,
+            place_count * sizeof(*unavailable));
+        if (local_count != 0) {
+            memcpy(analysis->initialized, header_initialized,
+                local_count * sizeof(*header_initialized));
+            memcpy(analysis->introduced, entry_introduced,
+                local_count * sizeof(*entry_introduced));
+            memcpy(analysis->introduction_depths, entry_depths,
+                local_count * sizeof(*entry_depths));
+        }
+        OwnershipLoop loop = {.parent = analysis->loop,
+            .entry_introduced = entry_introduced,
+            .break_unavailable = break_unavailable,
+            .break_initialized = break_initialized,
+            .back_unavailable = back_unavailable,
+            .back_initialized = back_initialized};
+        analysis->diagnostics = NULL;
+        analysis->loop = &loop;
+        bool pass_reachable = true;
+        if (statement->kind == SOL_IR_STATEMENT_WHILE) {
+            valid = analyze_expression(analysis, statement->condition, unavailable,
+                SOL_ACCESS_OWNED, &pass_reachable);
+        }
+        if (valid && pass_reachable) {
+            valid = analyze_expression(analysis, statement->expression, unavailable,
+                SOL_ACCESS_OWNED, &pass_reachable);
+        }
+        if (valid && pass_reachable) join_edge(analysis, back_unavailable,
+            back_initialized, &loop.has_back, unavailable);
+        analysis->loop = loop.parent;
+        analysis->diagnostics = diagnostics;
+        if (!valid) {
+            if (place_count != 0) memcpy(unavailable, header_unavailable,
+                place_count * sizeof(*unavailable));
+            if (local_count != 0) {
+                memcpy(analysis->initialized, header_initialized,
+                    local_count * sizeof(*header_initialized));
+                memcpy(analysis->introduced, entry_introduced,
+                    local_count * sizeof(*entry_introduced));
+            }
+            OwnershipLoop report = {.parent = analysis->loop,
+                .entry_introduced = entry_introduced,
+                .break_unavailable = break_unavailable,
+                .break_initialized = break_initialized,
+                .back_unavailable = back_unavailable,
+                .back_initialized = back_initialized};
+            bool report_reachable = true;
+            analysis->loop = &report;
+            if (statement->kind != SOL_IR_STATEMENT_WHILE
+                || analyze_expression(analysis, statement->condition, unavailable,
+                    SOL_ACCESS_OWNED, &report_reachable)) {
+                if (report_reachable) {
+                    analyze_expression(analysis, statement->expression,
+                        unavailable, SOL_ACCESS_OWNED, &report_reachable);
+                }
+            }
+            analysis->loop = report.parent;
+            break;
+        }
+        if (place_count != 0) memcpy(next_unavailable, entry_unavailable,
+            place_count * sizeof(*next_unavailable));
+        if (local_count != 0) memcpy(next_initialized, entry_initialized,
+            local_count * sizeof(*next_initialized));
+        if (loop.has_back) {
+            join_states(next_unavailable, next_unavailable, back_unavailable,
+                place_count);
+            intersect_states(next_initialized, next_initialized, back_initialized,
+                local_count);
+        }
+        converged = states_equal(header_unavailable, next_unavailable, place_count)
+            && states_equal(header_initialized, next_initialized, local_count);
+        if (place_count != 0) memcpy(header_unavailable, next_unavailable,
+            place_count * sizeof(*header_unavailable));
+        if (local_count != 0) memcpy(header_initialized, next_initialized,
+            local_count * sizeof(*header_initialized));
+        if (converged) break;
+    }
+    if (valid && !converged) valid = ownership_internal(analysis, statement->span,
+        "ownership loop fixed point did not converge");
+    bool has_exit = false;
+    if (valid) {
+        if (place_count != 0) memcpy(unavailable, header_unavailable,
+            place_count * sizeof(*unavailable));
+        if (local_count != 0) {
+            memcpy(analysis->initialized, header_initialized,
+                local_count * sizeof(*header_initialized));
+            memcpy(analysis->introduced, entry_introduced,
+                local_count * sizeof(*entry_introduced));
+        }
+        OwnershipLoop loop = {.parent = analysis->loop,
+            .entry_introduced = entry_introduced,
+            .break_unavailable = break_unavailable,
+            .break_initialized = break_initialized,
+            .back_unavailable = back_unavailable,
+            .back_initialized = back_initialized};
+        bool pass_reachable = true;
+        analysis->loop = &loop;
+        if (statement->kind == SOL_IR_STATEMENT_WHILE) {
+            valid = analyze_expression(analysis, statement->condition, unavailable,
+                SOL_ACCESS_OWNED, &pass_reachable);
+            if (valid && pass_reachable) {
+                if (place_count != 0) memcpy(false_unavailable, unavailable,
+                    place_count * sizeof(*false_unavailable));
+                if (local_count != 0) memcpy(false_initialized,
+                    analysis->initialized,
+                    local_count * sizeof(*false_initialized));
+                has_exit = true;
+            }
+        }
+        if (valid && pass_reachable) {
+            valid = analyze_expression(analysis, statement->expression,
+                unavailable, SOL_ACCESS_OWNED, &pass_reachable);
+        }
+        analysis->loop = loop.parent;
+        if (valid && loop.has_break) {
+            if (!has_exit) {
+                if (place_count != 0) memcpy(false_unavailable, break_unavailable,
+                    place_count * sizeof(*false_unavailable));
+                if (local_count != 0) memcpy(false_initialized, break_initialized,
+                    local_count * sizeof(*false_initialized));
+            } else {
+                join_states(false_unavailable, false_unavailable, break_unavailable,
+                    place_count);
+                intersect_states(false_initialized, false_initialized,
+                    break_initialized, local_count);
+            }
+            has_exit = true;
+        }
+        if (valid && has_exit) {
+            if (place_count != 0) memcpy(unavailable, false_unavailable,
+                place_count * sizeof(*unavailable));
+            if (local_count != 0) memcpy(analysis->initialized, false_initialized,
+                local_count * sizeof(*false_initialized));
+        }
+        *reachable = valid && has_exit;
+    }
+    analysis->diagnostics = diagnostics;
+    if (local_count != 0) {
+        memcpy(analysis->introduced, entry_introduced,
+            local_count * sizeof(*entry_introduced));
+        memcpy(analysis->introduction_depths, entry_depths,
+            local_count * sizeof(*entry_depths));
+    }
+    free(entry_unavailable); free(header_unavailable); free(next_unavailable);
+    free(break_unavailable); free(back_unavailable); free(false_unavailable);
+    free(entry_initialized); free(header_initialized); free(next_initialized);
+    free(break_initialized); free(back_initialized); free(false_initialized);
+    free(entry_introduced); free(entry_depths);
+    return valid;
+}
+
 static bool analyze_branches(Ownership *analysis, SolIrExpressionId left_id,
     SolIrExpressionId right_id, bool *available, bool *reachable) {
     size_t count = analysis->ir->place_count;
@@ -560,7 +823,7 @@ static bool analyze_match(Ownership *analysis, const SolIrExpression *expression
     return valid;
 }
 
-static bool analyze_expression(Ownership *analysis, SolIrExpressionId id,
+static bool analyze_expression_inner(Ownership *analysis, SolIrExpressionId id,
     bool *unavailable, SolAccessMode access, bool *reachable) {
     if (id >= analysis->ir->expression_count) {
         return ownership_internal(analysis, (SolSpan){0},
@@ -755,6 +1018,31 @@ call_complete:
                 } else if (statement->kind == SOL_IR_STATEMENT_MODIFY) {
                     valid_statement = analyze_modify(analysis, statement,
                         unavailable, reachable);
+                } else if (statement->kind == SOL_IR_STATEMENT_LOOP
+                    || statement->kind == SOL_IR_STATEMENT_WHILE) {
+                    valid_statement = analyze_loop(analysis, statement,
+                        unavailable, reachable);
+                } else if (statement->kind == SOL_IR_STATEMENT_BREAK
+                    || statement->kind == SOL_IR_STATEMENT_CONTINUE) {
+                    if (analysis->loop == NULL) {
+                        valid_statement = ownership_internal(analysis,
+                            statement->span,
+                            "loop exit appears outside a loop");
+                    } else {
+                        if (statement->kind == SOL_IR_STATEMENT_BREAK) {
+                            join_edge(analysis,
+                                analysis->loop->break_unavailable,
+                                analysis->loop->break_initialized,
+                                &analysis->loop->has_break, unavailable);
+                        } else {
+                            join_edge(analysis,
+                                analysis->loop->back_unavailable,
+                                analysis->loop->back_initialized,
+                                &analysis->loop->has_back, unavailable);
+                        }
+                        *reachable = false;
+                        valid_statement = true;
+                    }
                 } else {
                     valid_statement = analyze_expression(analysis,
                         statement->expression, unavailable, SOL_ACCESS_OWNED, reachable);

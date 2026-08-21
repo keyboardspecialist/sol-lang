@@ -193,6 +193,7 @@ static void test_type_declaration_relocation(void) {
     CHECK(write_text_file(second_path,
         "module second\nfunction seed(value: Int64) -> Int64 "
         "{ var pending: Int64 var copy = value modify copy { copy += 1 } "
+        "while copy < 3 { copy += 1 continue } loop { break } "
         "region scratch { let observed = copy } return copy }\n"));
 
     SolPackage package;
@@ -242,6 +243,9 @@ static void test_type_declaration_relocation(void) {
     size_t typed_vars = 0;
     size_t compound_assignments = 0;
     size_t modifies = 0;
+    size_t loops = 0;
+    size_t whiles = 0;
+    size_t exits = 0;
     for (size_t index = 0; index < package.syntax.statement_count; ++index) {
         const SolStatement *statement = &package.syntax.statements[index];
         if (statement->kind == SOL_STATEMENT_VAR
@@ -258,11 +262,30 @@ static void test_type_declaration_relocation(void) {
             ++modifies;
             CHECK(statement->as.modify.target < package.syntax.expression_count);
             CHECK(statement->as.modify.body < package.syntax.expression_count);
+        } else if (statement->kind == SOL_STATEMENT_LOOP
+            || statement->kind == SOL_STATEMENT_WHILE) {
+            loops += statement->kind == SOL_STATEMENT_LOOP;
+            whiles += statement->kind == SOL_STATEMENT_WHILE;
+            CHECK(statement->as.loop_statement.body < package.syntax.expression_count);
+            CHECK(statement->as.loop_statement.body != SOL_AST_NONE);
+            if (statement->kind == SOL_STATEMENT_LOOP) {
+                CHECK(statement->as.loop_statement.condition == SOL_AST_NONE);
+            } else {
+                CHECK(statement->as.loop_statement.condition
+                    < package.syntax.expression_count);
+            }
+        } else if (statement->kind == SOL_STATEMENT_BREAK
+            || statement->kind == SOL_STATEMENT_CONTINUE) {
+            ++exits;
+            CHECK(statement->as.expression == SOL_AST_NONE);
         }
     }
     CHECK(typed_vars == 1);
-    CHECK(compound_assignments == 1);
+    CHECK(compound_assignments == 2);
     CHECK(modifies == 1);
+    CHECK(loops == 1);
+    CHECK(whiles == 1);
+    CHECK(exits == 2);
 
     sol_diagnostics_free(&diagnostics);
     sol_package_free(&package);

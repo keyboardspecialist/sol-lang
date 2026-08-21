@@ -167,8 +167,14 @@ static bool sol_effects_collect_callable(
                     SolIrStatementId statement
                         = ir->statement_ids[
                             expression->as.block.statements.offset + index];
-                    if (ir->statements[statement].kind != SOL_IR_STATEMENT_DECLARE) {
-                        PUSH(ir->statements[statement].expression);
+                    const SolIrStatement *entry = &ir->statements[statement];
+                    if (entry->kind == SOL_IR_STATEMENT_WHILE) {
+                        PUSH(entry->condition);
+                    }
+                    if (entry->kind != SOL_IR_STATEMENT_DECLARE
+                        && entry->kind != SOL_IR_STATEMENT_BREAK
+                        && entry->kind != SOL_IR_STATEMENT_CONTINUE) {
+                        PUSH(entry->expression);
                     }
                 }
                 break;

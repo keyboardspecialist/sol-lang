@@ -126,6 +126,10 @@ typedef enum {
     SOL_STATEMENT_EXPRESSION,
     SOL_STATEMENT_REGION,
     SOL_STATEMENT_MODIFY,
+    SOL_STATEMENT_LOOP,
+    SOL_STATEMENT_WHILE,
+    SOL_STATEMENT_BREAK,
+    SOL_STATEMENT_CONTINUE,
 } SolStatementKind;
 
 typedef struct {
@@ -151,6 +155,10 @@ typedef struct {
             SolExprId target;
             SolExprId body;
         } modify;
+        struct {
+            SolExprId condition;
+            SolExprId body;
+        } loop_statement;
         SolExprId expression;
     } as;
 } SolStatement;

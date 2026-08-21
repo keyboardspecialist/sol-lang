@@ -2031,6 +2031,48 @@ static void test_region_types(void) {
     free_compilation(&compilation);
 }
 
+static void test_loop_types_and_reachability(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module loop_types\n"
+        "function after_loop() -> Int64 { loop { break } return 1 }\n"
+        "function after_while(flag: Bool) -> Int64 { while flag { continue } return 2 }\n"
+        "function nested() -> Int64 { loop { loop { break } continue } }\n"
+        "function break_condition() -> Int64 { while { break } {} return 4 }\n"
+        "function continue_condition() -> Int64 { while { continue } {} return 5 }\n"
+        "function unreachable(flag: Bool) -> Int64 { loop { loop {} "
+        "if flag { break } else { () } } return 3 }\n"));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module bad_loop_types\n"
+        "function condition() -> () { while 1 {} }\n"
+        "function while_body() -> () { while true { 1 } }\n"
+        "function loop_body() -> () { loop { 1 } }\n"));
+    CHECK(has_diagnostic(&compilation, "SOL-TYPE-003"));
+    CHECK(diagnostic_count(&compilation, "SOL-TYPE-002") == 2);
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module malformed_loop_type\nfunction run() -> () { while true {} }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    for (SolStatementId statement = 0;
+        statement < compilation.syntax.statement_count;
+        ++statement) {
+        if (compilation.syntax.statements[statement].kind == SOL_STATEMENT_WHILE) {
+            compilation.syntax.statements[statement].as.loop_statement.condition
+                = SOL_AST_NONE;
+        }
+    }
+    CHECK(!rerun_typecheck(&compilation));
+    CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-003"));
+    free_compilation(&compilation);
+}
+
 static void test_bounded_mutation_types(void) {
     TestCompilation compilation;
     CHECK(compile_source(&compilation,
@@ -2127,6 +2169,7 @@ int main(void) {
     test_runtime_identity_equality_rejected();
     test_access_modes_are_exact();
     test_region_types();
+    test_loop_types_and_reachability();
     test_bounded_mutation_types();
     test_mutable_local_types_and_targets();
     if (failures != 0) {

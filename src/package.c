@@ -488,6 +488,15 @@ static void sol_package_relocate_arenas(SolSyntaxTree *tree, SolArenaOffsets o, 
                 entry->as.modify.target, o.expressions);
             entry->as.modify.body = sol_relocate_id(
                 entry->as.modify.body, o.expressions);
+        } else if (entry->kind == SOL_STATEMENT_LOOP
+            || entry->kind == SOL_STATEMENT_WHILE) {
+            entry->as.loop_statement.condition = sol_relocate_id(
+                entry->as.loop_statement.condition, o.expressions);
+            entry->as.loop_statement.body = sol_relocate_id(
+                entry->as.loop_statement.body, o.expressions);
+        } else if (entry->kind == SOL_STATEMENT_BREAK
+            || entry->kind == SOL_STATEMENT_CONTINUE) {
+            /* Payloadless exits have no arena references to relocate. */
         } else {
             entry->as.expression = sol_relocate_id(entry->as.expression, o.expressions);
         }

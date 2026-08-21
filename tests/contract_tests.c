@@ -887,6 +887,21 @@ static void test_regions_forbidden_in_predicates(void) {
     free_compilation(&compilation);
 }
 
+static void test_loops_forbidden_in_predicates(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module loop_contract\n"
+        "function bad() -> Bool requires { loop { break } true } { return true }\n"));
+    CHECK(sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module loop_refinement\n"
+        "type Bad = refined Int64 where loop { break }\n"));
+    CHECK(sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+}
+
 static void test_mutation_forbidden_in_predicates(void) {
     TestCompilation compilation;
     CHECK(compile_source(&compilation,
@@ -944,6 +959,7 @@ int main(void) {
     test_refinement_contracts_and_distinct_construction();
     test_function_valued_distinct_construction();
     test_regions_forbidden_in_predicates();
+    test_loops_forbidden_in_predicates();
     test_mutation_forbidden_in_predicates();
     if (failures != 0) {
         fprintf(stderr, "%d contract test failure(s)\n", failures);

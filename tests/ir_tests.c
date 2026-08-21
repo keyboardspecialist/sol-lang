@@ -169,7 +169,8 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
         const SolIrStatement *a = &left->statements[index];
         const SolIrStatement *b = &right->statements[index];
         if (a->kind != b->kind || a->local != b->local || a->target != b->target
-            || a->expression != b->expression || a->span.start != b->span.start
+            || a->expression != b->expression || a->condition != b->condition
+            || a->span.start != b->span.start
             || a->span.end != b->span.end
             || a->region_label_span.start != b->region_label_span.start
             || a->region_label_span.end != b->region_label_span.end
@@ -2314,7 +2315,8 @@ static void test_exhaustive_validation_domains(void) {
         "function propagated(value: Option<Int64>) -> Option<Int64> "
         "{ let item = value? return some(item) }\n"
         "function boolean(value: Bool) -> Int64 { return match value "
-        "{ true => 1 false => 0 } }\n");
+        "{ true => 1 false => 0 } }\n"
+        "function loops(flag: Bool) -> () { while flag { continue } loop { break } }\n");
     CHECK(compiled);
     if (!compiled) {
         sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
@@ -2370,7 +2372,7 @@ static void test_exhaustive_validation_domains(void) {
     CHECK(generic_call != SOL_IR_NONE && builtin_call != SOL_IR_NONE
         && method_call != SOL_IR_NONE);
     bool expression_kinds[SOL_IR_EXPR_BOUND_OPERATION + 1] = {false};
-    bool statement_kinds[SOL_IR_STATEMENT_MODIFY + 1] = {false};
+    bool statement_kinds[SOL_IR_STATEMENT_CONTINUE + 1] = {false};
     bool pattern_kinds[SOL_IR_PATTERN_VARIANT + 1] = {false};
     for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
         SolIrExpressionKind kind = compilation.ir.expressions[index].kind;
@@ -2381,8 +2383,10 @@ static void test_exhaustive_validation_domains(void) {
     }
     for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
         SolIrStatementKind kind = compilation.ir.statements[index].kind;
-        CHECK((int)kind >= 0 && kind <= SOL_IR_STATEMENT_MODIFY);
-        if ((int)kind >= 0 && kind <= SOL_IR_STATEMENT_MODIFY) statement_kinds[kind] = true;
+        CHECK((int)kind >= 0 && kind <= SOL_IR_STATEMENT_CONTINUE);
+        if ((int)kind >= 0 && kind <= SOL_IR_STATEMENT_CONTINUE) {
+            statement_kinds[kind] = true;
+        }
     }
     for (size_t index = 0; index < compilation.ir.arm_count; ++index) {
         SolIrPatternKind kind = compilation.ir.arms[index].kind;
@@ -2392,7 +2396,7 @@ static void test_exhaustive_validation_domains(void) {
     for (size_t kind = 0; kind <= SOL_IR_EXPR_BOUND_OPERATION; ++kind) {
         CHECK(expression_kinds[kind]);
     }
-    for (size_t kind = 0; kind <= SOL_IR_STATEMENT_MODIFY; ++kind) {
+    for (size_t kind = 0; kind <= SOL_IR_STATEMENT_CONTINUE; ++kind) {
         CHECK(statement_kinds[kind]);
     }
     for (size_t kind = 0; kind <= SOL_IR_PATTERN_VARIANT; ++kind) {
@@ -2624,6 +2628,89 @@ static void test_exhaustive_validation_domains(void) {
     free_compilation(&compilation);
 }
 
+static void test_loop_ir_and_ownership(void) {
+    TestCompilation compilation;
+    CHECK(compile_ir(&compilation,
+        "module loop_ir\n"
+        "function count() -> Int64 { var n = 0 while n < 3 { n += 1 } return n }\n"
+        "function initialized() -> Int64 { var value: Int64 loop { value = 7 break } "
+            "return value }\n"
+        "function nested() -> Int64 { var value = 0 loop { loop { break } "
+            "value = 9 break } return value }\n"
+        "function forever() -> Int64 effects { diverge } { loop {} }\n"
+        "function never_condition() -> Int64 effects { diverge } { var value: Int64 "
+            "while { loop {} } {} return value }\n"));
+    SolIrStatement *loop = NULL;
+    SolIrStatement *while_statement = NULL;
+    SolIrStatement *exit = NULL;
+    SolIrStatement *outside = NULL;
+    for (size_t index = 0; index < compilation.ir.statement_count; ++index) {
+        SolIrStatement *statement = &compilation.ir.statements[index];
+        if (statement->kind == SOL_IR_STATEMENT_LOOP && loop == NULL) loop = statement;
+        if (statement->kind == SOL_IR_STATEMENT_WHILE) while_statement = statement;
+        if (statement->kind == SOL_IR_STATEMENT_BREAK) exit = statement;
+        if (statement->kind == SOL_IR_STATEMENT_RETURN && outside == NULL) {
+            outside = statement;
+        }
+    }
+    CHECK(loop != NULL && while_statement != NULL && exit != NULL);
+    if (loop != NULL) {
+        CHECK(loop->condition == SOL_IR_NONE && loop->local == SOL_IR_NONE
+            && loop->target == SOL_IR_NONE);
+        SolIrExpressionId saved = loop->condition;
+        loop->condition = loop->expression;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        loop->condition = saved;
+    }
+    if (while_statement != NULL) {
+        SolIrExpressionId saved = while_statement->condition;
+        while_statement->condition = while_statement->expression;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        while_statement->condition = saved;
+        saved = while_statement->expression;
+        while_statement->expression = while_statement->condition;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        while_statement->expression = saved;
+    }
+    if (exit != NULL) {
+        CHECK(exit->expression == SOL_IR_NONE && exit->condition == SOL_IR_NONE
+            && exit->target == SOL_IR_NONE && exit->local == SOL_IR_NONE);
+        exit->condition = 0;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        exit->condition = SOL_IR_NONE;
+    }
+    if (outside != NULL) {
+        SolIrStatement saved = *outside;
+        outside->kind = SOL_IR_STATEMENT_BREAK;
+        outside->expression = SOL_IR_NONE;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        *outside = saved;
+    }
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+    free_compilation(&compilation);
+
+    CHECK(!compile_ir(&compilation,
+        "module zero_iteration\n"
+        "function bad(flag: Bool) -> Int64 { var value: Int64 "
+            "while flag { value = 1 } return value }\n"));
+    CHECK(has_code(&compilation, "SOL-INITIALIZATION-001"));
+    free_compilation(&compilation);
+
+    CHECK(!compile_ir(&compilation,
+        "module loop_move\ncapability Token {}\n"
+        "function bad(value: capability Token) -> Int64 effects { diverge } "
+            "{ loop { let moved = value continue } }\n"));
+    CHECK(has_code(&compilation, "SOL-OWNERSHIP-001"));
+    free_compilation(&compilation);
+
+    CHECK(compile_ir(&compilation,
+        "module loop_restore\ncapability Token {}\n"
+        "function keep(value: capability Token) -> capability Token "
+            "authority { result derives_from value } { var slot = value "
+            "loop { slot = slot if true { break } else { continue } } return slot }\n"));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_geometric_growth();
     test_complete_ir_and_lifetime();
@@ -2645,6 +2732,7 @@ int main(void) {
     test_place_representation_and_validation();
     test_projected_ownership();
     test_exhaustive_validation_domains();
+    test_loop_ir_and_ownership();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

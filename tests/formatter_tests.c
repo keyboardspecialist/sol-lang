@@ -382,6 +382,33 @@ static void test_projected_mutation_formatting(void) {
     sol_formatted_free(&formatted);
 }
 
+static void test_loop_formatting(void) {
+    static const char source[] =
+        "module loops\nfunction run(ready:Bool)->(){\n"
+        "while ready{\ncontinue\n}\nloop{\nwhile ready{break}\nbreak\n}\n}\n";
+    static const char expected[] =
+        "module loops\n"
+        "function run(ready: Bool) -> () {\n"
+        "    while ready {\n"
+        "        continue\n"
+        "    }\n"
+        "    loop {\n"
+        "        while ready { break }\n"
+        "        break\n"
+        "    }\n"
+        "}\n";
+    SolFormatted formatted;
+    SolDiagnostics diagnostics;
+    sol_formatted_init(&formatted);
+    sol_diagnostics_init(&diagnostics);
+    CHECK(format_text(source, &formatted, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    check_output(&formatted, expected);
+    check_second_pass(&formatted);
+    sol_diagnostics_free(&diagnostics);
+    sol_formatted_free(&formatted);
+}
+
 static void test_construct_golden_formatting(void) {
     static const char source_text[] =
         "module constructs\n"
@@ -439,6 +466,7 @@ int main(void) {
     test_access_qualifiers();
     test_region_formatting();
     test_projected_mutation_formatting();
+    test_loop_formatting();
     test_construct_golden_formatting();
 
     if (failures != 0) {

@@ -2522,6 +2522,30 @@ static void test_region_effects(void) {
     free_compilation(&compilation);
 }
 
+static void test_loop_effect_union(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module loop_effects\n"
+        "function condition() -> Bool effects { panic } { return true }\n"
+        "function step() -> () effects { diverge } { () }\n"
+        "function valid() -> () effects { panic, diverge } "
+        "{ while condition() { step() break } }\n"));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module bad_loop_effects\n"
+        "function condition() -> Bool effects { panic } { return true }\n"
+        "function step() -> () effects { diverge } { () }\n"
+        "function bad() -> () effects { pure } "
+        "{ while condition() { step() break } }\n"));
+    CHECK(diagnostic_count(&compilation, "SOL-EFFECT-002") == 2);
+    free_compilation(&compilation);
+}
+
 static void test_assignment_rhs_effects(void) {
     TestCompilation compilation;
     CHECK(compile_source(&compilation,
@@ -2618,6 +2642,7 @@ int main(void) {
     test_distinct_implementation_and_function_representation();
     test_distinct_borrowed_function_signatures();
     test_region_effects();
+    test_loop_effect_union();
     test_assignment_rhs_effects();
     test_bounded_mutation_effects();
     if (failures != 0) {

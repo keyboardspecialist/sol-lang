@@ -6,7 +6,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef enum { FLOW_VALUE, FLOW_RETURN, FLOW_ERROR } FlowKind;
+typedef enum {
+    FLOW_VALUE, FLOW_RETURN, FLOW_BREAK, FLOW_CONTINUE, FLOW_ERROR
+} FlowKind;
 
 typedef struct {
     FlowKind kind;
@@ -550,10 +552,22 @@ static void cleanup_local(Interpreter *interpreter, Frame *frame,
     frame->authority_known[local] = false;
 }
 
+static void cleanup_binding(Interpreter *interpreter, Frame *frame,
+    SolIrLocalId local) {
+    cleanup_local(interpreter, frame, local);
+    if (local >= interpreter->request->ir->local_count
+        || !frame->registered[local]) return;
+    frame->registered[local] = false;
+    if (frame->binding_count != 0
+        && frame->binding_order[frame->binding_count - 1] == local) {
+        --frame->binding_count;
+    }
+}
+
 static void cleanup_slice(Interpreter *interpreter, SolIrSlice cleanup) {
     while (cleanup.count != 0) {
         --cleanup.count;
-        cleanup_local(interpreter, interpreter->frame,
+        cleanup_binding(interpreter, interpreter->frame,
             interpreter->request->ir->cleanup_locals[
                 cleanup.offset + cleanup.count]);
     }
@@ -1321,8 +1335,8 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
         frame.bound[local] = false;
     }
     while (frame.binding_count != 0) {
-        cleanup_local(interpreter, &frame,
-            frame.binding_order[--frame.binding_count]);
+        cleanup_binding(interpreter, &frame,
+            frame.binding_order[frame.binding_count - 1]);
     }
     free(frame.locals);
     free(frame.bound);
@@ -1718,6 +1732,77 @@ static Flow evaluate_block(Interpreter *interpreter,
                 return body;
             }
             sol_interpreter_value_free(&body.value);
+            sol_interpreter_value_free(&last.value);
+            last = flow_new(FLOW_VALUE);
+            sol_interpreter_value_unit(&last.value);
+            continue;
+        }
+        if (statement->kind == SOL_IR_STATEMENT_BREAK
+            || statement->kind == SOL_IR_STATEMENT_CONTINUE) {
+            sol_interpreter_value_free(&last.value);
+            cleanup_slice(interpreter, expression->as.block.cleanup);
+            return flow_new(statement->kind == SOL_IR_STATEMENT_BREAK
+                ? FLOW_BREAK : FLOW_CONTINUE);
+        }
+        if (statement->kind == SOL_IR_STATEMENT_LOOP
+            || statement->kind == SOL_IR_STATEMENT_WHILE) {
+            Flow loop = flow_new(FLOW_VALUE);
+            sol_interpreter_value_unit(&loop.value);
+            for (;;) {
+                if (statement->kind == SOL_IR_STATEMENT_WHILE) {
+                    sol_interpreter_value_free(&loop.value);
+                    loop = evaluate(interpreter, statement->condition);
+                    if (loop.kind == FLOW_BREAK) {
+                        sol_interpreter_value_free(&loop.value);
+                        loop = flow_new(FLOW_VALUE);
+                        sol_interpreter_value_unit(&loop.value);
+                        break;
+                    }
+                    if (loop.kind == FLOW_CONTINUE) {
+                        sol_interpreter_value_free(&loop.value);
+                        loop = flow_new(FLOW_VALUE);
+                        sol_interpreter_value_unit(&loop.value);
+                        continue;
+                    }
+                    if (loop.kind != FLOW_VALUE) break;
+                    if (loop.value.kind != SOL_INTERPRETER_VALUE_BOOL) {
+                        sol_interpreter_value_free(&loop.value);
+                        diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT,
+                            statement->span, "while condition is not Bool");
+                        loop = flow_new(FLOW_ERROR);
+                        break;
+                    }
+                    bool condition = loop.value.as.boolean;
+                    sol_interpreter_value_free(&loop.value);
+                    if (!condition) {
+                        loop = flow_new(FLOW_VALUE);
+                        sol_interpreter_value_unit(&loop.value);
+                        break;
+                    }
+                } else {
+                    sol_interpreter_value_free(&loop.value);
+                }
+                loop = evaluate(interpreter, statement->expression);
+                if (loop.kind == FLOW_BREAK) {
+                    sol_interpreter_value_free(&loop.value);
+                    loop = flow_new(FLOW_VALUE);
+                    sol_interpreter_value_unit(&loop.value);
+                    break;
+                }
+                if (loop.kind == FLOW_CONTINUE || loop.kind == FLOW_VALUE) {
+                    sol_interpreter_value_free(&loop.value);
+                    loop = flow_new(FLOW_VALUE);
+                    sol_interpreter_value_unit(&loop.value);
+                    continue;
+                }
+                break;
+            }
+            if (loop.kind != FLOW_VALUE) {
+                sol_interpreter_value_free(&last.value);
+                cleanup_slice(interpreter, expression->as.block.cleanup);
+                return loop;
+            }
+            sol_interpreter_value_free(&loop.value);
             sol_interpreter_value_free(&last.value);
             last = flow_new(FLOW_VALUE);
             sol_interpreter_value_unit(&last.value);

@@ -134,6 +134,55 @@ static void test_bounded_statement_resolution(void) {
     free_compilation(&compilation);
 }
 
+static void test_loop_resolution_and_validation(void) {
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation,
+        "module loop_resolution\n"
+        "function run(flag: Bool) -> () { while flag { loop { break } continue } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    size_t exits = 0;
+    SolStatementId loop = SOL_AST_NONE;
+    for (SolStatementId statement = 0;
+        statement < compilation.syntax.statement_count;
+        ++statement) {
+        SolStatementKind kind = compilation.syntax.statements[statement].kind;
+        if (kind == SOL_STATEMENT_BREAK || kind == SOL_STATEMENT_CONTINUE) ++exits;
+        if (kind == SOL_STATEMENT_LOOP) loop = statement;
+    }
+    CHECK(exits == 2);
+    CHECK(loop != SOL_AST_NONE);
+    if (loop != SOL_AST_NONE) {
+        compilation.syntax.statements[loop].as.loop_statement.condition = 0;
+        reset_hir_diagnostics(&compilation);
+        CHECK(!sol_hir_lower(&compilation.source, &compilation.syntax,
+            &compilation.hir, &compilation.diagnostics));
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    }
+    free_compilation(&compilation);
+
+    CHECK(compile_source(&compilation,
+        "module forged_exit\nfunction run() -> () { loop { break } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolStatementId exit = SOL_AST_NONE;
+    for (SolStatementId statement = 0;
+        statement < compilation.syntax.statement_count;
+        ++statement) {
+        if (compilation.syntax.statements[statement].kind == SOL_STATEMENT_BREAK) {
+            exit = statement;
+        }
+    }
+    CHECK(exit != SOL_AST_NONE);
+    if (exit != SOL_AST_NONE) {
+        SolExprId root = compilation.syntax.items[0].body;
+        compilation.syntax.expressions[root].as.block.first_statement = exit;
+        reset_hir_diagnostics(&compilation);
+        sol_hir_lower(&compilation.source, &compilation.syntax,
+            &compilation.hir, &compilation.diagnostics);
+        CHECK(has_diagnostic(&compilation, "SOL-INTERNAL-002"));
+    }
+    free_compilation(&compilation);
+}
+
 static void test_successful_resolution(void) {
     static const char text[] =
         "module resolution\n"
@@ -1097,6 +1146,7 @@ static void test_malformed_implementation_trait_span(void) {
 
 int main(void) {
     test_bounded_statement_resolution();
+    test_loop_resolution_and_validation();
     test_successful_resolution();
     test_unresolved_name();
     test_duplicate_declaration();

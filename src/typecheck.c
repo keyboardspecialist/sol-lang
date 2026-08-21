@@ -6,6 +6,11 @@
 #include <string.h>
 
 typedef struct {
+    bool saw_break;
+    bool saw_continue;
+} SolTypeLoopFrame;
+
+typedef struct {
     const SolSource *source;
     const SolSyntaxTree *syntax;
     const SolHirModule *hir;
@@ -24,7 +29,10 @@ typedef struct {
     SolContractOutcomeKind contract_outcome;
     SolType contract_result;
     SolLocalId modify_roots[256];
+    SolTypeLoopFrame loops[256];
     size_t modify_root_count;
+    size_t loop_count;
+    size_t loop_overflow;
     bool in_contract;
     bool in_old;
     bool allocation_failed;
@@ -610,11 +618,17 @@ static bool sol_type_validate(SolTypeChecker *checker) {
     }
     for (size_t index = 0; index < syntax->statement_count; ++index) {
         const SolStatement *statement = &syntax->statements[index];
-        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_MODIFY) {
+        if ((int)statement->kind < 0 || statement->kind > SOL_STATEMENT_CONTINUE) {
             sol_type_malformed(checker);
             return false;
         }
-        SolExprId value = statement->kind == SOL_STATEMENT_LET
+        SolExprId value = statement->kind == SOL_STATEMENT_LOOP
+                || statement->kind == SOL_STATEMENT_WHILE
+            ? statement->as.loop_statement.body
+            : statement->kind == SOL_STATEMENT_BREAK
+                    || statement->kind == SOL_STATEMENT_CONTINUE
+                ? SOL_AST_NONE
+            : statement->kind == SOL_STATEMENT_LET
                 || statement->kind == SOL_STATEMENT_VAR
             ? statement->as.let_statement.value
             : statement->kind == SOL_STATEMENT_ASSIGNMENT
@@ -625,8 +639,12 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                 ? statement->as.modify.body : statement->as.expression;
         bool binding = statement->kind == SOL_STATEMENT_LET
             || statement->kind == SOL_STATEMENT_VAR;
+        bool loop_exit = statement->kind == SOL_STATEMENT_BREAK
+            || statement->kind == SOL_STATEMENT_CONTINUE;
         bool uninitialized = binding && value == SOL_AST_NONE;
-        if ((!uninitialized && value >= syntax->expression_count)
+        if ((!loop_exit && !uninitialized && value >= syntax->expression_count)
+            || (loop_exit && statement->next != SOL_AST_NONE)
+            || (loop_exit && statement->as.expression != SOL_AST_NONE)
             || (binding && (uninitialized
                     ? statement->as.let_statement.type_id >= syntax->type_count
                     : statement->as.let_statement.type_id != SOL_AST_NONE))
@@ -650,6 +668,18 @@ static bool sol_type_validate(SolTypeChecker *checker) {
                 && (statement->as.modify.target >= syntax->expression_count
                     || syntax->expressions[value].kind != SOL_EXPR_BLOCK))
             || (statement->next != SOL_AST_NONE && statement->next >= syntax->statement_count)) {
+            sol_type_malformed(checker);
+            return false;
+        }
+        if ((statement->kind == SOL_STATEMENT_LOOP
+                || statement->kind == SOL_STATEMENT_WHILE)
+            && (value >= syntax->expression_count
+                || syntax->expressions[value].kind != SOL_EXPR_BLOCK
+                || (statement->kind == SOL_STATEMENT_LOOP
+                    && statement->as.loop_statement.condition != SOL_AST_NONE)
+                || (statement->kind == SOL_STATEMENT_WHILE
+                    && statement->as.loop_statement.condition
+                        >= syntax->expression_count))) {
             sol_type_malformed(checker);
             return false;
         }
@@ -4055,7 +4085,13 @@ static SolProvenanceId sol_type_block_origin(
     size_t traversed = 0;
     while (statement_id != SOL_AST_NONE && traversed++ < checker->syntax->statement_count) {
         const SolStatement *statement = &checker->syntax->statements[statement_id];
-        SolExprId value_id = statement->kind == SOL_STATEMENT_LET
+        SolExprId value_id = statement->kind == SOL_STATEMENT_LOOP
+                || statement->kind == SOL_STATEMENT_WHILE
+            ? statement->as.loop_statement.body
+            : statement->kind == SOL_STATEMENT_BREAK
+                    || statement->kind == SOL_STATEMENT_CONTINUE
+                ? SOL_AST_NONE
+            : statement->kind == SOL_STATEMENT_LET
                 || statement->kind == SOL_STATEMENT_VAR
             ? statement->as.let_statement.value
             : statement->kind == SOL_STATEMENT_ASSIGNMENT
@@ -4080,6 +4116,8 @@ static SolProvenanceId sol_type_block_origin(
                 result = SOL_PROVENANCE_NONE;
             }
             terminated = statement->kind == SOL_STATEMENT_RETURN
+                || statement->kind == SOL_STATEMENT_BREAK
+                || statement->kind == SOL_STATEMENT_CONTINUE
                 || value.kind == SOL_TYPE_NEVER;
         }
         statement_id = statement->next;
@@ -4360,7 +4398,83 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
     size_t traversed = 0;
     while (statement_id != SOL_AST_NONE && traversed++ < checker->syntax->statement_count) {
         const SolStatement *statement = &checker->syntax->statements[statement_id];
-        if (statement->kind == SOL_STATEMENT_LET
+        bool unreachable_loop_transfer = terminated && checker->loop_count != 0;
+        SolTypeLoopFrame saved_loop = unreachable_loop_transfer
+            ? checker->loops[checker->loop_count - 1] : (SolTypeLoopFrame){0};
+        if (statement->kind == SOL_STATEMENT_LOOP
+            || statement->kind == SOL_STATEMENT_WHILE) {
+            bool pushed = checker->loop_overflow == 0 && checker->loop_count < 256;
+            if (pushed) {
+                checker->loops[checker->loop_count++] = (SolTypeLoopFrame){0};
+            } else {
+                ++checker->loop_overflow;
+                sol_type_error(
+                    checker,
+                    "SOL-TYPE-007",
+                    statement->span,
+                    "nested loops exceed the limit of 256"
+                );
+            }
+            SolType condition = {.kind = SOL_TYPE_BOOL};
+            if (statement->kind == SOL_STATEMENT_WHILE) {
+                condition = sol_type_expression(
+                    checker, statement->as.loop_statement.condition
+                );
+                if (!sol_type_equal(condition, (SolType){.kind = SOL_TYPE_BOOL})) {
+                    sol_type_error(
+                        checker,
+                        "SOL-TYPE-003",
+                        checker->syntax->expressions[
+                            statement->as.loop_statement.condition
+                        ].span,
+                        "while condition must have type Bool"
+                    );
+                }
+            }
+            SolType body = sol_type_expression(
+                checker, statement->as.loop_statement.body
+            );
+            bool saw_break = pushed
+                && checker->loops[checker->loop_count - 1].saw_break;
+            if (pushed) --checker->loop_count;
+            else --checker->loop_overflow;
+            if (body.kind != SOL_TYPE_UNIT && body.kind != SOL_TYPE_NEVER
+                && body.kind != SOL_TYPE_ERROR) {
+                sol_type_error(
+                    checker,
+                    "SOL-TYPE-002",
+                    statement->span,
+                    statement->kind == SOL_STATEMENT_WHILE
+                        ? "a while body must have type Unit"
+                        : "a loop body must have type Unit"
+                );
+            }
+            if (!terminated) {
+                bool falls_through = (statement->kind == SOL_STATEMENT_WHILE
+                        && condition.kind != SOL_TYPE_NEVER)
+                    || saw_break;
+                result = falls_through
+                    ? (SolType){.kind = SOL_TYPE_UNIT}
+                    : (SolType){.kind = SOL_TYPE_NEVER};
+                terminated = !falls_through;
+            }
+        } else if (statement->kind == SOL_STATEMENT_BREAK
+            || statement->kind == SOL_STATEMENT_CONTINUE) {
+            if (checker->loop_count == 0 && checker->loop_overflow == 0) {
+                sol_type_malformed(checker);
+            } else if (!terminated && checker->loop_overflow == 0) {
+                SolTypeLoopFrame *loop = &checker->loops[checker->loop_count - 1];
+                if (statement->kind == SOL_STATEMENT_BREAK) {
+                    loop->saw_break = true;
+                } else {
+                    loop->saw_continue = true;
+                }
+            }
+            if (!terminated) {
+                result = (SolType){.kind = SOL_TYPE_NEVER};
+                terminated = true;
+            }
+        } else if (statement->kind == SOL_STATEMENT_LET
             || statement->kind == SOL_STATEMENT_VAR) {
             SolExprId initializer = statement->as.let_statement.value;
             SolType value = initializer == SOL_AST_NONE
@@ -4599,6 +4713,9 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
                 result = value;
                 terminated = value.kind == SOL_TYPE_NEVER;
             }
+        }
+        if (unreachable_loop_transfer && checker->loop_count != 0) {
+            checker->loops[checker->loop_count - 1] = saved_loop;
         }
         statement_id = statement->next;
     }

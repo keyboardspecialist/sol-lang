@@ -126,6 +126,16 @@ static void check_ast_links(const SolSyntaxTree *tree) {
         } else if (statement->kind == SOL_STATEMENT_MODIFY) {
             CHECK(statement->as.modify.target < tree->expression_count);
             CHECK(statement->as.modify.body < tree->expression_count);
+        } else if (statement->kind == SOL_STATEMENT_LOOP
+            || statement->kind == SOL_STATEMENT_WHILE) {
+            CHECK((statement->kind == SOL_STATEMENT_LOOP
+                    && statement->as.loop_statement.condition == SOL_AST_NONE)
+                || (statement->kind == SOL_STATEMENT_WHILE
+                    && statement->as.loop_statement.condition < tree->expression_count));
+            CHECK(statement->as.loop_statement.body < tree->expression_count);
+        } else if (statement->kind == SOL_STATEMENT_BREAK
+            || statement->kind == SOL_STATEMENT_CONTINUE) {
+            CHECK(statement->as.expression == SOL_AST_NONE);
         } else {
             CHECK(statement->as.expression < tree->expression_count);
         }
@@ -1748,7 +1758,7 @@ static void test_malformed_syntax_structure_rejections(void) {
         SolStatementKind kind = tree.statements[0].kind;
         tree.statements[0].kind = (SolStatementKind)-1;
         CHECK(!sol_syntax_contracts_validate(&source, &tree));
-        tree.statements[0].kind = (SolStatementKind)(SOL_STATEMENT_MODIFY + 1);
+        tree.statements[0].kind = (SolStatementKind)(SOL_STATEMENT_CONTINUE + 1);
         CHECK(!sol_syntax_contracts_validate(&source, &tree));
         tree.statements[0].kind = kind;
     }
@@ -2009,6 +2019,84 @@ static void test_projected_mutation_frontend(void) {
     sol_source_free(&source);
 }
 
+static void test_loop_statement_syntax(void) {
+    static const char valid[] =
+        "module loops\n"
+        "function run(ready: Bool) -> () { "
+        "while ready { if ready { continue } else { break } } "
+        "loop { while ready { break } break } }\n";
+    SolSource source;
+    SolTokens tokens;
+    SolDiagnostics diagnostics;
+    SolSyntaxTree tree;
+    CHECK(sol_source_from_text(&source, "loops.sol", valid));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    size_t loop_keywords = 0;
+    for (size_t index = 0; index < tokens.count; ++index) {
+        SolTokenKind kind = tokens.items[index].kind;
+        loop_keywords += kind == SOL_TOKEN_LOOP || kind == SOL_TOKEN_WHILE
+            || kind == SOL_TOKEN_BREAK || kind == SOL_TOKEN_CONTINUE;
+    }
+    CHECK(loop_keywords == 7);
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(sol_syntax_contracts_validate(&source, &tree));
+    size_t loops = 0;
+    size_t whiles = 0;
+    size_t breaks = 0;
+    size_t continues = 0;
+    for (size_t index = 0; index < tree.statement_count; ++index) {
+        const SolStatement *statement = &tree.statements[index];
+        loops += statement->kind == SOL_STATEMENT_LOOP;
+        whiles += statement->kind == SOL_STATEMENT_WHILE;
+        breaks += statement->kind == SOL_STATEMENT_BREAK;
+        continues += statement->kind == SOL_STATEMENT_CONTINUE;
+        if (statement->kind == SOL_STATEMENT_LOOP) {
+            CHECK(statement->as.loop_statement.condition == SOL_AST_NONE);
+        } else if (statement->kind == SOL_STATEMENT_WHILE) {
+            CHECK(statement->as.loop_statement.condition < tree.expression_count);
+            CHECK(tree.expressions[statement->as.loop_statement.condition].kind
+                == SOL_EXPR_PATH);
+        } else if (statement->kind == SOL_STATEMENT_BREAK
+            || statement->kind == SOL_STATEMENT_CONTINUE) {
+            CHECK(statement->next == SOL_AST_NONE);
+            CHECK(statement->as.expression == SOL_AST_NONE);
+        }
+    }
+    CHECK(loops == 1);
+    CHECK(whiles == 2);
+    CHECK(breaks == 3);
+    CHECK(continues == 1);
+    check_ast_links(&tree);
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+
+    static const char malformed[] =
+        "module bad_loops\n"
+        "function outside() -> () { break continue }\n"
+        "function payload() -> () { loop { break 1 } }\n"
+        "function nonfinal() -> () { loop { continue let value = 1 } }\n"
+        "function missing_body(ready: Bool) -> () { while ready }\n";
+    CHECK(sol_source_from_text(&source, "bad_loops.sol", malformed));
+    sol_tokens_init(&tokens);
+    sol_diagnostics_init(&diagnostics);
+    sol_syntax_tree_init(&tree);
+    CHECK(sol_lex(&source, &tokens, &diagnostics));
+    CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
+    CHECK(sol_diagnostics_has_errors(&diagnostics));
+    CHECK(diagnostics.count >= 5);
+    CHECK(!sol_syntax_contracts_validate(&source, &tree));
+    sol_syntax_tree_free(&tree);
+    sol_diagnostics_free(&diagnostics);
+    sol_tokens_free(&tokens);
+    sol_source_free(&source);
+}
+
 int main(void) {
     test_type_declaration_syntax();
     test_invalid_type_declarations_and_recovery();
@@ -2053,6 +2141,7 @@ int main(void) {
     test_region_statement_syntax();
     test_mutable_statement_syntax();
     test_projected_mutation_frontend();
+    test_loop_statement_syntax();
     if (failures != 0) {
         fprintf(stderr, "%d frontend test failure(s)\n", failures);
         return 1;
