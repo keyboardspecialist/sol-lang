@@ -4,6 +4,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "resource_internal.h"
 #include <string.h>
 
 typedef enum {
@@ -1125,13 +1126,24 @@ static Flow invoke_operation(Interpreter *interpreter,
         span, "host call")) return error;
     SolInterpreterValue borrowed;
     sol_interpreter_value_init(&borrowed);
-    const char *message = NULL;
+    SolInterpreterHostFailure failure = {0};
     bool ok = interpreter->request->host_operation(interpreter->request->host_context,
         interpreter->request->ir, callable, receiver->as.capability.root,
-        receiver->as.capability.source, arguments, argument_count, &borrowed, &message);
+        receiver->as.capability.source, arguments, argument_count, &borrowed, &failure);
     if (!ok) {
-        diagnostic(interpreter, SOL_INTERPRETER_HOST_ERROR, span, "%s",
-            message == NULL ? "host operation failed" : message);
+        if (failure.length > sizeof(failure.bytes)) {
+            diagnostic(interpreter, SOL_INTERPRETER_HOST_ERROR, span,
+                "host operation returned an invalid failure length");
+        } else if (failure.length == 0) {
+            diagnostic(interpreter, SOL_INTERPRETER_HOST_ERROR, span,
+                "host operation failed");
+        } else if (memchr(failure.bytes, '\0', failure.length) != NULL) {
+            diagnostic(interpreter, SOL_INTERPRETER_HOST_ERROR, span,
+                "host operation returned invalid failure text");
+        } else {
+            diagnostic(interpreter, SOL_INTERPRETER_HOST_ERROR, span, "%.*s",
+                (int)failure.length, failure.bytes);
+        }
         return error;
     }
     if (!value_shape_valid(&borrowed)

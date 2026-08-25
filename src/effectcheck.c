@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include "resource_internal.h"
 #include <string.h>
 
 typedef enum {
@@ -354,6 +355,10 @@ static bool sol_effect_row_append(
         if (sol_effect_atom_equal(checker, &row->atoms[index], &atom)) return true;
     }
     if (row->count == SIZE_MAX / sizeof(*row->atoms)) {
+        checker->allocation_failed = true;
+        return false;
+    }
+    if (!sol_resource_charge_arena(1)) {
         checker->allocation_failed = true;
         return false;
     }
@@ -820,6 +825,10 @@ static void sol_effect_add_edge(
             checker->allocation_failed = true;
             return;
         }
+        if (!sol_resource_charge_arena(capacity - checker->edge_capacity)) {
+            checker->allocation_failed = true;
+            return;
+        }
         SolEffectEdge *grown = realloc(checker->edges, capacity * sizeof(*checker->edges));
         if (grown == NULL) {
             checker->allocation_failed = true;
@@ -1060,6 +1069,10 @@ static bool sol_effect_append_call_atoms(
             grown_capacity *= 2;
         }
         if (grown_capacity > SIZE_MAX / sizeof(**arena)) {
+            checker->allocation_failed = true;
+            return false;
+        }
+        if (!sol_resource_charge_arena(grown_capacity - *capacity)) {
             checker->allocation_failed = true;
             return false;
         }
@@ -4283,6 +4296,13 @@ static bool sol_effect_allocate_table(SolEffectChecker *checker) {
     size_t function_count = checker->syntax->item_count;
     size_t member_count = checker->syntax->capability_member_count;
     size_t trait_method_count = checker->syntax->trait_method_count;
+    if (!sol_resource_charge_arena(function_count)
+        || !sol_resource_charge_arena(member_count)
+        || !sol_resource_charge_arena(trait_method_count)
+        || !sol_resource_charge_arena(checker->syntax->expression_count)) {
+        checker->allocation_failed = true;
+        return false;
+    }
     SolEffectRow *functions = calloc(function_count, sizeof(*functions));
     SolEffectRow *members = calloc(member_count, sizeof(*members));
     SolEffectRow *trait_methods = calloc(trait_method_count, sizeof(*trait_methods));

@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include "resource_internal.h"
 
 typedef enum {
     SOL_EXPRESSION_CONTEXT_BODY,

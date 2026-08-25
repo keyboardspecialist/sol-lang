@@ -1073,6 +1073,10 @@ static void test_exact_generic_evidence_bindings(void) {
 typedef struct {
     int calls;
     bool fail;
+    bool empty_failure;
+    bool embedded_failure;
+    bool maximum_failure;
+    size_t failure_length;
     bool malformed_cycle;
     void *special_root;
     int64_t special_value;
@@ -1082,7 +1086,7 @@ static bool host_read(void *context, const SolIr *ir,
     SolIrCallableId operation, void *root,
     const SolInterpreterValue *private_source,
     const SolInterpreterValue *arguments, size_t argument_count,
-    SolInterpreterValue *result, const char **error_message) {
+    SolInterpreterValue *result, SolInterpreterHostFailure *failure) {
     Host *host = context;
     (void)root;
     (void)private_source;
@@ -1090,7 +1094,20 @@ static bool host_read(void *context, const SolIr *ir,
     (void)argument_count;
     ++host->calls;
     if (host->fail) {
-        *error_message = "fixture host failure";
+        static const char message[] = "fixture host failure";
+        if (!host->empty_failure) {
+            memcpy(failure->bytes, message, sizeof(message) - 1);
+            failure->length = sizeof(message) - 1;
+        }
+        if (host->embedded_failure) {
+            memcpy(failure->bytes, "bad\0text", 8);
+            failure->length = 8;
+        }
+        if (host->maximum_failure) {
+            memset(failure->bytes, 'x', sizeof(failure->bytes));
+            failure->length = sizeof(failure->bytes);
+        }
+        if (host->failure_length != 0) failure->length = host->failure_length;
         return false;
     }
     if (host->malformed_cycle) {
@@ -1110,13 +1127,13 @@ static bool host_borrow_argument(void *context, const SolIr *ir,
     SolIrCallableId operation, void *root,
     const SolInterpreterValue *private_source,
     const SolInterpreterValue *arguments, size_t argument_count,
-    SolInterpreterValue *result, const char **error_message) {
+    SolInterpreterValue *result, SolInterpreterHostFailure *failure) {
     int *calls = context;
     (void)ir;
     (void)operation;
     (void)root;
     (void)private_source;
-    (void)error_message;
+    (void)failure;
     ++*calls;
     if (arguments == NULL || argument_count != 1) return false;
     *result = arguments[0];
@@ -1476,8 +1493,43 @@ static void test_capability_policy_and_malformed(void) {
     CHECK(!run(&compilation.ir, "invoke_read", &argument, 1,
         SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
         host_read, &host, &result));
-    CHECK(result.diagnostic.code == SOL_INTERPRETER_HOST_ERROR);
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_HOST_ERROR
+        && strcmp(result.diagnostic.message, "fixture host failure") == 0);
     sol_interpreter_result_free(&result);
+    host.empty_failure = true;
+    CHECK(!run(&compilation.ir, "invoke_read", &argument, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        host_read, &host, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_HOST_ERROR
+        && strcmp(result.diagnostic.message, "host operation failed") == 0);
+    sol_interpreter_result_free(&result);
+    host.empty_failure = false;
+    host.embedded_failure = true;
+    CHECK(!run(&compilation.ir, "invoke_read", &argument, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        host_read, &host, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_HOST_ERROR
+        && strcmp(result.diagnostic.message,
+            "host operation returned invalid failure text") == 0);
+    sol_interpreter_result_free(&result);
+    host.embedded_failure = false;
+    host.maximum_failure = true;
+    CHECK(!run(&compilation.ir, "invoke_read", &argument, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        host_read, &host, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_HOST_ERROR
+        && strlen(result.diagnostic.message) == SOL_INTERPRETER_HOST_FAILURE_CAPACITY);
+    sol_interpreter_result_free(&result);
+    host.maximum_failure = false;
+    host.failure_length = SOL_INTERPRETER_HOST_FAILURE_CAPACITY + 1;
+    CHECK(!run(&compilation.ir, "invoke_read", &argument, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        host_read, &host, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_HOST_ERROR
+        && strcmp(result.diagnostic.message,
+            "host operation returned an invalid failure length") == 0);
+    sol_interpreter_result_free(&result);
+    host.failure_length = 0;
     CHECK(!run(&compilation.ir, "invoke_read", &argument, 1,
         SOL_INTERPRETER_CONTRACTS_CHECK, (SolInterpreterLimits){0},
         host_read, &host, &result));

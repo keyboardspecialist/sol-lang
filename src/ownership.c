@@ -2,6 +2,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include "resource_internal.h"
 #include <string.h>
 
 typedef struct OwnershipLoop OwnershipLoop;

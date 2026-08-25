@@ -19,6 +19,19 @@ typedef enum {
 } SolCompilationOutcome;
 
 typedef struct {
+    size_t source_bytes_per_file;
+    size_t package_source_bytes;
+    size_t source_files;
+    size_t directory_depth;
+    size_t directory_entries;
+    size_t tokens;
+    size_t arena_entries;
+    size_t diagnostics;
+    size_t allocation_bytes;
+    size_t allocation_count;
+} SolCompilationLimits;
+
+typedef struct {
     size_t start;
     size_t end;
 } SolCompilationSpan;
@@ -71,6 +84,10 @@ typedef struct {
 } SolValidatedDefinitionView;
 
 SolCompilationSession *sol_compilation_create(void);
+void sol_compilation_limits_default(SolCompilationLimits *limits);
+SolCompilationSession *sol_compilation_create_with_limits(
+    const SolCompilationLimits *limits
+);
 SolCompilationOutcome sol_compilation_compile_path(
     SolCompilationSession *session,
     const char *path

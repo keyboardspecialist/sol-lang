@@ -182,6 +182,40 @@ static bool write_text_file(const char *path, const char *text) {
     return fclose(stream) == 0 && written;
 }
 
+static void test_source_identity_boundaries(void) {
+    char directory[] = "/tmp/sol-package-identity-XXXXXX";
+    CHECK(mkdtemp(directory) != NULL);
+    char source_path[sizeof(directory) + 8];
+    char alias_path[sizeof(directory) + 12];
+    snprintf(source_path, sizeof(source_path), "%s/a.sol", directory);
+    snprintf(alias_path, sizeof(alias_path), "%s/alias.sol", directory);
+    CHECK(write_text_file(source_path, "module identity\n"));
+    CHECK(symlink(source_path, alias_path) == 0);
+
+    SolPackage package;
+    SolDiagnostics diagnostics;
+    char error[256];
+    sol_package_init(&package);
+    sol_diagnostics_init(&diagnostics);
+    CHECK(!sol_package_load(&package, alias_path, &diagnostics, error, sizeof(error)));
+    CHECK(strstr(error, "not a directory or regular .sol file") != NULL);
+    sol_package_free(&package);
+    sol_diagnostics_free(&diagnostics);
+
+    CHECK(unlink(alias_path) == 0);
+    CHECK(link(source_path, alias_path) == 0);
+    sol_package_init(&package);
+    sol_diagnostics_init(&diagnostics);
+    CHECK(!sol_package_load(&package, directory, &diagnostics, error, sizeof(error)));
+    CHECK(strstr(error, "duplicate source file identity") != NULL);
+    sol_package_free(&package);
+    sol_diagnostics_free(&diagnostics);
+
+    CHECK(unlink(alias_path) == 0);
+    CHECK(unlink(source_path) == 0);
+    CHECK(rmdir(directory) == 0);
+}
+
 static void test_type_declaration_relocation(void) {
     char directory[] = "/tmp/sol-package-types-XXXXXX";
     CHECK(mkdtemp(directory) != NULL);
@@ -572,6 +606,7 @@ static void test_composite_relocation(void) {
 int main(void) {
     test_directory_load_and_boundaries();
     test_package_reuse();
+    test_source_identity_boundaries();
     test_type_declaration_relocation();
     test_composite_relocation();
     if (failures != 0) {

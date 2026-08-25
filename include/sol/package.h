@@ -35,7 +35,8 @@ void sol_package_init(SolPackage *package);
 void sol_package_free(SolPackage *package);
 
 /*
- * Loads one regular .sol file, or recursively aggregates a directory.
+ * Loads one regular .sol file, or recursively aggregates a directory. Direct
+ * symbolic-link operands are rejected and nested symbolic links are ignored.
  * The package must be initialized. Each load discards its prior state, including
  * state left by a failed load; diagnostics remain owned by the caller.
  */

@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include "resource_internal.h"
 #include <string.h>
 
 typedef struct {
@@ -956,6 +957,10 @@ static bool sol_contract_append_snapshot(
             lowerer->allocation_failed = true;
             return false;
         }
+        if (!sol_resource_charge_arena(capacity - table->snapshot_capacity)) {
+            lowerer->allocation_failed = true;
+            return false;
+        }
         SolSnapshot *grown = realloc(
             table->snapshots,
             capacity * sizeof(*table->snapshots)
@@ -994,6 +999,10 @@ static bool sol_contract_append_loop_obligation(
             ? 8 : table->loop_obligation_capacity * 2;
         if (capacity < table->loop_obligation_capacity
             || capacity > SIZE_MAX / sizeof(*table->loop_obligations)) {
+            lowerer->allocation_failed = true;
+            return false;
+        }
+        if (!sol_resource_charge_arena(capacity - table->loop_obligation_capacity)) {
             lowerer->allocation_failed = true;
             return false;
         }
@@ -1602,6 +1611,11 @@ static bool sol_contract_append_unreachable_obligation(
             lowerer->allocation_failed = true;
             return false;
         }
+        if (!sol_resource_charge_arena(
+            capacity - table->unreachable_obligation_capacity)) {
+            lowerer->allocation_failed = true;
+            return false;
+        }
         SolUnreachableObligation *grown = realloc(
             table->unreachable_obligations,
             capacity * sizeof(*table->unreachable_obligations));
@@ -1723,6 +1737,11 @@ bool sol_contract_lower(
     size_t count = syntax->contract_condition_count;
     if (count > SIZE_MAX / sizeof(*contracts->obligations)
         || syntax->expression_count > SIZE_MAX / sizeof(*contracts->expression_snapshots)) {
+        return false;
+    }
+    if (!sol_resource_charge_arena(count)
+        || !sol_resource_charge_arena(syntax->expression_count)) {
+        lowerer.allocation_failed = true;
         return false;
     }
     contracts->obligations = calloc(count, sizeof(*contracts->obligations));

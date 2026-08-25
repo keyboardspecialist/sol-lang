@@ -13,6 +13,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "resource_internal.h"
 #include <string.h>
 
 typedef enum {
@@ -34,6 +35,7 @@ struct SolCompilationSession {
     SolEffectTable effects;
     SolContractTable contracts;
     SolValidatedIr *validated;
+    SolResourceBudget resources;
     SolSessionState state;
     SolCompilationOutcome outcome;
     char error[512];
@@ -63,6 +65,7 @@ static SolCompilationOutcome sol_compilation_finish(
     SolCompilationSession *session,
     SolCompilationOutcome outcome
 ) {
+    sol_resource_end(&session->resources);
     session->outcome = outcome;
     session->state = outcome == SOL_COMPILATION_SUCCEEDED
         ? SOL_SESSION_COMPILED : SOL_SESSION_FAILED;
@@ -70,7 +73,10 @@ static SolCompilationOutcome sol_compilation_finish(
 }
 
 static void sol_compilation_set_resource_error(SolCompilationSession *session) {
-    if (session->error[0] == '\0') {
+    const char *failure = sol_resource_failure(&session->resources);
+    if (failure != NULL) {
+        snprintf(session->error, sizeof(session->error), "%s", failure);
+    } else if (session->error[0] == '\0') {
         snprintf(session->error, sizeof(session->error),
             "compilation stopped because the compiler ran out of memory");
     }
@@ -91,7 +97,8 @@ static SolCompilationOutcome sol_compilation_phase_outcome(
     SolCompilationSession *session,
     bool completed
 ) {
-    if (session->diagnostics.allocation_failed
+    if (sol_resource_failure(&session->resources) != NULL
+        || session->diagnostics.allocation_failed
         || sol_compilation_has_internal_diagnostic(&session->diagnostics)) {
         return SOL_COMPILATION_RESOURCE_FAILED;
     }
@@ -134,25 +141,21 @@ static SolCompilationOutcome sol_compilation_run(SolCompilationSession *session)
     }
     SolCompilationOutcome outcome = sol_compilation_phase_outcome(session, completed);
     if (outcome != SOL_COMPILATION_SUCCEEDED) return outcome;
-
     completed = sol_type_check(
         &package->source, &package->syntax, &session->hir, &session->types,
         diagnostics);
     outcome = sol_compilation_phase_outcome(session, completed);
     if (outcome != SOL_COMPILATION_SUCCEEDED) return outcome;
-
     completed = sol_effect_check(
         &package->source, &package->syntax, &session->hir, &session->types,
         &session->effects, diagnostics);
     outcome = sol_compilation_phase_outcome(session, completed);
     if (outcome != SOL_COMPILATION_SUCCEEDED) return outcome;
-
     completed = sol_contract_lower(
         &package->source, &package->syntax, &session->hir, &session->types,
         &session->effects, &session->contracts, diagnostics);
     outcome = sol_compilation_phase_outcome(session, completed);
     if (outcome != SOL_COMPILATION_SUCCEEDED) return outcome;
-
     completed = sol_ir_lower_scoped(
         &package->source, &package->syntax, &session->hir, &session->types,
         &session->effects, &session->contracts,
@@ -163,6 +166,15 @@ static SolCompilationOutcome sol_compilation_run(SolCompilationSession *session)
 }
 
 SolCompilationSession *sol_compilation_create(void) {
+    SolCompilationLimits limits;
+    sol_compilation_limits_default(&limits);
+    return sol_compilation_create_with_limits(&limits);
+}
+
+SolCompilationSession *sol_compilation_create_with_limits(
+    const SolCompilationLimits *limits
+) {
+    if (limits == NULL) return NULL;
     SolCompilationSession *session = calloc(1, sizeof(*session));
     if (session == NULL) return NULL;
     sol_package_init(&session->package);
@@ -174,6 +186,7 @@ SolCompilationSession *sol_compilation_create(void) {
     session->frontend_live = true;
     session->state = SOL_SESSION_EMPTY;
     session->outcome = SOL_COMPILATION_INVALID_ARGUMENT;
+    session->resources.limits = *limits;
     return session;
 }
 
@@ -184,11 +197,11 @@ static bool sol_compilation_begin(SolCompilationSession *session) {
             "compilation session has already been used");
         return false;
     }
+    sol_resource_begin(&session->resources);
     session->validated = malloc(sizeof(*session->validated));
     if (session->validated == NULL) {
         sol_compilation_finish(session, SOL_COMPILATION_RESOURCE_FAILED);
-        snprintf(session->error, sizeof(session->error),
-            "compilation stopped because the compiler ran out of memory");
+        sol_compilation_set_resource_error(session);
         return false;
     }
     sol_ir_init(&session->validated->ir);
@@ -217,7 +230,8 @@ SolCompilationOutcome sol_compilation_compile_path(
         &session->package, path, &session->diagnostics, session->error,
         sizeof(session->error)
     )) {
-        SolCompilationOutcome outcome = session->diagnostics.allocation_failed
+        SolCompilationOutcome outcome = sol_resource_failure(&session->resources) != NULL
+            || session->diagnostics.allocation_failed
             || sol_compilation_has_internal_diagnostic(&session->diagnostics)
             ? SOL_COMPILATION_RESOURCE_FAILED : SOL_COMPILATION_LOAD_FAILED;
         if (outcome == SOL_COMPILATION_RESOURCE_FAILED) {
@@ -300,6 +314,10 @@ SolCompilationOutcome sol_compilation_compile_source(
     }
     if (!sol_compilation_begin(session)) {
         return session->outcome;
+    }
+    if (!sol_resource_charge_file() || !sol_resource_charge_source(length)) {
+        sol_compilation_set_resource_error(session);
+        return sol_compilation_finish(session, SOL_COMPILATION_RESOURCE_FAILED);
     }
     char *text = malloc(length + 1);
     if (text != NULL) {

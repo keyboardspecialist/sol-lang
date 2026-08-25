@@ -3,6 +3,7 @@
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include "resource_internal.h"
 #include <string.h>
 
 void sol_diagnostics_init(SolDiagnostics *diagnostics) {
@@ -22,6 +23,10 @@ bool sol_diagnostics_add(
     const char *format,
     ...
 ) {
+    if (!sol_resource_charge_diagnostic()) {
+        diagnostics->allocation_failed = true;
+        return false;
+    }
     if (diagnostics->count == diagnostics->capacity) {
         if (diagnostics->capacity > SIZE_MAX / 2) {
             diagnostics->allocation_failed = true;

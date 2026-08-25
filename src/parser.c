@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include "resource_internal.h"
 #include <string.h>
 
 typedef enum {
@@ -156,6 +157,10 @@ static bool sol_parser_add_item(SolParser *parser, SolSyntaxItem item) {
             parser->allocation_failed = true;
             return false;
         }
+        if (!sol_resource_charge_arena(capacity - parser->tree->item_capacity)) {
+            parser->allocation_failed = true;
+            return false;
+        }
         SolSyntaxItem *items = realloc(parser->tree->items, capacity * sizeof(*items));
         if (items == NULL) {
             parser->allocation_failed = true;
@@ -180,6 +185,10 @@ static void *sol_parser_grow(
     }
     size_t new_capacity = *capacity == 0 ? 32 : *capacity * 2;
     if (new_capacity > SIZE_MAX / element_size) {
+        parser->allocation_failed = true;
+        return NULL;
+    }
+    if (!sol_resource_charge_arena(new_capacity - *capacity)) {
         parser->allocation_failed = true;
         return NULL;
     }

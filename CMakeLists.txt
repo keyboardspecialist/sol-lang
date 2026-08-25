@@ -40,6 +40,7 @@ add_library(sol_compiler STATIC
     src/ownership.c
     src/package.c
     src/parser.c
+    src/resource.c
     src/source.c
     src/syntax.c
     src/typecheck.c

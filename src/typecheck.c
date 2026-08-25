@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include "resource_internal.h"
 #include <string.h>
 
 typedef struct {
@@ -1708,6 +1709,10 @@ static SolProvenanceId sol_type_intern_provenance(
             checker->allocation_failed = true;
             return SOL_PROVENANCE_NONE;
         }
+        if (!sol_resource_charge_arena(capacity - table->provenance_capacity)) {
+            checker->allocation_failed = true;
+            return SOL_PROVENANCE_NONE;
+        }
         SolProvenanceSet *grown = realloc(
             table->provenances,
             capacity * sizeof(*table->provenances)
@@ -1736,6 +1741,10 @@ static SolProvenanceId sol_type_intern_provenance(
             capacity *= 2;
         }
         if (capacity > SIZE_MAX / sizeof(*table->provenance_roots)) {
+            checker->allocation_failed = true;
+            return SOL_PROVENANCE_NONE;
+        }
+        if (!sol_resource_charge_arena(capacity - table->provenance_root_capacity)) {
             checker->allocation_failed = true;
             return SOL_PROVENANCE_NONE;
         }
@@ -2432,12 +2441,29 @@ static SolType sol_type_intern_function(
             return (SolType){.kind = SOL_TYPE_FUNCTION_SIGNATURE, .definition = index};
         }
     }
+    if (!sol_resource_charge_arena(candidate.parameter_count)
+        || !sol_resource_charge_arena(candidate.parameter_count)
+        || !sol_resource_charge_arena(candidate.effects.count)) {
+        checker->allocation_failed = true;
+        free(candidate.parameters);
+        free(candidate.accesses);
+        free(candidate.effects.atoms);
+        return (SolType){.kind = SOL_TYPE_ERROR};
+    }
     if (checker->types->function_type_count == checker->types->function_type_capacity) {
         size_t capacity = checker->types->function_type_capacity == 0
             ? 8
             : checker->types->function_type_capacity * 2;
         if (capacity < checker->types->function_type_capacity
             || capacity > SIZE_MAX / sizeof(*checker->types->function_types)) {
+            checker->allocation_failed = true;
+            free(candidate.parameters);
+            free(candidate.accesses);
+            free(candidate.effects.atoms);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        if (!sol_resource_charge_arena(
+            capacity - checker->types->function_type_capacity)) {
             checker->allocation_failed = true;
             free(candidate.parameters);
             free(candidate.accesses);
@@ -2531,6 +2557,12 @@ static SolType sol_type_intern_application(
             free(arguments);
             return (SolType){.kind = SOL_TYPE_ERROR};
         }
+        if (!sol_resource_charge_arena(
+            capacity - checker->types->type_application_capacity)) {
+            checker->allocation_failed = true;
+            free(arguments);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
         SolTypeApplication *grown = realloc(
             checker->types->type_applications,
             capacity * sizeof(*checker->types->type_applications)
@@ -2562,6 +2594,12 @@ static SolType sol_type_intern_application(
             capacity *= 2;
         }
         if (capacity > SIZE_MAX / sizeof(*checker->types->type_application_arguments)) {
+            checker->allocation_failed = true;
+            free(arguments);
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        if (!sol_resource_charge_arena(
+            capacity - checker->types->type_application_argument_capacity)) {
             checker->allocation_failed = true;
             free(arguments);
             return (SolType){.kind = SOL_TYPE_ERROR};
@@ -3377,6 +3415,10 @@ static bool sol_type_record_coercion(
             checker->allocation_failed = true;
             return false;
         }
+        if (!sol_resource_charge_arena(capacity - types->function_coercion_capacity)) {
+            checker->allocation_failed = true;
+            return false;
+        }
         SolFunctionCoercion *grown = realloc(
             types->function_coercions,
             capacity * sizeof(*types->function_coercions)
@@ -3507,6 +3549,19 @@ static bool sol_type_allocate(SolTypeChecker *checker) {
         || checker->syntax->type_count > SIZE_MAX / sizeof(*checker->types->declared_types)) {
         return false;
     }
+#define CHARGE_MANY(count, copies) \
+    do { for (size_t charge = 0; charge < (copies); ++charge) { \
+        if (!sol_resource_charge_arena(count)) return false; \
+    } } while (0)
+    CHARGE_MANY(expression_count, 11);
+    CHARGE_MANY(local_count, 3);
+    CHARGE_MANY(definition_count, 3);
+    CHARGE_MANY(checker->syntax->type_count, 2);
+    CHARGE_MANY(checker->syntax->pattern_count, 2);
+    CHARGE_MANY(checker->syntax->pattern_binding_count, 2);
+    CHARGE_MANY(checker->syntax->argument_count, 1);
+    CHARGE_MANY(checker->syntax->statement_count, 2);
+#undef CHARGE_MANY
     checker->types->expressions = calloc(expression_count, sizeof(*checker->types->expressions));
     checker->types->expression_capability_origins = malloc(
         expression_count * sizeof(*checker->types->expression_capability_origins)
@@ -3796,6 +3851,11 @@ static SolType sol_type_intern_variant_constructor(
             : checker->types->variant_constructor_capacity * 2;
         if (capacity < checker->types->variant_constructor_capacity
             || capacity > SIZE_MAX / sizeof(*checker->types->variant_constructors)) {
+            checker->allocation_failed = true;
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        if (!sol_resource_charge_arena(
+            capacity - checker->types->variant_constructor_capacity)) {
             checker->allocation_failed = true;
             return (SolType){.kind = SOL_TYPE_ERROR};
         }
@@ -5275,6 +5335,11 @@ static bool sol_type_record_call_instantiation(
             capacity *= 2;
         }
         if (capacity > SIZE_MAX / sizeof(*table->call_instantiation_arguments)) {
+            checker->allocation_failed = true;
+            return false;
+        }
+        if (!sol_resource_charge_arena(
+            capacity - table->call_instantiation_argument_capacity)) {
             checker->allocation_failed = true;
             return false;
         }

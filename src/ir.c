@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <stdlib.h>
+#include "resource_internal.h"
 #include <string.h>
 
 typedef struct {
@@ -175,6 +176,7 @@ static char *sol_ir_copy_text(const char *text, size_t length) {
 static void *sol_ir_allocate(size_t count, size_t size, bool zeroed) {
     if (count == 0) return NULL;
     if (size == 0 || count > SIZE_MAX / size) return NULL;
+    if (!sol_resource_charge_arena(count)) return NULL;
     return zeroed ? calloc(count, size) : malloc(count * size);
 }
 
@@ -209,6 +211,7 @@ static bool sol_ir_grow(
             grown_capacity *= 2;
         }
         if (grown_capacity > SIZE_MAX / size) return false;
+        if (!sol_resource_charge_arena(grown_capacity - *capacity)) return false;
         void *grown = realloc(*items, grown_capacity * size);
         if (grown == NULL) return false;
         *items = grown;

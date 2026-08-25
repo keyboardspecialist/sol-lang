@@ -35,7 +35,7 @@ static bool probe_host(void *context, const SolIr *ir,
     SolIrCallableId operation, void *root,
     const SolInterpreterValue *private_source,
     const SolInterpreterValue *arguments, size_t argument_count,
-    SolInterpreterValue *result, const char **error_message) {
+    SolInterpreterValue *result, SolInterpreterHostFailure *failure) {
     HostProbe *probe = context;
     probe->invoked = true;
     probe->escaped = ir;
@@ -45,7 +45,7 @@ static bool probe_host(void *context, const SolIr *ir,
     (void)arguments;
     (void)argument_count;
     (void)result;
-    (void)error_message;
+    (void)failure;
     return false;
 }
 
@@ -339,12 +339,90 @@ static void test_paths_and_scopes(void) {
     sol_compilation_free(session);
 }
 
+static void check_resource_limit(
+    SolCompilationLimits limits, const char *source, const char *message
+) {
+    SolCompilationSession *session = sol_compilation_create_with_limits(&limits);
+    CHECK(session != NULL);
+    CHECK(sol_compilation_compile_text(session, "limited.sol", source)
+        == SOL_COMPILATION_RESOURCE_FAILED);
+    CHECK(sol_compilation_error(session) != NULL);
+    CHECK(strstr(sol_compilation_error(session), message) != NULL);
+    SolValidatedIr *validated = NULL;
+    CHECK(sol_compilation_take_ir(session, &validated)
+        == SOL_COMPILATION_INVALID_ARGUMENT);
+    CHECK(validated == NULL);
+    sol_compilation_free(session);
+}
+
+static void test_resource_limits(void) {
+    static const char source[] =
+        "module limited\nfunction value() -> Int64 { return 1 }\n";
+    SolCompilationLimits defaults;
+    sol_compilation_limits_default(&defaults);
+    CHECK(defaults.source_bytes_per_file != 0);
+    CHECK(defaults.package_source_bytes >= defaults.source_bytes_per_file);
+    CHECK(defaults.source_files != 0);
+    CHECK(defaults.tokens != 0);
+    CHECK(defaults.arena_entries != 0);
+    CHECK(defaults.diagnostics != 0);
+    CHECK(defaults.allocation_bytes != 0);
+    CHECK(defaults.allocation_count != 0);
+    sol_compilation_limits_default(NULL);
+    CHECK(sol_compilation_create_with_limits(NULL) == NULL);
+
+    SolCompilationLimits limits = defaults;
+    limits.source_bytes_per_file = sizeof(source) - 2;
+    check_resource_limit(limits, source, "source file byte limit exceeded");
+    limits = defaults;
+    limits.package_source_bytes = sizeof(source) - 2;
+    check_resource_limit(limits, source, "package source byte limit exceeded");
+    limits = defaults;
+    limits.source_files = 0;
+    check_resource_limit(limits, source, "source file limit exceeded");
+    limits = defaults;
+    limits.tokens = 1;
+    check_resource_limit(limits, source, "token limit exceeded");
+    limits = defaults;
+    limits.arena_entries = 1;
+    check_resource_limit(limits, source, "compiler arena limit exceeded");
+    limits = defaults;
+    limits.diagnostics = 1;
+    check_resource_limit(limits, "@ @ @", "diagnostic limit exceeded");
+    limits = defaults;
+    limits.allocation_bytes = 1;
+    check_resource_limit(limits, source, "compiler allocation byte limit exceeded");
+    limits = defaults;
+    limits.allocation_count = 1;
+    check_resource_limit(limits, source, "compiler allocation count limit exceeded");
+
+    limits = defaults;
+    limits.directory_depth = 0;
+    SolCompilationSession *session = sol_compilation_create_with_limits(&limits);
+    CHECK(session != NULL);
+    CHECK(sol_compilation_compile_path(
+        session, SOL_TEST_SOURCE_DIR "/tests/packages/valid")
+        == SOL_COMPILATION_RESOURCE_FAILED);
+    CHECK(strstr(sol_compilation_error(session), "directory depth limit exceeded") != NULL);
+    sol_compilation_free(session);
+    limits = defaults;
+    limits.directory_entries = 1;
+    session = sol_compilation_create_with_limits(&limits);
+    CHECK(session != NULL);
+    CHECK(sol_compilation_compile_path(
+        session, SOL_TEST_SOURCE_DIR "/tests/packages/valid")
+        == SOL_COMPILATION_RESOURCE_FAILED);
+    CHECK(strstr(sol_compilation_error(session), "directory entry limit exceeded") != NULL);
+    sol_compilation_free(session);
+}
+
 int main(void) {
     test_text_success_and_transfer();
     test_rejections_and_failure_teardown();
     test_invalid_arguments_and_state();
     test_source_bytes_validation_and_retry();
     test_paths_and_scopes();
+    test_resource_limits();
     if (failures != 0) {
         fprintf(stderr, "%d compilation test%s failed\n",
             failures, failures == 1 ? "" : "s");

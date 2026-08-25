@@ -2,6 +2,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include "resource_internal.h"
 #include <string.h>
 
 typedef struct {
@@ -1219,6 +1220,24 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
     if (reference_capacity > SIZE_MAX / sizeof(*resolver->module->semantic_references)) {
         return false;
     }
+    size_t import_count = resolver->package_aware ? syntax->import_count : 0;
+#define CHARGE(count) do { if (!sol_resource_charge_arena(count)) return false; } while (0)
+    CHARGE(syntax->item_count);
+    CHARGE(syntax->expression_count);
+    CHARGE(syntax->expression_count);
+    CHARGE(syntax->expression_count);
+    CHARGE(syntax->type_count);
+    CHARGE(syntax->effect_count);
+    CHARGE(syntax->type_count);
+    CHARGE(syntax->item_count);
+    CHARGE(syntax->type_parameter_count);
+    CHARGE(reference_capacity);
+    CHARGE(import_count);
+    CHARGE(resolver->scope_count);
+    CHARGE(syntax->item_count);
+    CHARGE(import_count);
+    CHARGE(import_count);
+#undef CHARGE
 
     resolver->module->definition_count = syntax->item_count;
     resolver->module->resolution_count = syntax->expression_count;
@@ -1272,7 +1291,6 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
     resolver->module->item_files = malloc(
         syntax->item_count * sizeof(*resolver->module->item_files)
     );
-    size_t import_count = resolver->package_aware ? syntax->import_count : 0;
     resolver->import_targets = malloc(import_count * sizeof(*resolver->import_targets));
     resolver->import_names = malloc(import_count * sizeof(*resolver->import_names));
 
@@ -1365,6 +1383,8 @@ static bool sol_resolver_allocate(SolResolver *resolver) {
         || local_capacity > SIZE_MAX / sizeof(*resolver->bindings)) {
         return false;
     }
+    if (!sol_resource_charge_arena(local_capacity)
+        || !sol_resource_charge_arena(local_capacity)) return false;
     resolver->module->locals = calloc(local_capacity, sizeof(*resolver->module->locals));
     resolver->bindings = calloc(local_capacity, sizeof(*resolver->bindings));
     if (local_capacity != 0

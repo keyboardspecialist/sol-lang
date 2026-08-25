@@ -8,13 +8,21 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include "resource_internal.h"
 #include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 typedef struct {
-    char **items;
+    char *path;
+    SolSourceIdentity identity;
+} SolDiscoveredPath;
+
+typedef struct {
+    SolDiscoveredPath *items;
     size_t count;
     size_t capacity;
 } SolPathList;
@@ -66,21 +74,27 @@ static bool sol_package_is_source_path(const char *path) {
     return length >= 4 && memcmp(path + length - 4, ".sol", 4) == 0;
 }
 
-static bool sol_path_list_add(SolPathList *paths, char *path) {
+static bool sol_path_list_add(
+    SolPathList *paths, char *path, const struct stat *status
+) {
+    if (!sol_resource_charge_file()) return false;
     if (paths->count == paths->capacity) {
         size_t capacity = paths->capacity == 0 ? 16 : paths->capacity * 2;
         if (capacity < paths->capacity || capacity > SIZE_MAX / sizeof(*paths->items)) return false;
-        char **items = realloc(paths->items, capacity * sizeof(*items));
+        SolDiscoveredPath *items = realloc(paths->items, capacity * sizeof(*items));
         if (items == NULL) return false;
         paths->items = items;
         paths->capacity = capacity;
     }
-    paths->items[paths->count++] = path;
+    paths->items[paths->count++] = (SolDiscoveredPath){
+        .path = path,
+        .identity = {(uintmax_t)status->st_dev, (uintmax_t)status->st_ino},
+    };
     return true;
 }
 
 static void sol_path_list_free(SolPathList *paths) {
-    for (size_t index = 0; index < paths->count; ++index) free(paths->items[index]);
+    for (size_t index = 0; index < paths->count; ++index) free(paths->items[index].path);
     free(paths->items);
     memset(paths, 0, sizeof(*paths));
 }
@@ -102,17 +116,35 @@ static char *sol_package_join_path(const char *directory, const char *name) {
 }
 
 static bool sol_package_discover(
+    int descriptor,
     const char *directory,
+    const struct stat *expected,
+    size_t depth,
     SolPathList *paths,
     bool *allocation_failed,
     char *error,
     size_t error_size
 ) {
-    DIR *handle = opendir(directory);
+    if (!sol_resource_charge_directory(depth)) {
+        sol_package_error(error, error_size,
+            "package directory resource limit exceeded at '%s'", directory);
+        close(descriptor);
+        return false;
+    }
+    DIR *handle = fdopendir(descriptor);
     if (handle == NULL) {
         if (error != NULL && error_size != 0) {
             snprintf(error, error_size, "cannot open directory '%s': %s", directory, strerror(errno));
         }
+        close(descriptor);
+        return false;
+    }
+    struct stat opened;
+    if (fstat(dirfd(handle), &opened) != 0 || !S_ISDIR(opened.st_mode)
+        || opened.st_dev != expected->st_dev || opened.st_ino != expected->st_ino) {
+        sol_package_error(error, error_size,
+            "directory changed after discovery: '%s'", directory);
+        closedir(handle);
         return false;
     }
     bool complete = true;
@@ -120,6 +152,12 @@ static bool sol_package_discover(
     struct dirent *entry;
     while ((entry = readdir(handle)) != NULL) {
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        if (!sol_resource_charge_directory(depth)) {
+            sol_package_error(error, error_size,
+                "package directory resource limit exceeded at '%s'", directory);
+            complete = false;
+            break;
+        }
         char *path = sol_package_join_path(directory, entry->d_name);
         if (path == NULL) {
             *allocation_failed = true;
@@ -128,7 +166,8 @@ static bool sol_package_discover(
             break;
         }
         struct stat status;
-        if (lstat(path, &status) != 0) {
+        if (fstatat(dirfd(handle), entry->d_name, &status,
+            AT_SYMLINK_NOFOLLOW) != 0) {
             if (error != NULL && error_size != 0) {
                 snprintf(error, error_size, "cannot inspect '%s': %s", path, strerror(errno));
             }
@@ -137,12 +176,46 @@ static bool sol_package_discover(
             break;
         }
         if (S_ISDIR(status.st_mode)) {
+            int flags = O_RDONLY;
+#ifdef O_CLOEXEC
+            flags |= O_CLOEXEC;
+#endif
+#ifdef O_DIRECTORY
+            flags |= O_DIRECTORY;
+#endif
+#ifdef O_NOFOLLOW
+            flags |= O_NOFOLLOW;
+#endif
+            int child = openat(dirfd(handle), entry->d_name, flags);
+            if (child < 0) {
+                if (error != NULL && error_size != 0) {
+                    snprintf(error, error_size, "cannot open directory '%s': %s",
+                        path, strerror(errno));
+                }
+                free(path);
+                complete = false;
+                break;
+            }
             complete = sol_package_discover(
-                path, paths, allocation_failed, error, error_size);
+                child, path, &status, depth + 1, paths, allocation_failed,
+                error, error_size);
             free(path);
             if (!complete) break;
         } else if (S_ISREG(status.st_mode) && sol_package_is_source_path(path)) {
-            if (!sol_path_list_add(paths, path)) {
+            bool duplicate = false;
+            for (size_t index = 0; index < paths->count; ++index) {
+                duplicate = paths->items[index].identity.device == (uintmax_t)status.st_dev
+                    && paths->items[index].identity.inode == (uintmax_t)status.st_ino;
+                if (duplicate) break;
+            }
+            if (duplicate) {
+                sol_package_error(error, error_size,
+                    "duplicate source file identity: '%s'", path);
+                free(path);
+                complete = false;
+                break;
+            }
+            if (!sol_path_list_add(paths, path, &status)) {
                 *allocation_failed = true;
                 sol_package_error(error, error_size, "out of memory while discovering '%s'", directory);
                 free(path);
@@ -170,9 +243,9 @@ static bool sol_package_discover(
 }
 
 static int sol_package_compare_paths(const void *left, const void *right) {
-    const char *const *left_path = left;
-    const char *const *right_path = right;
-    return strcmp(*left_path, *right_path);
+    const SolDiscoveredPath *left_path = left;
+    const SolDiscoveredPath *right_path = right;
+    return strcmp(left_path->path, right_path->path);
 }
 
 void sol_package_init(SolPackage *package) {
@@ -229,6 +302,7 @@ static bool sol_package_append_storage(
             grown_capacity *= 2;
         }
         if (grown_capacity > SIZE_MAX / element_size) return false;
+        if (!sol_resource_charge_arena(grown_capacity - *capacity)) return false;
         void *grown = realloc(*target, grown_capacity * element_size);
         if (grown == NULL) return false;
         *target = grown;
@@ -779,11 +853,12 @@ static bool sol_package_load_paths(
     size_t aggregate_length = 0;
     for (size_t index = 0; index < paths->count; ++index) {
         SolPackageFile *file = &package->files[index];
-        file->path = paths->items[index];
-        paths->items[index] = NULL;
+        file->path = paths->items[index].path;
+        paths->items[index].path = NULL;
         package->file_count = index + 1;
-        SolSourceLoadOutcome source_outcome = sol_source_load_outcome(
-            &file->source, file->path, error, error_size);
+        SolSourceLoadOutcome source_outcome = sol_source_load_expected(
+            &file->source, file->path, &paths->items[index].identity,
+            error, error_size);
         if (source_outcome != SOL_SOURCE_LOAD_SUCCEEDED) {
             if (source_outcome == SOL_SOURCE_LOAD_RESOURCE_FAILED) {
                 diagnostics->allocation_failed = true;
@@ -878,7 +953,7 @@ static bool sol_package_load_kind(
     sol_package_init(package);
     if (error != NULL && error_size != 0) error[0] = '\0';
     struct stat status;
-    if (stat(path, &status) != 0) {
+    if (lstat(path, &status) != 0) {
         if (error != NULL && error_size != 0) {
             snprintf(error, error_size, "cannot inspect '%s': %s", path, strerror(errno));
         }
@@ -889,11 +964,31 @@ static bool sol_package_load_kind(
     bool complete;
     if (S_ISDIR(status.st_mode)) {
         package->is_directory = true;
-        complete = sol_package_discover(
-            path, &paths, &allocation_failed, error, error_size);
+        int flags = O_RDONLY;
+#ifdef O_CLOEXEC
+        flags |= O_CLOEXEC;
+#endif
+#ifdef O_DIRECTORY
+        flags |= O_DIRECTORY;
+#endif
+#ifdef O_NOFOLLOW
+        flags |= O_NOFOLLOW;
+#endif
+        int descriptor = open(path, flags);
+        if (descriptor < 0) {
+            if (error != NULL && error_size != 0) {
+                snprintf(error, error_size, "cannot open directory '%s': %s",
+                    path, strerror(errno));
+            }
+            complete = false;
+        } else {
+            complete = sol_package_discover(
+                descriptor, path, &status, 1, &paths, &allocation_failed,
+                error, error_size);
+        }
     } else if (!directory_only && S_ISREG(status.st_mode) && sol_package_is_source_path(path)) {
         char *copy = sol_package_copy_string(path);
-        complete = copy != NULL && sol_path_list_add(&paths, copy);
+        complete = copy != NULL && sol_path_list_add(&paths, copy, &status);
         if (!complete) {
             allocation_failed = true;
             free(copy);

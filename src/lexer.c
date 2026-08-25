@@ -3,6 +3,7 @@
 #include <ctype.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include "resource_internal.h"
 #include <string.h>
 
 typedef struct {
@@ -69,6 +70,7 @@ void sol_tokens_free(SolTokens *tokens) {
 }
 
 static bool sol_tokens_add(SolTokens *tokens, SolTokenKind kind, size_t start, size_t end) {
+    if (!sol_resource_charge_token()) return false;
     if (tokens->count == tokens->capacity) {
         if (tokens->capacity > SIZE_MAX / 2) {
             return false;
