@@ -89,7 +89,7 @@ their larger production scopes.
 
 | Done | Order | Milestone | Exit criteria | Source tasks |
 | --- | ---: | --- | --- | --- |
-| [ ] | E1a | Create the shared compilation session and validated-IR handle | One API owns phase order, outputs, diagnostics, and teardown; CLI/tests stop duplicating the pipeline; repeated execution consumes one immutable validated IR handle | 43A; current pipeline |
+| [x] | E1a | Create the shared compilation session and validated-IR handle | One API owns phase order, private frontend state, diagnostics, narrow value/render projections, and teardown; the production CLI and normal consumer tests use the session while phase-corruption and malformed-IR tests intentionally retain direct APIs; repeated execution consumes one truly opaque immutable validated-IR handle, and raw-IR host callbacks are rejected pending E3 | 43A; current pipeline |
 | [ ] | E1b | Harden source/package and host boundaries | Package/compiler byte, file, depth, token, arena, diagnostic, and allocation budgets are enforced; loading verifies opened file identity; host failures are owned or length-delimited | hardening debt |
 | [ ] | E1c | Remove immediate scaling/release hazards | Generic call analysis uses adjacency/SCCs; immutable IR validation is reused; clean configure/build/test CI, initial parser/package/IR fuzz targets, and stress baselines are tracked | E1a, E1b |
 | [ ] | E2 | Define the entrypoint and bounded application ABI | Explicit unique entrypoint metadata reaches owning IR; legal signatures, visibility, result/exit mapping, panic behavior, capability parameters, limits, and diagnostics are specified and checked | 40A, 49A |
@@ -97,6 +97,12 @@ their larger production scopes.
 | [ ] | E4 | Implement interpreter-based `sol run` | `sol run <file-or-package>` compiles through E1a-E1c, resolves E2, wires E3, frees frontend state, executes under limits, and emits stable human/JSON results | 49B |
 | [ ] | E5 | Execute core contracts and refinements | Interpreter policy checks `requires`, `old`, `ensures`, `Result` outcomes, and refined construction with exact cleanup and structured failures; loop runtime checks may be a follow-up | 50A |
 | [ ] | E6 | Freeze an executable-core conformance application | One multi-file application passes `fmt`, `check`, `test`, `effects`, `inspect`, and `run`, covering imports, ownership, effects, capabilities, contracts, errors, and cleanup | 51A; conformance |
+
+The compilation API tests and production `check`, `test`, `effects`, and `inspect`
+CLI integrations are the representative normal consumers for E1a. Package and
+phase tests intentionally exercise lower-level frontend APIs, while declaration,
+IR, and raw-interpreter tests retain direct IR access for malformed-IR mutation,
+phase-corruption assertions, and trusted host-callback coverage.
 
 The production track begins only after E6:
 

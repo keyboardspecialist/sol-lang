@@ -1,19 +1,11 @@
 #define _POSIX_C_SOURCE 200809L
 
-#include "sol/contract.h"
+#include "sol/compilation.h"
 #include "sol/diagnostic.h"
-#include "sol/effectcheck.h"
-#include "sol/effects.h"
 #include "sol/formatter.h"
-#include "sol/hir.h"
-#include "sol/inspection.h"
-#include "sol/ir.h"
 #include "sol/interpreter.h"
-#include "sol/lexer.h"
 #include "sol/package.h"
-#include "sol/parser.h"
 #include "sol/source.h"
-#include "sol/typecheck.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -521,99 +513,6 @@ static int sol_fmt_path(const char *path, bool check, bool to_stdout) {
     return result;
 }
 
-typedef struct {
-    SolPackage package;
-    SolDiagnostics diagnostics;
-    SolHirModule hir;
-    SolTypeTable types;
-    SolEffectTable effects;
-    SolContractTable contracts;
-    SolIr ir;
-    char load_error[512];
-} SolCompilation;
-
-typedef enum {
-    SOL_COMPILE_SUCCEEDED,
-    SOL_COMPILE_FAILED,
-    SOL_COMPILE_LOAD_ERROR,
-} SolCompileOutcome;
-
-static void sol_compilation_init(SolCompilation *compilation) {
-    memset(compilation, 0, sizeof(*compilation));
-    sol_package_init(&compilation->package);
-    sol_diagnostics_init(&compilation->diagnostics);
-    sol_hir_module_init(&compilation->hir);
-    sol_type_table_init(&compilation->types);
-    sol_effect_table_init(&compilation->effects);
-    sol_contract_table_init(&compilation->contracts);
-    sol_ir_init(&compilation->ir);
-}
-
-static void sol_compilation_frontend_free(SolCompilation *compilation) {
-    sol_contract_table_free(&compilation->contracts);
-    sol_effect_table_free(&compilation->effects);
-    sol_type_table_free(&compilation->types);
-    sol_hir_module_free(&compilation->hir);
-    sol_diagnostics_free(&compilation->diagnostics);
-    sol_package_free(&compilation->package);
-}
-
-static SolCompileOutcome sol_compile_path(SolCompilation *compilation, const char *path) {
-    SolPackage *package = &compilation->package;
-    SolDiagnostics *diagnostics = &compilation->diagnostics;
-    if (!sol_package_load(package, path, diagnostics, compilation->load_error,
-        sizeof(compilation->load_error))) {
-        return SOL_COMPILE_LOAD_ERROR;
-    }
-    bool completed = !sol_diagnostics_has_errors(diagnostics);
-    if (completed && !package->is_directory) {
-        completed = sol_hir_lower(&package->source, &package->syntax,
-            &compilation->hir, diagnostics);
-    } else if (completed) {
-        SolHirFileScope *scopes = malloc(package->file_count * sizeof(*scopes));
-        if (scopes == NULL) {
-            sol_diagnostics_add(diagnostics, "SOL-INTERNAL-001", SOL_SEVERITY_ERROR,
-                (SolSpan){0}, "out of memory while constructing package scopes");
-            completed = false;
-        } else {
-            for (size_t index = 0; index < package->file_count; ++index) {
-                scopes[index] = (SolHirFileScope){
-                    package->files[index].module_name,
-                    package->files[index].import_start,
-                    package->files[index].import_count,
-                    package->files[index].item_start,
-                    package->files[index].item_count,
-                };
-            }
-            completed = sol_hir_lower_scoped(&package->source, &package->syntax,
-                scopes, package->file_count, &compilation->hir, diagnostics);
-            free(scopes);
-        }
-    }
-    if (completed && !sol_diagnostics_has_errors(diagnostics)) {
-        completed = sol_type_check(&package->source, &package->syntax,
-            &compilation->hir, &compilation->types, diagnostics);
-    }
-    if (completed && !sol_diagnostics_has_errors(diagnostics)) {
-        completed = sol_effect_check(&package->source, &package->syntax,
-            &compilation->hir, &compilation->types, &compilation->effects, diagnostics);
-    }
-    if (completed && !sol_diagnostics_has_errors(diagnostics)) {
-        completed = sol_contract_lower(&package->source, &package->syntax,
-            &compilation->hir, &compilation->types, &compilation->effects,
-            &compilation->contracts, diagnostics);
-    }
-    if (completed && !sol_diagnostics_has_errors(diagnostics)) {
-        completed = sol_ir_lower_scoped(&package->source, &package->syntax,
-            &compilation->hir, &compilation->types, &compilation->effects,
-            &compilation->contracts, package->is_directory ? package->files : NULL,
-            package->is_directory ? package->file_count : 0, &compilation->ir,
-            diagnostics);
-    }
-    return completed && !sol_diagnostics_has_errors(diagnostics)
-        ? SOL_COMPILE_SUCCEEDED : SOL_COMPILE_FAILED;
-}
-
 static void sol_print_json_string(FILE *stream, const char *text);
 
 static void sol_render_cli_error(
@@ -628,40 +527,57 @@ static void sol_render_cli_error(
     fputs("}\n", stream);
 }
 
+static int sol_cli_infrastructure_failure(
+    const char *path, bool json, const char *message
+) {
+    if (json) sol_render_cli_error(stdout, "infrastructure", message, path);
+    else fprintf(stderr, "sol: %s\n", message);
+    return 1;
+}
+
 static int sol_check_path(const char *path, bool json) {
-    SolCompilation compilation;
-    sol_compilation_init(&compilation);
-    SolCompileOutcome outcome = sol_compile_path(&compilation, path);
-    if (json && outcome == SOL_COMPILE_LOAD_ERROR) {
-        sol_render_cli_error(stdout, "load", compilation.load_error, path);
-    } else if (json && outcome == SOL_COMPILE_FAILED
-        && compilation.diagnostics.count == 0) {
+    SolCompilationSession *session = sol_compilation_create();
+    if (session == NULL) {
+        if (json) sol_render_cli_error(stdout, "infrastructure",
+            "compilation stopped because the compiler ran out of memory", path);
+        else fputs("sol: compilation stopped because the compiler ran out of memory\n", stderr);
+        return 1;
+    }
+    SolCompilationOutcome outcome = sol_compilation_compile_path(session, path);
+    SolCompilationSummary summary;
+    const char *error = sol_compilation_error(session);
+    if (!sol_compilation_summary(session, &summary)) {
+        sol_compilation_free(session);
+        return sol_cli_infrastructure_failure(path, json,
+            "compilation result is unavailable");
+    }
+    if (json && outcome == SOL_COMPILATION_LOAD_FAILED) {
+        sol_render_cli_error(stdout, "load", error, path);
+    } else if (json && outcome == SOL_COMPILATION_RESOURCE_FAILED
+        && summary.diagnostic_count == 0) {
         sol_render_cli_error(stdout, "infrastructure",
             "compilation stopped because the compiler ran out of memory", path);
     } else if (json) {
-        sol_package_diagnostics_render_json(
-            stdout, &compilation.package, &compilation.diagnostics);
-    } else if (outcome == SOL_COMPILE_LOAD_ERROR) {
-        fprintf(stderr, "sol: %s\n", compilation.load_error);
-    } else if (compilation.diagnostics.count != 0) {
-        sol_package_diagnostics_render_human(
-            stderr, &compilation.package, &compilation.diagnostics);
-    } else if (outcome != SOL_COMPILE_SUCCEEDED) {
+        (void)sol_compilation_diagnostics_render_json(stdout, session);
+    } else if (outcome == SOL_COMPILATION_LOAD_FAILED) {
+        fprintf(stderr, "sol: %s\n", error);
+    } else if (summary.diagnostic_count != 0) {
+        (void)sol_compilation_diagnostics_render_human(stderr, session);
+    } else if (outcome != SOL_COMPILATION_SUCCEEDED) {
         fputs("sol: compilation stopped because the compiler ran out of memory\n", stderr);
-    } else if (compilation.package.is_directory) {
+    } else if (summary.is_directory) {
         printf("checked %s: %zu file%s, %zu declaration%s\n", path,
-            compilation.package.file_count,
-            compilation.package.file_count == 1 ? "" : "s",
-            compilation.package.syntax.item_count,
-            compilation.package.syntax.item_count == 1 ? "" : "s");
+            summary.file_count,
+            summary.file_count == 1 ? "" : "s",
+            summary.declaration_count,
+            summary.declaration_count == 1 ? "" : "s");
     } else {
         printf("checked %s: %zu declaration%s\n", path,
-            compilation.package.syntax.item_count,
-            compilation.package.syntax.item_count == 1 ? "" : "s");
+            summary.declaration_count,
+            summary.declaration_count == 1 ? "" : "s");
     }
-    sol_compilation_frontend_free(&compilation);
-    sol_ir_free(&compilation.ir);
-    return outcome == SOL_COMPILE_SUCCEEDED ? 0 : 1;
+    sol_compilation_free(session);
+    return outcome == SOL_COMPILATION_SUCCEEDED ? 0 : 1;
 }
 
 static bool sol_json_continuation(unsigned char byte) {
@@ -717,64 +633,82 @@ static void sol_print_json_string(FILE *stream, const char *text) {
     fputc('"', stream);
 }
 
-static const char *sol_ir_test_path(const SolIr *ir, SolSpan span) {
-    for (size_t index = 0; index < ir->file_count; ++index) {
-        if (span.start >= ir->files[index].aggregate_start
-            && span.start < ir->files[index].aggregate_end) return ir->files[index].path;
-    }
-    return ir->source_path;
-}
-
 static int sol_test_path(const char *path, bool json) {
-    SolCompilation compilation;
-    sol_compilation_init(&compilation);
-    SolCompileOutcome outcome = sol_compile_path(&compilation, path);
-    if (outcome != SOL_COMPILE_SUCCEEDED) {
-        if (json && outcome == SOL_COMPILE_LOAD_ERROR) {
-            sol_render_cli_error(stdout, "load", compilation.load_error, path);
-        } else if (json && compilation.diagnostics.count == 0) {
+    SolCompilationSession *session = sol_compilation_create();
+    if (session == NULL) {
+        if (json) sol_render_cli_error(stdout, "infrastructure",
+            "compilation stopped because the compiler ran out of memory", path);
+        else fputs("sol: compilation stopped because the compiler ran out of memory\n", stderr);
+        return 1;
+    }
+    SolCompilationOutcome outcome = sol_compilation_compile_path(session, path);
+    SolCompilationSummary summary;
+    if (!sol_compilation_summary(session, &summary)) {
+        sol_compilation_free(session);
+        return sol_cli_infrastructure_failure(path, json,
+            "compilation result is unavailable");
+    }
+    if (outcome != SOL_COMPILATION_SUCCEEDED) {
+        if (json && outcome == SOL_COMPILATION_LOAD_FAILED) {
+            sol_render_cli_error(stdout, "load", sol_compilation_error(session), path);
+        } else if (json && summary.diagnostic_count == 0) {
             sol_render_cli_error(stdout, "infrastructure",
                 "compilation stopped because the compiler ran out of memory", path);
         } else if (json) {
-            sol_package_diagnostics_render_json(
-                stdout, &compilation.package, &compilation.diagnostics);
-        } else if (outcome == SOL_COMPILE_LOAD_ERROR) {
-            fprintf(stderr, "sol: %s\n", compilation.load_error);
-        } else if (compilation.diagnostics.count != 0) sol_package_diagnostics_render_human(
-            stderr, &compilation.package, &compilation.diagnostics);
+            (void)sol_compilation_diagnostics_render_json(stdout, session);
+        } else if (outcome == SOL_COMPILATION_LOAD_FAILED) {
+            fprintf(stderr, "sol: %s\n", sol_compilation_error(session));
+        } else if (summary.diagnostic_count != 0) {
+            (void)sol_compilation_diagnostics_render_human(stderr, session);
+        }
         else fputs("sol: compilation stopped because the compiler ran out of memory\n", stderr);
-        sol_compilation_frontend_free(&compilation);
-        sol_ir_free(&compilation.ir);
+        sol_compilation_free(session);
         return 1;
     }
-    if (!json && compilation.diagnostics.count != 0) {
-        sol_package_diagnostics_render_human(
-            stderr, &compilation.package, &compilation.diagnostics);
+    if (!json && summary.diagnostic_count != 0) {
+        (void)sol_compilation_diagnostics_render_human(stderr, session);
     }
-    SolIr ir = compilation.ir;
-    sol_ir_init(&compilation.ir);
-    sol_compilation_frontend_free(&compilation);
+    SolValidatedIr *validated = NULL;
+    SolCompilationOutcome transfer = sol_compilation_take_ir(session, &validated);
+    sol_compilation_free(session);
+    if (transfer != SOL_COMPILATION_SUCCEEDED || validated == NULL) {
+        sol_validated_ir_free(validated);
+        return sol_cli_infrastructure_failure(path, json,
+            "validated compilation result is unavailable");
+    }
 
     size_t total = 0;
     size_t passed = 0;
     if (json) fputs("{\"schema\":\"sol.test-results\",\"version\":1,\"tests\":[", stdout);
-    for (size_t id = 0; id < ir.definition_count; ++id) {
-        const SolIrDefinition *test = &ir.definitions[id];
-        if (test->kind != SOL_IR_DEFINITION_TEST) continue;
+    size_t definition_count = sol_validated_ir_definition_count(validated);
+    for (size_t id = 0; id < definition_count; ++id) {
+        SolValidatedDefinitionView test;
+        if (!sol_validated_ir_definition_at(validated, id, &test)) {
+            sol_validated_ir_free(validated);
+            return sol_cli_infrastructure_failure(path, json,
+                "validated definition is unavailable");
+        }
+        if (test.kind != SOL_VALIDATED_DEFINITION_TEST) continue;
         SolInterpreterRequest request = {
-            .ir = &ir, .callable = test->callable, .definition = SOL_IR_NONE,
+            .ir = NULL, .callable = test.callable, .definition = SOL_IR_NONE,
             .contracts = SOL_INTERPRETER_CONTRACTS_IGNORE, .test_entry = true,
         };
         SolInterpreterResult result;
-        bool executed = sol_interpret(&request, &result);
+        bool executed = sol_validated_ir_interpret(validated, &request, &result);
         bool truth = executed && result.value.kind == SOL_INTERPRETER_VALUE_BOOL
             && result.value.as.boolean;
         const char *status = truth ? "passed" : executed ? "false" : "runtime_error";
-        const char *source_path = sol_ir_test_path(&ir, test->span);
+        const char *source_path = sol_validated_ir_path_at(validated, test.span);
+        if (source_path == NULL || test.name == NULL) {
+            sol_interpreter_result_free(&result);
+            sol_validated_ir_free(validated);
+            return sol_cli_infrastructure_failure(path, json,
+                "validated definition metadata is unavailable");
+        }
         if (json) {
             if (total != 0) fputc(',', stdout);
             fputs("{\"path\":", stdout); sol_print_json_string(stdout, source_path);
-            fputs(",\"label\":", stdout); sol_print_json_string(stdout, test->name);
+            fputs(",\"label\":", stdout); sol_print_json_string(stdout, test.name);
             fputs(",\"status\":", stdout); sol_print_json_string(stdout, status);
             if (executed) fputs(",\"diagnostic\":null}", stdout);
             else {
@@ -787,7 +721,7 @@ static int sol_test_path(const char *path, bool json) {
             }
         } else {
             fputs(truth ? "PASS " : "FAIL ", stdout);
-            sol_print_json_string(stdout, test->name);
+            sol_print_json_string(stdout, test.name);
             printf(" (%s)", source_path);
             if (executed && !truth) fputs(": evaluated to false", stdout);
             else if (!executed) printf(": runtime at %s:%zu: %s",
@@ -805,40 +739,53 @@ static int sol_test_path(const char *path, bool json) {
         total, passed, failed);
     else printf("%zu test%s, %zu passed, %zu failed\n",
         total, total == 1 ? "" : "s", passed, failed);
-    sol_ir_free(&ir);
+    sol_validated_ir_free(validated);
     return failed == 0 ? 0 : 1;
 }
 
 static int sol_effects_path(const char *path, bool json) {
-    SolCompilation compilation;
-    sol_compilation_init(&compilation);
-    SolCompileOutcome outcome = sol_compile_path(&compilation, path);
-    if (outcome != SOL_COMPILE_SUCCEEDED) {
-        if (json && outcome == SOL_COMPILE_LOAD_ERROR) {
-            sol_render_cli_error(stdout, "load", compilation.load_error, path);
-        } else if (json && compilation.diagnostics.count == 0) {
+    SolCompilationSession *session = sol_compilation_create();
+    if (session == NULL) {
+        if (json) sol_render_cli_error(stdout, "infrastructure",
+            "compilation stopped because the compiler ran out of memory", path);
+        else fputs("sol: compilation stopped because the compiler ran out of memory\n", stderr);
+        return 1;
+    }
+    SolCompilationOutcome outcome = sol_compilation_compile_path(session, path);
+    SolCompilationSummary summary;
+    if (!sol_compilation_summary(session, &summary)) {
+        sol_compilation_free(session);
+        return sol_cli_infrastructure_failure(path, json,
+            "compilation result is unavailable");
+    }
+    if (outcome != SOL_COMPILATION_SUCCEEDED) {
+        if (json && outcome == SOL_COMPILATION_LOAD_FAILED) {
+            sol_render_cli_error(stdout, "load", sol_compilation_error(session), path);
+        } else if (json && summary.diagnostic_count == 0) {
             sol_render_cli_error(stdout, "infrastructure",
                 "compilation stopped because the compiler ran out of memory", path);
         } else if (json) {
-            sol_package_diagnostics_render_json(
-                stdout, &compilation.package, &compilation.diagnostics);
-        } else if (outcome == SOL_COMPILE_LOAD_ERROR) {
-            fprintf(stderr, "sol: %s\n", compilation.load_error);
-        } else if (compilation.diagnostics.count != 0) {
-            sol_package_diagnostics_render_human(
-                stderr, &compilation.package, &compilation.diagnostics);
+            (void)sol_compilation_diagnostics_render_json(stdout, session);
+        } else if (outcome == SOL_COMPILATION_LOAD_FAILED) {
+            fprintf(stderr, "sol: %s\n", sol_compilation_error(session));
+        } else if (summary.diagnostic_count != 0) {
+            (void)sol_compilation_diagnostics_render_human(stderr, session);
         } else {
             fputs("sol: compilation stopped because the compiler ran out of memory\n", stderr);
         }
-        sol_compilation_frontend_free(&compilation);
-        sol_ir_free(&compilation.ir);
+        sol_compilation_free(session);
         return 1;
     }
-    SolIr ir = compilation.ir;
-    sol_ir_init(&compilation.ir);
-    sol_compilation_frontend_free(&compilation);
-    bool rendered = sol_effects_render(stdout, &ir, json);
-    sol_ir_free(&ir);
+    SolValidatedIr *validated = NULL;
+    SolCompilationOutcome transfer = sol_compilation_take_ir(session, &validated);
+    sol_compilation_free(session);
+    if (transfer != SOL_COMPILATION_SUCCEEDED || validated == NULL) {
+        sol_validated_ir_free(validated);
+        return sol_cli_infrastructure_failure(path, json,
+            "validated compilation result is unavailable");
+    }
+    bool rendered = sol_validated_ir_effects_render(stdout, validated, json);
+    sol_validated_ir_free(validated);
     if (!rendered && ferror(stdout) == 0) {
         if (json) sol_render_cli_error(stdout, "infrastructure",
             "cannot construct effects report", path);
@@ -848,27 +795,34 @@ static int sol_effects_path(const char *path, bool json) {
 }
 
 static int sol_inspect_path(const char *path) {
-    SolCompilation compilation;
-    sol_compilation_init(&compilation);
-    SolCompileOutcome outcome = sol_compile_path(&compilation, path);
-    if (outcome == SOL_COMPILE_LOAD_ERROR) {
-        sol_render_cli_error(stdout, "load", compilation.load_error, path);
-    } else if (outcome == SOL_COMPILE_FAILED && compilation.diagnostics.count == 0) {
+    SolCompilationSession *session = sol_compilation_create();
+    if (session == NULL) {
         sol_render_cli_error(stdout, "infrastructure",
             "compilation stopped because the compiler ran out of memory", path);
-    } else if (outcome != SOL_COMPILE_SUCCEEDED) {
-        sol_package_diagnostics_render_json(
-            stdout, &compilation.package, &compilation.diagnostics);
-    } else if (!sol_inspection_render(stdout, &compilation.package, &compilation.hir,
-        &compilation.types, &compilation.effects, &compilation.contracts,
-        &compilation.diagnostics)) {
+        return 1;
+    }
+    SolCompilationOutcome outcome = sol_compilation_compile_path(session, path);
+    SolCompilationSummary summary;
+    if (!sol_compilation_summary(session, &summary)) {
+        sol_compilation_free(session);
+        return sol_cli_infrastructure_failure(path, true,
+            "compilation result is unavailable");
+    }
+    if (outcome == SOL_COMPILATION_LOAD_FAILED) {
+        sol_render_cli_error(stdout, "load", sol_compilation_error(session), path);
+    } else if (outcome == SOL_COMPILATION_RESOURCE_FAILED
+        && summary.diagnostic_count == 0) {
+        sol_render_cli_error(stdout, "infrastructure",
+            "compilation stopped because the compiler ran out of memory", path);
+    } else if (outcome != SOL_COMPILATION_SUCCEEDED) {
+        (void)sol_compilation_diagnostics_render_json(stdout, session);
+    } else if (!sol_compilation_inspection_render(stdout, session)) {
         if (ferror(stdout) == 0) sol_render_cli_error(stdout, "infrastructure",
             "cannot construct inspection projection", path);
-        outcome = SOL_COMPILE_FAILED;
+        outcome = SOL_COMPILATION_RESOURCE_FAILED;
     }
-    sol_compilation_frontend_free(&compilation);
-    sol_ir_free(&compilation.ir);
-    return outcome == SOL_COMPILE_SUCCEEDED ? 0 : 1;
+    sol_compilation_free(session);
+    return outcome == SOL_COMPILATION_SUCCEEDED ? 0 : 1;
 }
 
 static int sol_main(int argc, char **argv) {

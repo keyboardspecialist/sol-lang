@@ -4,6 +4,8 @@
 
 #include "sol/lexer.h"
 
+#include "source_internal.h"
+
 #include <dirent.h>
 #include <errno.h>
 #include <stdint.h>
@@ -102,6 +104,7 @@ static char *sol_package_join_path(const char *directory, const char *name) {
 static bool sol_package_discover(
     const char *directory,
     SolPathList *paths,
+    bool *allocation_failed,
     char *error,
     size_t error_size
 ) {
@@ -119,6 +122,7 @@ static bool sol_package_discover(
         if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
         char *path = sol_package_join_path(directory, entry->d_name);
         if (path == NULL) {
+            *allocation_failed = true;
             sol_package_error(error, error_size, "out of memory while discovering '%s'", directory);
             complete = false;
             break;
@@ -133,11 +137,13 @@ static bool sol_package_discover(
             break;
         }
         if (S_ISDIR(status.st_mode)) {
-            complete = sol_package_discover(path, paths, error, error_size);
+            complete = sol_package_discover(
+                path, paths, allocation_failed, error, error_size);
             free(path);
             if (!complete) break;
         } else if (S_ISREG(status.st_mode) && sol_package_is_source_path(path)) {
             if (!sol_path_list_add(paths, path)) {
+                *allocation_failed = true;
                 sol_package_error(error, error_size, "out of memory while discovering '%s'", directory);
                 free(path);
                 complete = false;
@@ -738,7 +744,11 @@ static bool sol_package_parse_file(
             diagnostics, &local_diagnostics, file->aggregate_start
         );
     }
-    if (!complete) sol_package_error(error, error_size, "out of memory while parsing '%s'", file->path);
+    if (!complete) {
+        diagnostics->allocation_failed = true;
+        sol_package_error(error, error_size,
+            "out of memory while parsing '%s'", file->path);
+    }
     sol_diagnostics_free(&local_diagnostics);
     sol_syntax_tree_free(&local);
     sol_tokens_free(&tokens);
@@ -755,11 +765,13 @@ static bool sol_package_load_paths(
 ) {
     package->path = sol_package_copy_string(root);
     if (package->path == NULL) {
+        diagnostics->allocation_failed = true;
         sol_package_error(error, error_size, "out of memory while loading '%s'", root);
         return false;
     }
     package->files = calloc(paths->count, sizeof(*package->files));
     if (paths->count != 0 && package->files == NULL) {
+        diagnostics->allocation_failed = true;
         sol_package_error(error, error_size, "out of memory while loading '%s'", root);
         return false;
     }
@@ -770,7 +782,14 @@ static bool sol_package_load_paths(
         file->path = paths->items[index];
         paths->items[index] = NULL;
         package->file_count = index + 1;
-        if (!sol_source_load(&file->source, file->path, error, error_size)) return false;
+        SolSourceLoadOutcome source_outcome = sol_source_load_outcome(
+            &file->source, file->path, error, error_size);
+        if (source_outcome != SOL_SOURCE_LOAD_SUCCEEDED) {
+            if (source_outcome == SOL_SOURCE_LOAD_RESOURCE_FAILED) {
+                diagnostics->allocation_failed = true;
+            }
+            return false;
+        }
         if (memchr(file->source.text, '\0', file->source.length) != NULL) {
             sol_package_error(error, error_size, "source contains an embedded NUL byte: '%s'", file->path);
             return false;
@@ -793,6 +812,7 @@ static bool sol_package_load_paths(
     }
     char *text = malloc(aggregate_length + 1);
     if (text == NULL) {
+        diagnostics->allocation_failed = true;
         sol_package_error(error, error_size, "out of memory while aggregating '%s'", root);
         return false;
     }
@@ -807,6 +827,7 @@ static bool sol_package_load_paths(
     bool complete = sol_source_from_text(&package->source, package->path, text);
     free(text);
     if (!complete) {
+        diagnostics->allocation_failed = true;
         sol_package_error(error, error_size, "out of memory while indexing '%s'", root);
         return false;
     }
@@ -864,14 +885,17 @@ static bool sol_package_load_kind(
         return false;
     }
     SolPathList paths = {0};
+    bool allocation_failed = false;
     bool complete;
     if (S_ISDIR(status.st_mode)) {
         package->is_directory = true;
-        complete = sol_package_discover(path, &paths, error, error_size);
+        complete = sol_package_discover(
+            path, &paths, &allocation_failed, error, error_size);
     } else if (!directory_only && S_ISREG(status.st_mode) && sol_package_is_source_path(path)) {
         char *copy = sol_package_copy_string(path);
         complete = copy != NULL && sol_path_list_add(&paths, copy);
         if (!complete) {
+            allocation_failed = true;
             free(copy);
             sol_package_error(error, error_size, "out of memory while loading '%s'", path);
         }
@@ -884,6 +908,7 @@ static bool sol_package_load_kind(
         );
         complete = false;
     }
+    if (allocation_failed) diagnostics->allocation_failed = true;
     if (complete) {
         qsort(paths.items, paths.count, sizeof(*paths.items), sol_package_compare_paths);
         complete = sol_package_load_paths(package, path, &paths, diagnostics, error, error_size);

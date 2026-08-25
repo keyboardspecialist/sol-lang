@@ -1,5 +1,7 @@
 #include "sol/source.h"
 
+#include "source_internal.h"
+
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -66,27 +68,29 @@ bool sol_source_from_text(SolSource *source, const char *path, const char *text)
     return true;
 }
 
-bool sol_source_load(SolSource *source, const char *path, char *error, size_t error_size) {
+SolSourceLoadOutcome sol_source_load_outcome(
+    SolSource *source, const char *path, char *error, size_t error_size
+) {
     memset(source, 0, sizeof(*source));
     source->path = path;
 
     FILE *file = fopen(path, "rb");
     if (file == NULL) {
         snprintf(error, error_size, "cannot open '%s': %s", path, strerror(errno));
-        return false;
+        return SOL_SOURCE_LOAD_IO_FAILED;
     }
 
     if (fseek(file, 0, SEEK_END) != 0) {
         snprintf(error, error_size, "cannot seek '%s'", path);
         fclose(file);
-        return false;
+        return SOL_SOURCE_LOAD_IO_FAILED;
     }
 
     long measured = ftell(file);
     if (measured < 0 || fseek(file, 0, SEEK_SET) != 0) {
         snprintf(error, error_size, "cannot measure '%s'", path);
         fclose(file);
-        return false;
+        return SOL_SOURCE_LOAD_IO_FAILED;
     }
 
     source->length = (size_t)measured;
@@ -94,7 +98,7 @@ bool sol_source_load(SolSource *source, const char *path, char *error, size_t er
     if (source->text == NULL) {
         snprintf(error, error_size, "out of memory while reading '%s'", path);
         fclose(file);
-        return false;
+        return SOL_SOURCE_LOAD_RESOURCE_FAILED;
     }
 
     size_t read_count = fread(source->text, 1, source->length, file);
@@ -102,7 +106,7 @@ bool sol_source_load(SolSource *source, const char *path, char *error, size_t er
         snprintf(error, error_size, "cannot read '%s'", path);
         fclose(file);
         sol_source_free(source);
-        return false;
+        return SOL_SOURCE_LOAD_IO_FAILED;
     }
     fclose(file);
     source->text[source->length] = '\0';
@@ -110,9 +114,14 @@ bool sol_source_load(SolSource *source, const char *path, char *error, size_t er
     if (!sol_source_index_lines(source)) {
         snprintf(error, error_size, "out of memory while indexing '%s'", path);
         sol_source_free(source);
-        return false;
+        return SOL_SOURCE_LOAD_RESOURCE_FAILED;
     }
-    return true;
+    return SOL_SOURCE_LOAD_SUCCEEDED;
+}
+
+bool sol_source_load(SolSource *source, const char *path, char *error, size_t error_size) {
+    return sol_source_load_outcome(source, path, error, error_size)
+        == SOL_SOURCE_LOAD_SUCCEEDED;
 }
 
 void sol_source_free(SolSource *source) {

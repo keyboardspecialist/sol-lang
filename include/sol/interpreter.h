@@ -133,6 +133,10 @@ typedef struct {
 } SolInterpreterEvidence;
 
 /*
+ * Raw trusted-interpreter callback. sol_validated_ir_interpret rejects requests
+ * containing this callback because a validated handle never exposes its IR.
+ * A safe application host profile is deferred to E3.
+ *
  * The callback writes a borrowed value view to result. Its storage remains
  * host-owned, may alias callback inputs, and only needs to remain valid until
  * the callback returns; the interpreter validates and deep-clones it.
@@ -149,7 +153,7 @@ typedef bool (*SolInterpreterHostOperation)(
     const char **error_message
 );
 
-typedef struct {
+typedef struct SolInterpreterRequest {
     const SolIr *ir;
     SolIrCallableId callable;
     SolIrDefinitionId definition;
@@ -168,7 +172,7 @@ typedef struct {
     bool test_entry;
 } SolInterpreterRequest;
 
-typedef struct {
+typedef struct SolInterpreterResult {
     SolInterpreterValue value;
     SolInterpreterDiagnostic diagnostic;
     SolInterpreterLimits used;
