@@ -551,6 +551,31 @@ A compiler that implements ownership but omits explicit effects, executable cont
 
 ## Roadmap
 
+### Near-term critical path
+
+The project is pausing language breadth after the recursive-pattern milestone. The
+next goal is a bounded application profile over the existing owning IR and reference
+interpreter, not closures, collections, unsafe, or backend code generation.
+
+```text
+shared compilation session and hardening
+    -> explicit entrypoint and application ABI
+    -> minimal trusted host-capability profile
+    -> interpreter-based sol run
+    -> executable core contracts and refinements
+    -> representative multi-file conformance application
+```
+
+This sequence turns the current language-test pipeline into useful end-to-end
+application execution before entrypoint, authority, failure, cleanup, and contract
+semantics are embedded in MIR or a backend. The detailed exit criteria and the
+stable numbered capability backlog are tracked in [TODO.md](TODO.md).
+
+After that profile is frozen, the shortest production track is ownership-explicit
+CFG/MIR, explicit monomorphization and data layout, a target-independent runtime
+ABI, a WebAssembly backend, reproducible `sol build`, and interpreter/WebAssembly
+differential tests.
+
 ### Phase 0 — Executable language model
 
 Define the grammar, core calculus, effect-row behavior, ownership rules, contract semantics, and serialized diagnostic/IR schemas. The bootstrap's internal typed IR is intentionally distinct from those future stable schemas. Build small interpreters and model checkers before committing to production compiler architecture.
@@ -559,9 +584,9 @@ Define the grammar, core calculus, effect-row behavior, ownership rules, contrac
 
 Implement canonical parsing and formatting, algebraic data types, pattern matching, basic traits, refinement checks, effect inference, capabilities, effect/authority inspection, structured diagnostics, and an interpreter suitable for language tests.
 
-### Phase 2 — Ownership and executable output
+### Phase 2 — Application execution and executable output
 
-Extend the bounded ownership/region foundation with user resource protocols, unsafe boundaries, FFI foundations, and initial native or WebAssembly code generation.
+First expose the bounded interpreter profile through explicit entrypoint/host semantics, `sol run`, and runtime contracts. Then lower the frozen core through ownership-explicit MIR, an explicit representation/runtime ABI, and an initial WebAssembly backend. Resource protocols, unsafe, and C FFI follow when required by the executable profile rather than blocking it.
 
 ### Phase 3 — Verification
 

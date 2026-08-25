@@ -79,7 +79,42 @@ bounds them. Generic capabilities/members, trait defaults/contracts/authority cl
 associated effects, inheritance, trait objects, and dependent method effects remain
 deferred until a concrete core API requires their smallest coherent subset.
 
-## Prioritized Work
+## Active End-to-End Track
+
+The immediate goal is a bounded, useful application profile executed by the existing
+owning IR and reference interpreter. Language breadth, MIR, and backend work are not
+on this critical path. Existing numbered tasks remain stable identifiers; the `E`
+milestones split the application-facing parts of tasks 40, 43, 48, 49, and 50 from
+their larger production scopes.
+
+| Done | Order | Milestone | Exit criteria | Source tasks |
+| --- | ---: | --- | --- | --- |
+| [ ] | E1a | Create the shared compilation session and validated-IR handle | One API owns phase order, outputs, diagnostics, and teardown; CLI/tests stop duplicating the pipeline; repeated execution consumes one immutable validated IR handle | 43A; current pipeline |
+| [ ] | E1b | Harden source/package and host boundaries | Package/compiler byte, file, depth, token, arena, diagnostic, and allocation budgets are enforced; loading verifies opened file identity; host failures are owned or length-delimited | hardening debt |
+| [ ] | E1c | Remove immediate scaling/release hazards | Generic call analysis uses adjacency/SCCs; immutable IR validation is reused; clean configure/build/test CI, initial parser/package/IR fuzz targets, and stress baselines are tracked | E1a, E1b |
+| [ ] | E2 | Define the entrypoint and bounded application ABI | Explicit unique entrypoint metadata reaches owning IR; legal signatures, visibility, result/exit mapping, panic behavior, capability parameters, limits, and diagnostics are specified and checked | 40A, 49A |
+| [ ] | E3 | Define the trusted interpreter host profile | Minimal console/config/argument capabilities use an explicit root registry and operation allowlist; host failures are owned and undeclared authority is rejected before execution | 48A |
+| [ ] | E4 | Implement interpreter-based `sol run` | `sol run <file-or-package>` compiles through E1a-E1c, resolves E2, wires E3, frees frontend state, executes under limits, and emits stable human/JSON results | 49B |
+| [ ] | E5 | Execute core contracts and refinements | Interpreter policy checks `requires`, `old`, `ensures`, `Result` outcomes, and refined construction with exact cleanup and structured failures; loop runtime checks may be a follow-up | 50A |
+| [ ] | E6 | Freeze an executable-core conformance application | One multi-file application passes `fmt`, `check`, `test`, `effects`, `inspect`, and `run`, covering imports, ownership, effects, capabilities, contracts, errors, and cleanup | 51A; conformance |
+
+The production track begins only after E6:
+
+| Order | Milestone | Dependency |
+| ---: | --- | --- |
+| P1 | Introduce ownership-explicit CFG/MIR for the frozen executable core | E6, 45A |
+| P2 | Define monomorphization, representation, target layout, symbols, and linkage | P1 |
+| P3 | Define the target-independent runtime ABI and panic/cleanup policy | P1, P2, 48B |
+| P4 | Integrate a WebAssembly backend and host adapter | P2, P3, 47W, 48C |
+| P5 | Implement reproducible `sol build` artifacts and interpreter/Wasm differential tests | P4, 49C |
+
+Items 28-39, 41-42, 44, 46, 50B+, and 52-61 are deferred until a
+concrete E- or P-track requirement pulls in their smallest coherent subset.
+
+## Numbered Capability Backlog
+
+Numbers below are stable capability identifiers, not the immediate execution order.
+The active order is defined by the E and P tracks above.
 
 | Done | Order | Task | Impact | Complexity | Primary dependency |
 | --- | ---: | --- | ---: | ---: | --- |
@@ -122,17 +157,17 @@ deferred until a concrete core API requires their smallest coherent subset.
 | [ ] | 37 | Add allocator capabilities, allocator-bearing regions, `using` resource scopes, allocation effects, callable cost/resource clauses, and runtime/allocation profiles | 5 | 5 | Lifetimes and resource cleanup |
 | [ ] | 38 | Implement the core collection layer required by examples: `Vector`, persistent `List`, explicit map variants, `View`, and `Slice` | 4 | 5 | Arrays, allocators, and lifetimes |
 | [ ] | 39 | Define iterator traits and add protocol-based `for` loops | 4 | 4 | Richer traits, collections, and loops |
-| [ ] | 40 | Complete package manifests, features/edition policy, dependencies/locks, visibility, aliases/re-exports, sandboxed build execution, host wiring, and dependency-qualified semantic IDs | 5 | 5 | Existing package resolution |
+| [ ] | 40 | Complete package capabilities after E2's minimal application metadata: manifests, features/edition policy, dependencies/locks, visibility, aliases/re-exports, sandboxed builds, and dependency-qualified semantic IDs | 5 | 5 | E2 and existing package resolution |
 | [ ] | 41 | Add versioned schema declarations, canonical schema identities, checked migration declarations, and deterministic migration planning | 4 | 5 | Constants, records, and packages |
 | [ ] | 42 | Add bounded general effect-row polymorphism and effect aliases, including explicit/multiple/result-position arguments and authority capture | 5 | 5 | Existing effect parameters and closures |
-| [ ] | 43 | Integrate place, ownership, resource, and control-flow facts with effects, contracts, inspection, and structured diagnostics | 5 | 5 | Completed ownership surface |
+| [ ] | 43 | Maintain cross-phase integration as acceptance criteria; E1 handles the current-surface audit/session/hardening, while later resource and control-flow facts integrate with the same diagnostics and inspection contracts | 5 | 5 | E1 and completed ownership surface |
 | [ ] | 44 | Define lexical unsafe blocks, assumptions/establishments, raw pointer primitives, audit records, and unsafe effects | 5 | 5 | Places, lifetimes, resources, and obligations |
 | [ ] | 45 | Introduce ownership-explicit control-flow MIR with blocks/SSA, moves, borrows, drops, regions, panic policy, generic lowering, and target-independent layout | 5 | 5 | Complete core control/resource semantics |
 | [ ] | 46 | Define C ABI layouts and FFI declarations with ownership, nullability, threading, blocking, error, and effect metadata | 5 | 5 | Unsafe boundaries, packages, and MIR layout |
 | [ ] | 47 | Select and integrate an established native or WebAssembly backend | 5 | 5 | Control-flow MIR |
-| [ ] | 48 | Implement runtime/host ABI support for allocation, cleanup, panic policy, capabilities, handlers, and FFI | 5 | 5 | Backend and MIR |
-| [ ] | 49 | Implement package entry points and `sol build` / `sol run` | 5 | 4 | Packages, backend, and runtime |
-| [ ] | 50 | Generate runtime contract/refinement checks, refined construction/projection/destructuring, refinement-aware exhaustiveness, cost/resource checks, and normalized logical obligations | 5 | 5 | IR, ownership, and resources |
+| [ ] | 48 | Complete runtime ABI after E3's interpreter host profile: target-independent allocation, cleanup, panic, capabilities, handlers, FFI, and backend-specific adapters | 5 | 5 | E3, MIR, and backend |
+| [ ] | 49 | Complete application tooling after E2/E4: backend `sol build`, artifact execution, target/profile selection, linkage, and reproducibility | 5 | 4 | E4, packages, backend, and runtime ABI |
+| [ ] | 50 | Complete verification after E5's runtime core: normalized logical obligations, call-site substitution, refinement projection/destructuring/exhaustiveness, and cost/resource checks | 5 | 5 | E5, ownership, and resources |
 | [ ] | 51 | Add `spec` examples, authored/generated properties, boundary generation, shrinking, seeds, and ghost state | 4 | 4 | Runtime checks and interpreter |
 | [ ] | 52 | Integrate SMT proof policies, isolated solver execution, deterministic caching, counterexamples, cost proofs, and proof diagnostics | 4 | 5 | Logical obligation IR |
 | [ ] | 53 | Complete formatter width reflow, trailing-comma policy, sorting, comment reflow, and syntax-category fixtures without semantic reordering | 3 | 3 | Grammar implemented through the current milestone |

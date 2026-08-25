@@ -1571,6 +1571,19 @@ Runtime reflection is opt-in package metadata and cannot bypass invariants. Dese
 
 Begin with a deliberately small core proving interactions among canonical syntax, algebraic types, ownership, effects, contracts, semantic identities, and diagnostics. Simultaneously building full proof automation, workflows, native targets, and an ecosystem would obscure core coherence.
 
+The bounded frontend/interpreter core is now sufficiently complete to pause language breadth. The active critical path is:
+
+```text
+shared compilation session and compiler hardening
+-> explicit entrypoint and application ABI
+-> minimal trusted interpreter host profile
+-> interpreter-based sol run
+-> executable core contracts and refinements
+-> representative multi-file conformance application
+```
+
+This ordering deliberately splits the application-facing parts of package, runtime, entrypoint, and contract work from their larger backend scopes. It resolves authority injection, process behavior, cleanup, diagnostics, and contract policy using the existing owning IR before those decisions are encoded in MIR or a target ABI. Closures, collections, broad numerics, unsafe, FFI, public IR, and concurrency remain off the immediate path unless one of these milestones requires their smallest coherent subset.
+
 == Executable Bootstrap Baseline
 
 The current C17 bootstrap provides:
@@ -1611,12 +1624,12 @@ It is not a production compiler. In particular, general row constraints and expl
   (
     ([0 - Executable core], [Current front-end semantics plus formalized core interactions; continue resolving contradictions with tests.]),
     ([1 - Front end/interpreter], [Formatter, modules, richer generics, traits, pattern matching, typed errors, effects, effect/authority inspection, canonical graph, VM.]),
-    ([2 - Ownership/native], [Affine types, borrows/regions, drop, C FFI, backend, memory-safety validation.]),
-    ([3 - Contracts/SMT], [Runtime checks, invariants/refinements, obligation IR, solvers, counterexamples, proof cache.]),
-    ([4 - Concurrency/capabilities], [Structured async, actors/channels, `Send`/`Share`, cancellation, broader handlers, sandbox hosts.]),
-    ([5 - Schemas/Wasm], [Schema compiler, migrations, component target, bindings, compatibility reports.]),
-    ([6 - AI/tooling], [Patches, context bundles, change reports, policy gates, agent SDK.]),
-    ([7 - Stabilization], [Editions, registry, library hardening, security audit, performance, 1.0 RFC process.]),
+    ([2 - Application execution], [Shared compilation session, entrypoint and host profiles, interpreter `sol run`, runtime contracts, and a versioned executable-core conformance application.]),
+    ([3 - MIR/WebAssembly], [Ownership-explicit CFG/MIR, monomorphization, layout/runtime ABI, WebAssembly backend, reproducible artifacts, and differential execution.]),
+    ([4 - Contracts/SMT], [Normalized obligations, invariants/refinements, solvers, counterexamples, proof cache, and generated properties.]),
+    ([5 - Concurrency/capabilities], [Structured async, actors/channels, `Send`/`Share`, cancellation, broader handlers, and sandbox hosts.]),
+    ([6 - Schemas/tooling], [Schema compiler, migrations, public semantic graph, patches, context bundles, change reports, compatibility, and IDE/agent APIs.]),
+    ([7 - Stabilization], [Editions, registry, library hardening, security audit, performance, additional backends, and the 1.0 RFC process.]),
   ),
 )
 
