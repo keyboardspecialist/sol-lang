@@ -1421,9 +1421,14 @@ static void test_projected_place_lowering(void) {
     for (size_t name = 0; name < 4; ++name) {
         SolMir mir;
         sol_mir_init(&mir);
-        CHECK(sol_mir_lower_callable(&compilation.ir,
+        SolMirLowerOutcome outcome = sol_mir_lower_callable(&compilation.ir,
             callable(&compilation.ir, names[name]), &mir,
-            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+            &compilation.diagnostics);
+        CHECK(outcome == SOL_MIR_LOWER_SUCCEEDED);
+        if (outcome != SOL_MIR_LOWER_SUCCEEDED) {
+            sol_mir_free(&mir);
+            continue;
+        }
         CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
         bool projected_load = false;
         bool projected_drop = false;
@@ -1603,9 +1608,14 @@ static void test_callback_invoke_lowering(void) {
     for (size_t name = 0; name < 3; ++name) {
         SolMir mir;
         sol_mir_init(&mir);
-        CHECK(sol_mir_lower_callable(&compilation.ir,
+        SolMirLowerOutcome outcome = sol_mir_lower_callable(&compilation.ir,
             callable(&compilation.ir, names[name]), &mir,
-            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+            &compilation.diagnostics);
+        CHECK(outcome == SOL_MIR_LOWER_SUCCEEDED);
+        if (outcome != SOL_MIR_LOWER_SUCCEEDED) {
+            sol_mir_free(&mir);
+            continue;
+        }
         CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
         SolMirBlockId invoke = SOL_MIR_NONE;
         for (size_t block = 0; block < mir.block_count; ++block) {
@@ -1657,6 +1667,132 @@ static void test_callback_invoke_lowering(void) {
                 direct->as.invoke.callee = SOL_MIR_NONE;
                 CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
             }
+        }
+        sol_mir_free(&mir);
+    }
+    free_compilation(&compilation);
+}
+
+static void test_concrete_method_invoke_lowering(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_methods\n"
+        "record Pair { left: Int64, right: Int64 }\n"
+        "trait Sum { function sum(self: Self, extra: Int64) -> Int64 "
+        "effects { pure } }\n"
+        "implementation Sum for Pair { function sum(self: Self, extra: Int64) "
+        "-> Int64 effects { pure } { return self.left + self.right + extra } }\n"
+        "trait Read { function read(self: borrow Self) -> Int64 "
+        "effects { pure } }\n"
+        "implementation Read for Int64 { function read(self: borrow Self) "
+        "-> Int64 effects { pure } { return self } }\n"
+        "trait Set { function set(self: inout Self) -> () effects { pure } }\n"
+        "implementation Set for Int64 { function set(self: inout Self) -> () "
+        "effects { pure } { self = 7 } }\n"
+        "trait Update { function update(self: inout Self, other: borrow Int64) "
+        "-> () effects { pure } }\n"
+        "implementation Update for Int64 { function update(self: inout Self, "
+        "other: borrow Int64) -> () effects { pure } { self = other } }\n"
+        "trait Fail { function fail(self: inout Self) -> () "
+        "effects { panic } }\n"
+        "implementation Fail for Int64 { function fail(self: inout Self) -> () "
+        "effects { panic } { panic \"fail\" } }\n"
+        "function owned(value: Pair) -> Int64 effects { pure } { "
+        "return value.sum(3) }\n"
+        "function shared(value: Pair) -> Int64 effects { pure } { "
+        "return value.left.read() }\n"
+        "function exclusive() -> Int64 effects { pure } { "
+        "var value = Pair { left = 1, right = 2 } value.left.set() "
+        "return value.left }\n"
+        "function disjoint() -> Int64 effects { pure } { "
+        "var value = Pair { left = 1, right = 2 } "
+        "value.left.update(value.right) return value.left }\n"
+        "function failure() -> () effects { panic } { "
+        "var value = Pair { left = 1, right = 2 } value.left.fail() }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    const char *names[] = {
+        "owned", "shared", "exclusive", "disjoint", "failure",
+    };
+    for (size_t name = 0; name < 5; ++name) {
+        SolMir mir;
+        sol_mir_init(&mir);
+        SolMirLowerOutcome outcome = sol_mir_lower_callable(&compilation.ir,
+            callable(&compilation.ir, names[name]), &mir,
+            &compilation.diagnostics);
+        CHECK(outcome == SOL_MIR_LOWER_SUCCEEDED);
+        if (outcome != SOL_MIR_LOWER_SUCCEEDED) {
+            sol_mir_free(&mir);
+            continue;
+        }
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        SolMirTerminator *invoke = NULL;
+        for (size_t block = 0; block < mir.block_count; ++block) {
+            if (mir.blocks[block].terminator.kind == SOL_MIR_TERM_INVOKE
+                && mir.blocks[block].terminator.as.invoke.kind
+                    == SOL_IR_CALL_METHOD) {
+                invoke = &mir.blocks[block].terminator;
+            }
+        }
+        CHECK(invoke != NULL);
+        CHECK(invoke->as.invoke.callable < compilation.ir.callable_count);
+        CHECK(compilation.ir.callables[invoke->as.invoke.callable].kind
+            == SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION);
+        CHECK(invoke->as.invoke.receiver.access == (name == 0
+            ? SOL_ACCESS_OWNED : name == 1
+            ? SOL_ACCESS_SHARED : SOL_ACCESS_EXCLUSIVE));
+        if (name == 0) {
+            CHECK(invoke->as.invoke.receiver.temporary < mir.temporary_count);
+            SolMirInstructionId receiver_init = SOL_MIR_NONE;
+            SolMirInstructionId argument_init = SOL_MIR_NONE;
+            for (size_t instruction = 0; instruction < mir.instruction_count;
+                ++instruction) {
+                if (mir.instructions[instruction].kind
+                    != SOL_MIR_INST_TEMPORARY_INIT) continue;
+                if (mir.instructions[instruction].as.temporary_init.temporary
+                    == invoke->as.invoke.receiver.temporary) {
+                    receiver_init = instruction;
+                } else {
+                    argument_init = instruction;
+                }
+            }
+            CHECK(receiver_init < argument_init);
+        } else {
+            CHECK(invoke->as.invoke.receiver.place < compilation.ir.place_count);
+        }
+        SolIrCallableId implementation = invoke->as.invoke.callable;
+        SolIrExpressionId call_source = invoke->as.invoke.source_expression;
+        invoke->as.invoke.callable
+            = compilation.ir.expressions[call_source].as.call.callable;
+        CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+        invoke->as.invoke.callable = implementation;
+        SolIrExpressionId receiver
+            = invoke->as.invoke.receiver.source_expression;
+        invoke->as.invoke.receiver.source_expression = SOL_IR_NONE;
+        CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+        invoke->as.invoke.receiver.source_expression = receiver;
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        if (name == 3) {
+            SolMirCallArgument *argument = &mir.call_arguments[
+                invoke->as.invoke.arguments.offset];
+            SolIrPlaceId place = argument->place;
+            argument->place = invoke->as.invoke.receiver.place;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            argument->place = place;
+            CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        }
+        if (name == 4) {
+            SolMirBlockId failure = invoke->as.invoke.failure_edge.block;
+            bool wrote_back = false;
+            SolMirSlice instructions = mir.blocks[failure].instructions;
+            for (size_t index = 0; index < instructions.count; ++index) {
+                SolMirInstructionKind kind
+                    = mir.instructions[instructions.offset + index].kind;
+                wrote_back = wrote_back || kind == SOL_MIR_INST_STORE
+                    || kind == SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED;
+            }
+            CHECK(!wrote_back);
+            CHECK(mir.blocks[failure].terminator.kind
+                == SOL_MIR_TERM_RESUME_FAILURE);
         }
         sol_mir_free(&mir);
     }
@@ -1922,6 +2058,7 @@ int main(void) {
     test_projected_place_lowering();
     test_partial_move_path_state();
     test_callback_invoke_lowering();
+    test_concrete_method_invoke_lowering();
     test_owned_temporary_cleanup();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

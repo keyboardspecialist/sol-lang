@@ -631,8 +631,10 @@ backedges, borrow availability, and whole-local cleanup of partial aggregates. I
 not yet cover authority-bearing construction. Dynamic callback calls now stage the
 callee before operands and use the same abstract normal/failure invoke edges, with
 exact structural signature, access, source-order, temporary-consumption, and cleanup
-validation. MIR does not yet cover capability/method calls,
-dynamic/method/capability calls, handlers, contracts, generic lowering,
+validation. Concrete nongeneric method calls now select implementation callables from
+exact non-forwarded evidence and retain owned/shared/exclusive receivers before
+operands, with receiver-first normal writeback and failure suppression. MIR does not
+yet cover capability calls, handlers, contracts, generic lowering,
 representation, runtime ABI, or a backend.
 
 ### Phase 0 — Executable language model
