@@ -628,7 +628,10 @@ direct shared/exclusive operands with sibling-aware overlap and abstract normal-
 writeback. A separate layout-free path-state fixed point now tracks projected moves,
 sibling availability, exact/ancestor hole restoration, conservative joins and loop
 backedges, borrow availability, and whole-local cleanup of partial aggregates. It does
-not yet cover authority-bearing construction,
+not yet cover authority-bearing construction. Dynamic callback calls now stage the
+callee before operands and use the same abstract normal/failure invoke edges, with
+exact structural signature, access, source-order, temporary-consumption, and cleanup
+validation. MIR does not yet cover capability/method calls,
 dynamic/method/capability calls, handlers, contracts, generic lowering,
 representation, runtime ABI, or a backend.
 

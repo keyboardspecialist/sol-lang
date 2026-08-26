@@ -129,7 +129,8 @@ open until the complete frozen executable core lowers:
 | [x] | P1a.3b5 | Lower typed Option/Result propagation | Consume one staged sum in an abstract two-result terminator, transport the success payload to continuation, retype None/Err to the callable result on the residual edge, and preserve that residual through exact pending/local/region/parameter cleanup before return |
 | [x] | P1a.3b6 | Add bounded projected places | Retain canonical local-rooted record/tuple paths for projected copies, fully initialized plain replacement, and direct shared/exclusive call operands with sibling-aware overlap checks and normal-edge-only abstract writeback |
 | [x] | P1a.3b7 | Add partial-move path state | Track unavailable projection frontiers through moves, exact-hole reinitialization, joins, loops, and whole-local cleanup without choosing aggregate layout |
-| [ ] | P1a.3b8 | Complete structured executable-core CFG lowering | Lower handlers, capability/method/callback calls, contracts/snapshots, authority-bearing construction, and every E6 callable |
+| [x] | P1a.3b8 | Add callback invocation | Stage dynamic function callees before ordered operands, retain exact structural signature/access metadata, consume callee and owned arguments atomically, and preserve normal/failure cleanup and writeback edges |
+| [ ] | P1a.3b9 | Complete structured executable-core CFG lowering | Lower handlers, capability/method calls, contracts/snapshots, authority-bearing construction, and every E6 callable |
 | [ ] | P1b | Freeze backend-facing value/CFG invariants | Complete dominance/SSA and ownership validation, generic/evidence retention, canonical internal rendering, and a bounded MIR evaluator/trace for interpreter differential semantics without choosing representation or ABI |
 
 Items 28-39, 41-42, 44, 46, 50B+, and 52-61 are deferred until a

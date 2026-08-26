@@ -202,7 +202,10 @@ typedef struct {
         } branch;
         struct {
             SolIrExpressionId source_expression;
+            SolIrCallKind kind;
             SolIrCallableId callable;
+            SolMirTemporaryId callee;
+            SolMirCallArgument receiver;
             SolMirSlice arguments;
             SolMirValueId result;
             SolMirEdge normal_edge;

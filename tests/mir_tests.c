@@ -1585,6 +1585,84 @@ static void test_partial_move_path_state(void) {
     free_compilation(&compilation);
 }
 
+static void test_callback_invoke_lowering(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_callbacks\n"
+        "function apply(callback: function(Int64) -> Int64 effects { pure }, "
+        "value: Int64) -> Int64 effects { pure } { return callback(value) }\n"
+        "function borrow_apply(callback: function(borrow Int64) -> Int64 "
+        "effects { pure }, value: Int64) -> Int64 effects { pure } { "
+        "return callback(value) }\n"
+        "function crash() -> Int64 effects { panic } { panic \"boom\" }\n"
+        "function apply_failure(callback: function(Int64) -> Int64 "
+        "effects { pure }) -> Int64 effects { panic } { "
+        "return callback(crash()) }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    const char *names[] = {"apply", "borrow_apply", "apply_failure"};
+    for (size_t name = 0; name < 3; ++name) {
+        SolMir mir;
+        sol_mir_init(&mir);
+        CHECK(sol_mir_lower_callable(&compilation.ir,
+            callable(&compilation.ir, names[name]), &mir,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        SolMirBlockId invoke = SOL_MIR_NONE;
+        for (size_t block = 0; block < mir.block_count; ++block) {
+            if (mir.blocks[block].terminator.kind == SOL_MIR_TERM_INVOKE
+                && mir.blocks[block].terminator.as.invoke.kind
+                    == SOL_IR_CALL_CALLBACK) invoke = block;
+        }
+        CHECK(invoke != SOL_MIR_NONE);
+        SolMirTerminator *term = &mir.blocks[invoke].terminator;
+        CHECK(term->as.invoke.callable == SOL_IR_NONE);
+        CHECK(term->as.invoke.callee < mir.temporary_count);
+        if (name == 1) {
+            CHECK(mir.call_arguments[term->as.invoke.arguments.offset].access
+                == SOL_ACCESS_SHARED);
+        }
+        if (name == 2) {
+            bool dropped_callee = false;
+            for (size_t instruction = 0; instruction < mir.instruction_count;
+                ++instruction) {
+                dropped_callee = dropped_callee
+                    || (mir.instructions[instruction].kind
+                            == SOL_MIR_INST_TEMPORARY_DROP
+                        && mir.instructions[instruction].as.temporary_drop
+                            .temporary == term->as.invoke.callee);
+            }
+            CHECK(dropped_callee);
+        }
+        SolMirTemporaryId callee = term->as.invoke.callee;
+        SolMirValueId parameter = mir.parameter_values[
+            mir.blocks[term->as.invoke.normal_edge.block].parameters.offset];
+        SolIrExpressionId parameter_source
+            = mir.values[parameter].source_expression;
+        mir.values[parameter].source_expression = SOL_IR_NONE;
+        CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+        mir.values[parameter].source_expression = parameter_source;
+        term->as.invoke.callee = SOL_MIR_NONE;
+        CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+        term->as.invoke.callee = callee;
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        if (name == 2) {
+            for (size_t block = 0; block < mir.block_count; ++block) {
+                SolMirTerminator *direct = &mir.blocks[block].terminator;
+                if (direct->kind != SOL_MIR_TERM_INVOKE
+                    || direct->as.invoke.kind != SOL_IR_CALL_FUNCTION) {
+                    continue;
+                }
+                direct->as.invoke.callee = 0;
+                CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+                direct->as.invoke.callee = SOL_MIR_NONE;
+                CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+            }
+        }
+        sol_mir_free(&mir);
+    }
+    free_compilation(&compilation);
+}
+
 static void test_owned_temporary_cleanup(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -1843,6 +1921,7 @@ int main(void) {
     test_propagation_lowering();
     test_projected_place_lowering();
     test_partial_move_path_state();
+    test_callback_invoke_lowering();
     test_owned_temporary_cleanup();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
