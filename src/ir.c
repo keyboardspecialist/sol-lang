@@ -5492,7 +5492,10 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                 || ir->types[ir->locals[local].type].definition >= ir->definition_count
                 || ir->definitions[ir->types[
                     ir->locals[local].type
-                ].definition].kind != SOL_IR_DEFINITION_CAPABILITY) {
+                ].definition].kind != SOL_IR_DEFINITION_CAPABILITY
+                || ir->definitions[ir->types[
+                    ir->locals[local].type
+                ].definition].capability_source != SOL_IR_NONE) {
                 return sol_ir_error(diagnostics,
                     "IR entrypoint parameter is not an owned root capability");
             }

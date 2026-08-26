@@ -9071,7 +9071,10 @@ bool sol_type_check(
                 || types->declared_types[entry->type_id].kind != SOL_TYPE_NOMINAL
                 || types->declared_types[entry->type_id].definition >= syntax->item_count
                 || syntax->items[types->declared_types[entry->type_id].definition].kind
-                    != SOL_ITEM_CAPABILITY) {
+                    != SOL_ITEM_CAPABILITY
+                || syntax->items[
+                    types->declared_types[entry->type_id].definition
+                ].capability_source != SOL_AST_NONE) {
                 valid = false;
             }
             parameter = entry->next;

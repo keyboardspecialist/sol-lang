@@ -87,7 +87,7 @@ Priority: high. Runtime contract semantics should be implemented before Sol is p
 
 == Application Execution Boundary Is Incomplete
 
-The compiler defines argumentless `@entry`, package uniqueness, its bounded signature, capability-only parameters, successful result-to-status mapping, and owning-IR/opaque-handle metadata. Trusted capability injection, missing-entry command diagnostics, and stable panic/runtime rendering remain E3/E4 work.
+The compiler defines argumentless `@entry`, package uniqueness, its bounded signature, capability-only parameters, successful result-to-status mapping, owning-IR/opaque-handle metadata, and trusted capability injection through an exact root/member registry. Missing-entry command diagnostics and stable panic/runtime rendering remain E4 work.
 
 This keeps later interpreter and backend work from embedding accidental function-name or truncating exit-status conventions.
 
@@ -95,7 +95,7 @@ This keeps later interpreter and backend work from embedding accidental function
 
 The raw host callback writes failure text into interpreter-owned fixed-capacity storage with an authoritative length. Empty failures select a stable default; embedded NULs and oversized lengths are rejected. No borrowed failure C string is scanned after callback return.
 
-The callback still receives raw IR and remains a trusted compiler-test interface. Opaque validated handles reject it until the safe E3 host profile exists.
+The raw callback still receives raw IR and remains a trusted compiler-test interface. Ordinary opaque-handle interpretation rejects it; hosted entrypoint execution uses a separate data-only callback and exact opaque registry that expose no IR or authority token.
 
 == Public C IR Is Not a Hostile-Input Format
 
@@ -226,6 +226,8 @@ Implement only what a representative application requires:
 - Default and configurable execution limits.
 
 Filesystem, network, clock, randomness, and process mutation should remain absent until each receives an explicit authority and deterministic-test policy.
+
+#status("IMPLEMENTED", [A registry bound to one validated handle gives every entrypoint capability parameter a distinct opaque root and grants bodyless data-only members per exact root. Preflight rejects missing roots, missing or extra authority, ambiguous effect families, and cross-handle registries before Sol execution. Safe callbacks receive no IR, callable ID, root, or private source. The minimal conventions cover console `write`, immutable arguments `count`/`get`, and deterministic configuration `read`; callback results consume existing value/text budgets, dispatch consumes the host-call budget, and failures are copied into owned diagnostics.])
 
 == Milestone 4: `sol run`
 

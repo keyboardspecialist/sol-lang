@@ -3559,6 +3559,18 @@ static void test_entrypoint_metadata_validation(void) {
     launch->is_entrypoint = true;
     CHECK(sol_ir_validate(&compilation.ir, NULL));
     free_compilation(&compilation);
+
+    CHECK(compile_ir(&compilation,
+        "module derived_entry_ir\n"
+        "capability Root {}\n"
+        "capability Derived derives_from source: capability Root {}\n"
+        "public function launch(value: capability Derived) -> () "
+        "effects { pure } { () }\n"));
+    compilation.ir.definitions[2].is_entrypoint = true;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    compilation.ir.definitions[2].is_entrypoint = false;
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+    free_compilation(&compilation);
 }
 
 int main(void) {

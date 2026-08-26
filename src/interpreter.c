@@ -8,6 +8,7 @@
 #include <string.h>
 
 #include "validated_ir_internal.h"
+#include "host_internal.h"
 
 typedef enum {
     FLOW_VALUE, FLOW_RETURN, FLOW_BREAK, FLOW_CONTINUE, FLOW_ERROR
@@ -1121,6 +1122,13 @@ static Flow invoke_operation(Interpreter *interpreter,
     if (interpreter->request->host_operation == NULL) {
         diagnostic(interpreter, SOL_INTERPRETER_UNBOUND_OPERATION, span,
             "capability operation '%s' is unbound", operation->name);
+        return error;
+    }
+    if (interpreter->request->host_allows != NULL
+        && !interpreter->request->host_allows(interpreter->request->host_context,
+            interpreter->request->ir, callable, receiver->as.capability.root)) {
+        diagnostic(interpreter, SOL_INTERPRETER_UNBOUND_OPERATION, span,
+            "capability operation '%s' is not allowed for this root", operation->name);
         return error;
     }
     if (!consume(interpreter, &interpreter->result->used.host_calls,
@@ -2628,15 +2636,409 @@ bool sol_validated_ir_interpret(
         return sol_interpret_impl(NULL, result, false);
     }
     if (result == NULL) return false;
-    if (request->host_operation != NULL) {
+    if (request->host_operation != NULL || request->host_allows != NULL) {
         sol_interpreter_result_init(result);
         result->diagnostic.code = SOL_INTERPRETER_INVALID_REQUEST;
         (void)snprintf(result->diagnostic.message,
             sizeof(result->diagnostic.message),
-            "validated IR handles do not expose raw IR host callbacks; a safe host profile is not yet available");
+            "validated IR handles do not expose raw IR host callbacks; use a host registry");
         return false;
     }
     SolInterpreterRequest private_request = *request;
     private_request.ir = &validated->ir;
     return sol_interpret_impl(&private_request, result, false);
+}
+
+static const SolHostGrant *host_registry_grant(
+    const SolHostRegistry *registry,
+    void *root,
+    SolIrCallableId callable
+) {
+    size_t parameter = SIZE_MAX;
+    for (size_t index = 0; index < registry->root_count; ++index) {
+        if (root == &registry->roots[index]) {
+            parameter = index;
+            break;
+        }
+    }
+    if (parameter == SIZE_MAX) return NULL;
+    for (size_t index = 0; index < registry->grant_count; ++index) {
+        if (registry->grants[index].parameter == parameter
+            && registry->grants[index].callable == callable) return &registry->grants[index];
+    }
+    return NULL;
+}
+
+typedef struct {
+    const SolHostRegistry *registry;
+    SolInterpreterValue pending_result;
+    bool has_pending_result;
+} SolHostExecution;
+
+static void host_value_view_free(SolHostValue *value) {
+    if (value == NULL) return;
+    if ((value->kind == SOL_HOST_VALUE_OPTION || value->kind == SOL_HOST_VALUE_RESULT)
+        && value->as.sum.value != NULL) {
+        host_value_view_free((SolHostValue *)value->as.sum.value);
+        free((SolHostValue *)value->as.sum.value);
+    }
+    memset(value, 0, sizeof(*value));
+}
+
+static bool host_value_view(
+    const SolInterpreterValue *source,
+    SolHostValue *output,
+    size_t depth
+) {
+    if (source == NULL || output == NULL || depth >= 256) return false;
+    memset(output, 0, sizeof(*output));
+    switch (source->kind) {
+        case SOL_INTERPRETER_VALUE_INT64:
+            output->kind = SOL_HOST_VALUE_INT64;
+            output->as.integer = source->as.integer;
+            return true;
+        case SOL_INTERPRETER_VALUE_BOOL:
+            output->kind = SOL_HOST_VALUE_BOOL;
+            output->as.boolean = source->as.boolean;
+            return true;
+        case SOL_INTERPRETER_VALUE_TEXT:
+            output->kind = SOL_HOST_VALUE_TEXT;
+            output->as.text.bytes = source->as.text.bytes;
+            output->as.text.length = source->as.text.length;
+            return true;
+        case SOL_INTERPRETER_VALUE_UNIT:
+            output->kind = SOL_HOST_VALUE_UNIT;
+            return true;
+        case SOL_INTERPRETER_VALUE_OPTION:
+        case SOL_INTERPRETER_VALUE_RESULT:
+            output->kind = source->kind == SOL_INTERPRETER_VALUE_OPTION
+                ? SOL_HOST_VALUE_OPTION : SOL_HOST_VALUE_RESULT;
+            output->as.sum.is_error = source->as.sum.is_error;
+            if (!source->as.sum.has_value) return true;
+            output->as.sum.value = calloc(1, sizeof(*output->as.sum.value));
+            if (output->as.sum.value == NULL
+                || !host_value_view(source->as.sum.value,
+                    (SolHostValue *)output->as.sum.value, depth + 1)) {
+                host_value_view_free(output);
+                return false;
+            }
+            return true;
+        default:
+            return false;
+    }
+}
+
+static bool host_value_result(
+    const SolIr *ir,
+    SolIrTypeId type_id,
+    const SolHostValue *source,
+    SolInterpreterValue *output,
+    size_t depth
+) {
+    static char empty_text;
+    if (type_id >= ir->type_count || source == NULL || output == NULL
+        || depth > ir->type_count) return false;
+    const SolIrType *type = &ir->types[type_id];
+    switch (type->kind) {
+        case SOL_IR_TYPE_INT64:
+            if (source->kind != SOL_HOST_VALUE_INT64) return false;
+            output->kind = SOL_INTERPRETER_VALUE_INT64;
+            output->as.integer = source->as.integer;
+            return true;
+        case SOL_IR_TYPE_BOOL:
+            if (source->kind != SOL_HOST_VALUE_BOOL) return false;
+            output->kind = SOL_INTERPRETER_VALUE_BOOL;
+            output->as.boolean = source->as.boolean;
+            return true;
+        case SOL_IR_TYPE_TEXT:
+            if (source->kind != SOL_HOST_VALUE_TEXT
+                || (source->as.text.length != 0 && source->as.text.bytes == NULL)) return false;
+            output->kind = SOL_INTERPRETER_VALUE_TEXT;
+            output->as.text.bytes = source->as.text.bytes == NULL
+                ? &empty_text : (char *)source->as.text.bytes;
+            output->as.text.length = source->as.text.length;
+            return true;
+        case SOL_IR_TYPE_UNIT:
+            if (source->kind != SOL_HOST_VALUE_UNIT) return false;
+            output->kind = SOL_INTERPRETER_VALUE_UNIT;
+            return true;
+        case SOL_IR_TYPE_OPTION: {
+            if (source->kind != SOL_HOST_VALUE_OPTION || source->as.sum.is_error
+                || type->argument_count != 1) return false;
+            output->kind = SOL_INTERPRETER_VALUE_OPTION;
+            output->as.sum.has_value = source->as.sum.value != NULL;
+            output->as.sum.is_error = false;
+            if (source->as.sum.value == NULL) return true;
+            output->as.sum.value = calloc(1, sizeof(*output->as.sum.value));
+            return output->as.sum.value != NULL
+                && host_value_result(ir, ir->type_ids[type->argument_offset],
+                    source->as.sum.value, output->as.sum.value, depth + 1);
+        }
+        case SOL_IR_TYPE_RESULT: {
+            if (source->kind != SOL_HOST_VALUE_RESULT || source->as.sum.value == NULL
+                || type->argument_count != 2) return false;
+            size_t argument = source->as.sum.is_error ? 1 : 0;
+            output->kind = SOL_INTERPRETER_VALUE_RESULT;
+            output->as.sum.has_value = true;
+            output->as.sum.is_error = source->as.sum.is_error;
+            output->as.sum.value = calloc(1, sizeof(*output->as.sum.value));
+            return output->as.sum.value != NULL
+                && host_value_result(ir,
+                    ir->type_ids[type->argument_offset + argument],
+                    source->as.sum.value, output->as.sum.value, depth + 1);
+        }
+        default:
+            return false;
+    }
+}
+
+static void host_borrowed_result_free(SolInterpreterValue *value) {
+    if (value == NULL) return;
+    if ((value->kind == SOL_INTERPRETER_VALUE_OPTION
+            || value->kind == SOL_INTERPRETER_VALUE_RESULT)
+        && value->as.sum.value != NULL) {
+        host_borrowed_result_free(value->as.sum.value);
+        free(value->as.sum.value);
+    }
+    sol_interpreter_value_init(value);
+}
+
+static bool host_registry_allows(
+    void *context,
+    const SolIr *ir,
+    SolIrCallableId operation,
+    void *root
+) {
+    const SolHostExecution *execution = context;
+    const SolHostRegistry *registry = execution == NULL ? NULL : execution->registry;
+    return registry != NULL && ir == &registry->validated->ir
+        && host_registry_grant(registry, root, operation) != NULL;
+}
+
+static bool host_registry_dispatch(
+    void *context,
+    const SolIr *ir,
+    SolIrCallableId operation,
+    void *root,
+    const SolInterpreterValue *private_source,
+    const SolInterpreterValue *arguments,
+    size_t argument_count,
+    SolInterpreterValue *result,
+    SolInterpreterHostFailure *failure
+) {
+    SolHostExecution *execution = context;
+    const SolHostRegistry *registry = execution == NULL ? NULL : execution->registry;
+    const SolHostGrant *grant = registry == NULL || ir != &registry->validated->ir
+        || private_source != NULL
+        ? NULL : host_registry_grant(registry, root, operation);
+    if (grant == NULL) return false;
+    if (execution->has_pending_result) {
+        host_borrowed_result_free(&execution->pending_result);
+        execution->has_pending_result = false;
+    }
+    SolHostValue *views = argument_count == 0
+        ? NULL : calloc(argument_count, sizeof(*views));
+    if (views == NULL && argument_count != 0) return false;
+    bool valid = true;
+    for (size_t index = 0; index < argument_count; ++index) {
+        if (!host_value_view(&arguments[index], &views[index], 0)) {
+            valid = false;
+            break;
+        }
+    }
+    SolHostValue host_result = {0};
+    bool succeeded = valid && grant->callback(
+        grant->context, views, argument_count, &host_result, failure);
+    bool converted = false;
+    if (succeeded) {
+        sol_interpreter_value_init(&execution->pending_result);
+        converted = host_value_result(ir, ir->callables[operation].result,
+            &host_result, &execution->pending_result, 0);
+    }
+    for (size_t index = 0; index < argument_count; ++index) {
+        host_value_view_free(&views[index]);
+    }
+    free(views);
+    if (!succeeded) return false;
+    if (!converted) {
+        host_borrowed_result_free(&execution->pending_result);
+        return false;
+    }
+    execution->has_pending_result = true;
+    *result = execution->pending_result;
+    return true;
+}
+
+static bool host_entry_effect_matches(
+    const SolIr *ir,
+    const SolIrCallable *entry,
+    size_t parameter,
+    const SolIrEffect *operation_effect
+) {
+    SolIrLocalId root = ir->roots[entry->parameters.offset + parameter];
+    for (size_t index = 0; index < entry->effects.count; ++index) {
+        const SolIrEffect *effect = &ir->effects[entry->effects.offset + index];
+        if (effect->authority_kind == SOL_IR_AUTHORITY_LOCAL
+            && effect->authority == root
+            && strcmp(effect->name, operation_effect->name) == 0) return true;
+    }
+    return false;
+}
+
+static bool host_registry_preflight(
+    const SolHostRegistry *registry,
+    const SolIrCallable *entry,
+    char *error,
+    size_t error_capacity
+) {
+    const SolIr *ir = &registry->validated->ir;
+    for (size_t index = 0; index < registry->root_count; ++index) {
+        if (!registry->roots[index].bound) {
+            (void)snprintf(error, error_capacity,
+                "entrypoint capability parameter %zu has no bound host root", index);
+            return false;
+        }
+    }
+    for (size_t index = 0; index < registry->grant_count; ++index) {
+        const SolHostGrant *grant = &registry->grants[index];
+        const SolIrCallable *operation = &ir->callables[grant->callable];
+        const SolIrEffect *effect = &ir->effects[operation->effects.offset];
+        if (!host_entry_effect_matches(ir, entry, grant->parameter, effect)) {
+            (void)snprintf(error, error_capacity,
+                "allowed host operation '%s' is not declared by the entrypoint",
+                operation->name);
+            return false;
+        }
+    }
+    for (size_t effect_index = 0; effect_index < entry->effects.count; ++effect_index) {
+        const SolIrEffect *effect = &ir->effects[entry->effects.offset + effect_index];
+        if (effect->authority_kind == SOL_IR_AUTHORITY_NONE) continue;
+        if (effect->authority_kind != SOL_IR_AUTHORITY_LOCAL) {
+            (void)snprintf(error, error_capacity,
+                "entrypoint effect authority is not a registered root");
+            return false;
+        }
+        size_t parameter = SIZE_MAX;
+        for (size_t index = 0; index < entry->parameters.count; ++index) {
+            if (ir->roots[entry->parameters.offset + index] == effect->authority) {
+                parameter = index;
+                break;
+            }
+        }
+        if (parameter == SIZE_MAX) {
+            (void)snprintf(error, error_capacity,
+                "entrypoint effect refers to undeclared authority");
+            return false;
+        }
+        const SolIrDefinition *capability
+            = &ir->definitions[registry->roots[parameter].capability];
+        SolIrCallableId required = SOL_IR_NONE;
+        for (size_t member = 0; member < capability->members.count; ++member) {
+            SolIrCallableId callable
+                = ir->members[capability->members.offset + member].callable;
+            const SolIrCallable *operation = &ir->callables[callable];
+            if (operation->body != SOL_IR_NONE || operation->effects.count != 1) continue;
+            const SolIrEffect *operation_effect
+                = &ir->effects[operation->effects.offset];
+            if (strcmp(effect->name, operation_effect->name) != 0) continue;
+            if (!sol_host_operation_supported_internal(ir, callable)) {
+                (void)snprintf(error, error_capacity,
+                    "entrypoint effect '%s' names an unsupported host operation",
+                    effect->name);
+                return false;
+            }
+            if (required != SOL_IR_NONE) {
+                (void)snprintf(error, error_capacity,
+                    "entrypoint effect '%s' ambiguously names multiple host operations",
+                    effect->name);
+                return false;
+            }
+            required = callable;
+        }
+        if (required == SOL_IR_NONE) {
+            (void)snprintf(error, error_capacity,
+                "entrypoint effect '%s' names no host operation", effect->name);
+            return false;
+        }
+        if (host_registry_grant(
+                registry, (void *)&registry->roots[parameter], required
+            ) == NULL) {
+            (void)snprintf(error, error_capacity,
+                "entrypoint host operation '%s' is not allowed", ir->callables[required].name);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool host_invalid_result(SolInterpreterResult *result, const char *message) {
+    if (result == NULL) return false;
+    sol_interpreter_result_init(result);
+    result->diagnostic.code = SOL_INTERPRETER_INVALID_REQUEST;
+    (void)snprintf(result->diagnostic.message,
+        sizeof(result->diagnostic.message), "%s", message);
+    return false;
+}
+
+bool sol_validated_ir_interpret_entrypoint(
+    const SolValidatedIr *validated,
+    const SolHostRegistry *registry,
+    const SolInterpreterRequest *request,
+    SolInterpreterResult *result
+) {
+    if (validated == NULL || registry == NULL || request == NULL
+        || registry->validated != validated) {
+        return host_invalid_result(result,
+            "entrypoint execution requires a matching validated host registry");
+    }
+    SolEntrypointView entrypoint;
+    if (!sol_validated_ir_entrypoint(validated, &entrypoint)) {
+        return host_invalid_result(result, "application declares no entrypoint");
+    }
+    const SolIr *ir = &validated->ir;
+    const SolIrCallable *callable = &ir->callables[entrypoint.callable];
+    char error[192];
+    if (!host_registry_preflight(registry, callable, error, sizeof(error))) {
+        return host_invalid_result(result, error);
+    }
+    SolInterpreterValue *arguments = entrypoint.parameter_count == 0
+        ? NULL : calloc(entrypoint.parameter_count, sizeof(*arguments));
+    if (arguments == NULL && entrypoint.parameter_count != 0) {
+        return host_invalid_result(result, "entrypoint argument allocation failed");
+    }
+    bool initialized = true;
+    for (size_t index = 0; index < entrypoint.parameter_count; ++index) {
+        sol_interpreter_value_init(&arguments[index]);
+        if (!sol_interpreter_value_capability(&arguments[index],
+                registry->roots[index].capability,
+                (void *)&registry->roots[index], NULL)) {
+            initialized = false;
+            break;
+        }
+    }
+    if (!initialized) {
+        free_values(arguments, entrypoint.parameter_count);
+        return host_invalid_result(result, "entrypoint capability construction failed");
+    }
+    SolInterpreterRequest hosted = {
+        .ir = ir,
+        .callable = entrypoint.callable,
+        .definition = SOL_IR_NONE,
+        .arguments = arguments,
+        .argument_count = entrypoint.parameter_count,
+        .contracts = request->contracts,
+        .limits = request->limits,
+        .host_operation = host_registry_dispatch,
+        .host_allows = host_registry_allows,
+        .host_context = NULL,
+    };
+    SolHostExecution execution = {.registry = registry};
+    sol_interpreter_value_init(&execution.pending_result);
+    hosted.host_context = &execution;
+    bool executed = sol_interpret_impl(&hosted, result, false);
+    if (execution.has_pending_result) {
+        host_borrowed_result_free(&execution.pending_result);
+    }
+    free_values(arguments, entrypoint.parameter_count);
+    return executed;
 }

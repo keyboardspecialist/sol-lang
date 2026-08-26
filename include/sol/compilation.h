@@ -3,12 +3,18 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <stdio.h>
 
 typedef struct SolCompilationSession SolCompilationSession;
 typedef struct SolValidatedIr SolValidatedIr;
 typedef struct SolInterpreterRequest SolInterpreterRequest;
 typedef struct SolInterpreterResult SolInterpreterResult;
+typedef struct SolInterpreterHostFailure SolInterpreterHostFailure;
+typedef struct SolHostRegistry SolHostRegistry;
+
+#define SOL_HOST_ROOT_LIMIT 64
+#define SOL_HOST_OPERATION_LIMIT 256
 
 typedef enum {
     SOL_COMPILATION_SUCCEEDED,
@@ -106,6 +112,49 @@ typedef struct {
     const char *capability;
 } SolEntrypointParameterView;
 
+typedef enum {
+    SOL_HOST_VALUE_INVALID,
+    SOL_HOST_VALUE_INT64,
+    SOL_HOST_VALUE_BOOL,
+    SOL_HOST_VALUE_TEXT,
+    SOL_HOST_VALUE_UNIT,
+    SOL_HOST_VALUE_OPTION,
+    SOL_HOST_VALUE_RESULT,
+} SolHostValueKind;
+
+typedef struct SolHostValue SolHostValue;
+
+struct SolHostValue {
+    SolHostValueKind kind;
+    union {
+        int64_t integer;
+        bool boolean;
+        struct {
+            const char *bytes;
+            size_t length;
+        } text;
+        struct {
+            const SolHostValue *value;
+            bool is_error;
+        } sum;
+    } as;
+};
+
+/*
+ * Safe host callback for one explicitly allowed root-capability operation.
+ * Argument views are borrowed for the callback duration and the result may
+ * alias them. Other storage referenced by the result remains host-owned and
+ * valid through hosted interpretation.
+ * No IR, mutable interpreter value, callable, root, or private source is exposed.
+ */
+typedef bool (*SolHostOperation)(
+    void *context,
+    const SolHostValue *arguments,
+    size_t argument_count,
+    SolHostValue *result,
+    SolInterpreterHostFailure *failure
+);
+
 SolCompilationSession *sol_compilation_create(void);
 void sol_compilation_limits_default(SolCompilationLimits *limits);
 SolCompilationSession *sol_compilation_create_with_limits(
@@ -190,6 +239,30 @@ bool sol_validated_ir_entrypoint_exit_status(
     const SolValidatedIr *validated,
     const SolInterpreterResult *result,
     int *status
+);
+/* The validated handle must outlive its registry. */
+SolHostRegistry *sol_host_registry_create(const SolValidatedIr *validated);
+void sol_host_registry_free(SolHostRegistry *registry);
+/* Binds one exact entrypoint capability parameter to a fresh opaque root. */
+bool sol_host_registry_bind_root(SolHostRegistry *registry, size_t parameter);
+/* Allows one bodyless data-only member on that exact root. */
+bool sol_host_registry_allow(
+    SolHostRegistry *registry,
+    size_t parameter,
+    const char *operation,
+    SolHostOperation callback,
+    void *context
+);
+const char *sol_host_registry_error(const SolHostRegistry *registry);
+/*
+ * Preflights all declared authority before invoking the entrypoint. Only the
+ * request's contracts and limits fields are read.
+ */
+bool sol_validated_ir_interpret_entrypoint(
+    const SolValidatedIr *validated,
+    const SolHostRegistry *registry,
+    const SolInterpreterRequest *request,
+    SolInterpreterResult *result
 );
 /* Returned paths are borrowed and valid until the validated handle is freed. */
 const char *sol_validated_ir_path_at(

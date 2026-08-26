@@ -134,7 +134,7 @@ typedef struct {
 
 #define SOL_INTERPRETER_HOST_FAILURE_CAPACITY 191
 
-typedef struct {
+typedef struct SolInterpreterHostFailure {
     /* Interpreter-owned text storage. length is authoritative; NUL is forbidden. */
     char bytes[SOL_INTERPRETER_HOST_FAILURE_CAPACITY];
     size_t length;
@@ -147,8 +147,8 @@ typedef struct {
  *
  * The callback writes a borrowed value view to result. Its storage remains
  * host-owned, may alias callback inputs, and must remain valid until the
- * enclosing sol_interpret call returns. The interpreter validates and
- * deep-clones it synchronously. On failure, the callback may write bounded
+ * enclosing interpretation call returns. The interpreter validates and
+ * deep-clones it synchronously after the callback. On failure, the callback may write bounded
  * bytes into the interpreter-owned failure buffer; length zero selects the
  * default failure message.
  */
@@ -164,6 +164,14 @@ typedef bool (*SolInterpreterHostOperation)(
     SolInterpreterHostFailure *failure
 );
 
+/* Raw trusted-interpreter authorization hook with the same IR exposure. */
+typedef bool (*SolInterpreterHostAllows)(
+    void *context,
+    const SolIr *ir,
+    SolIrCallableId operation,
+    void *root
+);
+
 typedef struct SolInterpreterRequest {
     const SolIr *ir;
     SolIrCallableId callable;
@@ -176,6 +184,7 @@ typedef struct SolInterpreterRequest {
     SolInterpreterContractPolicy contracts;
     SolInterpreterLimits limits;
     SolInterpreterHostOperation host_operation;
+    SolInterpreterHostAllows host_allows;
     void *host_context;
     SolInterpreterCleanupObserver cleanup_observer;
     void *cleanup_context;

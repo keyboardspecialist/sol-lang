@@ -17,6 +17,7 @@
 #include <string.h>
 
 #include "validated_ir_internal.h"
+#include "host_internal.h"
 
 typedef enum {
     SOL_SESSION_EMPTY,
@@ -519,6 +520,194 @@ bool sol_validated_ir_entrypoint_parameter_at(
         .capability = ir->definitions[capability].name,
     };
     return true;
+}
+
+static void sol_host_registry_set_error(SolHostRegistry *registry, const char *message) {
+    if (registry != NULL) {
+        (void)snprintf(registry->error, sizeof(registry->error), "%s", message);
+    }
+}
+
+static bool sol_host_type_supported(const SolIr *ir, SolIrTypeId id, size_t depth) {
+    if (id >= ir->type_count || depth > ir->type_count) return false;
+    const SolIrType *type = &ir->types[id];
+    if (type->kind == SOL_IR_TYPE_INT64 || type->kind == SOL_IR_TYPE_BOOL
+        || type->kind == SOL_IR_TYPE_TEXT || type->kind == SOL_IR_TYPE_UNIT) return true;
+    if (type->kind != SOL_IR_TYPE_OPTION && type->kind != SOL_IR_TYPE_RESULT) return false;
+    size_t expected = type->kind == SOL_IR_TYPE_OPTION ? 1 : 2;
+    if (type->argument_count != expected
+        || type->argument_offset > ir->type_id_count
+        || expected > ir->type_id_count - type->argument_offset) return false;
+    for (size_t index = 0; index < expected; ++index) {
+        if (!sol_host_type_supported(
+                ir, ir->type_ids[type->argument_offset + index], depth + 1
+            )) return false;
+    }
+    return true;
+}
+
+bool sol_host_operation_supported_internal(
+    const SolIr *ir,
+    SolIrCallableId callable_id
+) {
+    if (callable_id >= ir->callable_count) return false;
+    const SolIrCallable *callable = &ir->callables[callable_id];
+    if (callable->kind != SOL_IR_CALLABLE_CAPABILITY || callable->body != SOL_IR_NONE
+        || callable->generic_parameters.count != 0
+        || callable->effect_parameters.count != 0
+        || callable->effect_parameter != SOL_IR_NONE
+        || callable->result_authority_kind != SOL_IR_AUTHORITY_NONE
+        || callable->effects.count != 1
+        || !sol_host_type_supported(ir, callable->result, 0)) return false;
+    const SolIrEffect *effect = &ir->effects[callable->effects.offset];
+    if (effect->authority_kind != SOL_IR_AUTHORITY_SELF) return false;
+    for (size_t index = 0; index < callable->parameters.count; ++index) {
+        SolIrLocalId local = ir->roots[callable->parameters.offset + index];
+        if (local >= ir->local_count || ir->locals[local].access == SOL_ACCESS_EXCLUSIVE
+            || !sol_host_type_supported(ir, ir->locals[local].type, 0)) return false;
+    }
+    return true;
+}
+
+static SolIrCallableId sol_host_find_operation(
+    const SolIr *ir,
+    SolIrDefinitionId capability,
+    const char *name
+) {
+    if (capability >= ir->definition_count || name == NULL) return SOL_IR_NONE;
+    const SolIrDefinition *definition = &ir->definitions[capability];
+    SolIrCallableId found = SOL_IR_NONE;
+    for (size_t index = 0; index < definition->members.count; ++index) {
+        SolIrCallableId callable = ir->members[definition->members.offset + index].callable;
+        if (callable < ir->callable_count
+            && strcmp(ir->callables[callable].name, name) == 0) {
+            if (found != SOL_IR_NONE) return SOL_IR_NONE;
+            found = callable;
+        }
+    }
+    return found;
+}
+
+SolHostRegistry *sol_host_registry_create(const SolValidatedIr *validated) {
+    SolEntrypointView entrypoint;
+    if (!sol_validated_ir_entrypoint(validated, &entrypoint)) return NULL;
+    const SolIr *ir = &validated->ir;
+    const SolIrCallable *callable = &ir->callables[entrypoint.callable];
+    if (entrypoint.parameter_count > SOL_HOST_ROOT_LIMIT
+        || callable->effects.count > SOL_HOST_OPERATION_LIMIT) return NULL;
+    size_t member_count = 0;
+    for (size_t index = 0; index < entrypoint.parameter_count; ++index) {
+        SolIrLocalId local = ir->roots[callable->parameters.offset + index];
+        SolIrDefinitionId capability = ir->types[ir->locals[local].type].definition;
+        size_t count = ir->definitions[capability].members.count;
+        if (count > SOL_HOST_OPERATION_LIMIT - member_count) return NULL;
+        member_count += count;
+    }
+    SolHostRegistry *registry = calloc(1, sizeof(*registry));
+    if (registry == NULL) return NULL;
+    registry->validated = validated;
+    registry->root_count = entrypoint.parameter_count;
+    if (registry->root_count != 0) {
+        if (registry->root_count > SIZE_MAX / sizeof(*registry->roots)) {
+            free(registry);
+            return NULL;
+        }
+        registry->roots = calloc(registry->root_count, sizeof(*registry->roots));
+        if (registry->roots == NULL) {
+            free(registry);
+            return NULL;
+        }
+    }
+    for (size_t index = 0; index < registry->root_count; ++index) {
+        SolEntrypointParameterView parameter;
+        if (!sol_validated_ir_entrypoint_parameter_at(validated, index, &parameter)) {
+            sol_host_registry_free(registry);
+            return NULL;
+        }
+        registry->roots[index].capability = parameter.capability_definition;
+    }
+    return registry;
+}
+
+void sol_host_registry_free(SolHostRegistry *registry) {
+    if (registry == NULL) return;
+    free(registry->grants);
+    free(registry->roots);
+    free(registry);
+}
+
+bool sol_host_registry_bind_root(SolHostRegistry *registry, size_t parameter) {
+    if (registry == NULL || parameter >= registry->root_count) return false;
+    if (registry->roots[parameter].bound) {
+        sol_host_registry_set_error(registry, "entrypoint capability root is already bound");
+        return false;
+    }
+    registry->roots[parameter].bound = true;
+    registry->error[0] = '\0';
+    return true;
+}
+
+bool sol_host_registry_allow(
+    SolHostRegistry *registry,
+    size_t parameter,
+    const char *operation,
+    SolHostOperation callback,
+    void *context
+) {
+    if (registry == NULL || operation == NULL || callback == NULL
+        || parameter >= registry->root_count) return false;
+    if (registry->grant_count >= SOL_HOST_OPERATION_LIMIT) {
+        sol_host_registry_set_error(registry, "host operation limit exceeded");
+        return false;
+    }
+    if (!registry->roots[parameter].bound) {
+        sol_host_registry_set_error(registry,
+            "entrypoint capability root must be bound before allowing operations");
+        return false;
+    }
+    const SolIr *ir = &registry->validated->ir;
+    SolIrCallableId callable = sol_host_find_operation(
+        ir, registry->roots[parameter].capability, operation);
+    if (callable == SOL_IR_NONE
+        || !sol_host_operation_supported_internal(ir, callable)) {
+        sol_host_registry_set_error(registry,
+            "host operation must be a unique bodyless data-only capability member");
+        return false;
+    }
+    for (size_t index = 0; index < registry->grant_count; ++index) {
+        if (registry->grants[index].parameter == parameter
+            && registry->grants[index].callable == callable) {
+            sol_host_registry_set_error(registry, "host operation is already allowed");
+            return false;
+        }
+    }
+    if (registry->grant_count == registry->grant_capacity) {
+        size_t capacity = registry->grant_capacity == 0 ? 4 : registry->grant_capacity * 2;
+        if (capacity < registry->grant_capacity
+            || capacity > SIZE_MAX / sizeof(*registry->grants)) {
+            sol_host_registry_set_error(registry, "host registry is too large");
+            return false;
+        }
+        SolHostGrant *grants = realloc(registry->grants, capacity * sizeof(*grants));
+        if (grants == NULL) {
+            sol_host_registry_set_error(registry, "host registry allocation failed");
+            return false;
+        }
+        registry->grants = grants;
+        registry->grant_capacity = capacity;
+    }
+    registry->grants[registry->grant_count++] = (SolHostGrant){
+        .parameter = parameter,
+        .callable = callable,
+        .callback = callback,
+        .context = context,
+    };
+    registry->error[0] = '\0';
+    return true;
+}
+
+const char *sol_host_registry_error(const SolHostRegistry *registry) {
+    return registry == NULL || registry->error[0] == '\0' ? NULL : registry->error;
 }
 
 bool sol_validated_ir_entrypoint_exit_status(

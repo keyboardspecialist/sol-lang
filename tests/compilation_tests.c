@@ -31,6 +31,16 @@ typedef struct {
     const SolIr *escaped;
 } HostProbe;
 
+typedef struct {
+    size_t calls;
+    char output[128];
+    size_t output_length;
+    int64_t argument_count;
+    SolHostValue argument_value;
+    SolHostValue configuration_value;
+    bool fail_console;
+} SafeHost;
+
 static bool probe_host(void *context, const SolIr *ir,
     SolIrCallableId operation, void *root,
     const SolInterpreterValue *private_source,
@@ -47,6 +57,94 @@ static bool probe_host(void *context, const SolIr *ir,
     (void)result;
     (void)failure;
     return false;
+}
+
+static bool safe_console(void *context, const SolHostValue *arguments,
+    size_t argument_count, SolHostValue *result,
+    SolInterpreterHostFailure *failure) {
+    SafeHost *host = context;
+    ++host->calls;
+    if (host->fail_console) {
+        static const char message[] = "console unavailable";
+        memcpy(failure->bytes, message, sizeof(message) - 1);
+        failure->length = sizeof(message) - 1;
+        return false;
+    }
+    if (argument_count != 1 || arguments[0].kind != SOL_HOST_VALUE_TEXT
+        || arguments[0].as.text.length > sizeof(host->output) - host->output_length) {
+        return false;
+    }
+    memcpy(host->output + host->output_length,
+        arguments[0].as.text.bytes, arguments[0].as.text.length);
+    host->output_length += arguments[0].as.text.length;
+    result->kind = SOL_HOST_VALUE_UNIT;
+    return true;
+}
+
+static bool safe_arguments(void *context, const SolHostValue *arguments,
+    size_t argument_count, SolHostValue *result,
+    SolInterpreterHostFailure *failure) {
+    SafeHost *host = context;
+    (void)arguments;
+    (void)failure;
+    ++host->calls;
+    if (argument_count != 0) return false;
+    result->kind = SOL_HOST_VALUE_INT64;
+    result->as.integer = host->argument_count;
+    return true;
+}
+
+static bool safe_argument_get(void *context, const SolHostValue *arguments,
+    size_t argument_count, SolHostValue *result,
+    SolInterpreterHostFailure *failure) {
+    SafeHost *host = context;
+    (void)failure;
+    ++host->calls;
+    if (argument_count != 1 || arguments[0].kind != SOL_HOST_VALUE_INT64
+        || arguments[0].as.integer != 0) return false;
+    result->kind = SOL_HOST_VALUE_OPTION;
+    result->as.sum.is_error = false;
+    result->as.sum.value = &host->argument_value;
+    return true;
+}
+
+static bool safe_configuration(void *context,
+    const SolHostValue *arguments, size_t argument_count,
+    SolHostValue *result, SolInterpreterHostFailure *failure) {
+    SafeHost *host = context;
+    (void)failure;
+    ++host->calls;
+    if (argument_count != 1 || arguments[0].kind != SOL_HOST_VALUE_TEXT) {
+        return false;
+    }
+    result->kind = SOL_HOST_VALUE_OPTION;
+    result->as.sum.is_error = false;
+    result->as.sum.value = &host->configuration_value;
+    return true;
+}
+
+static bool safe_wrong_result(void *context, const SolHostValue *arguments,
+    size_t argument_count, SolHostValue *result,
+    SolInterpreterHostFailure *failure) {
+    SafeHost *host = context;
+    (void)arguments;
+    (void)failure;
+    ++host->calls;
+    if (argument_count != 0) return false;
+    result->kind = SOL_HOST_VALUE_BOOL;
+    result->as.boolean = true;
+    return true;
+}
+
+static bool safe_alias_result(void *context, const SolHostValue *arguments,
+    size_t argument_count, SolHostValue *result,
+    SolInterpreterHostFailure *failure) {
+    SafeHost *host = context;
+    (void)failure;
+    ++host->calls;
+    if (argument_count != 1) return false;
+    *result = arguments[0];
+    return true;
 }
 
 static SolIrCallableId callable(const SolValidatedIr *validated, const char *name) {
@@ -269,6 +367,13 @@ static void test_rejections_and_failure_teardown(void) {
         "module duplicate_annotation\n"
         "@entry @entry public function run() -> () effects { pure } { () }\n",
         "SOL-PARSE-026");
+    check_rejected(
+        "module derived_entry\n"
+        "capability Root {}\n"
+        "capability Derived derives_from source: capability Root {}\n"
+        "@entry public function run(value: capability Derived) -> () "
+        "effects { pure } { () }\n",
+        "SOL-ENTRY-003");
 
     for (size_t index = 0; index < 8; ++index) {
         SolCompilationSession *session = sol_compilation_create();
@@ -317,6 +422,249 @@ static void test_entrypoint_abi(void) {
     CHECK(sol_compilation_take_ir(session, &validated) == SOL_COMPILATION_SUCCEEDED);
     sol_compilation_free(session);
     CHECK(!sol_validated_ir_entrypoint(validated, &entrypoint));
+    sol_validated_ir_free(validated);
+}
+
+static void test_safe_host_registry(void) {
+    static const char source[] =
+        "module safe_host\n"
+        "capability Console { function write(value: Text) -> () "
+        "effects { console.write<Self> } }\n"
+        "capability Arguments { function count() -> Int64 "
+        "effects { process.arguments.count<Self> } function get(index: Int64) "
+        "-> Option<Text> effects { process.arguments.get<Self> } }\n"
+        "capability Configuration { function read(key: Text) -> Option<Text> "
+        "effects { configuration.read<Self> } }\n"
+        "@entry public function launch(console: capability Console, "
+        "arguments: capability Arguments, configuration: capability Configuration) "
+        "-> Int64 effects { console.write<console> "
+        "process.arguments.count<arguments> process.arguments.get<arguments> "
+        "configuration.read<configuration> } {\n"
+        " let configured = configuration.read(\"mode\")\n"
+        " let first = arguments.get(0)\n"
+        " console.write(\"ready\")\n"
+        " return arguments.count()\n"
+        "}\n";
+    SolCompilationSession *session = sol_compilation_create();
+    CHECK(session != NULL);
+    CHECK(sol_compilation_compile_text(session, "host.sol", source)
+        == SOL_COMPILATION_SUCCEEDED);
+    SolValidatedIr *validated = NULL;
+    CHECK(sol_compilation_take_ir(session, &validated) == SOL_COMPILATION_SUCCEEDED);
+    sol_compilation_free(session);
+
+    SolHostRegistry *registry = sol_host_registry_create(validated);
+    CHECK(registry != NULL);
+    SafeHost host = {
+        .argument_count = 3,
+        .argument_value = {
+            .kind = SOL_HOST_VALUE_TEXT,
+            .as.text = {.bytes = "first", .length = 5},
+        },
+        .configuration_value = {
+            .kind = SOL_HOST_VALUE_TEXT,
+            .as.text = {.bytes = NULL, .length = 0},
+        },
+    };
+    CHECK(sol_host_registry_bind_root(registry, 0));
+    CHECK(sol_host_registry_bind_root(registry, 1));
+    CHECK(sol_host_registry_bind_root(registry, 2));
+    CHECK(!sol_host_registry_bind_root(registry, 2));
+    CHECK(sol_host_registry_error(registry) != NULL);
+    CHECK(sol_host_registry_allow(registry, 0, "write", safe_console, &host));
+    CHECK(sol_host_registry_allow(registry, 1, "count", safe_arguments, &host));
+    CHECK(sol_host_registry_allow(registry, 1, "get", safe_argument_get, &host));
+    CHECK(sol_host_registry_allow(registry, 2, "read", safe_configuration, &host));
+    CHECK(!sol_host_registry_allow(registry, 2, "read", safe_configuration, &host));
+    CHECK(sol_host_registry_error(registry) != NULL);
+    SolInterpreterRequest request = {
+        .contracts = SOL_INTERPRETER_CONTRACTS_IGNORE,
+    };
+    SolInterpreterResult result;
+    CHECK(sol_validated_ir_interpret_entrypoint(validated, registry, &request, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64);
+    CHECK(result.value.as.integer == 3);
+    CHECK(result.used.host_calls == 4);
+    CHECK(host.calls == 4);
+    CHECK(host.output_length == 5);
+    CHECK(memcmp(host.output, "ready", 5) == 0);
+    int status = -1;
+    CHECK(sol_validated_ir_entrypoint_exit_status(validated, &result, &status));
+    CHECK(status == 3);
+    sol_interpreter_result_free(&result);
+
+    request.limits.host_calls = 0;
+    request.limits.steps = 100000;
+    request.limits.call_depth = 128;
+    request.limits.value_nodes = 100000;
+    request.limits.text_bytes = 1048576;
+    size_t calls = host.calls;
+    CHECK(!sol_validated_ir_interpret_entrypoint(validated, registry, &request, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_HOST_CALL_LIMIT);
+    CHECK(host.calls == calls);
+    sol_interpreter_result_free(&result);
+    request.limits = (SolInterpreterLimits){0};
+
+    host.fail_console = true;
+    CHECK(!sol_validated_ir_interpret_entrypoint(validated, registry, &request, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_HOST_ERROR);
+    CHECK(strstr(result.diagnostic.message, "console unavailable") != NULL);
+    host.fail_console = false;
+    sol_interpreter_result_free(&result);
+
+    SolHostRegistry *missing = sol_host_registry_create(validated);
+    CHECK(missing != NULL);
+    CHECK(sol_host_registry_bind_root(missing, 0));
+    CHECK(sol_host_registry_bind_root(missing, 1));
+    calls = host.calls;
+    CHECK(!sol_validated_ir_interpret_entrypoint(validated, missing, &request, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_INVALID_REQUEST);
+    CHECK(host.calls == calls);
+    sol_interpreter_result_free(&result);
+    CHECK(sol_host_registry_bind_root(missing, 2));
+    CHECK(sol_host_registry_allow(missing, 0, "write", safe_console, &host));
+    CHECK(!sol_validated_ir_interpret_entrypoint(validated, missing, &request, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_INVALID_REQUEST);
+    CHECK(host.calls == calls);
+    sol_interpreter_result_free(&result);
+
+    SolCompilationSession *other_session = sol_compilation_create();
+    CHECK(other_session != NULL);
+    CHECK(sol_compilation_compile_text(other_session, "other.sol", source)
+        == SOL_COMPILATION_SUCCEEDED);
+    SolValidatedIr *other = NULL;
+    CHECK(sol_compilation_take_ir(other_session, &other) == SOL_COMPILATION_SUCCEEDED);
+    sol_compilation_free(other_session);
+    CHECK(!sol_validated_ir_interpret_entrypoint(other, registry, &request, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_INVALID_REQUEST);
+    sol_interpreter_result_free(&result);
+
+    sol_validated_ir_free(other);
+    sol_host_registry_free(missing);
+    sol_host_registry_free(registry);
+    sol_validated_ir_free(validated);
+    sol_host_registry_free(NULL);
+    CHECK(sol_host_registry_error(NULL) == NULL);
+}
+
+static void test_root_specific_allowlist(void) {
+    static const char source[] =
+        "module root_specific\n"
+        "capability Console { function write(value: Text) -> () "
+        "effects { console.write<Self> } }\n"
+        "@entry public function launch(left: capability Console, "
+        "right: capability Console) -> () "
+        "effects { console.write<left> console.write<right> } { "
+        "left.write(\"left\") right.write(\"right\") }\n";
+    SolCompilationSession *session = sol_compilation_create();
+    CHECK(session != NULL);
+    CHECK(sol_compilation_compile_text(session, "roots.sol", source)
+        == SOL_COMPILATION_SUCCEEDED);
+    SolValidatedIr *validated = NULL;
+    CHECK(sol_compilation_take_ir(session, &validated) == SOL_COMPILATION_SUCCEEDED);
+    sol_compilation_free(session);
+    SolHostRegistry *registry = sol_host_registry_create(validated);
+    SafeHost left = {0};
+    SafeHost right = {0};
+    CHECK(registry != NULL);
+    CHECK(sol_host_registry_bind_root(registry, 0));
+    CHECK(sol_host_registry_bind_root(registry, 1));
+    CHECK(sol_host_registry_allow(registry, 0, "write", safe_console, &left));
+    CHECK(sol_host_registry_allow(registry, 1, "write", safe_console, &right));
+    SolInterpreterRequest request = {
+        .contracts = SOL_INTERPRETER_CONTRACTS_IGNORE,
+    };
+    SolInterpreterResult result;
+    CHECK(sol_validated_ir_interpret_entrypoint(validated, registry, &request, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_UNIT);
+    CHECK(left.calls == 1 && right.calls == 1);
+    CHECK(left.output_length == 4 && memcmp(left.output, "left", 4) == 0);
+    CHECK(right.output_length == 5 && memcmp(right.output, "right", 5) == 0);
+    sol_interpreter_result_free(&result);
+    sol_host_registry_free(registry);
+    sol_validated_ir_free(validated);
+
+    static const char alias_source[] =
+        "module host_alias\n"
+        "capability Echo { function echo(value: Option<Text>) -> Option<Text> "
+        "effects { host.echo<Self> } }\n"
+        "@entry public function launch(echo: capability Echo) -> () "
+        "effects { host.echo<echo> } { let value = echo.echo(some(\"value\")) }\n";
+    session = sol_compilation_create();
+    CHECK(session != NULL);
+    CHECK(sol_compilation_compile_text(session, "alias.sol", alias_source)
+        == SOL_COMPILATION_SUCCEEDED);
+    validated = NULL;
+    CHECK(sol_compilation_take_ir(session, &validated) == SOL_COMPILATION_SUCCEEDED);
+    sol_compilation_free(session);
+    registry = sol_host_registry_create(validated);
+    CHECK(registry != NULL);
+    CHECK(sol_host_registry_bind_root(registry, 0));
+    CHECK(sol_host_registry_allow(registry, 0, "echo", safe_alias_result, &left));
+    CHECK(sol_validated_ir_interpret_entrypoint(validated, registry, &request, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_UNIT);
+    sol_interpreter_result_free(&result);
+    sol_host_registry_free(registry);
+    sol_validated_ir_free(validated);
+}
+
+static void test_host_preflight_and_results(void) {
+    static const char unsupported_source[] =
+        "module unsupported_host\n"
+        "capability Console { function write(value: Text) -> () "
+        "effects { console.write<Self> } }\n"
+        "capability Unsupported { function pair() -> (Int64, Int64) "
+        "effects { unsupported.pair<Self> } }\n"
+        "@entry public function launch(console: capability Console, "
+        "unsupported: capability Unsupported) -> () "
+        "effects { console.write<console> unsupported.pair<unsupported> } { "
+        "console.write(\"must not run\") let pair = unsupported.pair() }\n";
+    SolCompilationSession *session = sol_compilation_create();
+    CHECK(session != NULL);
+    CHECK(sol_compilation_compile_text(session, "unsupported.sol", unsupported_source)
+        == SOL_COMPILATION_SUCCEEDED);
+    SolValidatedIr *validated = NULL;
+    CHECK(sol_compilation_take_ir(session, &validated) == SOL_COMPILATION_SUCCEEDED);
+    sol_compilation_free(session);
+    SolHostRegistry *registry = sol_host_registry_create(validated);
+    SafeHost host = {0};
+    CHECK(registry != NULL);
+    CHECK(sol_host_registry_bind_root(registry, 0));
+    CHECK(sol_host_registry_bind_root(registry, 1));
+    CHECK(sol_host_registry_allow(registry, 0, "write", safe_console, &host));
+    CHECK(!sol_host_registry_allow(registry, 1, "pair", safe_console, &host));
+    SolInterpreterRequest request = {
+        .contracts = SOL_INTERPRETER_CONTRACTS_IGNORE,
+    };
+    SolInterpreterResult result;
+    CHECK(!sol_validated_ir_interpret_entrypoint(validated, registry, &request, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_INVALID_REQUEST);
+    CHECK(host.calls == 0 && host.output_length == 0);
+    sol_interpreter_result_free(&result);
+    sol_host_registry_free(registry);
+    sol_validated_ir_free(validated);
+
+    static const char wrong_source[] =
+        "module wrong_host_result\n"
+        "capability Arguments { function count() -> Int64 "
+        "effects { process.arguments.count<Self> } }\n"
+        "@entry public function launch(arguments: capability Arguments) -> Int64 "
+        "effects { process.arguments.count<arguments> } { return arguments.count() }\n";
+    session = sol_compilation_create();
+    CHECK(session != NULL);
+    CHECK(sol_compilation_compile_text(session, "wrong.sol", wrong_source)
+        == SOL_COMPILATION_SUCCEEDED);
+    validated = NULL;
+    CHECK(sol_compilation_take_ir(session, &validated) == SOL_COMPILATION_SUCCEEDED);
+    sol_compilation_free(session);
+    registry = sol_host_registry_create(validated);
+    CHECK(registry != NULL);
+    CHECK(sol_host_registry_bind_root(registry, 0));
+    CHECK(sol_host_registry_allow(registry, 0, "count", safe_wrong_result, &host));
+    CHECK(!sol_validated_ir_interpret_entrypoint(validated, registry, &request, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_HOST_ERROR);
+    sol_interpreter_result_free(&result);
+    sol_host_registry_free(registry);
     sol_validated_ir_free(validated);
 }
 
@@ -517,6 +865,9 @@ int main(void) {
     test_text_success_and_transfer();
     test_rejections_and_failure_teardown();
     test_entrypoint_abi();
+    test_safe_host_registry();
+    test_root_specific_allowlist();
+    test_host_preflight_and_results();
     test_invalid_arguments_and_state();
     test_source_bytes_validation_and_retry();
     test_paths_and_scopes();
