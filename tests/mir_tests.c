@@ -103,6 +103,7 @@ static bool mir_equal(const SolMir *left, const SolMir *right) {
         && left->call_argument_count == right->call_argument_count
         && left->loop_count == right->loop_count
         && left->construct_operand_count == right->construct_operand_count
+        && left->temporary_count == right->temporary_count
         && bytes_equal(left->blocks, right->blocks,
             left->block_count, sizeof(*left->blocks))
         && bytes_equal(left->instructions, right->instructions,
@@ -118,7 +119,9 @@ static bool mir_equal(const SolMir *left, const SolMir *right) {
         && bytes_equal(left->loops, right->loops,
             left->loop_count, sizeof(*left->loops))
         && bytes_equal(left->construct_operands, right->construct_operands,
-            left->construct_operand_count, sizeof(*left->construct_operands));
+            left->construct_operand_count, sizeof(*left->construct_operands))
+        && bytes_equal(left->temporaries, right->temporaries,
+            left->temporary_count, sizeof(*left->temporaries));
 }
 
 static void test_initial_lowering_and_determinism(void) {
@@ -244,8 +247,11 @@ static void test_initial_lowering_and_determinism(void) {
     SolMirValueId ending_value = ending.blocks[0].terminator.as.value;
     CHECK(ending.values[ending_value].type
         == compilation.ir.callables[ending.callable].result);
-    CHECK(ending.instructions[ending.values[ending_value].definition].kind
-        == SOL_MIR_INST_CONST_UNIT);
+    const SolMirInstruction *ending_result
+        = &ending.instructions[ending.values[ending_value].definition];
+    CHECK(ending_result->kind == SOL_MIR_INST_EXPRESSION_RESULT);
+    CHECK(ending.instructions[ending.values[ending_result->as.operand].definition]
+        .kind == SOL_MIR_INST_CONST_UNIT);
     sol_mir_free(&ending);
 
     SolMir panic;
@@ -288,10 +294,9 @@ static void test_transactional_unsupported(void) {
     before = compilation.diagnostics.count;
     CHECK(sol_mir_lower_callable(&compilation.ir,
         callable(&compilation.ir, "block_argument"), &mir,
-        &compilation.diagnostics) == SOL_MIR_LOWER_UNSUPPORTED);
-    CHECK(mir.callable == SOL_IR_NONE && mir.blocks == NULL
-        && mir.call_arguments == NULL);
-    CHECK(compilation.diagnostics.count == before + 1);
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(mir.temporary_count == 1 && mir.call_argument_count == 1);
+    CHECK(compilation.diagnostics.count == before);
     sol_mir_free(&mir);
 
     sol_mir_init(&mir);
@@ -389,7 +394,7 @@ static void test_calls_and_remaining_local_control(void) {
                 || argument->access == SOL_ACCESS_EXCLUSIVE;
             saw_owned = saw_owned || argument->access == SOL_ACCESS_OWNED;
             if (argument->access != SOL_ACCESS_OWNED) {
-                CHECK(argument->value == SOL_MIR_NONE);
+                CHECK(argument->temporary == SOL_MIR_NONE);
                 CHECK(argument->place < compilation.ir.place_count);
             }
         }
@@ -418,24 +423,36 @@ static void test_calls_and_remaining_local_control(void) {
 
     SolMirSlice owned_arguments
         = calls.blocks[owned_invoke].terminator.as.invoke.arguments;
-    SolMirValueId first_owned
-        = calls.call_arguments[owned_arguments.offset].value;
-    SolMirValueId second_owned
-        = calls.call_arguments[owned_arguments.offset + 1].value;
-    calls.call_arguments[owned_arguments.offset].value = second_owned;
-    calls.call_arguments[owned_arguments.offset + 1].value = first_owned;
+    SolMirTemporaryId first_owned
+        = calls.call_arguments[owned_arguments.offset].temporary;
+    SolMirTemporaryId second_owned
+        = calls.call_arguments[owned_arguments.offset + 1].temporary;
+    calls.call_arguments[owned_arguments.offset].temporary = second_owned;
+    calls.call_arguments[owned_arguments.offset + 1].temporary = first_owned;
     CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
-    calls.call_arguments[owned_arguments.offset].value = first_owned;
-    calls.call_arguments[owned_arguments.offset + 1].value = second_owned;
-    SolMirInstructionId first_wrapper = calls.values[first_owned].definition;
-    SolMirInstructionId second_wrapper = calls.values[second_owned].definition;
-    SolMirValueId first_operand = calls.instructions[first_wrapper].as.operand;
-    SolMirValueId second_operand = calls.instructions[second_wrapper].as.operand;
-    calls.instructions[first_wrapper].as.operand = second_operand;
-    calls.instructions[second_wrapper].as.operand = first_operand;
+    calls.call_arguments[owned_arguments.offset].temporary = first_owned;
+    calls.call_arguments[owned_arguments.offset + 1].temporary = second_owned;
+    SolMirInstructionId first_wrapper = SOL_MIR_NONE;
+    SolMirInstructionId second_wrapper = SOL_MIR_NONE;
+    for (size_t instruction = 0; instruction < calls.instruction_count;
+        ++instruction) {
+        if (calls.instructions[instruction].kind
+            != SOL_MIR_INST_TEMPORARY_INIT) continue;
+        if (calls.instructions[instruction].as.temporary_init.temporary
+            == first_owned) first_wrapper = instruction;
+        if (calls.instructions[instruction].as.temporary_init.temporary
+            == second_owned) second_wrapper = instruction;
+    }
+    CHECK(first_wrapper != SOL_MIR_NONE && second_wrapper != SOL_MIR_NONE);
+    SolMirValueId first_operand
+        = calls.instructions[first_wrapper].as.temporary_init.value;
+    SolMirValueId second_operand
+        = calls.instructions[second_wrapper].as.temporary_init.value;
+    calls.instructions[first_wrapper].as.temporary_init.value = second_operand;
+    calls.instructions[second_wrapper].as.temporary_init.value = first_operand;
     CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
-    calls.instructions[first_wrapper].as.operand = first_operand;
-    calls.instructions[second_wrapper].as.operand = second_operand;
+    calls.instructions[first_wrapper].as.temporary_init.value = first_operand;
+    calls.instructions[second_wrapper].as.temporary_init.value = second_operand;
 
     SolMirTerminator *owned_term = &calls.blocks[owned_invoke].terminator;
     SolMirBlockId normal_block = owned_term->as.invoke.normal_edge.block;
@@ -447,7 +464,7 @@ static void test_calls_and_remaining_local_control(void) {
     SolMirValueId normal_result = owned_term->as.invoke.result;
     SolMirValueId transported = calls.edge_values[
         owned_term->as.invoke.normal_edge.arguments.offset];
-    SolMirValueId substitute = calls.call_arguments[owned_arguments.offset].value;
+    SolMirValueId substitute = first_operand;
     calls.edge_values[owned_term->as.invoke.normal_edge.arguments.offset]
         = substitute;
     CHECK(calls.values[substitute].type == calls.values[normal_result].type);
@@ -1058,13 +1075,19 @@ static void test_bounded_value_construction(void) {
             earlier = box_after.instructions[instruction].result;
         }
         if (box_after.instructions[instruction].kind
-            == SOL_MIR_INST_CONSTRUCT_ARGUMENT) wrapper = instruction;
+            == SOL_MIR_INST_TEMPORARY_INIT) wrapper = instruction;
     }
     CHECK(wrapper != SOL_MIR_NONE && earlier != SOL_MIR_NONE);
-    SolMirValueId wrapped = box_after.instructions[wrapper].as.operand;
-    box_after.instructions[wrapper].as.operand = earlier;
+    SolMirTemporaryId wrapped
+        = box_after.instructions[wrapper].as.temporary_init.temporary;
+    SolMirValueId staged_value
+        = box_after.instructions[wrapper].as.temporary_init.value;
+    box_after.instructions[wrapper].as.temporary_init.value = earlier;
     CHECK(!sol_mir_validate(&compilation.ir, &box_after, NULL));
-    box_after.instructions[wrapper].as.operand = wrapped;
+    box_after.instructions[wrapper].as.temporary_init.value = staged_value;
+    box_after.instructions[wrapper].as.temporary_init.temporary = SOL_MIR_NONE;
+    CHECK(!sol_mir_validate(&compilation.ir, &box_after, NULL));
+    box_after.instructions[wrapper].as.temporary_init.temporary = wrapped;
     SolSpan wrapper_span = box_after.instructions[wrapper].span;
     ++box_after.instructions[wrapper].span.start;
     CHECK(!sol_mir_validate(&compilation.ir, &box_after, NULL));
@@ -1152,23 +1175,275 @@ static void test_bounded_value_construction(void) {
         "function tuple() -> (Int64, Bool) { (1, true) }\n"
         "function block_box() -> Box { Box { value = { 1 } } }\n"
         "function positive() -> Positive { Positive(1) }\n"));
-    const char *deferred_names[] = {
-        "pair", "tuple", "block_box", "positive",
+    const char *aggregate_names[] = {
+        "pair", "tuple", "block_box",
     };
     for (size_t index = 0;
-        index < sizeof(deferred_names) / sizeof(deferred_names[0]); ++index) {
+        index < sizeof(aggregate_names) / sizeof(aggregate_names[0]); ++index) {
         SolMir mir;
         sol_mir_init(&mir);
-        size_t before = deferred.diagnostics.count;
         CHECK(sol_mir_lower_callable(&deferred.ir,
-            callable(&deferred.ir, deferred_names[index]), &mir,
-            &deferred.diagnostics) == SOL_MIR_LOWER_UNSUPPORTED);
-        CHECK(mir.callable == SOL_IR_NONE && mir.blocks == NULL
-            && mir.construct_operands == NULL);
-        CHECK(deferred.diagnostics.count == before + 1);
+            callable(&deferred.ir, aggregate_names[index]), &mir,
+            &deferred.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_validate(&deferred.ir, &mir, NULL));
         sol_mir_free(&mir);
     }
+    SolMir refined;
+    sol_mir_init(&refined);
+    size_t before = deferred.diagnostics.count;
+    CHECK(sol_mir_lower_callable(&deferred.ir,
+        callable(&deferred.ir, "positive"), &refined,
+        &deferred.diagnostics) == SOL_MIR_LOWER_UNSUPPORTED);
+    CHECK(refined.callable == SOL_IR_NONE && refined.blocks == NULL);
+    CHECK(deferred.diagnostics.count == before + 1);
+    sol_mir_free(&refined);
     free_compilation(&deferred);
+}
+
+static void test_owned_temporary_cleanup(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_temporaries\n"
+        "record Box<T> { value: T }\n"
+        "record Pair { left: Box<Int64>, right: Box<Int64> }\n"
+        "function make(value: Int64) -> Box<Int64> { Box<Int64> { value } }\n"
+        "function consume(first: Box<Int64>, second: Int64) -> () {}\n"
+        "function consume_three(first: Box<Int64>, second: Box<Int64>, "
+        "third: Int64) -> () {}\n"
+        "function crash() -> Int64 effects { panic } { panic \"crash\" }\n"
+        "function staged_failure() -> () effects { panic } { "
+        "consume(make(1), crash()) }\n"
+        "function staged_panic() -> () effects { panic } { "
+        "consume(make(1), { panic \"later\" }) }\n"
+        "function staged_order() -> () effects { panic } { "
+        "consume_three(make(1), make(2), crash()) }\n"
+        "function alias_source() -> Int64 { 1 { 2 } }\n"
+        "function preserve_loop() -> () { "
+        "consume(make(1), { loop { break } 2 }) }\n"
+        "function pair() -> Pair { Pair { left = make(1), right = make(2) } }\n"
+        "function inline_pair() -> Pair { Pair { "
+        "left = Box<Int64> { value = 1 }, "
+        "right = Box<Int64> { value = 2 } } }\n"
+        "function tuple() -> (Box<Int64>, Box<Int64>) { "
+        "(make(1), make(2)) }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+
+    SolMir alias;
+    sol_mir_init(&alias);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "alias_source"), &alias,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    SolMirValueId first_integer = SOL_MIR_NONE;
+    SolMirInstructionId inner_alias = SOL_MIR_NONE;
+    for (size_t instruction = 0; instruction < alias.instruction_count;
+        ++instruction) {
+        if (alias.instructions[instruction].kind == SOL_MIR_INST_CONST_INT64
+            && first_integer == SOL_MIR_NONE) {
+            first_integer = alias.instructions[instruction].result;
+        }
+        if (alias.instructions[instruction].kind
+                == SOL_MIR_INST_EXPRESSION_RESULT
+            && inner_alias == SOL_MIR_NONE) inner_alias = instruction;
+    }
+    CHECK(first_integer != SOL_MIR_NONE && inner_alias != SOL_MIR_NONE);
+    SolMirValueId alias_operand = alias.instructions[inner_alias].as.operand;
+    alias.instructions[inner_alias].as.operand = first_integer;
+    CHECK(!sol_mir_validate(&compilation.ir, &alias, NULL));
+    alias.instructions[inner_alias].as.operand = alias_operand;
+    CHECK(sol_mir_validate(&compilation.ir, &alias, NULL));
+    sol_mir_free(&alias);
+
+    SolMir failure;
+    sol_mir_init(&failure);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "staged_failure"), &failure,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(failure.temporary_count >= 2);
+    bool saw_outer_drop = false;
+    for (size_t block = 0; block < failure.block_count; ++block) {
+        const SolMirTerminator *term = &failure.blocks[block].terminator;
+        if (term->kind != SOL_MIR_TERM_INVOKE
+            || strcmp(compilation.ir.callables[term->as.invoke.callable].name,
+                "crash") != 0) continue;
+        SolMirBlockId cleanup = term->as.invoke.failure_edge.block;
+        SolMirSlice instructions = failure.blocks[cleanup].instructions;
+        CHECK(instructions.count != 0);
+        saw_outer_drop = failure.instructions[instructions.offset].kind
+            == SOL_MIR_INST_TEMPORARY_DROP;
+    }
+    CHECK(saw_outer_drop);
+    CHECK(sol_mir_validate(&compilation.ir, &failure, NULL));
+    SolMirInstructionId drop = SOL_MIR_NONE;
+    for (size_t instruction = 0; instruction < failure.instruction_count;
+        ++instruction) {
+        if (failure.instructions[instruction].kind
+            == SOL_MIR_INST_TEMPORARY_DROP) {
+            drop = instruction;
+            break;
+        }
+    }
+    CHECK(drop != SOL_MIR_NONE);
+    SolMirTemporaryId dropped
+        = failure.instructions[drop].as.temporary_drop.temporary;
+    failure.instructions[drop].as.temporary_drop.temporary = SOL_MIR_NONE;
+    CHECK(!sol_mir_validate(&compilation.ir, &failure, NULL));
+    failure.instructions[drop].as.temporary_drop.temporary = dropped;
+    CHECK(sol_mir_validate(&compilation.ir, &failure, NULL));
+    size_t temporary_count = failure.temporary_count;
+    size_t temporary_capacity = failure.temporary_capacity;
+    failure.temporary_count = SIZE_MAX / sizeof(SolMirTemporary) + 1;
+    failure.temporary_capacity = failure.temporary_count;
+    CHECK(!sol_mir_validate(&compilation.ir, &failure, NULL));
+    failure.temporary_count = temporary_count;
+    failure.temporary_capacity = temporary_capacity;
+    SolMirTemporary *temporaries = failure.temporaries;
+    failure.temporaries = NULL;
+    CHECK(!sol_mir_validate(&compilation.ir, &failure, NULL));
+    failure.temporaries = temporaries;
+    CHECK(sol_mir_validate(&compilation.ir, &failure, NULL));
+    sol_mir_free(&failure);
+
+    SolMir order;
+    sol_mir_init(&order);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "staged_order"), &order,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    SolMirTemporaryId ordered_drops[2] = {SOL_MIR_NONE, SOL_MIR_NONE};
+    SolMirInstructionId ordered_drop_instructions[2]
+        = {SOL_MIR_NONE, SOL_MIR_NONE};
+    size_t ordered_drop_count = 0;
+    for (size_t block = 0; block < order.block_count; ++block) {
+        const SolMirTerminator *term = &order.blocks[block].terminator;
+        if (term->kind != SOL_MIR_TERM_INVOKE
+            || strcmp(compilation.ir.callables[term->as.invoke.callable].name,
+                "crash") != 0) continue;
+        SolMirSlice instructions
+            = order.blocks[term->as.invoke.failure_edge.block].instructions;
+        for (size_t index = 0; index < instructions.count
+            && ordered_drop_count < 2; ++index) {
+            const SolMirInstruction *instruction
+                = &order.instructions[instructions.offset + index];
+            if (instruction->kind == SOL_MIR_INST_TEMPORARY_DROP) {
+                CHECK(instruction->as.temporary_drop.preserve_depth == 0);
+                ordered_drop_instructions[ordered_drop_count]
+                    = instructions.offset + index;
+                ordered_drops[ordered_drop_count++]
+                    = instruction->as.temporary_drop.temporary;
+            }
+        }
+    }
+    CHECK(ordered_drop_count == 2);
+    CHECK(ordered_drops[0] < ordered_drops[1]);
+    CHECK(sol_mir_validate(&compilation.ir, &order, NULL));
+    order.instructions[ordered_drop_instructions[0]]
+        .as.temporary_drop.temporary = ordered_drops[1];
+    order.instructions[ordered_drop_instructions[0]]
+        .as.temporary_drop.preserve_depth = 1;
+    order.instructions[ordered_drop_instructions[1]]
+        .as.temporary_drop.temporary = ordered_drops[0];
+    CHECK(!sol_mir_validate(&compilation.ir, &order, NULL));
+    order.instructions[ordered_drop_instructions[0]]
+        .as.temporary_drop.temporary = ordered_drops[0];
+    order.instructions[ordered_drop_instructions[0]]
+        .as.temporary_drop.preserve_depth = 0;
+    order.instructions[ordered_drop_instructions[1]]
+        .as.temporary_drop.temporary = ordered_drops[1];
+    CHECK(sol_mir_validate(&compilation.ir, &order, NULL));
+    sol_mir_free(&order);
+
+    SolMir panic;
+    sol_mir_init(&panic);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "staged_panic"), &panic,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    bool dropped_before_panic = false;
+    for (size_t block = 0; block < panic.block_count; ++block) {
+        if (panic.blocks[block].terminator.kind != SOL_MIR_TERM_PANIC) continue;
+        SolMirSlice instructions = panic.blocks[block].instructions;
+        for (size_t index = 0; index < instructions.count; ++index) {
+            dropped_before_panic = dropped_before_panic
+                || panic.instructions[instructions.offset + index].kind
+                    == SOL_MIR_INST_TEMPORARY_DROP;
+        }
+    }
+    CHECK(dropped_before_panic);
+    CHECK(sol_mir_validate(&compilation.ir, &panic, NULL));
+    sol_mir_free(&panic);
+
+    SolMir loop;
+    sol_mir_init(&loop);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "preserve_loop"), &loop,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(loop.loop_count == 1);
+    for (size_t block = 0; block < loop.block_count; ++block) {
+        if (loop.blocks[block].terminator.kind != SOL_MIR_TERM_BREAK) continue;
+        SolMirSlice instructions = loop.blocks[block].instructions;
+        for (size_t index = 0; index < instructions.count; ++index) {
+            CHECK(loop.instructions[instructions.offset + index].kind
+                != SOL_MIR_INST_TEMPORARY_DROP);
+        }
+    }
+    CHECK(sol_mir_validate(&compilation.ir, &loop, NULL));
+    sol_mir_free(&loop);
+
+    const char *aggregates[] = {"pair", "inline_pair", "tuple"};
+    for (size_t index = 0;
+        index < sizeof(aggregates) / sizeof(aggregates[0]); ++index) {
+        SolMir mir;
+        SolMir repeated;
+        sol_mir_init(&mir);
+        sol_mir_init(&repeated);
+        SolIrCallableId id = callable(&compilation.ir, aggregates[index]);
+        CHECK(sol_mir_lower_callable(&compilation.ir, id, &mir,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_lower_callable(&compilation.ir, id, &repeated,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(mir_equal(&mir, &repeated));
+        bool consumed_two = false;
+        for (size_t instruction = 0; instruction < mir.instruction_count;
+            ++instruction) {
+            consumed_two = consumed_two
+                || (mir.instructions[instruction].kind == SOL_MIR_INST_CONSTRUCT
+                    && mir.instructions[instruction].as.construct.operands.count
+                        == 2);
+        }
+        CHECK(consumed_two);
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        if (strcmp(aggregates[index], "inline_pair") == 0) {
+            SolMirInstructionId initializers[4]
+                = {SOL_MIR_NONE, SOL_MIR_NONE, SOL_MIR_NONE, SOL_MIR_NONE};
+            size_t initializer_count = 0;
+            for (size_t instruction = 0; instruction < mir.instruction_count
+                && initializer_count < 4; ++instruction) {
+                if (mir.instructions[instruction].kind
+                    == SOL_MIR_INST_TEMPORARY_INIT) {
+                    initializers[initializer_count++] = instruction;
+                }
+            }
+            CHECK(initializer_count == 4);
+            size_t duplicate = 1;
+            SolIrTypeId first_type = mir.temporaries[mir.instructions[
+                initializers[0]].as.temporary_init.temporary].type;
+            while (duplicate < initializer_count
+                && mir.temporaries[mir.instructions[initializers[duplicate]]
+                    .as.temporary_init.temporary].type != first_type) {
+                ++duplicate;
+            }
+            CHECK(duplicate < initializer_count);
+            SolMirValueId second_value = mir.instructions[initializers[duplicate]]
+                .as.temporary_init.value;
+            mir.instructions[initializers[duplicate]].as.temporary_init.value
+                = mir.instructions[initializers[0]].as.temporary_init.value;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            mir.instructions[initializers[duplicate]].as.temporary_init.value
+                = second_value;
+            CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        }
+        sol_mir_free(&mir);
+        sol_mir_free(&repeated);
+    }
+    free_compilation(&compilation);
 }
 
 int main(void) {
@@ -1178,6 +1453,7 @@ int main(void) {
     test_validator_rejects_corruption();
     test_loop_control_lowering();
     test_bounded_value_construction();
+    test_owned_temporary_cleanup();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

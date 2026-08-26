@@ -607,11 +607,15 @@ natural backedges, and cleanup at transfer boundaries. Loop obligations are reta
 as proof-only metadata and not executed. Authority-free infallible zero/one-payload
 records, enum variants, Option/Result cases, and non-refined distinct wrappers use
 semantic construction instructions and ordered operand metadata without choosing
-layout. Unsupported constructs fail transactionally. P1a.3b1 is not connected to
-compilation sessions or execution and does not yet cover owned temporary cleanup,
-multi-operand records/tuples/enums, checked refinement, patterns, propagation,
-projected places, dynamic/method/capability calls, handlers, contracts, generic
-lowering, representation, runtime ABI, or a backend.
+layout. Typed reusable temporary slots now stage multiple owned call/construction
+operands, consume exact pending suffixes on invoke/construction, preserve outer
+values across loop transfers, and destroy abandoned operands in interpreter order.
+This enables multi-operand records, tuples, and enum payloads without requiring P1b
+dominance. Unsupported constructs fail transactionally. P1a.3b2 is not connected to
+compilation sessions or execution and does not yet cover checked refinement,
+patterns, propagation, projected places, authority-bearing construction,
+dynamic/method/capability calls, handlers, contracts, generic lowering,
+representation, runtime ABI, or a backend.
 
 ### Phase 0 — Executable language model
 

@@ -8,6 +8,7 @@ typedef size_t SolMirBlockId;
 typedef size_t SolMirInstructionId;
 typedef size_t SolMirValueId;
 typedef size_t SolMirLoopId;
+typedef size_t SolMirTemporaryId;
 
 #define SOL_MIR_NONE SIZE_MAX
 
@@ -52,15 +53,17 @@ typedef enum {
     SOL_MIR_INST_STORE,
     SOL_MIR_INST_UNARY,
     SOL_MIR_INST_BINARY,
-    SOL_MIR_INST_CALL_ARGUMENT,
     SOL_MIR_INST_REGION_ENTER,
     SOL_MIR_INST_REGION_EXIT,
-    SOL_MIR_INST_CONSTRUCT_ARGUMENT,
+    SOL_MIR_INST_TEMPORARY_INIT,
+    SOL_MIR_INST_TEMPORARY_DROP,
+    SOL_MIR_INST_EXPRESSION_RESULT,
     SOL_MIR_INST_CONSTRUCT,
 } SolMirInstructionKind;
 
 typedef enum {
     SOL_MIR_CONSTRUCT_RECORD,
+    SOL_MIR_CONSTRUCT_TUPLE,
     SOL_MIR_CONSTRUCT_ENUM,
     SOL_MIR_CONSTRUCT_OPTION_NONE,
     SOL_MIR_CONSTRUCT_OPTION_SOME,
@@ -96,6 +99,14 @@ typedef struct {
         SolMirValueId operand;
         SolIrStatementId region;
         struct {
+            SolMirTemporaryId temporary;
+            SolMirValueId value;
+        } temporary_init;
+        struct {
+            SolMirTemporaryId temporary;
+            size_t preserve_depth;
+        } temporary_drop;
+        struct {
             SolMirConstructKind kind;
             SolIrDefinitionId definition;
             SolIrVariantId variant;
@@ -105,18 +116,24 @@ typedef struct {
 } SolMirInstruction;
 
 typedef struct {
+    SolIrTypeId type;
+    SolIrExpressionId source_expression;
+    SolSpan span;
+} SolMirTemporary;
+
+typedef struct {
     size_t formal;
     SolIrExpressionId source_expression;
-    SolMirValueId value;
+    SolMirTemporaryId temporary;
 } SolMirConstructOperand;
 
 typedef struct {
     size_t formal;
     SolAccessMode access;
     SolIrExpressionId source_expression;
-    /* Owned operands carry an SSA value; borrows carry a whole-local place.
+    /* Owned operands carry a temporary; borrows carry a whole-local place.
        Exclusive places write back only when the invoke takes its normal edge. */
-    SolMirValueId value;
+    SolMirTemporaryId temporary;
     SolIrPlaceId place;
 } SolMirCallArgument;
 
@@ -220,6 +237,9 @@ typedef struct {
     SolMirConstructOperand *construct_operands;
     size_t construct_operand_count;
     size_t construct_operand_capacity;
+    SolMirTemporary *temporaries;
+    size_t temporary_count;
+    size_t temporary_capacity;
 } SolMir;
 
 void sol_mir_init(SolMir *mir);
