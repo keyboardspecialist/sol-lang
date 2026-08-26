@@ -142,6 +142,22 @@ static bool run_observed(const SolIr *ir, const char *name,
     return sol_interpret(&request, result);
 }
 
+static bool run_observed_checked(const SolIr *ir, const char *name,
+    const SolInterpreterValue *arguments, size_t argument_count,
+    CleanupLog *log, SolInterpreterResult *result) {
+    SolInterpreterRequest request;
+    memset(&request, 0, sizeof(request));
+    request.ir = ir;
+    request.callable = callable(ir, name);
+    request.definition = SOL_IR_NONE;
+    request.arguments = arguments;
+    request.argument_count = argument_count;
+    request.contracts = SOL_INTERPRETER_CONTRACTS_CHECK;
+    request.cleanup_observer = observe_cleanup;
+    request.cleanup_context = log;
+    return sol_interpret(&request, result);
+}
+
 static bool run_observed_limits(const SolIr *ir, const char *name,
     SolInterpreterLimits limits, CleanupLog *log, SolInterpreterResult *result) {
     SolInterpreterRequest request;
@@ -1342,7 +1358,8 @@ static void test_capability_policy_and_malformed(void) {
     Compilation compilation;
     bool compiled = compile(&compilation,
         "module host\n"
-        "capability Read { function read() -> Int64 effects { service.read<Self> } }\n"
+        "capability Read { function read() -> Int64 effects { service.read<Self> } "
+        "ensures { result == 41 } }\n"
         "capability Write { function write(value: inout Int64) -> () "
         "effects { service.write<Self> } }\n"
         "capability Wrapped derives_from private_source: capability Read { "
@@ -1530,10 +1547,11 @@ static void test_capability_policy_and_malformed(void) {
             "host operation returned an invalid failure length") == 0);
     sol_interpreter_result_free(&result);
     host.failure_length = 0;
-    CHECK(!run(&compilation.ir, "invoke_read", &argument, 1,
+    host.fail = false;
+    CHECK(run(&compilation.ir, "invoke_read", &argument, 1,
         SOL_INTERPRETER_CONTRACTS_CHECK, (SolInterpreterLimits){0},
         host_read, &host, &result));
-    CHECK(result.diagnostic.code == SOL_INTERPRETER_UNSUPPORTED_CONTRACT_POLICY);
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_OK);
     sol_interpreter_result_free(&result);
 
     SolIrExpressionId saved = compilation.ir.callables[callable(
@@ -1554,7 +1572,8 @@ static void test_deep_handler(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
         "module handlers\n"
-        "capability Read { function read() -> Int64 effects { service.read<Self> } }\n"
+        "capability Read { function read() -> Int64 effects { service.read<Self> } "
+        "requires { false } }\n"
         "capability Mock { function read() -> Int64 effects { pure } }\n"
         "function helper(source: borrow capability Read) -> Int64 effects { service.read<source> } "
         "{ return source.read() }\n"
@@ -1590,6 +1609,12 @@ static void test_deep_handler(void) {
         host_read, &host, &result));
     CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
         && result.value.as.integer == 99 && host.calls == 1);
+    sol_interpreter_result_free(&result);
+    CHECK(!run(&compilation.ir, "handled", arguments, 2,
+        SOL_INTERPRETER_CONTRACTS_CHECK, (SolInterpreterLimits){0},
+        host_read, &host, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_REQUIRE_VIOLATION
+        && host.calls == 1);
     sol_interpreter_result_free(&result);
     SolIrExpression *handler_expression = NULL;
     for (size_t index = 0; index < compilation.ir.expression_count; ++index) {
@@ -2414,6 +2439,126 @@ static void test_recursive_patterns_guards_and_cleanup(void) {
     free_compilation(&compilation);
 }
 
+static void test_runtime_callable_contracts(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module runtime_contracts\n"
+        "enum Failure { bad }\n"
+        "type Positive = refined Int64 where self > 0\n"
+        "type Identity<T> = refined T where true\n"
+        "function exact(value: Int64) -> Int64 requires { value > 0 } "
+        "ensures { result == old(value) } { return value }\n"
+        "function call_exact(value: Int64) -> Int64 { return exact(value) }\n"
+        "function changed(value: Int64) -> Int64 "
+        "ensures { result == old(value) } { return value + 1 }\n"
+        "function panicking_check(value: Int64) -> Int64 "
+        "requires { 1 / 0 == 0 } { return value }\n"
+        "function outcome(value: Int64, fail: Bool) -> Result<Int64, Failure> "
+        "ensures { success => result == old(value), failure => old(value) == value } "
+        "{ return if fail { err(Failure.bad) } else { ok(value) } }\n"
+        "function bad_success(value: Int64) -> Result<Int64, Failure> "
+        "ensures { success => result == old(value), failure => true } "
+        "{ return ok(value + 1) }\n"
+        "function positive(value: Int64) -> Positive { return Positive(value) }\n"
+        "function identity(value: Int64) -> Identity<Int64> "
+        "{ return Identity<Int64>(value) }\n"
+        "function update(value: inout Int64) -> Int64 "
+        "ensures { result == value && old(value) == 1 } "
+        "{ value = 2 return value }\n"
+        "function invoke_update() -> Int64 { var value = 1 return update(value) }\n"));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
+        sol_diagnostics_render_human(stderr, &compilation.source,
+            &compilation.diagnostics);
+    }
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+
+    SolInterpreterValue arguments[2];
+    SolInterpreterResult result;
+    sol_interpreter_value_int64(&arguments[0], 4);
+    CHECK(run(&compilation.ir, "exact", arguments, 1,
+        SOL_INTERPRETER_CONTRACTS_CHECK, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 4);
+    sol_interpreter_result_free(&result);
+
+    arguments[0].as.integer = 0;
+    CHECK(!run(&compilation.ir, "call_exact", arguments, 1,
+        SOL_INTERPRETER_CONTRACTS_CHECK, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_REQUIRE_VIOLATION);
+    sol_interpreter_result_free(&result);
+    CHECK(run(&compilation.ir, "call_exact", arguments, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    sol_interpreter_result_free(&result);
+
+    arguments[0].as.integer = 4;
+    CHECK(!run(&compilation.ir, "changed", arguments, 1,
+        SOL_INTERPRETER_CONTRACTS_CHECK, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_ENSURE_VIOLATION);
+    sol_interpreter_result_free(&result);
+    CleanupLog log = {.ir = &compilation.ir};
+    CHECK(!run_observed_checked(&compilation.ir, "changed", arguments, 1,
+        &log, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_ENSURE_VIOLATION);
+    CHECK(log.count == 1 && strcmp(log.names[0], "value") == 0);
+    sol_interpreter_result_free(&result);
+    CHECK(!run(&compilation.ir, "panicking_check", arguments, 1,
+        SOL_INTERPRETER_CONTRACTS_CHECK, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_DIVISION_BY_ZERO);
+    sol_interpreter_result_free(&result);
+
+    sol_interpreter_value_bool(&arguments[1], false);
+    CHECK(run(&compilation.ir, "outcome", arguments, 2,
+        SOL_INTERPRETER_CONTRACTS_CHECK, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_RESULT
+        && !result.value.as.sum.is_error);
+    sol_interpreter_result_free(&result);
+    arguments[1].as.boolean = true;
+    CHECK(run(&compilation.ir, "outcome", arguments, 2,
+        SOL_INTERPRETER_CONTRACTS_CHECK, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_RESULT
+        && result.value.as.sum.is_error);
+    sol_interpreter_result_free(&result);
+    CHECK(!run(&compilation.ir, "bad_success", arguments, 1,
+        SOL_INTERPRETER_CONTRACTS_CHECK, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_ENSURE_VIOLATION);
+    sol_interpreter_result_free(&result);
+    arguments[0].as.integer = 1;
+    CHECK(run(&compilation.ir, "positive", arguments, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_DISTINCT);
+    sol_interpreter_result_free(&result);
+    arguments[0].as.integer = 0;
+    CHECK(!run(&compilation.ir, "positive", arguments, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.diagnostic.code == SOL_INTERPRETER_REFINEMENT_VIOLATION);
+    sol_interpreter_result_free(&result);
+    arguments[0].as.integer = 3;
+    CHECK(run(&compilation.ir, "identity", arguments, 1,
+        SOL_INTERPRETER_CONTRACTS_IGNORE, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_DISTINCT);
+    sol_interpreter_result_free(&result);
+    CHECK(run(&compilation.ir, "invoke_update", NULL, 0,
+        SOL_INTERPRETER_CONTRACTS_CHECK, (SolInterpreterLimits){0},
+        NULL, NULL, &result));
+    CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64
+        && result.value.as.integer == 2);
+    sol_interpreter_result_free(&result);
+    sol_interpreter_value_free(&arguments[0]);
+    sol_interpreter_value_free(&arguments[1]);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_primitives_control_and_lifetime();
     test_place_projection_execution();
@@ -2435,6 +2580,7 @@ int main(void) {
     test_terminating_statements_runtime();
     test_tuple_runtime_and_host_values();
     test_recursive_patterns_guards_and_cleanup();
+    test_runtime_callable_contracts();
     if (failures != 0) fprintf(stderr, "%d interpreter test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

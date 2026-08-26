@@ -46,6 +46,11 @@ if(NOT runtime_output MATCHES "integer division by zero")
     message(FATAL_ERROR "runtime output mismatch: ${runtime_output}")
 endif()
 
+run_test(contract_failure 1 "${FIXTURE_DIR}/contract_failure.sol" human)
+if(NOT contract_failure_output MATCHES "requires contract was not satisfied")
+    message(FATAL_ERROR "contract test output mismatch: ${contract_failure_output}")
+endif()
+
 run_test(cross_file_runtime 1 "${FIXTURE_DIR}/cross_file_runtime" human)
 if(NOT cross_file_runtime_output MATCHES "cross-file runtime"
     OR NOT cross_file_runtime_output MATCHES "helper.sol:[0-9]+: integer division by zero")

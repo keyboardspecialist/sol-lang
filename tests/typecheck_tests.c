@@ -2029,12 +2029,13 @@ static void test_distinct_type_identity_and_construction(void) {
     free_compilation(&compilation);
 }
 
-static void test_refined_type_predicates_and_construction_rejection(void) {
+static void test_refined_type_predicates_and_construction(void) {
     static const char valid[] =
         "module refined_self\n"
         "type Positive = refined Int64 where self > 0\n"
         "type Identity<T> = refined T where true\n"
-        "function retain(value: Identity<Int64>) -> Identity<Int64> { return value }\n";
+        "function retain(value: Identity<Int64>) -> Identity<Int64> { return value }\n"
+        "function positive() -> Positive { return Positive(1) }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, valid));
     if (sol_diagnostics_has_errors(&compilation.diagnostics)) {
@@ -2048,19 +2049,9 @@ static void test_refined_type_predicates_and_construction_rejection(void) {
     static const char invalid[] =
         "module invalid_refined\n"
         "type NotBool = refined Int64 where self\n"
-        "type Positive = refined Int64 where self > 0\n"
-        "function bad() -> Positive { return Positive(1) }\n";
+        "type Positive = refined Int64 where self > 0\n";
     CHECK(compile_source(&compilation, invalid));
     CHECK(has_diagnostic(&compilation, "SOL-CONTRACT-001"));
-    CHECK(has_diagnostic(&compilation, "SOL-TYPE-024"));
-    bool bootstrap_message = false;
-    for (size_t index = 0; index < compilation.diagnostics.count; ++index) {
-        bootstrap_message = bootstrap_message || strstr(
-            compilation.diagnostics.items[index].message,
-            "unsupported by this bootstrap"
-        ) != NULL;
-    }
-    CHECK(bootstrap_message);
     free_compilation(&compilation);
 }
 
@@ -2158,7 +2149,7 @@ static void test_type_metadata_defensive_validation(void) {
     }
     CHECK(construction != SOL_AST_NONE);
     if (construction != SOL_AST_NONE) {
-        compilation.types.representations[0].flavor = SOL_TYPE_DECLARATION_REFINED;
+        compilation.types.representations[0].flavor = SOL_TYPE_DECLARATION_NONE;
         CHECK(sol_type_construction(&compilation.types, construction) == NULL);
         compilation.types.representations[0].flavor = SOL_TYPE_DECLARATION_DISTINCT;
     }
@@ -2575,7 +2566,7 @@ int main(void) {
     test_bound_evidence_forwarding();
     test_method_named_arguments();
     test_distinct_type_identity_and_construction();
-    test_refined_type_predicates_and_construction_rejection();
+    test_refined_type_predicates_and_construction();
     test_declared_constructor_requires_definition_head();
     test_invalid_type_representations_and_constructors();
     test_generic_representation_safety();

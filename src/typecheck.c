@@ -1386,7 +1386,8 @@ const SolTypeConstruction *sol_type_construction(
     if (construction->definition == SOL_AST_NONE
         || construction->definition >= table->representation_count
         || representation == NULL
-        || representation->flavor != SOL_TYPE_DECLARATION_DISTINCT
+        || (representation->flavor != SOL_TYPE_DECLARATION_DISTINCT
+            && representation->flavor != SOL_TYPE_DECLARATION_REFINED)
         || (construction->result.kind != SOL_TYPE_NOMINAL
             && construction->result.kind != SOL_TYPE_APPLICATION)
         || (int)construction->representation.kind < 0
@@ -5723,15 +5724,6 @@ static SolType sol_type_declared_constructor_call(
             "SOL-TYPE-024",
             call->span,
             "type construction requires exactly one positional argument"
-        );
-        return (SolType){.kind = SOL_TYPE_ERROR};
-    }
-    if (metadata->flavor == SOL_TYPE_DECLARATION_REFINED) {
-        sol_type_error(
-            checker,
-            "SOL-TYPE-024",
-            call->span,
-            "refined type construction is unsupported by this bootstrap"
         );
         return (SolType){.kind = SOL_TYPE_ERROR};
     }

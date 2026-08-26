@@ -661,8 +661,10 @@ static bool sol_contract_validate(SolContractLowerer *lowerer) {
         }
         if (construction->definition >= syntax->item_count
             || syntax->items[construction->definition].kind != SOL_ITEM_TYPE
-            || syntax->items[construction->definition].flavor
-                != SOL_TYPE_DECLARATION_DISTINCT
+            || (syntax->items[construction->definition].flavor
+                    != SOL_TYPE_DECLARATION_DISTINCT
+                && syntax->items[construction->definition].flavor
+                    != SOL_TYPE_DECLARATION_REFINED)
             || syntax->expressions[expression].kind != SOL_EXPR_CALL
             || !sol_type_exact_reference_valid(syntax, types, construction->representation)
             || !sol_type_exact_reference_valid(syntax, types, construction->result)

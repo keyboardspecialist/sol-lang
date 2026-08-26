@@ -802,6 +802,12 @@ static const char *sol_run_runtime_code(SolInterpreterCode code) {
             return "SOL-RUNTIME-REACHED-UNREACHABLE";
         case SOL_INTERPRETER_REQUIRE_FALLBACK_RETURNED:
             return "SOL-RUNTIME-REQUIRE-FALLBACK-RETURNED";
+        case SOL_INTERPRETER_REQUIRE_VIOLATION:
+            return "SOL-RUNTIME-REQUIRE-VIOLATION";
+        case SOL_INTERPRETER_ENSURE_VIOLATION:
+            return "SOL-RUNTIME-ENSURE-VIOLATION";
+        case SOL_INTERPRETER_REFINEMENT_VIOLATION:
+            return "SOL-RUNTIME-REFINEMENT-VIOLATION";
         case SOL_INTERPRETER_INTERNAL_INVARIANT: return "SOL-RUNTIME-INTERNAL";
         case SOL_INTERPRETER_OK: return "SOL-RUNTIME-OK";
     }
@@ -966,7 +972,7 @@ static int sol_run_path(const char *path, bool json, SolRunHost *host) {
         return 1;
     }
     SolInterpreterRequest request = {
-        .contracts = SOL_INTERPRETER_CONTRACTS_IGNORE,
+        .contracts = SOL_INTERPRETER_CONTRACTS_CHECK,
     };
     SolInterpreterResult result;
     bool executed = sol_validated_ir_interpret_entrypoint(
@@ -1049,7 +1055,7 @@ static int sol_test_path(const char *path, bool json) {
         if (test.kind != SOL_VALIDATED_DEFINITION_TEST) continue;
         SolInterpreterRequest request = {
             .ir = NULL, .callable = test.callable, .definition = SOL_IR_NONE,
-            .contracts = SOL_INTERPRETER_CONTRACTS_IGNORE, .test_entry = true,
+            .contracts = SOL_INTERPRETER_CONTRACTS_CHECK, .test_entry = true,
         };
         SolInterpreterResult result;
         bool executed = sol_validated_ir_interpret(validated, &request, &result);

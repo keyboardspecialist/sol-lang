@@ -547,6 +547,8 @@ static void test_classified_calls_handler_contract(void) {
         "capability Read { function read() -> Int64 effects { service.read<Self> } }\n"
         "capability Mock { function read() -> Int64 effects { pure } }\n"
         "function render(value: Int64) -> Text effects { pure } ensures { result == result } { return value.show() }\n"
+        "function retained(value: Int64) -> Int64 "
+        "ensures { result == old(value) } { return value }\n"
         "function handled(source: capability Read, mock: capability Mock) -> Int64 effects { pure } "
         "{ return handle service.read<source> with mock { source.read() } }\n";
     TestCompilation compilation;
@@ -568,7 +570,25 @@ static void test_classified_calls_handler_contract(void) {
     CHECK(method);
     CHECK(capability);
     CHECK(handler);
-    CHECK(compilation.ir.obligation_count == 1);
+    CHECK(compilation.ir.obligation_count == 2);
+    CHECK(compilation.ir.snapshot_count == 1);
+    if (compilation.ir.obligation_count == 2) {
+        SolIrObligation saved = compilation.ir.obligations[0];
+        compilation.ir.obligations[0].result_available = false;
+        compilation.ir.obligations[0].result_type = SOL_IR_NONE;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        compilation.ir.obligations[0] = saved;
+        compilation.ir.obligations[0].outcome = SOL_CONTRACT_OUTCOME_SUCCESS;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        compilation.ir.obligations[0] = saved;
+    }
+    if (compilation.ir.snapshot_count == 1) {
+        SolObligationId owner = compilation.ir.snapshots[0].obligation;
+        compilation.ir.snapshots[0].obligation = owner == 0 ? 1 : 0;
+        CHECK(!sol_ir_validate(&compilation.ir, NULL));
+        compilation.ir.snapshots[0].obligation = owner;
+    }
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
     free_compilation(&compilation);
 }
 

@@ -36,6 +36,12 @@ struct Frame {
     SolIrGenericParameterId type_parameter_offset;
     const SolIrDispatchEvidence *evidence;
     size_t evidence_count;
+    const SolIrObligation *contract_obligation;
+    const SolInterpreterValue *contract_result;
+    const SolInterpreterValue *contract_self;
+    SolInterpreterValue *contract_snapshots;
+    bool *contract_snapshot_bound;
+    bool observe_cleanup;
 };
 
 struct Handler {
@@ -649,7 +655,7 @@ static void cleanup_local(Interpreter *interpreter, Frame *frame,
     SolIrLocalId local) {
     if (local >= interpreter->request->ir->local_count || !frame->bound[local]) return;
     const SolIrLocal *metadata = &interpreter->request->ir->locals[local];
-    if (metadata->access == SOL_ACCESS_OWNED) {
+    if (metadata->access == SOL_ACCESS_OWNED && frame->observe_cleanup) {
         size_t ordinal = interpreter->result->cleanup_actions++;
         if (interpreter->request->cleanup_observer != NULL) {
             interpreter->request->cleanup_observer(
@@ -1067,11 +1073,337 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable,
 static bool validate_authority(Interpreter *interpreter,
     const SolIrCallable *callable, const SolInterpreterValue *receiver,
     const SolInterpreterValue *result, SolSpan span);
+static void free_values(SolInterpreterValue *values, size_t count);
+
+static bool frame_allocate(Interpreter *interpreter, Frame *frame, SolSpan span) {
+    const SolIr *ir = interpreter->request->ir;
+    if (ir->local_count == 0) return true;
+    frame->locals = calloc(ir->local_count, sizeof(*frame->locals));
+    frame->bound = calloc(ir->local_count, sizeof(*frame->bound));
+    frame->registered = calloc(ir->local_count, sizeof(*frame->registered));
+    frame->authority_roots = calloc(ir->local_count,
+        sizeof(*frame->authority_roots));
+    frame->authority_known = calloc(ir->local_count,
+        sizeof(*frame->authority_known));
+    frame->binding_order = malloc(ir->local_count * sizeof(*frame->binding_order));
+    if (frame->locals != NULL && frame->bound != NULL && frame->registered != NULL
+        && frame->authority_roots != NULL && frame->authority_known != NULL
+        && frame->binding_order != NULL) return true;
+    free(frame->locals);
+    free(frame->bound);
+    free(frame->registered);
+    free(frame->authority_roots);
+    free(frame->authority_known);
+    free(frame->binding_order);
+    memset(frame, 0, sizeof(*frame));
+    diagnostic(interpreter, SOL_INTERPRETER_INTERNAL_INVARIANT, span,
+        "frame allocation failed");
+    return false;
+}
+
+static void frame_release(Interpreter *interpreter, Frame *frame) {
+    while (frame->binding_count != 0) {
+        cleanup_binding(interpreter, frame,
+            frame->binding_order[frame->binding_count - 1]);
+    }
+    free_values(frame->contract_snapshots,
+        interpreter->request->ir->snapshot_count);
+    free(frame->contract_snapshot_bound);
+    free(frame->locals);
+    free(frame->bound);
+    free(frame->registered);
+    free(frame->authority_roots);
+    free(frame->authority_known);
+    free(frame->binding_order);
+}
+
+static bool contract_owner_matches(const SolIr *ir,
+    const SolIrObligation *obligation, SolIrCallableId callable_id) {
+    const SolIrCallable *callable = &ir->callables[callable_id];
+    if (obligation->owner_kind == SOL_CONTRACT_OWNER_CAPABILITY_MEMBER) {
+        return obligation->owner == callable_id;
+    }
+    return obligation->owner_kind == SOL_CONTRACT_OWNER_ITEM
+        && obligation->owner == callable->owner;
+}
+
+static bool contract_frame_init(Interpreter *interpreter, Frame *contract,
+    const Frame *source, SolSpan span) {
+    const SolIr *ir = interpreter->request->ir;
+    memset(contract, 0, sizeof(*contract));
+    contract->parent = source->parent;
+    contract->type_arguments = source->type_arguments;
+    contract->type_argument_count = source->type_argument_count;
+    contract->type_parameter_offset = source->type_parameter_offset;
+    contract->evidence = source->evidence;
+    contract->evidence_count = source->evidence_count;
+    if (!frame_allocate(interpreter, contract, span)) return false;
+    for (size_t local = 0; local < ir->local_count; ++local) {
+        if (!source->bound[local]) continue;
+        if (!clone_runtime(interpreter, span, &contract->locals[local],
+            &source->locals[local])) {
+            frame_release(interpreter, contract);
+            return false;
+        }
+        contract->bound[local] = true;
+        contract->registered[local] = true;
+        contract->binding_order[contract->binding_count++] = local;
+        contract->authority_roots[local] = source->authority_roots[local];
+        contract->authority_known[local] = source->authority_known[local];
+    }
+    if (ir->snapshot_count != 0) {
+        contract->contract_snapshots = calloc(ir->snapshot_count,
+            sizeof(*contract->contract_snapshots));
+        contract->contract_snapshot_bound = calloc(ir->snapshot_count,
+            sizeof(*contract->contract_snapshot_bound));
+        if (contract->contract_snapshots == NULL
+            || contract->contract_snapshot_bound == NULL) {
+            diagnostic(interpreter, SOL_INTERPRETER_INTERNAL_INVARIANT, span,
+                "contract snapshot allocation failed");
+            frame_release(interpreter, contract);
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool evaluate_contract(Interpreter *interpreter, Frame *contract,
+    const SolIrObligation *obligation, const SolInterpreterValue *result) {
+    const SolIr *ir = interpreter->request->ir;
+    Frame *saved = interpreter->frame;
+    contract->contract_obligation = obligation;
+    contract->contract_result = result;
+    interpreter->frame = contract;
+    Flow predicate = evaluate(interpreter, obligation->predicate);
+    interpreter->frame = saved;
+    contract->contract_obligation = NULL;
+    contract->contract_result = NULL;
+    if (predicate.kind == FLOW_ERROR) return false;
+    if (predicate.kind != FLOW_VALUE
+        || predicate.value.kind != SOL_INTERPRETER_VALUE_BOOL) {
+        sol_interpreter_value_free(&predicate.value);
+        diagnostic(interpreter, SOL_INTERPRETER_INVALID_IR,
+            ir->expressions[obligation->predicate].span,
+            "contract predicate did not produce Bool");
+        return false;
+    }
+    bool satisfied = predicate.value.as.boolean;
+    sol_interpreter_value_free(&predicate.value);
+    if (!satisfied) {
+        diagnostic(interpreter, obligation->kind == SOL_CONTRACT_REQUIRES
+            ? SOL_INTERPRETER_REQUIRE_VIOLATION
+            : SOL_INTERPRETER_ENSURE_VIOLATION,
+            ir->expressions[obligation->predicate].span,
+            obligation->kind == SOL_CONTRACT_REQUIRES
+                ? "requires contract was not satisfied"
+                : "ensures contract was not satisfied");
+    }
+    return satisfied;
+}
+
+static bool capture_contract_snapshots(Interpreter *interpreter, Frame *contract,
+    SolIrCallableId callable_id) {
+    const SolIr *ir = interpreter->request->ir;
+    Frame *saved = interpreter->frame;
+    interpreter->frame = contract;
+    for (size_t index = 0; index < ir->snapshot_count; ++index) {
+        const SolIrSnapshot *snapshot = &ir->snapshots[index];
+        const SolIrObligation *obligation = &ir->obligations[snapshot->obligation];
+        if (obligation->kind != SOL_CONTRACT_ENSURES
+            || !contract_owner_matches(ir, obligation, callable_id)) continue;
+        contract->contract_obligation = obligation;
+        Flow value = evaluate(interpreter, snapshot->operand);
+        contract->contract_obligation = NULL;
+        if (value.kind != FLOW_VALUE) {
+            sol_interpreter_value_free(&value.value);
+            interpreter->frame = saved;
+            return false;
+        }
+        contract->contract_snapshots[index] = value.value;
+        contract->contract_snapshot_bound[index] = true;
+    }
+    interpreter->frame = saved;
+    return true;
+}
+
+static bool check_postconditions(Interpreter *interpreter, Frame *contract,
+    SolIrCallableId callable_id, const SolInterpreterValue *result) {
+    const SolIr *ir = interpreter->request->ir;
+    for (size_t index = 0; index < ir->obligation_count; ++index) {
+        const SolIrObligation *obligation = &ir->obligations[index];
+        if (obligation->kind != SOL_CONTRACT_ENSURES
+            || !contract_owner_matches(ir, obligation, callable_id)) continue;
+        bool success = result->kind == SOL_INTERPRETER_VALUE_RESULT
+            && !result->as.sum.is_error;
+        bool failure = result->kind == SOL_INTERPRETER_VALUE_RESULT
+            && result->as.sum.is_error;
+        if ((obligation->outcome == SOL_CONTRACT_OUTCOME_SUCCESS && !success)
+            || (obligation->outcome == SOL_CONTRACT_OUTCOME_FAILURE && !failure)) {
+            continue;
+        }
+        const SolInterpreterValue *binding = NULL;
+        if (obligation->result_available) {
+            binding = obligation->outcome == SOL_CONTRACT_OUTCOME_SUCCESS
+                ? result->as.sum.value : result;
+        }
+        if (!evaluate_contract(interpreter, contract, obligation, binding)) return false;
+    }
+    return true;
+}
+
+static bool refresh_contract_local(Interpreter *interpreter, Frame *contract,
+    const Frame *body, SolIrLocalId local, SolSpan span) {
+    const SolIr *ir = interpreter->request->ir;
+    if (local >= ir->local_count || !body->bound[local]) {
+        diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT, span,
+            "exclusive contract binding is unavailable after the callable body");
+        return false;
+    }
+    sol_interpreter_value_free(&contract->locals[local]);
+    contract->bound[local] = false;
+    if (!clone_runtime(interpreter, span, &contract->locals[local],
+        &body->locals[local])) return false;
+    contract->bound[local] = true;
+    contract->authority_roots[local] = body->authority_roots[local];
+    contract->authority_known[local] = body->authority_known[local];
+    return true;
+}
+
+static bool refresh_contract_writebacks(Interpreter *interpreter, Frame *contract,
+    const Frame *body, const SolIrCallable *callable, SolSpan span) {
+    const SolIr *ir = interpreter->request->ir;
+    if (callable->receiver != SOL_IR_NONE
+        && callable->receiver_access == SOL_ACCESS_EXCLUSIVE
+        && !refresh_contract_local(interpreter, contract, body,
+            callable->receiver, span)) return false;
+    for (size_t index = 0; index < callable->parameters.count; ++index) {
+        SolIrLocalId local = ir->roots[callable->parameters.offset + index];
+        if (ir->locals[local].access == SOL_ACCESS_EXCLUSIVE
+            && !refresh_contract_local(interpreter, contract, body, local, span)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool check_refinement(Interpreter *interpreter,
+    const SolIrExpression *construction, const SolInterpreterValue *value) {
+    const SolIr *ir = interpreter->request->ir;
+    SolIrDefinitionId definition_id = construction->as.call.definition;
+    const SolIrDefinition *definition = &ir->definitions[definition_id];
+    if (definition->kind != SOL_IR_DEFINITION_REFINED) return true;
+    const SolIrType *nominal = &ir->types[construction->type];
+    Frame refinement;
+    memset(&refinement, 0, sizeof(refinement));
+    refinement.parent = interpreter->frame;
+    refinement.type_arguments = nominal->argument_count == 0 ? NULL
+        : &ir->type_ids[nominal->argument_offset];
+    refinement.type_argument_count = nominal->argument_count;
+    refinement.type_parameter_offset = definition->generic_parameters.offset;
+    refinement.contract_self = value;
+    if (!frame_allocate(interpreter, &refinement, construction->span)) return false;
+    Frame *saved = interpreter->frame;
+    interpreter->frame = &refinement;
+    bool satisfied = true;
+    size_t predicates = 0;
+    for (size_t index = 0; satisfied && index < ir->obligation_count; ++index) {
+        const SolIrObligation *obligation = &ir->obligations[index];
+        if (obligation->owner_kind != SOL_CONTRACT_OWNER_TYPE
+            || obligation->owner != definition_id) continue;
+        ++predicates;
+        refinement.contract_obligation = obligation;
+        Flow predicate = evaluate(interpreter, obligation->predicate);
+        refinement.contract_obligation = NULL;
+        if (predicate.kind == FLOW_ERROR) {
+            satisfied = false;
+        } else if (predicate.kind != FLOW_VALUE
+            || predicate.value.kind != SOL_INTERPRETER_VALUE_BOOL) {
+            sol_interpreter_value_free(&predicate.value);
+            diagnostic(interpreter, SOL_INTERPRETER_INVALID_IR,
+                ir->expressions[obligation->predicate].span,
+                "refinement predicate did not produce Bool");
+            satisfied = false;
+        } else {
+            satisfied = predicate.value.as.boolean;
+            sol_interpreter_value_free(&predicate.value);
+            if (!satisfied) {
+                diagnostic(interpreter, SOL_INTERPRETER_REFINEMENT_VIOLATION,
+                    ir->expressions[obligation->predicate].span,
+                    "refined type predicate was not satisfied");
+            }
+        }
+    }
+    if (satisfied && predicates != 1) {
+        diagnostic(interpreter, SOL_INTERPRETER_INVALID_IR, construction->span,
+            "refined type does not own exactly one runtime predicate");
+        satisfied = false;
+    }
+    interpreter->frame = saved;
+    frame_release(interpreter, &refinement);
+    return satisfied;
+}
 
 static void free_values(SolInterpreterValue *values, size_t count) {
     if (values == NULL) return;
     for (size_t index = 0; index < count; ++index) sol_interpreter_value_free(&values[index]);
     free(values);
+}
+
+static bool prepare_operation_contracts(Interpreter *interpreter,
+    SolIrCallableId callable, const SolInterpreterValue *receiver,
+    const SolInterpreterValue *arguments, size_t argument_count, SolSpan span,
+    Frame *operation_frame, Frame *contract) {
+    const SolIr *ir = interpreter->request->ir;
+    const SolIrCallable *operation = &ir->callables[callable];
+    memset(operation_frame, 0, sizeof(*operation_frame));
+    operation_frame->parent = interpreter->frame;
+    if (!frame_allocate(interpreter, operation_frame, span)) return false;
+    interpreter->frame = operation_frame;
+    bool bound = operation->receiver == SOL_IR_NONE
+        || bind_local(interpreter, operation_frame, operation->receiver,
+            receiver, span);
+    if (bound && operation->capability_source != SOL_IR_NONE) {
+        if (receiver->as.capability.source == NULL) {
+            diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT, span,
+                "derived capability source is missing");
+            bound = false;
+        } else {
+            bound = bind_local(interpreter, operation_frame,
+                operation->capability_source,
+                receiver->as.capability.source, span);
+        }
+    }
+    for (size_t index = 0; bound && index < argument_count; ++index) {
+        bound = bind_local(interpreter, operation_frame,
+            ir->roots[operation->parameters.offset + index],
+            &arguments[index], span);
+    }
+    bool contract_ready = false;
+    if (bound) {
+        contract_ready = contract_frame_init(interpreter, contract,
+            operation_frame, span);
+        bound = contract_ready;
+    }
+    for (size_t index = 0; bound && index < ir->obligation_count; ++index) {
+        const SolIrObligation *obligation = &ir->obligations[index];
+        if (obligation->kind == SOL_CONTRACT_REQUIRES
+            && contract_owner_matches(ir, obligation, callable)) {
+            bound = evaluate_contract(interpreter, contract, obligation, NULL);
+        }
+    }
+    if (bound) bound = capture_contract_snapshots(interpreter, contract, callable);
+    if (bound) return true;
+    if (contract_ready) frame_release(interpreter, contract);
+    interpreter->frame = operation_frame->parent;
+    frame_release(interpreter, operation_frame);
+    return false;
+}
+
+static void release_operation_contracts(Interpreter *interpreter,
+    Frame *operation_frame, Frame *contract) {
+    frame_release(interpreter, contract);
+    interpreter->frame = operation_frame->parent;
+    frame_release(interpreter, operation_frame);
 }
 
 static Flow invoke_operation(Interpreter *interpreter,
@@ -1098,12 +1430,27 @@ static Flow invoke_operation(Interpreter *interpreter,
         }
         if (handler->source == callable && handler->root == receiver->as.capability.root
             && effect) {
+            Frame source_frame;
+            Frame source_contract;
+            bool check = interpreter->request->contracts
+                == SOL_INTERPRETER_CONTRACTS_CHECK;
+            if (check && !prepare_operation_contracts(interpreter, callable,
+                receiver, arguments, argument_count, span,
+                &source_frame, &source_contract)) return error;
             Handler *saved = interpreter->handler;
             interpreter->handler = handler->parent;
             Flow result = invoke_operation(interpreter, &handler->provider,
                 handler->provider_callable, arguments, argument_count,
                 argument_writebacks, span);
             interpreter->handler = saved;
+            if (check && result.kind != FLOW_ERROR
+                && !check_postconditions(interpreter, &source_contract,
+                    callable, &result.value)) {
+                sol_interpreter_value_free(&result.value);
+                result.kind = FLOW_ERROR;
+            }
+            if (check) release_operation_contracts(interpreter,
+                &source_frame, &source_contract);
             return result;
         }
     }
@@ -1119,21 +1466,31 @@ static Flow invoke_operation(Interpreter *interpreter,
             return error;
         }
     }
+    Frame host_frame;
+    Frame contract;
+    bool host_frame_ready = false;
+    bool contract_ready = false;
+    if (interpreter->request->contracts == SOL_INTERPRETER_CONTRACTS_CHECK) {
+        if (!prepare_operation_contracts(interpreter, callable, receiver,
+            arguments, argument_count, span, &host_frame, &contract)) return error;
+        host_frame_ready = true;
+        contract_ready = true;
+    }
     if (interpreter->request->host_operation == NULL) {
         diagnostic(interpreter, SOL_INTERPRETER_UNBOUND_OPERATION, span,
             "capability operation '%s' is unbound", operation->name);
-        return error;
+        goto host_done;
     }
     if (interpreter->request->host_allows != NULL
         && !interpreter->request->host_allows(interpreter->request->host_context,
             interpreter->request->ir, callable, receiver->as.capability.root)) {
         diagnostic(interpreter, SOL_INTERPRETER_UNBOUND_OPERATION, span,
             "capability operation '%s' is not allowed for this root", operation->name);
-        return error;
+        goto host_done;
     }
     if (!consume(interpreter, &interpreter->result->used.host_calls,
         interpreter->request->limits.host_calls, SOL_INTERPRETER_HOST_CALL_LIMIT,
-        span, "host call")) return error;
+        span, "host call")) goto host_done;
     SolInterpreterValue borrowed;
     sol_interpreter_value_init(&borrowed);
     SolInterpreterHostFailure failure = {0};
@@ -1154,21 +1511,31 @@ static Flow invoke_operation(Interpreter *interpreter,
             diagnostic(interpreter, SOL_INTERPRETER_HOST_ERROR, span, "%.*s",
                 (int)failure.length, failure.bytes);
         }
-        return error;
+        goto host_done;
     }
     if (!value_shape_valid(&borrowed)
         || !value_matches_type(interpreter, &borrowed, operation->result, receiver, 0)) {
         diagnostic(interpreter, SOL_INTERPRETER_TYPE_INVARIANT, span,
             "host operation result does not match its IR type");
-        return error;
+        goto host_done;
     }
     Flow flow = flow_new(FLOW_VALUE);
-    if (!clone_runtime(interpreter, span, &flow.value, &borrowed)) return error;
+    if (!clone_runtime(interpreter, span, &flow.value, &borrowed)) goto host_done;
     if (!validate_authority(interpreter, operation, receiver, &flow.value, span)) {
         sol_interpreter_value_free(&flow.value);
-        return error;
+        goto host_done;
     }
-    return flow;
+    if (contract_ready
+        && !check_postconditions(interpreter, &contract, callable, &flow.value)) {
+        sol_interpreter_value_free(&flow.value);
+        goto host_done;
+    }
+    error = flow;
+host_done:
+    if (host_frame_ready && contract_ready) {
+        release_operation_contracts(interpreter, &host_frame, &contract);
+    }
+    return error;
 }
 
 static const SolIrDispatchEvidence *resolve_parameter_evidence(
@@ -1371,29 +1738,8 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
     frame.type_parameter_offset = callable->generic_parameters.offset;
     frame.evidence = evidence;
     frame.evidence_count = evidence_count;
-    if (ir->local_count != 0) {
-        frame.locals = calloc(ir->local_count, sizeof(*frame.locals));
-        frame.bound = calloc(ir->local_count, sizeof(*frame.bound));
-        frame.registered = calloc(ir->local_count, sizeof(*frame.registered));
-        frame.authority_roots = calloc(ir->local_count,
-            sizeof(*frame.authority_roots));
-        frame.authority_known = calloc(ir->local_count,
-            sizeof(*frame.authority_known));
-        frame.binding_order = malloc(ir->local_count * sizeof(*frame.binding_order));
-        if (frame.locals == NULL || frame.bound == NULL || frame.registered == NULL
-            || frame.authority_roots == NULL || frame.authority_known == NULL
-            || frame.binding_order == NULL) {
-            free(frame.locals);
-            free(frame.bound);
-            free(frame.registered);
-            free(frame.authority_roots);
-            free(frame.authority_known);
-            free(frame.binding_order);
-            diagnostic(interpreter, SOL_INTERPRETER_INTERNAL_INVARIANT, span,
-                "frame allocation failed");
-            return error;
-        }
-    }
+    frame.observe_cleanup = true;
+    if (!frame_allocate(interpreter, &frame, span)) return error;
     interpreter->frame = &frame;
     ++interpreter->depth;
     if (interpreter->depth > interpreter->result->used.call_depth) {
@@ -1437,6 +1783,20 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
         SolIrLocalId local = ir->roots[callable->parameters.offset + index];
         bound = bind_local(interpreter, &frame, local, &arguments[index], span);
     }
+    Frame contract;
+    bool contract_ready = false;
+    if (bound && interpreter->request->contracts == SOL_INTERPRETER_CONTRACTS_CHECK) {
+        contract_ready = contract_frame_init(interpreter, &contract, &frame, span);
+        bound = contract_ready;
+        for (size_t index = 0; bound && index < ir->obligation_count; ++index) {
+            const SolIrObligation *obligation = &ir->obligations[index];
+            if (obligation->kind == SOL_CONTRACT_REQUIRES
+                && contract_owner_matches(ir, obligation, callable_id)) {
+                bound = evaluate_contract(interpreter, &contract, obligation, NULL);
+            }
+        }
+        if (bound) bound = capture_contract_snapshots(interpreter, &contract, callable_id);
+    }
     Flow result = error;
     if (bound && callable->body != SOL_IR_NONE) result = evaluate(interpreter, callable->body);
     else if (bound) diagnostic(interpreter, SOL_INTERPRETER_UNBOUND_OPERATION, span,
@@ -1451,6 +1811,17 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
     }
     if (result.kind != FLOW_ERROR
         && !validate_authority(interpreter, callable, receiver, &result.value, span)) {
+        sol_interpreter_value_free(&result.value);
+        result.kind = FLOW_ERROR;
+    }
+    if (result.kind != FLOW_ERROR && contract_ready
+        && !refresh_contract_writebacks(interpreter, &contract, &frame,
+            callable, span)) {
+        sol_interpreter_value_free(&result.value);
+        result.kind = FLOW_ERROR;
+    }
+    if (result.kind != FLOW_ERROR && contract_ready
+        && !check_postconditions(interpreter, &contract, callable_id, &result.value)) {
         sol_interpreter_value_free(&result.value);
         result.kind = FLOW_ERROR;
     }
@@ -1487,16 +1858,8 @@ static Flow invoke(Interpreter *interpreter, SolIrCallableId callable_id,
         sol_interpreter_value_init(&frame.locals[local]);
         frame.bound[local] = false;
     }
-    while (frame.binding_count != 0) {
-        cleanup_binding(interpreter, &frame,
-            frame.binding_order[frame.binding_count - 1]);
-    }
-    free(frame.locals);
-    free(frame.bound);
-    free(frame.registered);
-    free(frame.authority_roots);
-    free(frame.authority_known);
-    free(frame.binding_order);
+    if (contract_ready) frame_release(interpreter, &contract);
+    frame_release(interpreter, &frame);
     --interpreter->depth;
     interpreter->frame = frame.parent;
     if (result.kind == FLOW_RETURN) result.kind = FLOW_VALUE;
@@ -1730,7 +2093,8 @@ static Flow evaluate_call(Interpreter *interpreter,
             }
             break;
         case SOL_IR_CALL_DISTINCT_CONSTRUCTOR:
-            if (new_value(interpreter, expression->span)) {
+            if (check_refinement(interpreter, expression, &arguments[0])
+                && new_value(interpreter, expression->span)) {
                 output.kind = FLOW_VALUE;
                 output.value.kind = SOL_INTERPRETER_VALUE_DISTINCT;
                 output.value.as.distinct.definition = expression->as.call.definition;
@@ -2500,9 +2864,51 @@ static Flow evaluate(Interpreter *interpreter, SolIrExpressionId expression_id) 
             sol_interpreter_value_free(&handler.provider);
             return body;
         }
-        case SOL_IR_EXPR_REFINEMENT_SELF:
         case SOL_IR_EXPR_RESULT:
-        case SOL_IR_EXPR_SNAPSHOT_READ:
+            if (interpreter->frame == NULL
+                || interpreter->frame->contract_obligation == NULL
+                || interpreter->frame->contract_result == NULL
+                || !clone_runtime(interpreter, expression->span, &output.value,
+                    interpreter->frame->contract_result)) {
+                if (interpreter->result->diagnostic.code == SOL_INTERPRETER_OK) {
+                    diagnostic(interpreter, SOL_INTERPRETER_INVALID_IR,
+                        expression->span, "result is unavailable in this contract");
+                }
+                return flow_new(FLOW_ERROR);
+            }
+            return output;
+        case SOL_IR_EXPR_SNAPSHOT_READ: {
+            SolIrSnapshotId snapshot = expression->as.snapshot;
+            if (interpreter->frame == NULL
+                || interpreter->frame->contract_obligation == NULL
+                || snapshot >= ir->snapshot_count
+                || interpreter->frame->contract_snapshot_bound == NULL
+                || !interpreter->frame->contract_snapshot_bound[snapshot]
+                || ir->snapshots[snapshot].obligation
+                    != interpreter->frame->contract_obligation->id
+                || !clone_runtime(interpreter, expression->span, &output.value,
+                    &interpreter->frame->contract_snapshots[snapshot])) {
+                if (interpreter->result->diagnostic.code == SOL_INTERPRETER_OK) {
+                    diagnostic(interpreter, SOL_INTERPRETER_INVALID_IR,
+                        expression->span, "old snapshot is unavailable in this contract");
+                }
+                return flow_new(FLOW_ERROR);
+            }
+            return output;
+        }
+        case SOL_IR_EXPR_REFINEMENT_SELF:
+            if (interpreter->frame == NULL
+                || interpreter->frame->contract_self == NULL
+                || !clone_runtime(interpreter, expression->span, &output.value,
+                    interpreter->frame->contract_self)) {
+                if (interpreter->result->diagnostic.code == SOL_INTERPRETER_OK) {
+                    diagnostic(interpreter, SOL_INTERPRETER_INVALID_IR,
+                        expression->span,
+                        "self is unavailable outside a refinement predicate");
+                }
+                return flow_new(FLOW_ERROR);
+            }
+            return output;
         case SOL_IR_EXPR_COMPILE_TIME_HEAD:
             diagnostic(interpreter, SOL_INTERPRETER_INVALID_IR, expression->span,
                 "contract-only or compile-time expression reached an ordinary body");
@@ -2553,9 +2959,10 @@ static bool sol_interpret_impl(
             return false;
         }
     }
-    if (request->contracts != SOL_INTERPRETER_CONTRACTS_IGNORE) {
+    if (request->contracts != SOL_INTERPRETER_CONTRACTS_IGNORE
+        && request->contracts != SOL_INTERPRETER_CONTRACTS_CHECK) {
         diagnostic(&interpreter, SOL_INTERPRETER_UNSUPPORTED_CONTRACT_POLICY,
-            (SolSpan){0}, "runtime contract checking is not supported");
+            (SolSpan){0}, "unknown runtime contract policy");
         return false;
     }
     SolIrCallableId callable = request->callable;

@@ -50,6 +50,12 @@ if(NOT panic_error MATCHES "SOL-RUNTIME-PANIC" OR NOT panic_error MATCHES "boom"
     message(FATAL_ERROR "panic mismatch: ${panic_output}${panic_error}")
 endif()
 
+run_case(contract_failure 1 "${FIXTURE_DIR}/contract_failure.sol")
+if(NOT contract_failure_error MATCHES "SOL-RUNTIME-REQUIRE-VIOLATION"
+    OR NOT contract_failure_error MATCHES "requires contract was not satisfied")
+    message(FATAL_ERROR "contract failure mismatch: ${contract_failure_output}${contract_failure_error}")
+endif()
+
 run_case(unsupported 1 "${FIXTURE_DIR}/unsupported.sol")
 if(NOT unsupported_output STREQUAL "" OR NOT unsupported_error MATCHES "SOL-RUN-003")
     message(FATAL_ERROR "unsupported host mismatch: ${unsupported_output}${unsupported_error}")
@@ -89,6 +95,11 @@ run_case(json_panic 1 --diagnostic-format=json "${FIXTURE_DIR}/panic.sol")
 if(NOT json_panic_output MATCHES "\"outcome\":\"runtime_error\""
     OR NOT json_panic_output MATCHES "SOL-RUNTIME-PANIC")
     message(FATAL_ERROR "JSON panic mismatch: ${json_panic_output}${json_panic_error}")
+endif()
+
+run_case(json_contract_failure 1 --diagnostic-format=json "${FIXTURE_DIR}/contract_failure.sol")
+if(NOT json_contract_failure_output MATCHES "SOL-RUNTIME-REQUIRE-VIOLATION")
+    message(FATAL_ERROR "JSON contract failure mismatch: ${json_contract_failure_output}${json_contract_failure_error}")
 endif()
 
 run_case(json_no_entry 1 --diagnostic-format=json "${FIXTURE_DIR}/no_entry.sol")

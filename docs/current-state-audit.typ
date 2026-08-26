@@ -9,6 +9,15 @@
 #set par(justify: true, leading: 0.62em)
 #show raw: set text(font: "DejaVu Sans Mono", size: 8.5pt)
 
+#let status(kind, body) = block(
+  width: 100%,
+  inset: 8pt,
+  fill: if kind == "IMPLEMENTED" { rgb("e8f3e8") } else { rgb("f5ece8") },
+  stroke: (left: 3pt + rgb("4b7d56")),
+  radius: (right: 2pt),
+  breakable: true,
+)[#text(size: 7.5pt, weight: "bold", fill: rgb("4b7d56"))[#kind] #body]
+
 #align(center)[
   #text(size: 22pt, weight: "bold")[Sol Current-State Audit]
   #v(4pt)
@@ -37,7 +46,7 @@ source/package
 
 This is real functionality rather than scaffolding. Records, enums, tuples, bounded generics, traits, effects, capabilities, contracts-as-obligations, ownership, mutation, loops, handlers, recursive patterns, cleanup, and host operations cross the complete pipeline.
 
-Sol now has a bounded end-to-end interpreter application profile with explicit entrypoints, trusted host capabilities, and `sol run`. It is not yet a production application toolchain: there is no runtime contract enforcement, MIR, native or WebAssembly backend, linker, target runtime ABI, `sol build`, package manifest, dependency system, or public semantic IR.
+Sol now has a bounded end-to-end interpreter application profile with explicit entrypoints, trusted host capabilities, executable core contracts/refinements, and `sol run`. It is not yet a production application toolchain: there is no MIR, native or WebAssembly backend, linker, target runtime ABI, `sol build`, package manifest, dependency system, or public semantic IR.
 
 Current verification is healthy:
 
@@ -249,7 +258,7 @@ Required behavior:
 
 At this point Sol has meaningful end-to-end application execution.
 
-#status("IMPLEMENTED", [`sol run` accepts one file or directory package, optional deterministic `--config=KEY=VALUE` entries, and bounded application arguments after `--`. It compiles through the shared session, transfers owning IR before execution, grants only exact Console/Arguments/Configuration signatures and effects, and rejects unsupported authority before side effects. Human mode preserves exact console bytes on stdout and sends boundary/runtime diagnostics to stderr. JSON mode emits one `sol.run-result` version-1 envelope with base64 console data, symbolic diagnostics, and exact returned status. Successful `()`/`Int64` results map to 0 or identical 0-through-255 status; missing entrypoints, invalid status values, host-profile failures, and runtime failures use driver status 1, while usage uses 2. Runtime contracts remain ignored until E5.])
+#status("IMPLEMENTED", [`sol run` accepts one file or directory package, optional deterministic `--config=KEY=VALUE` entries, and bounded application arguments after `--`. It compiles through the shared session, transfers owning IR before execution, grants only exact Console/Arguments/Configuration signatures and effects, rejects unsupported authority before side effects, and executes core contracts. Human mode preserves exact console bytes on stdout and sends boundary/runtime diagnostics to stderr. JSON mode emits one `sol.run-result` version-1 envelope with base64 console data, symbolic diagnostics, and exact returned status. Successful `()`/`Int64` results map to 0 or identical 0-through-255 status; missing entrypoints, invalid status values, host-profile failures, and runtime failures use driver status 1, while usage uses 2.])
 
 == Milestone 5: Executable Contracts
 
@@ -266,6 +275,8 @@ Implement:
 - Exact ownership cleanup when a contract fails.
 
 Loop invariant and decreases checking may follow as a second increment if needed.
+
+#status("IMPLEMENTED", [The interpreter CHECK policy executes source-ordered callable preconditions, entry snapshots, always/success/failure postconditions, and bodyless hosted-member contracts under shared deterministic limits. Direct refined construction always validates its type-owned predicate. False predicates have dedicated structured diagnostics, predicate runtime failures retain their original diagnostic, and every exit performs exact ordinary-binding cleanup without exposing logical copies to cleanup observers. `sol run` and `sol test` request CHECK; explicit interpreter callers may retain IGNORE compatibility. Loop invariant and decreases templates remain runtime-erased.])
 
 == Milestone 6: Representative Application and Conformance
 
@@ -311,7 +322,7 @@ Recommended splits:
 - Item 40: application metadata; dependencies and locks; visibility and re-exports; sandboxed builds.
 - Item 48: interpreter host profile; target-independent runtime ABI; backend adapters.
 - Item 49: entrypoint semantics; interpreter `sol run`; backend `sol build`.
-- Item 50: runtime contracts; normalized logical obligations; refinement-aware matching; cost/resource checks.
+- Item 50: normalized logical obligations, refinement-aware matching, and cost/resource checks beyond E5's runtime core.
 - Item 43: immediate integration acceptance criteria rather than one permanent mega-task.
 
 Recommended new explicit tasks:
