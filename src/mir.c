@@ -715,6 +715,75 @@ static LoweredValue mir_lower_direct_call(MirLowerer *lowerer,
     return (LoweredValue){.reachable = true, .value = parameter};
 }
 
+static LoweredValue mir_lower_checked_refined(MirLowerer *lowerer,
+    SolIrExpressionId id, const SolIrExpression *expression,
+    const Scope *scope) {
+    SolIrDefinitionId definition = expression->as.call.definition;
+    SolIrSlice operands = expression->as.call.operands;
+    if (definition >= lowerer->ir->definition_count
+        || lowerer->ir->definitions[definition].kind
+            != SOL_IR_DEFINITION_REFINED
+        || operands.count != 1) return mir_failure(lowerer);
+    SolObligationId obligation = SOL_IR_NONE;
+    for (size_t index = 0; index < lowerer->ir->obligation_count; ++index) {
+        if (lowerer->ir->obligations[index].owner_kind
+                == SOL_CONTRACT_OWNER_TYPE
+            && lowerer->ir->obligations[index].owner == definition) {
+            obligation = index;
+            break;
+        }
+    }
+    if (obligation == SOL_IR_NONE) return mir_failure(lowerer);
+    size_t operation_depth = lowerer->pending_temporary_count;
+    const SolIrOperand *operand = &lowerer->ir->operands[operands.offset];
+    LoweredValue representation = mir_lower_expression(lowerer,
+        operand->value, scope);
+    if (!representation.reachable) {
+        lowerer->pending_temporary_count = operation_depth;
+        return representation;
+    }
+    SolMirTemporaryId temporary = SOL_MIR_NONE;
+    if (!mir_stage_temporary(lowerer, operand->value,
+        representation.value, &temporary)) return mir_failure(lowerer);
+    SolMirBlockId check_block = lowerer->current;
+    SolMirBlockId failure = mir_append_block(lowerer, expression->span);
+    SolMirBlockId normal = mir_append_block(lowerer, expression->span);
+    SolMirValueId result = mir_append_terminator_result(lowerer, check_block,
+        expression->type, id, expression->span);
+    SolMirValueId parameter = mir_append_parameter(lowerer, normal,
+        expression->type, id, expression->span);
+    if (failure == SOL_MIR_NONE || normal == SOL_MIR_NONE
+        || result == SOL_MIR_NONE || parameter == SOL_MIR_NONE) {
+        return mir_failure(lowerer);
+    }
+    SolMirSlice no_arguments = {lowerer->mir->edge_value_count, 0};
+    SolMirSlice normal_arguments
+        = mir_append_edge_arguments(lowerer, &result, 1);
+    if (lowerer->failed) return mir_failure(lowerer);
+    lowerer->pending_temporary_count = operation_depth;
+    lowerer->mir->blocks[check_block].terminator = (SolMirTerminator){
+        .kind = SOL_MIR_TERM_CHECK_REFINED,
+        .span = expression->span,
+        .as.check_refined = {
+            .source_expression = id,
+            .definition = definition,
+            .obligation = obligation,
+            .representation = temporary,
+            .result = result,
+            .normal_edge = {.block = normal, .arguments = normal_arguments},
+            .failure_edge = {.block = failure, .arguments = no_arguments},
+        },
+    };
+    if (!mir_start_block(lowerer, failure)
+        || !mir_emit_exit_cleanup(lowerer, scope, expression->span)
+        || !mir_set_failure_terminator(lowerer,
+            SOL_MIR_TERM_RESUME_FAILURE, expression->span)) {
+        return mir_failure(lowerer);
+    }
+    if (!mir_start_block(lowerer, normal)) return mir_failure(lowerer);
+    return (LoweredValue){.reachable = true, .value = parameter};
+}
+
 static LoweredValue mir_lower_construct(MirLowerer *lowerer,
     SolIrExpressionId id, const SolIrExpression *expression,
     const Scope *scope) {
@@ -777,9 +846,8 @@ static LoweredValue mir_lower_construct(MirLowerer *lowerer,
                 }
                 if (lowerer->ir->definitions[definition].kind
                     == SOL_IR_DEFINITION_REFINED) {
-                    mir_unsupported(lowerer, expression->span,
-                        "checked refined construction requires a later P1a.3b failure edge");
-                    return mir_unreachable();
+                    return mir_lower_checked_refined(lowerer, id,
+                        expression, scope);
                 }
                 if (lowerer->ir->definitions[definition].kind
                     != SOL_IR_DEFINITION_DISTINCT) return mir_failure(lowerer);
@@ -1799,6 +1867,13 @@ static bool mir_validate_arena_ownership(const SolMir *mir,
                 SolMirValueId result = terminator->as.invoke.result;
                 valid = result < mir->value_count && ++values[result] == 1;
             }
+        } else if (terminator->kind == SOL_MIR_TERM_CHECK_REFINED) {
+            slices[count++]
+                = terminator->as.check_refined.normal_edge.arguments;
+            slices[count++]
+                = terminator->as.check_refined.failure_edge.arguments;
+            SolMirValueId result = terminator->as.check_refined.result;
+            valid = result < mir->value_count && ++values[result] == 1;
         } else if (terminator->kind == SOL_MIR_TERM_BREAK
             || terminator->kind == SOL_MIR_TERM_CONTINUE) {
             slices[count++] = terminator->as.transfer.edge.arguments;
@@ -1994,6 +2069,11 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
                     targets[target_count++] = term->as.invoke.normal_edge.block;
                 }
                 targets[target_count++] = term->as.invoke.failure_edge.block;
+            } else if (valid && term->kind == SOL_MIR_TERM_CHECK_REFINED) {
+                targets[target_count++]
+                    = term->as.check_refined.normal_edge.block;
+                targets[target_count++]
+                    = term->as.check_refined.failure_edge.block;
             } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
                 || term->kind == SOL_MIR_TERM_CONTINUE)) {
                 targets[target_count++] = term->as.transfer.edge.block;
@@ -2094,6 +2174,9 @@ static bool mir_validate_regions(const SolIr *ir, const SolMir *mir,
                 targets[target_count++] = term->as.invoke.normal_edge.block;
             }
             targets[target_count++] = term->as.invoke.failure_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_CHECK_REFINED) {
+            targets[target_count++] = term->as.check_refined.normal_edge.block;
+            targets[target_count++] = term->as.check_refined.failure_edge.block;
         } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE)) {
             targets[target_count++] = term->as.transfer.edge.block;
@@ -2212,6 +2295,9 @@ static bool mir_validate_storage_order(const SolIr *ir, const SolMir *mir,
                 targets[target_count++] = term->as.invoke.normal_edge.block;
             }
             targets[target_count++] = term->as.invoke.failure_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_CHECK_REFINED) {
+            targets[target_count++] = term->as.check_refined.normal_edge.block;
+            targets[target_count++] = term->as.check_refined.failure_edge.block;
         } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE)) {
             targets[target_count++] = term->as.transfer.edge.block;
@@ -2372,6 +2458,10 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
                     == argument->temporary;
             }
             if (valid) depth -= owned;
+        } else if (valid && term->kind == SOL_MIR_TERM_CHECK_REFINED) {
+            valid = depth != 0
+                && working[depth - 1] == term->as.check_refined.representation;
+            if (valid) --depth;
         }
         if (valid && depth != 0
             && (term->kind == SOL_MIR_TERM_RETURN
@@ -2390,6 +2480,9 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
                 targets[target_count++] = term->as.invoke.normal_edge.block;
             }
             targets[target_count++] = term->as.invoke.failure_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_CHECK_REFINED) {
+            targets[target_count++] = term->as.check_refined.normal_edge.block;
+            targets[target_count++] = term->as.check_refined.failure_edge.block;
         } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE)) {
             targets[target_count++] = term->as.transfer.edge.block;
@@ -2701,7 +2794,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || !mir_slice_valid(block->parameters, mir->parameter_value_count)
             || !mir_slice_valid(block->instructions, mir->instruction_count)
             || block->terminator.kind <= SOL_MIR_TERM_INVALID
-            || block->terminator.kind > SOL_MIR_TERM_CONTINUE
+            || block->terminator.kind > SOL_MIR_TERM_CHECK_REFINED
             || !mir_span_valid(ir, block->terminator.span)) {
             free(instruction_owners);
             free(parameter_owners);
@@ -2978,6 +3071,81 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                     free(parameter_owners);
                     return mir_error(diagnostics, term->span,
                         "malformed MIR loop transfer");
+                }
+                break;
+            }
+            case SOL_MIR_TERM_CHECK_REFINED: {
+                const SolMirTerminator *term = &block->terminator;
+                const SolIrExpression *source
+                    = term->as.check_refined.source_expression
+                            < ir->expression_count
+                    ? &ir->expressions[
+                        term->as.check_refined.source_expression] : NULL;
+                SolIrDefinitionId definition
+                    = term->as.check_refined.definition;
+                SolObligationId obligation
+                    = term->as.check_refined.obligation;
+                SolMirTemporaryId representation
+                    = term->as.check_refined.representation;
+                SolMirValueId result = term->as.check_refined.result;
+                bool valid = source != NULL
+                    && source->kind == SOL_IR_EXPR_CALL
+                    && source->as.call.kind
+                        == SOL_IR_CALL_DISTINCT_CONSTRUCTOR
+                    && source->as.call.definition == definition
+                    && source->as.call.operands.count == 1
+                    && source->capability_roots.count == 0
+                    && source->operation_roots.count == 0
+                    && definition < ir->definition_count
+                    && ir->definitions[definition].kind
+                        == SOL_IR_DEFINITION_REFINED
+                    && source->type < ir->type_count
+                    && ir->types[source->type].kind == SOL_IR_TYPE_NOMINAL
+                    && ir->types[source->type].definition == definition
+                    && obligation < ir->obligation_count
+                    && ir->obligations[obligation].id == obligation
+                    && ir->obligations[obligation].owner_kind
+                        == SOL_CONTRACT_OWNER_TYPE
+                    && ir->obligations[obligation].owner == definition
+                    && ir->obligations[obligation].kind
+                        == SOL_CONTRACT_REQUIRES
+                    && ir->obligations[obligation].outcome
+                        == SOL_CONTRACT_OUTCOME_ALWAYS
+                    && !ir->obligations[obligation].result_available
+                    && ir->obligations[obligation].snapshots.count == 0
+                    && representation < mir->temporary_count
+                    && mir->temporaries[representation].source_expression
+                        == ir->operands[source->as.call.operands.offset].value
+                    && mir->temporaries[representation].type
+                        == ir->expressions[ir->operands[
+                            source->as.call.operands.offset].value].type
+                    && ir->operands[source->as.call.operands.offset].formal == 0
+                    && ir->operands[source->as.call.operands.offset].access
+                        == SOL_ACCESS_OWNED
+                    && result < mir->value_count
+                    && mir->values[result].kind == SOL_MIR_VALUE_TERMINATOR
+                    && mir->values[result].block == block_id
+                    && mir->values[result].definition == block_id
+                    && mir->values[result].type == source->type
+                    && mir->values[result].source_expression
+                        == term->as.check_refined.source_expression
+                    && term->span.start == source->span.start
+                    && term->span.end == source->span.end
+                    && mir_validate_edge(mir, block_id,
+                        &term->as.check_refined.normal_edge, result)
+                    && term->as.check_refined.normal_edge.arguments.count == 1
+                    && mir->edge_values[term->as.check_refined.normal_edge
+                        .arguments.offset] == result
+                    && term->as.check_refined.failure_edge.arguments.count == 0
+                    && mir_validate_edge(mir, block_id,
+                        &term->as.check_refined.failure_edge, SOL_MIR_NONE)
+                    && mir->blocks[term->as.check_refined.failure_edge.block]
+                        .terminator.kind == SOL_MIR_TERM_RESUME_FAILURE;
+                if (!valid) {
+                    free(instruction_owners);
+                    free(parameter_owners);
+                    return mir_error(diagnostics, term->span,
+                        "malformed MIR checked refinement");
                 }
                 break;
             }
@@ -3341,6 +3509,9 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 ++predecessors[term->as.invoke.normal_edge.block];
             }
             ++predecessors[term->as.invoke.failure_edge.block];
+        } else if (term->kind == SOL_MIR_TERM_CHECK_REFINED) {
+            ++predecessors[term->as.check_refined.normal_edge.block];
+            ++predecessors[term->as.check_refined.failure_edge.block];
         } else if (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE) {
             ++predecessors[term->as.transfer.edge.block];
@@ -3364,6 +3535,9 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 targets[target_count++] = term->as.invoke.normal_edge.block;
             }
             targets[target_count++] = term->as.invoke.failure_edge.block;
+        } else if (term->kind == SOL_MIR_TERM_CHECK_REFINED) {
+            targets[target_count++] = term->as.check_refined.normal_edge.block;
+            targets[target_count++] = term->as.check_refined.failure_edge.block;
         } else if (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE) {
             targets[target_count++] = term->as.transfer.edge.block;

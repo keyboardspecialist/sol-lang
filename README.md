@@ -600,7 +600,7 @@ Nongeneric direct function calls use an abstract invoke terminator with distinct
 normal and failure-cleanup edges; ordered operands distinguish owned values from
 call-scoped whole-local shared and exclusive borrows, with exclusive writeback only
 on normal completion. `sol_mir_validate` independently checks arena ownership,
-edges, invoke result transport and argument provenance, source/type/control-event
+edges, invoke/refinement result transport and argument provenance, source/type/control-event
 relations, exact parameter activation, local initialization/moves, lexical cleanup
 order, balanced regions, loop source/parent identity, condition/body/exit edges,
 natural backedges, and cleanup at transfer boundaries. Loop obligations are retained
@@ -611,9 +611,13 @@ layout. Typed reusable temporary slots now stage multiple owned call/constructio
 operands, consume exact pending suffixes on invoke/construction, preserve outer
 values across loop transfers, and destroy abandoned operands in interpreter order.
 This enables multi-operand records, tuples, and enum payloads without requiring P1b
-dominance. Unsupported constructs fail transactionally. P1a.3b2 is not connected to
-compilation sessions or execution and does not yet cover checked refinement,
-patterns, propagation, projected places, authority-bearing construction,
+dominance. Checked refined construction retains its exact type-owned predicate
+obligation in a target-neutral terminator, consumes the representation on either
+outcome, transports the nominal result only on success, and performs pending,
+local, and region cleanup before resuming failure. Unsupported constructs fail
+transactionally. P1a.3b3 is not connected to compilation sessions or execution and
+does not choose how a backend evaluates predicates. It does not yet cover patterns,
+propagation, projected places, authority-bearing construction,
 dynamic/method/capability calls, handlers, contracts, generic lowering,
 representation, runtime ABI, or a backend.
 

@@ -1190,14 +1190,92 @@ static void test_bounded_value_construction(void) {
     }
     SolMir refined;
     sol_mir_init(&refined);
-    size_t before = deferred.diagnostics.count;
     CHECK(sol_mir_lower_callable(&deferred.ir,
         callable(&deferred.ir, "positive"), &refined,
-        &deferred.diagnostics) == SOL_MIR_LOWER_UNSUPPORTED);
-    CHECK(refined.callable == SOL_IR_NONE && refined.blocks == NULL);
-    CHECK(deferred.diagnostics.count == before + 1);
+        &deferred.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_validate(&deferred.ir, &refined, NULL));
+    SolMirBlockId check = SOL_MIR_NONE;
+    for (size_t block = 0; block < refined.block_count; ++block) {
+        if (refined.blocks[block].terminator.kind
+            == SOL_MIR_TERM_CHECK_REFINED) check = block;
+    }
+    CHECK(check != SOL_MIR_NONE);
+    SolMirTerminator *refinement = &refined.blocks[check].terminator;
+    CHECK(refinement->as.check_refined.normal_edge.arguments.count == 1);
+    CHECK(refinement->as.check_refined.failure_edge.arguments.count == 0);
+    CHECK(refined.blocks[refinement->as.check_refined.failure_edge.block]
+        .terminator.kind == SOL_MIR_TERM_RESUME_FAILURE);
+    SolObligationId obligation = refinement->as.check_refined.obligation;
+    refinement->as.check_refined.obligation = SOL_IR_NONE;
+    CHECK(!sol_mir_validate(&deferred.ir, &refined, NULL));
+    refinement->as.check_refined.obligation = obligation;
+    SolMirTemporaryId representation
+        = refinement->as.check_refined.representation;
+    refinement->as.check_refined.representation = SOL_MIR_NONE;
+    CHECK(!sol_mir_validate(&deferred.ir, &refined, NULL));
+    refinement->as.check_refined.representation = representation;
+    SolMirBlockId normal = refinement->as.check_refined.normal_edge.block;
+    refinement->as.check_refined.normal_edge.block = SOL_MIR_NONE;
+    CHECK(!sol_mir_validate(&deferred.ir, &refined, NULL));
+    refinement->as.check_refined.normal_edge.block = normal;
+    CHECK(sol_mir_validate(&deferred.ir, &refined, NULL));
     sol_mir_free(&refined);
     free_compilation(&deferred);
+}
+
+static void test_refined_failure_cleanup(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_refined_cleanup\n"
+        "record Box<T> { value: T }\n"
+        "type Positive = refined Int64 where self > 0\n"
+        "function make(value: Int64) -> Box<Int64> "
+        "{ Box<Int64> { value } }\n"
+        "function consume(box: Box<Int64>, value: Positive) -> () {}\n"
+        "function checked() -> () { consume(make(1), Positive(2)) }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolMir mir;
+    sol_mir_init(&mir);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "checked"), &mir,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+    SolMirBlockId check = SOL_MIR_NONE;
+    for (size_t block = 0; block < mir.block_count; ++block) {
+        if (mir.blocks[block].terminator.kind
+            == SOL_MIR_TERM_CHECK_REFINED) check = block;
+    }
+    CHECK(check != SOL_MIR_NONE);
+    SolMirBlockId failure
+        = mir.blocks[check].terminator.as.check_refined.failure_edge.block;
+    SolMirTemporaryId representation
+        = mir.blocks[check].terminator.as.check_refined.representation;
+    SolMirTemporaryId outer = SOL_MIR_NONE;
+    for (size_t block = 0; block < mir.block_count; ++block) {
+        const SolMirTerminator *term = &mir.blocks[block].terminator;
+        if (term->kind == SOL_MIR_TERM_INVOKE
+            && term->as.invoke.arguments.count == 2) {
+            outer = mir.call_arguments[term->as.invoke.arguments.offset]
+                .temporary;
+        }
+    }
+    CHECK(outer != SOL_MIR_NONE);
+    size_t drop_count = 0;
+    SolMirTemporaryId dropped = SOL_MIR_NONE;
+    SolMirSlice instructions = mir.blocks[failure].instructions;
+    for (size_t index = 0; index < instructions.count; ++index) {
+        const SolMirInstruction *instruction
+            = &mir.instructions[instructions.offset + index];
+        if (instruction->kind == SOL_MIR_INST_TEMPORARY_DROP) {
+            ++drop_count;
+            dropped = instruction->as.temporary_drop.temporary;
+        }
+    }
+    CHECK(drop_count == 1 && dropped == outer && dropped != representation);
+    CHECK(mir.blocks[failure].terminator.kind
+        == SOL_MIR_TERM_RESUME_FAILURE);
+    sol_mir_free(&mir);
+    free_compilation(&compilation);
 }
 
 static void test_owned_temporary_cleanup(void) {
@@ -1453,6 +1531,7 @@ int main(void) {
     test_validator_rejects_corruption();
     test_loop_control_lowering();
     test_bounded_value_construction();
+    test_refined_failure_cleanup();
     test_owned_temporary_cleanup();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

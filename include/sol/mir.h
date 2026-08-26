@@ -167,6 +167,7 @@ typedef enum {
     SOL_MIR_TERM_UNREACHABLE,
     SOL_MIR_TERM_BREAK,
     SOL_MIR_TERM_CONTINUE,
+    SOL_MIR_TERM_CHECK_REFINED,
 } SolMirTerminatorKind;
 
 typedef struct {
@@ -197,6 +198,17 @@ typedef struct {
             SolMirLoopId loop;
             SolMirEdge edge;
         } transfer;
+        struct {
+            /* The representation is consumed on both edges; only the normal
+               edge transports the checked nominal result. */
+            SolIrExpressionId source_expression;
+            SolIrDefinitionId definition;
+            SolObligationId obligation;
+            SolMirTemporaryId representation;
+            SolMirValueId result;
+            SolMirEdge normal_edge;
+            SolMirEdge failure_edge;
+        } check_refined;
     } as;
 } SolMirTerminator;
 
