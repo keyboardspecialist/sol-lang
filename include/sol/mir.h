@@ -24,6 +24,8 @@ typedef enum {
 typedef enum {
     SOL_MIR_VALUE_BLOCK_PARAMETER,
     SOL_MIR_VALUE_INSTRUCTION,
+    /* Available only as the normal-edge result of its defining terminator. */
+    SOL_MIR_VALUE_TERMINATOR,
 } SolMirValueKind;
 
 typedef struct {
@@ -31,6 +33,7 @@ typedef struct {
     SolIrTypeId type;
     SolMirBlockId block;
     size_t definition;
+    SolIrExpressionId source_expression;
     SolSpan span;
 } SolMirValue;
 
@@ -48,6 +51,9 @@ typedef enum {
     SOL_MIR_INST_STORE,
     SOL_MIR_INST_UNARY,
     SOL_MIR_INST_BINARY,
+    SOL_MIR_INST_CALL_ARGUMENT,
+    SOL_MIR_INST_REGION_ENTER,
+    SOL_MIR_INST_REGION_EXIT,
 } SolMirInstructionKind;
 
 typedef struct {
@@ -74,8 +80,20 @@ typedef struct {
             SolIrLocalId local;
             SolMirValueId value;
         } store;
+        SolMirValueId operand;
+        SolIrStatementId region;
     } as;
 } SolMirInstruction;
+
+typedef struct {
+    size_t formal;
+    SolAccessMode access;
+    SolIrExpressionId source_expression;
+    /* Owned operands carry an SSA value; borrows carry a whole-local place.
+       Exclusive places write back only when the invoke takes its normal edge. */
+    SolMirValueId value;
+    SolIrPlaceId place;
+} SolMirCallArgument;
 
 typedef struct {
     SolMirBlockId block;
@@ -88,6 +106,9 @@ typedef enum {
     SOL_MIR_TERM_BRANCH,
     SOL_MIR_TERM_RETURN,
     SOL_MIR_TERM_PANIC,
+    SOL_MIR_TERM_INVOKE,
+    SOL_MIR_TERM_RESUME_FAILURE,
+    SOL_MIR_TERM_UNREACHABLE,
 } SolMirTerminatorKind;
 
 typedef struct {
@@ -100,12 +121,25 @@ typedef struct {
             SolMirEdge true_edge;
             SolMirEdge false_edge;
         } branch;
+        struct {
+            SolIrExpressionId source_expression;
+            SolIrCallableId callable;
+            SolMirSlice arguments;
+            SolMirValueId result;
+            SolMirEdge normal_edge;
+            SolMirEdge failure_edge;
+        } invoke;
         SolMirValueId value;
+        struct {
+            SolIrStatementId statement;
+            size_t obligation;
+        } unreachable;
     } as;
 } SolMirTerminator;
 
 typedef struct {
     SolMirBlockId id;
+    size_t order;
     SolMirSlice parameters;
     SolMirSlice instructions;
     SolMirTerminator terminator;
@@ -131,6 +165,9 @@ typedef struct {
     SolMirValueId *edge_values;
     size_t edge_value_count;
     size_t edge_value_capacity;
+    SolMirCallArgument *call_arguments;
+    size_t call_argument_count;
+    size_t call_argument_capacity;
 } SolMir;
 
 void sol_mir_init(SolMir *mir);

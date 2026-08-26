@@ -100,6 +100,7 @@ static bool mir_equal(const SolMir *left, const SolMir *right) {
         && left->value_count == right->value_count
         && left->parameter_value_count == right->parameter_value_count
         && left->edge_value_count == right->edge_value_count
+        && left->call_argument_count == right->call_argument_count
         && bytes_equal(left->blocks, right->blocks,
             left->block_count, sizeof(*left->blocks))
         && bytes_equal(left->instructions, right->instructions,
@@ -109,7 +110,9 @@ static bool mir_equal(const SolMir *left, const SolMir *right) {
         && bytes_equal(left->parameter_values, right->parameter_values,
             left->parameter_value_count, sizeof(*left->parameter_values))
         && bytes_equal(left->edge_values, right->edge_values,
-            left->edge_value_count, sizeof(*left->edge_values));
+            left->edge_value_count, sizeof(*left->edge_values))
+        && bytes_equal(left->call_arguments, right->call_arguments,
+            left->call_argument_count, sizeof(*left->call_arguments));
 }
 
 static void test_initial_lowering_and_determinism(void) {
@@ -259,6 +262,8 @@ static void test_transactional_unsupported(void) {
         "module mir_unsupported\n"
         "function classify(value: Bool) -> Int64 { "
         "return match value { true => 1 false => 0 } }\n"
+        "function consume(value: Int64) -> Int64 { return value }\n"
+        "function block_argument() -> Int64 { return consume({ 1 }) }\n"
         "function contracted(value: Int64) -> Int64 "
         "requires { value > 0 } { return value }\n"));
     SolMir mir;
@@ -271,6 +276,16 @@ static void test_transactional_unsupported(void) {
         && mir.block_count == 0 && mir.instructions == NULL);
     CHECK(compilation.diagnostics.count == before + 1);
     CHECK(strcmp(compilation.diagnostics.items[before].code, "SOL-MIR-001") == 0);
+    sol_mir_free(&mir);
+
+    sol_mir_init(&mir);
+    before = compilation.diagnostics.count;
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "block_argument"), &mir,
+        &compilation.diagnostics) == SOL_MIR_LOWER_UNSUPPORTED);
+    CHECK(mir.callable == SOL_IR_NONE && mir.blocks == NULL
+        && mir.call_arguments == NULL);
+    CHECK(compilation.diagnostics.count == before + 1);
     sol_mir_free(&mir);
 
     sol_mir_init(&mir);
@@ -292,6 +307,321 @@ static void test_transactional_unsupported(void) {
         && mir.instructions == NULL);
     sol_mir_free(&mir);
     compilation.ir.callables[contracted_id].body = body;
+    free_compilation(&compilation);
+}
+
+static void test_calls_and_remaining_local_control(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_control\n"
+        "function positive(value: borrow Int64) -> Bool { return value > 0 }\n"
+        "function sum(left: Int64, right: Int64) -> Int64 { return left + right }\n"
+        "function replace(value: inout Int64) -> () { value = 9 }\n"
+        "function foreign() -> () { region other { () } }\n"
+        "function calls(flag: Bool) -> Int64 effects { panic } { "
+        "var value = 1 region work { "
+        "require flag || positive(value) else { panic \"required\" } "
+        "value = sum(value, 2) replace(value) } "
+        "region later { () } return value }\n"
+        "function impossible(flag: Bool) -> Int64 { "
+        "if flag && true { return 1 } else { "
+        "unreachable because { flag == false } } }\n"
+        "function proofs(flag: Bool) -> Int64 { if flag { "
+        "unreachable because { flag } } else { "
+        "unreachable because { flag == false } } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+
+    SolMir calls;
+    SolMir repeated;
+    sol_mir_init(&calls);
+    sol_mir_init(&repeated);
+    SolIrCallableId calls_id = callable(&compilation.ir, "calls");
+    CHECK(sol_mir_lower_callable(&compilation.ir, calls_id, &calls,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_lower_callable(&compilation.ir, calls_id, &repeated,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_validate(&compilation.ir, &calls, NULL));
+    CHECK(mir_equal(&calls, &repeated));
+
+    size_t invokes = 0;
+    size_t enters = 0;
+    size_t exits = 0;
+    bool saw_shared = false;
+    bool saw_exclusive = false;
+    bool saw_owned = false;
+    SolMirBlockId first_invoke = SOL_MIR_NONE;
+    SolMirBlockId owned_invoke = SOL_MIR_NONE;
+    SolMirInstructionId first_region_exit = SOL_MIR_NONE;
+    for (size_t index = 0; index < calls.instruction_count; ++index) {
+        const SolMirInstruction *instruction = &calls.instructions[index];
+        enters += instruction->kind == SOL_MIR_INST_REGION_ENTER;
+        exits += instruction->kind == SOL_MIR_INST_REGION_EXIT;
+        if (instruction->kind == SOL_MIR_INST_REGION_EXIT
+            && first_region_exit == SOL_MIR_NONE) first_region_exit = index;
+        if (instruction->kind == SOL_MIR_INST_BINARY) {
+            CHECK(instruction->as.binary.operator_kind != SOL_TOKEN_AMP_AMP);
+            CHECK(instruction->as.binary.operator_kind != SOL_TOKEN_PIPE_PIPE);
+        }
+    }
+    for (size_t block = 0; block < calls.block_count; ++block) {
+        const SolMirTerminator *term = &calls.blocks[block].terminator;
+        if (term->kind != SOL_MIR_TERM_INVOKE) continue;
+        ++invokes;
+        if (first_invoke == SOL_MIR_NONE) first_invoke = block;
+        CHECK(term->as.invoke.normal_edge.arguments.count == 1);
+        CHECK(term->as.invoke.failure_edge.arguments.count == 0);
+        CHECK(calls.blocks[term->as.invoke.failure_edge.block].terminator.kind
+            == SOL_MIR_TERM_RESUME_FAILURE);
+        CHECK(calls.values[term->as.invoke.result].kind
+            == SOL_MIR_VALUE_TERMINATOR);
+        SolMirSlice arguments = term->as.invoke.arguments;
+        for (size_t index = 0; index < arguments.count; ++index) {
+            const SolMirCallArgument *argument
+                = &calls.call_arguments[arguments.offset + index];
+            saw_shared = saw_shared || argument->access == SOL_ACCESS_SHARED;
+            saw_exclusive = saw_exclusive
+                || argument->access == SOL_ACCESS_EXCLUSIVE;
+            saw_owned = saw_owned || argument->access == SOL_ACCESS_OWNED;
+            if (argument->access != SOL_ACCESS_OWNED) {
+                CHECK(argument->value == SOL_MIR_NONE);
+                CHECK(argument->place < compilation.ir.place_count);
+            }
+        }
+        if (arguments.count == 2
+            && calls.call_arguments[arguments.offset].access == SOL_ACCESS_OWNED
+            && calls.call_arguments[arguments.offset + 1].access
+                == SOL_ACCESS_OWNED) owned_invoke = block;
+    }
+    CHECK(invokes == 3);
+    CHECK(enters == 2 && exits >= 4);
+    CHECK(saw_shared && saw_exclusive && saw_owned);
+    CHECK(first_invoke != SOL_MIR_NONE);
+    CHECK(owned_invoke != SOL_MIR_NONE);
+    CHECK(first_region_exit != SOL_MIR_NONE);
+
+    SolMirTerminator *invoke = &calls.blocks[first_invoke].terminator;
+    size_t argument_offset = invoke->as.invoke.arguments.offset;
+    SolAccessMode access = calls.call_arguments[argument_offset].access;
+    calls.call_arguments[argument_offset].access = SOL_ACCESS_OWNED;
+    CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
+    calls.call_arguments[argument_offset].access = access;
+    SolMirValueKind result_kind = calls.values[invoke->as.invoke.result].kind;
+    calls.values[invoke->as.invoke.result].kind = SOL_MIR_VALUE_INSTRUCTION;
+    CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
+    calls.values[invoke->as.invoke.result].kind = result_kind;
+
+    SolMirSlice owned_arguments
+        = calls.blocks[owned_invoke].terminator.as.invoke.arguments;
+    SolMirValueId first_owned
+        = calls.call_arguments[owned_arguments.offset].value;
+    SolMirValueId second_owned
+        = calls.call_arguments[owned_arguments.offset + 1].value;
+    calls.call_arguments[owned_arguments.offset].value = second_owned;
+    calls.call_arguments[owned_arguments.offset + 1].value = first_owned;
+    CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
+    calls.call_arguments[owned_arguments.offset].value = first_owned;
+    calls.call_arguments[owned_arguments.offset + 1].value = second_owned;
+    SolMirInstructionId first_wrapper = calls.values[first_owned].definition;
+    SolMirInstructionId second_wrapper = calls.values[second_owned].definition;
+    SolMirValueId first_operand = calls.instructions[first_wrapper].as.operand;
+    SolMirValueId second_operand = calls.instructions[second_wrapper].as.operand;
+    calls.instructions[first_wrapper].as.operand = second_operand;
+    calls.instructions[second_wrapper].as.operand = first_operand;
+    CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
+    calls.instructions[first_wrapper].as.operand = first_operand;
+    calls.instructions[second_wrapper].as.operand = second_operand;
+
+    SolMirTerminator *owned_term = &calls.blocks[owned_invoke].terminator;
+    SolMirBlockId normal_block = owned_term->as.invoke.normal_edge.block;
+    size_t parameter_offset = calls.blocks[normal_block].parameters.offset;
+    calls.blocks[normal_block].parameters.offset = SIZE_MAX;
+    CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
+    calls.blocks[normal_block].parameters.offset = parameter_offset;
+
+    SolMirValueId normal_result = owned_term->as.invoke.result;
+    SolMirValueId transported = calls.edge_values[
+        owned_term->as.invoke.normal_edge.arguments.offset];
+    SolMirValueId substitute = calls.call_arguments[owned_arguments.offset].value;
+    calls.edge_values[owned_term->as.invoke.normal_edge.arguments.offset]
+        = substitute;
+    CHECK(calls.values[substitute].type == calls.values[normal_result].type);
+    CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
+    calls.edge_values[owned_term->as.invoke.normal_edge.arguments.offset]
+        = transported;
+
+    SolMirBlockId cleanup_block = owned_term->as.invoke.failure_edge.block;
+    SolMirSlice cleanup_instructions = calls.blocks[cleanup_block].instructions;
+    SolMirInstructionId dead[2] = {SOL_MIR_NONE, SOL_MIR_NONE};
+    size_t dead_count = 0;
+    for (size_t index = 0; index < cleanup_instructions.count
+        && dead_count < 2; ++index) {
+        SolMirInstructionId id = cleanup_instructions.offset + index;
+        if (calls.instructions[id].kind == SOL_MIR_INST_STORAGE_DEAD) {
+            dead[dead_count++] = id;
+        }
+    }
+    CHECK(dead_count == 2);
+    SolIrLocalId first_dead = calls.instructions[dead[0]].as.local;
+    SolIrLocalId second_dead = calls.instructions[dead[1]].as.local;
+    calls.instructions[dead[0] - 1].as.local = second_dead;
+    calls.instructions[dead[0]].as.local = second_dead;
+    calls.instructions[dead[1] - 1].as.local = first_dead;
+    calls.instructions[dead[1]].as.local = first_dead;
+    CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
+    calls.instructions[dead[0] - 1].as.local = first_dead;
+    calls.instructions[dead[0]].as.local = first_dead;
+    calls.instructions[dead[1] - 1].as.local = second_dead;
+    calls.instructions[dead[1]].as.local = second_dead;
+
+    SolMirInstructionId region_enters[2] = {SOL_MIR_NONE, SOL_MIR_NONE};
+    size_t region_enter_count = 0;
+    for (size_t index = 0; index < calls.instruction_count
+        && region_enter_count < 2; ++index) {
+        if (calls.instructions[index].kind == SOL_MIR_INST_REGION_ENTER) {
+            region_enters[region_enter_count++] = index;
+        }
+    }
+    CHECK(region_enter_count == 2);
+    SolIrStatementId first_region
+        = calls.instructions[region_enters[0]].as.region;
+    SolIrStatementId second_region
+        = calls.instructions[region_enters[1]].as.region;
+    SolSpan first_region_span = calls.instructions[region_enters[0]].span;
+    SolSpan second_region_span = calls.instructions[region_enters[1]].span;
+    for (size_t index = 0; index < calls.instruction_count; ++index) {
+        if (calls.instructions[index].kind != SOL_MIR_INST_REGION_ENTER
+            && calls.instructions[index].kind != SOL_MIR_INST_REGION_EXIT) {
+            continue;
+        }
+        if (calls.instructions[index].as.region == first_region) {
+            calls.instructions[index].as.region = second_region;
+        } else if (calls.instructions[index].as.region == second_region) {
+            calls.instructions[index].as.region = first_region;
+        }
+    }
+    calls.instructions[region_enters[0]].span = second_region_span;
+    calls.instructions[region_enters[1]].span = first_region_span;
+    CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
+    for (size_t index = 0; index < calls.instruction_count; ++index) {
+        if (calls.instructions[index].kind != SOL_MIR_INST_REGION_ENTER
+            && calls.instructions[index].kind != SOL_MIR_INST_REGION_EXIT) {
+            continue;
+        }
+        if (calls.instructions[index].as.region == first_region) {
+            calls.instructions[index].as.region = second_region;
+        } else if (calls.instructions[index].as.region == second_region) {
+            calls.instructions[index].as.region = first_region;
+        }
+    }
+    calls.instructions[region_enters[0]].span = first_region_span;
+    calls.instructions[region_enters[1]].span = second_region_span;
+
+    SolIrStatementId own_region
+        = calls.instructions[first_region_exit].as.region;
+    SolIrStatementId foreign_region = SOL_IR_NONE;
+    for (size_t statement = 0; statement < compilation.ir.statement_count;
+        ++statement) {
+        if (compilation.ir.statements[statement].kind == SOL_IR_STATEMENT_REGION
+            && statement != own_region) {
+            foreign_region = statement;
+            break;
+        }
+    }
+    CHECK(foreign_region != SOL_IR_NONE);
+    for (size_t index = 0; index < calls.instruction_count; ++index) {
+        if ((calls.instructions[index].kind == SOL_MIR_INST_REGION_ENTER
+                || calls.instructions[index].kind == SOL_MIR_INST_REGION_EXIT)
+            && calls.instructions[index].as.region == own_region) {
+            calls.instructions[index].as.region = foreign_region;
+        }
+    }
+    CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
+    for (size_t index = 0; index < calls.instruction_count; ++index) {
+        if ((calls.instructions[index].kind == SOL_MIR_INST_REGION_ENTER
+                || calls.instructions[index].kind == SOL_MIR_INST_REGION_EXIT)
+            && calls.instructions[index].as.region == foreign_region) {
+            calls.instructions[index].as.region = own_region;
+        }
+    }
+
+    calls.instructions[first_region_exit].kind = SOL_MIR_INST_REGION_ENTER;
+    CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
+    calls.instructions[first_region_exit].kind = SOL_MIR_INST_REGION_EXIT;
+    CHECK(sol_mir_validate(&compilation.ir, &calls, NULL));
+    sol_mir_free(&calls);
+    sol_mir_free(&repeated);
+
+    SolMir impossible;
+    sol_mir_init(&impossible);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "impossible"), &impossible,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    size_t unreachable = 0;
+    for (size_t block = 0; block < impossible.block_count; ++block) {
+        if (impossible.blocks[block].terminator.kind
+            == SOL_MIR_TERM_UNREACHABLE) {
+            ++unreachable;
+            CHECK(impossible.blocks[block].terminator.as.unreachable.obligation
+                < compilation.ir.unreachable_obligation_count);
+        }
+    }
+    CHECK(unreachable == 1);
+    CHECK(sol_mir_validate(&compilation.ir, &impossible, NULL));
+    sol_mir_free(&impossible);
+
+    SolMir proofs;
+    sol_mir_init(&proofs);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "proofs"), &proofs,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    SolMirBlockId proof_blocks[2] = {SOL_MIR_NONE, SOL_MIR_NONE};
+    size_t proof_count = 0;
+    for (size_t block = 0; block < proofs.block_count && proof_count < 2;
+        ++block) {
+        if (proofs.blocks[block].terminator.kind
+            == SOL_MIR_TERM_UNREACHABLE) proof_blocks[proof_count++] = block;
+    }
+    CHECK(proof_count == 2);
+    SolIrStatementId first_statement = proofs.blocks[proof_blocks[0]]
+        .terminator.as.unreachable.statement;
+    size_t first_obligation = proofs.blocks[proof_blocks[0]]
+        .terminator.as.unreachable.obligation;
+    SolIrStatementId second_statement = proofs.blocks[proof_blocks[1]]
+        .terminator.as.unreachable.statement;
+    size_t second_obligation = proofs.blocks[proof_blocks[1]]
+        .terminator.as.unreachable.obligation;
+    SolSpan first_span = proofs.blocks[proof_blocks[0]].terminator.span;
+    SolSpan second_span = proofs.blocks[proof_blocks[1]].terminator.span;
+    size_t first_order = proofs.blocks[proof_blocks[0]].order;
+    size_t second_order = proofs.blocks[proof_blocks[1]].order;
+    proofs.blocks[proof_blocks[0]].terminator.as.unreachable.statement
+        = second_statement;
+    proofs.blocks[proof_blocks[0]].terminator.as.unreachable.obligation
+        = second_obligation;
+    proofs.blocks[proof_blocks[1]].terminator.as.unreachable.statement
+        = first_statement;
+    proofs.blocks[proof_blocks[1]].terminator.as.unreachable.obligation
+        = first_obligation;
+    proofs.blocks[proof_blocks[0]].terminator.span = second_span;
+    proofs.blocks[proof_blocks[1]].terminator.span = first_span;
+    proofs.blocks[proof_blocks[0]].order = second_order;
+    proofs.blocks[proof_blocks[1]].order = first_order;
+    CHECK(!sol_mir_validate(&compilation.ir, &proofs, NULL));
+    proofs.blocks[proof_blocks[0]].terminator.as.unreachable.statement
+        = first_statement;
+    proofs.blocks[proof_blocks[0]].terminator.as.unreachable.obligation
+        = first_obligation;
+    proofs.blocks[proof_blocks[1]].terminator.as.unreachable.statement
+        = second_statement;
+    proofs.blocks[proof_blocks[1]].terminator.as.unreachable.obligation
+        = second_obligation;
+    proofs.blocks[proof_blocks[0]].terminator.span = first_span;
+    proofs.blocks[proof_blocks[1]].terminator.span = second_span;
+    proofs.blocks[proof_blocks[0]].order = first_order;
+    proofs.blocks[proof_blocks[1]].order = second_order;
+    CHECK(sol_mir_validate(&compilation.ir, &proofs, NULL));
+    sol_mir_free(&proofs);
+
     free_compilation(&compilation);
 }
 
@@ -386,6 +716,7 @@ static void test_validator_rejects_corruption(void) {
 int main(void) {
     test_initial_lowering_and_determinism();
     test_transactional_unsupported();
+    test_calls_and_remaining_local_control();
     test_validator_rejects_corruption();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

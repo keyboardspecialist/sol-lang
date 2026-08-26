@@ -8,6 +8,7 @@ typedef struct Scope Scope;
 struct Scope {
     const Scope *parent;
     SolIrSlice cleanup;
+    SolIrStatementId region;
 };
 
 typedef struct {
@@ -21,6 +22,7 @@ typedef struct {
     SolMir *mir;
     SolDiagnostics *diagnostics;
     SolMirBlockId current;
+    size_t next_block_order;
     bool unsupported;
     bool failed;
 } MirLowerer;
@@ -72,6 +74,7 @@ void sol_mir_free(SolMir *mir) {
     free(mir->values);
     free(mir->parameter_values);
     free(mir->edge_values);
+    free(mir->call_arguments);
     sol_mir_init(mir);
 }
 
@@ -84,7 +87,9 @@ static bool mir_empty(const SolMir *mir) {
         && mir->value_count == 0 && mir->value_capacity == 0
         && mir->parameter_values == NULL && mir->parameter_value_count == 0
         && mir->parameter_value_capacity == 0 && mir->edge_values == NULL
-        && mir->edge_value_count == 0 && mir->edge_value_capacity == 0;
+        && mir->edge_value_count == 0 && mir->edge_value_capacity == 0
+        && mir->call_arguments == NULL && mir->call_argument_count == 0
+        && mir->call_argument_capacity == 0;
 }
 
 static SolMirBlockId mir_append_block(MirLowerer *lowerer, SolSpan span) {
@@ -97,6 +102,7 @@ static SolMirBlockId mir_append_block(MirLowerer *lowerer, SolSpan span) {
     SolMirBlockId id = mir->block_count++;
     mir->blocks[id] = (SolMirBlock){
         .id = id,
+        .order = SOL_MIR_NONE,
         .parameters = {mir->parameter_value_count, 0},
         .instructions = {mir->instruction_count, 0},
         .terminator = {.kind = SOL_MIR_TERM_INVALID},
@@ -112,6 +118,7 @@ static bool mir_start_block(MirLowerer *lowerer, SolMirBlockId block) {
         return false;
     }
     lowerer->current = block;
+    lowerer->mir->blocks[block].order = lowerer->next_block_order++;
     lowerer->mir->blocks[block].started = true;
     lowerer->mir->blocks[block].instructions.offset
         = lowerer->mir->instruction_count;
@@ -132,7 +139,8 @@ static SolMirValueId mir_append_value(MirLowerer *lowerer,
 }
 
 static SolMirValueId mir_append_parameter(MirLowerer *lowerer,
-    SolMirBlockId block, SolIrTypeId type, SolSpan span) {
+    SolMirBlockId block, SolIrTypeId type,
+    SolIrExpressionId source_expression, SolSpan span) {
     SolMir *mir = lowerer->mir;
     if (block >= mir->block_count
         || !mir_grow((void **)&mir->parameter_values,
@@ -146,6 +154,7 @@ static SolMirValueId mir_append_parameter(MirLowerer *lowerer,
         .type = type,
         .block = block,
         .definition = mir->blocks[block].parameters.count,
+        .source_expression = source_expression,
         .span = span,
     });
     if (value == SOL_MIR_NONE) return value;
@@ -177,6 +186,7 @@ static SolMirInstructionId mir_append_instruction(MirLowerer *lowerer,
             .type = instruction.type,
             .block = lowerer->current,
             .definition = id,
+            .source_expression = instruction.source_expression,
             .span = instruction.span,
         });
         if (result == SOL_MIR_NONE) return SOL_MIR_NONE;
@@ -207,6 +217,19 @@ static SolMirSlice mir_append_edge_arguments(MirLowerer *lowerer,
         ++slice.count;
     }
     return slice;
+}
+
+static bool mir_append_call_argument(MirLowerer *lowerer,
+    SolMirCallArgument argument) {
+    SolMir *mir = lowerer->mir;
+    if (!mir_grow((void **)&mir->call_arguments,
+        &mir->call_argument_capacity, mir->call_argument_count,
+        sizeof(*mir->call_arguments))) {
+        lowerer->failed = true;
+        return false;
+    }
+    mir->call_arguments[mir->call_argument_count++] = argument;
+    return true;
 }
 
 static bool mir_set_goto(MirLowerer *lowerer, SolMirBlockId source,
@@ -253,6 +276,40 @@ static bool mir_set_branch(MirLowerer *lowerer, SolMirBlockId source,
     return true;
 }
 
+static bool mir_set_branch_values(MirLowerer *lowerer, SolMirBlockId source,
+    SolMirValueId condition, SolMirBlockId true_block,
+    SolMirValueId true_value, bool true_has_value,
+    SolMirBlockId false_block, SolMirValueId false_value,
+    bool false_has_value, SolSpan span) {
+    if (source >= lowerer->mir->block_count
+        || true_block >= lowerer->mir->block_count
+        || false_block >= lowerer->mir->block_count
+        || lowerer->mir->blocks[source].terminator.kind
+            != SOL_MIR_TERM_INVALID) {
+        lowerer->failed = true;
+        return false;
+    }
+    SolMirSlice true_arguments = {lowerer->mir->edge_value_count, 0};
+    if (true_has_value) {
+        true_arguments = mir_append_edge_arguments(lowerer, &true_value, 1);
+    }
+    SolMirSlice false_arguments = {lowerer->mir->edge_value_count, 0};
+    if (false_has_value) {
+        false_arguments = mir_append_edge_arguments(lowerer, &false_value, 1);
+    }
+    if (lowerer->failed) return false;
+    lowerer->mir->blocks[source].terminator = (SolMirTerminator){
+        .kind = SOL_MIR_TERM_BRANCH,
+        .span = span,
+        .as.branch = {
+            .condition = condition,
+            .true_edge = {.block = true_block, .arguments = true_arguments},
+            .false_edge = {.block = false_block, .arguments = false_arguments},
+        },
+    };
+    return true;
+}
+
 static bool mir_emit_local(MirLowerer *lowerer,
     SolMirInstructionKind kind, SolIrLocalId local, SolSpan span) {
     return mir_append_instruction(lowerer, (SolMirInstruction){
@@ -283,6 +340,14 @@ static bool mir_emit_exit_cleanup(MirLowerer *lowerer,
     for (const Scope *current = scope; current != NULL;
         current = current->parent) {
         if (!mir_emit_cleanup_slice(lowerer, current->cleanup, span)) return false;
+        if (current->region != SOL_IR_NONE
+            && mir_append_instruction(lowerer, (SolMirInstruction){
+                .kind = SOL_MIR_INST_REGION_EXIT,
+                .type = SOL_IR_NONE,
+                .source_expression = SOL_IR_NONE,
+                .span = span,
+                .as.region = current->region,
+            }, false) == SOL_MIR_NONE) return false;
     }
     SolIrSlice parameters = lowerer->callable->parameters;
     while (parameters.count != 0) {
@@ -299,6 +364,8 @@ static bool mir_emit_exit_cleanup(MirLowerer *lowerer,
 
 static LoweredValue mir_lower_expression(MirLowerer *lowerer,
     SolIrExpressionId id, const Scope *scope);
+static bool mir_type_is(const SolIr *ir, SolIrTypeId id,
+    SolIrTypeKind kind);
 
 static LoweredValue mir_unreachable(void) {
     return (LoweredValue){.reachable = false, .value = SOL_MIR_NONE};
@@ -307,6 +374,206 @@ static LoweredValue mir_unreachable(void) {
 static LoweredValue mir_failure(MirLowerer *lowerer) {
     lowerer->failed = lowerer->failed || !lowerer->unsupported;
     return mir_unreachable();
+}
+
+static SolMirValueId mir_append_terminator_result(MirLowerer *lowerer,
+    SolMirBlockId block, SolIrTypeId type,
+    SolIrExpressionId source_expression, SolSpan span) {
+    return mir_append_value(lowerer, (SolMirValue){
+        .kind = SOL_MIR_VALUE_TERMINATOR,
+        .type = type,
+        .block = block,
+        .definition = block,
+        .source_expression = source_expression,
+        .span = span,
+    });
+}
+
+static bool mir_set_failure_terminator(MirLowerer *lowerer,
+    SolMirTerminatorKind kind, SolSpan span) {
+    if (lowerer->current >= lowerer->mir->block_count
+        || lowerer->mir->blocks[lowerer->current].terminator.kind
+            != SOL_MIR_TERM_INVALID
+        || (kind != SOL_MIR_TERM_RESUME_FAILURE
+            && kind != SOL_MIR_TERM_UNREACHABLE)) return false;
+    lowerer->mir->blocks[lowerer->current].terminator = (SolMirTerminator){
+        .kind = kind,
+        .span = span,
+    };
+    return true;
+}
+
+static LoweredValue mir_lower_short_circuit(MirLowerer *lowerer,
+    const SolIrExpression *expression, const Scope *scope) {
+    LoweredValue left = mir_lower_expression(lowerer,
+        expression->as.binary.left, scope);
+    if (!left.reachable) return left;
+    SolMirBlockId branch = lowerer->current;
+    SolMirBlockId right_block = mir_append_block(lowerer,
+        lowerer->ir->expressions[expression->as.binary.right].span);
+    SolMirBlockId join = mir_append_block(lowerer, expression->span);
+    SolMirValueId parameter = mir_append_parameter(lowerer, join,
+        expression->type,
+        (SolIrExpressionId)(expression - lowerer->ir->expressions),
+        expression->span);
+    bool conjunction = expression->as.binary.operator_kind == SOL_TOKEN_AMP_AMP;
+    if (right_block == SOL_MIR_NONE || join == SOL_MIR_NONE
+        || parameter == SOL_MIR_NONE
+        || !mir_set_branch_values(lowerer, branch, left.value,
+            conjunction ? right_block : join,
+            conjunction ? SOL_MIR_NONE : left.value, !conjunction,
+            conjunction ? join : right_block,
+            conjunction ? left.value : SOL_MIR_NONE, conjunction,
+            expression->span)
+        || !mir_start_block(lowerer, right_block)) return mir_failure(lowerer);
+    LoweredValue right = mir_lower_expression(lowerer,
+        expression->as.binary.right, scope);
+    if (right.reachable && !mir_set_goto(lowerer, lowerer->current, join,
+        right.value, true, expression->span)) return mir_failure(lowerer);
+    if (!mir_start_block(lowerer, join)) return mir_failure(lowerer);
+    return (LoweredValue){.reachable = true, .value = parameter};
+}
+
+static LoweredValue mir_lower_direct_call(MirLowerer *lowerer,
+    SolIrExpressionId id, const SolIrExpression *expression,
+    const Scope *scope) {
+    if (expression->as.call.kind != SOL_IR_CALL_FUNCTION
+        || expression->as.call.callable >= lowerer->ir->callable_count
+        || expression->as.call.type_arguments.count != 0
+        || expression->as.call.evidence.count != 0
+        || expression->as.call.effect_parameter != SOL_IR_NONE) {
+        mir_unsupported(lowerer, expression->span,
+            "P1a.2 MIR supports only nongeneric direct function calls");
+        return mir_unreachable();
+    }
+    const SolIrCallable *target
+        = &lowerer->ir->callables[expression->as.call.callable];
+    if (target->kind != SOL_IR_CALLABLE_FUNCTION
+        || target->generic_parameters.count != 0
+        || target->effect_parameters.count != 0
+        || target->receiver != SOL_IR_NONE
+        || target->capability_source != SOL_IR_NONE
+        || target->result != expression->type) {
+        mir_unsupported(lowerer, expression->span,
+            "P1a.2 MIR direct call target is outside the nongeneric free-function subset");
+        return mir_unreachable();
+    }
+    size_t count = expression->as.call.operands.count;
+    SolMirCallArgument *arguments = count == 0 ? NULL
+        : calloc(count, sizeof(*arguments));
+    if (count != 0 && arguments == NULL) return mir_failure(lowerer);
+    for (size_t index = 0; index < count; ++index) {
+        const SolIrOperand *operand = &lowerer->ir->operands[
+            expression->as.call.operands.offset + index];
+        SolMirCallArgument *argument = &arguments[index];
+        *argument = (SolMirCallArgument){
+            .formal = operand->formal,
+            .access = operand->access,
+            .source_expression = operand->value,
+            .value = SOL_MIR_NONE,
+            .place = SOL_IR_NONE,
+        };
+        if (operand->access == SOL_ACCESS_OWNED) {
+            LoweredValue value = mir_lower_expression(lowerer,
+                operand->value, scope);
+            if (!value.reachable) {
+                free(arguments);
+                return value;
+            }
+            if (value.value >= lowerer->mir->value_count
+                || lowerer->mir->values[value.value].source_expression
+                    != operand->value) {
+                free(arguments);
+                mir_unsupported(lowerer,
+                    lowerer->ir->expressions[operand->value].span,
+                    "P1a.2 MIR does not lower block-valued direct-call operands");
+                return mir_unreachable();
+            }
+            argument->value = mir_instruction_result(lowerer,
+                (SolMirInstruction){
+                    .kind = SOL_MIR_INST_CALL_ARGUMENT,
+                    .type = lowerer->ir->expressions[operand->value].type,
+                    .source_expression = operand->value,
+                    .span = lowerer->ir->expressions[operand->value].span,
+                    .as.operand = value.value,
+                });
+            if (argument->value == SOL_MIR_NONE) {
+                free(arguments);
+                return mir_failure(lowerer);
+            }
+            continue;
+        }
+        const SolIrExpression *source
+            = &lowerer->ir->expressions[operand->value];
+        if ((operand->access != SOL_ACCESS_SHARED
+                && operand->access != SOL_ACCESS_EXCLUSIVE)
+            || source->kind != SOL_IR_EXPR_PLACE
+            || source->as.place >= lowerer->ir->place_count) {
+            free(arguments);
+            mir_unsupported(lowerer, source->span,
+                "P1a.2 MIR supports only whole-local call borrows");
+            return mir_unreachable();
+        }
+        const SolIrPlace *place = &lowerer->ir->places[source->as.place];
+        if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+            || place->projections.count != 0) {
+            free(arguments);
+            mir_unsupported(lowerer, source->span,
+                "P1a.2 MIR does not lower projected call borrows");
+            return mir_unreachable();
+        }
+        argument->place = source->as.place;
+    }
+    SolMirSlice argument_slice = {lowerer->mir->call_argument_count, 0};
+    for (size_t index = 0; index < count; ++index) {
+        if (!mir_append_call_argument(lowerer, arguments[index])) break;
+        ++argument_slice.count;
+    }
+    free(arguments);
+    if (lowerer->failed) return mir_failure(lowerer);
+
+    SolMirBlockId invoke_block = lowerer->current;
+    SolMirBlockId failure = mir_append_block(lowerer, expression->span);
+    bool never = mir_type_is(lowerer->ir, expression->type, SOL_IR_TYPE_NEVER);
+    SolMirBlockId normal = never ? SOL_MIR_NONE
+        : mir_append_block(lowerer, expression->span);
+    SolMirValueId result = never ? SOL_MIR_NONE
+        : mir_append_terminator_result(lowerer, invoke_block,
+            expression->type, id, expression->span);
+    SolMirValueId parameter = never ? SOL_MIR_NONE
+        : mir_append_parameter(lowerer, normal, expression->type,
+            id, expression->span);
+    if (failure == SOL_MIR_NONE || (!never
+            && (normal == SOL_MIR_NONE || result == SOL_MIR_NONE
+                || parameter == SOL_MIR_NONE))) return mir_failure(lowerer);
+    SolMirSlice no_arguments = {lowerer->mir->edge_value_count, 0};
+    SolMirSlice normal_arguments = no_arguments;
+    if (!never) normal_arguments = mir_append_edge_arguments(lowerer, &result, 1);
+    if (lowerer->failed) return mir_failure(lowerer);
+    lowerer->mir->blocks[invoke_block].terminator = (SolMirTerminator){
+        .kind = SOL_MIR_TERM_INVOKE,
+        .span = expression->span,
+        .as.invoke = {
+            .source_expression = id,
+            .callable = expression->as.call.callable,
+            .arguments = argument_slice,
+            .result = result,
+            .normal_edge = {.block = normal, .arguments = normal_arguments},
+            .failure_edge = {.block = failure, .arguments = no_arguments},
+        },
+    };
+    if (!mir_start_block(lowerer, failure)
+        || !mir_emit_exit_cleanup(lowerer, scope, expression->span)
+        || !mir_set_failure_terminator(lowerer,
+            SOL_MIR_TERM_RESUME_FAILURE, expression->span)) {
+        return mir_failure(lowerer);
+    }
+    if (never) {
+        lowerer->current = SOL_MIR_NONE;
+        return mir_unreachable();
+    }
+    if (!mir_start_block(lowerer, normal)) return mir_failure(lowerer);
+    return (LoweredValue){.reachable = true, .value = parameter};
 }
 
 static LoweredValue mir_lower_if(MirLowerer *lowerer,
@@ -336,7 +603,9 @@ static LoweredValue mir_lower_if(MirLowerer *lowerer,
     }
     SolMirBlockId join = mir_append_block(lowerer, expression->span);
     SolMirValueId parameter = mir_append_parameter(lowerer, join,
-        expression->type, expression->span);
+        expression->type,
+        (SolIrExpressionId)(expression - lowerer->ir->expressions),
+        expression->span);
     if (join == SOL_MIR_NONE || parameter == SOL_MIR_NONE) {
         return mir_failure(lowerer);
     }
@@ -379,6 +648,7 @@ static LoweredValue mir_lower_block(MirLowerer *lowerer,
     Scope scope = {
         .parent = parent,
         .cleanup = {.offset = expression->as.block.cleanup.offset, .count = 0},
+        .region = SOL_IR_NONE,
     };
     LoweredValue last = {.reachable = true, .value = SOL_MIR_NONE};
     for (size_t index = 0; index < expression->as.block.statements.count;
@@ -473,6 +743,89 @@ static LoweredValue mir_lower_block(MirLowerer *lowerer,
                 }
                 return mir_unreachable();
             }
+            case SOL_IR_STATEMENT_REGION: {
+                if (mir_append_instruction(lowerer, (SolMirInstruction){
+                    .kind = SOL_MIR_INST_REGION_ENTER,
+                    .type = SOL_IR_NONE,
+                    .source_expression = SOL_IR_NONE,
+                    .span = statement->span,
+                    .as.region = statement_id,
+                }, false) == SOL_MIR_NONE) return mir_failure(lowerer);
+                Scope region_scope = {
+                    .parent = &scope,
+                    .cleanup = {0},
+                    .region = statement_id,
+                };
+                LoweredValue body = mir_lower_expression(lowerer,
+                    statement->expression, &region_scope);
+                if (!body.reachable) return body;
+                if (mir_append_instruction(lowerer, (SolMirInstruction){
+                    .kind = SOL_MIR_INST_REGION_EXIT,
+                    .type = SOL_IR_NONE,
+                    .source_expression = SOL_IR_NONE,
+                    .span = statement->span,
+                    .as.region = statement_id,
+                }, false) == SOL_MIR_NONE) return mir_failure(lowerer);
+                last = body;
+                break;
+            }
+            case SOL_IR_STATEMENT_REQUIRE: {
+                LoweredValue condition = mir_lower_expression(lowerer,
+                    statement->condition, &scope);
+                if (!condition.reachable) return condition;
+                SolMirBlockId branch = lowerer->current;
+                SolMirBlockId required = mir_append_block(lowerer, statement->span);
+                SolMirBlockId fallback = mir_append_block(lowerer,
+                    lowerer->ir->expressions[statement->expression].span);
+                if (required == SOL_MIR_NONE || fallback == SOL_MIR_NONE
+                    || !mir_set_branch(lowerer, branch, condition.value,
+                        required, fallback, statement->span)
+                    || !mir_start_block(lowerer, fallback)) {
+                    return mir_failure(lowerer);
+                }
+                LoweredValue failed = mir_lower_expression(lowerer,
+                    statement->expression, &scope);
+                if (failed.reachable) {
+                    lowerer->failed = true;
+                    return mir_unreachable();
+                }
+                if (!mir_start_block(lowerer, required)) {
+                    return mir_failure(lowerer);
+                }
+                SolIrTypeId unit = SOL_IR_NONE;
+                for (size_t type = 0; type < lowerer->ir->type_count; ++type) {
+                    if (lowerer->ir->types[type].kind == SOL_IR_TYPE_UNIT) {
+                        unit = type;
+                        break;
+                    }
+                }
+                if (unit == SOL_IR_NONE) return mir_failure(lowerer);
+                last = (LoweredValue){
+                    .reachable = true,
+                    .value = mir_instruction_result(lowerer, (SolMirInstruction){
+                        .kind = SOL_MIR_INST_CONST_UNIT,
+                        .type = unit,
+                        .source_expression = SOL_IR_NONE,
+                        .span = statement->span,
+                    }),
+                };
+                if (last.value == SOL_MIR_NONE) return mir_failure(lowerer);
+                break;
+            }
+            case SOL_IR_STATEMENT_UNREACHABLE:
+                if (!mir_emit_exit_cleanup(lowerer, &scope, statement->span)) {
+                    return mir_failure(lowerer);
+                }
+                if (!mir_set_failure_terminator(lowerer,
+                    SOL_MIR_TERM_UNREACHABLE, statement->span)) {
+                    return mir_failure(lowerer);
+                }
+                lowerer->mir->blocks[lowerer->current].terminator
+                    .as.unreachable.statement = statement_id;
+                lowerer->mir->blocks[lowerer->current].terminator
+                    .as.unreachable.obligation
+                    = statement->unreachable_obligations.offset;
+                return mir_unreachable();
             default:
                 mir_unsupported(lowerer, statement->span,
                     "statement is outside the initial P1a MIR checkpoint");
@@ -553,9 +906,7 @@ static LoweredValue mir_lower_expression(MirLowerer *lowerer,
         case SOL_IR_EXPR_BINARY: {
             if (expression->as.binary.operator_kind == SOL_TOKEN_AMP_AMP
                 || expression->as.binary.operator_kind == SOL_TOKEN_PIPE_PIPE) {
-                mir_unsupported(lowerer, expression->span,
-                    "short-circuit CFG lowering is deferred from the initial P1a checkpoint");
-                return mir_unreachable();
+                return mir_lower_short_circuit(lowerer, expression, scope);
             }
             LoweredValue left = mir_lower_expression(lowerer,
                 expression->as.binary.left, scope);
@@ -574,6 +925,8 @@ static LoweredValue mir_lower_expression(MirLowerer *lowerer,
             return mir_lower_if(lowerer, expression, scope);
         case SOL_IR_EXPR_BLOCK:
             return mir_lower_block(lowerer, expression, scope);
+        case SOL_IR_EXPR_CALL:
+            return mir_lower_direct_call(lowerer, id, expression, scope);
         default:
             mir_unsupported(lowerer, expression->span,
                 "expression is outside the initial P1a MIR checkpoint");
@@ -597,6 +950,127 @@ static bool mir_type_is(const SolIr *ir, SolIrTypeId id,
     return id < ir->type_count && ir->types[id].kind == kind;
 }
 
+static bool mir_expression_contains_statement(const SolIr *ir,
+    SolIrExpressionId expression_id, SolIrStatementId sought, size_t depth) {
+    if (expression_id >= ir->expression_count || depth > ir->expression_count) {
+        return false;
+    }
+    const SolIrExpression *expression = &ir->expressions[expression_id];
+    switch (expression->kind) {
+        case SOL_IR_EXPR_UNARY:
+            return mir_expression_contains_statement(ir,
+                expression->as.unary.operand, sought, depth + 1);
+        case SOL_IR_EXPR_BINARY:
+            return mir_expression_contains_statement(ir,
+                    expression->as.binary.left, sought, depth + 1)
+                || mir_expression_contains_statement(ir,
+                    expression->as.binary.right, sought, depth + 1);
+        case SOL_IR_EXPR_CALL:
+            for (size_t index = 0;
+                index < expression->as.call.operands.count; ++index) {
+                if (mir_expression_contains_statement(ir, ir->operands[
+                        expression->as.call.operands.offset + index].value,
+                    sought, depth + 1)) return true;
+            }
+            return false;
+        case SOL_IR_EXPR_IF:
+            return mir_expression_contains_statement(ir,
+                    expression->as.if_expr.condition, sought, depth + 1)
+                || mir_expression_contains_statement(ir,
+                    expression->as.if_expr.then_branch, sought, depth + 1)
+                || mir_expression_contains_statement(ir,
+                    expression->as.if_expr.else_branch, sought, depth + 1);
+        case SOL_IR_EXPR_BLOCK:
+            for (size_t index = 0;
+                index < expression->as.block.statements.count; ++index) {
+                SolIrStatementId statement_id = ir->statement_ids[
+                    expression->as.block.statements.offset + index];
+                if (statement_id == sought) return true;
+                const SolIrStatement *statement = &ir->statements[statement_id];
+                if (statement->target != SOL_IR_NONE
+                    && mir_expression_contains_statement(ir, statement->target,
+                        sought, depth + 1)) return true;
+                if (statement->condition != SOL_IR_NONE
+                    && mir_expression_contains_statement(ir,
+                        statement->condition, sought, depth + 1)) return true;
+                if (statement->expression != SOL_IR_NONE
+                    && mir_expression_contains_statement(ir,
+                        statement->expression, sought, depth + 1)) return true;
+            }
+            return false;
+        default:
+            return false;
+    }
+}
+
+static bool mir_collect_source_statements(const SolIr *ir,
+    SolIrExpressionId expression_id, SolIrStatementId *statements,
+    size_t *count, size_t depth) {
+    if (expression_id >= ir->expression_count || depth > ir->expression_count) {
+        return false;
+    }
+    const SolIrExpression *expression = &ir->expressions[expression_id];
+    switch (expression->kind) {
+        case SOL_IR_EXPR_UNARY:
+            return mir_collect_source_statements(ir, expression->as.unary.operand,
+                statements, count, depth + 1);
+        case SOL_IR_EXPR_BINARY:
+            return mir_collect_source_statements(ir, expression->as.binary.left,
+                    statements, count, depth + 1)
+                && mir_collect_source_statements(ir, expression->as.binary.right,
+                    statements, count, depth + 1);
+        case SOL_IR_EXPR_CALL:
+            for (size_t index = 0;
+                index < expression->as.call.operands.count; ++index) {
+                if (!mir_collect_source_statements(ir, ir->operands[
+                        expression->as.call.operands.offset + index].value,
+                    statements, count, depth + 1)) return false;
+            }
+            return true;
+        case SOL_IR_EXPR_IF:
+            return mir_collect_source_statements(ir,
+                    expression->as.if_expr.condition, statements, count,
+                    depth + 1)
+                && mir_collect_source_statements(ir,
+                    expression->as.if_expr.then_branch, statements, count,
+                    depth + 1)
+                && mir_collect_source_statements(ir,
+                    expression->as.if_expr.else_branch, statements, count,
+                    depth + 1);
+        case SOL_IR_EXPR_BLOCK:
+            for (size_t index = 0;
+                index < expression->as.block.statements.count; ++index) {
+                SolIrStatementId statement_id = ir->statement_ids[
+                    expression->as.block.statements.offset + index];
+                if (*count >= ir->statement_count) return false;
+                statements[(*count)++] = statement_id;
+                const SolIrStatement *statement = &ir->statements[statement_id];
+                if (statement->target != SOL_IR_NONE
+                    && !mir_collect_source_statements(ir, statement->target,
+                        statements, count, depth + 1)) return false;
+                if (statement->condition != SOL_IR_NONE
+                    && !mir_collect_source_statements(ir, statement->condition,
+                        statements, count, depth + 1)) return false;
+                if (statement->expression != SOL_IR_NONE
+                    && !mir_collect_source_statements(ir, statement->expression,
+                        statements, count, depth + 1)) return false;
+            }
+            return true;
+        default:
+            return true;
+    }
+}
+
+static SolIrStatementId mir_next_source_statement(const SolIr *ir,
+    const SolIrStatementId *statements, size_t count, size_t *cursor,
+    SolIrStatementKind kind) {
+    while (*cursor < count) {
+        SolIrStatementId statement = statements[(*cursor)++];
+        if (ir->statements[statement].kind == kind) return statement;
+    }
+    return SOL_IR_NONE;
+}
+
 static bool mir_value_available(const SolMir *mir, SolMirValueId id,
     SolMirBlockId block, size_t before_instruction) {
     if (id >= mir->value_count) return false;
@@ -608,9 +1082,11 @@ static bool mir_value_available(const SolMir *mir, SolMirValueId id,
 }
 
 static bool mir_validate_edge(const SolMir *mir, SolMirBlockId source,
-    const SolMirEdge *edge) {
+    const SolMirEdge *edge, SolMirValueId terminator_result) {
     if (edge->block >= mir->block_count
         || !mir_slice_valid(edge->arguments, mir->edge_value_count)
+        || !mir_slice_valid(mir->blocks[edge->block].parameters,
+            mir->parameter_value_count)
         || edge->arguments.count != mir->blocks[edge->block].parameters.count) {
         return false;
     }
@@ -619,9 +1095,13 @@ static bool mir_validate_edge(const SolMir *mir, SolMirBlockId source,
         SolMirValueId parameter = mir->parameter_values[
             mir->blocks[edge->block].parameters.offset + index];
         if (argument >= mir->value_count || parameter >= mir->value_count
-            || !mir_value_available(mir, argument, source,
-                mir->blocks[source].instructions.offset
-                    + mir->blocks[source].instructions.count)
+            || (!mir_value_available(mir, argument, source,
+                    mir->blocks[source].instructions.offset
+                        + mir->blocks[source].instructions.count)
+                && !(argument == terminator_result
+                    && mir->values[argument].kind
+                        == SOL_MIR_VALUE_TERMINATOR
+                    && mir->values[argument].block == source))
             || mir->values[argument].type != mir->values[parameter].type) return false;
     }
     return true;
@@ -633,10 +1113,14 @@ static bool mir_validate_arena_ownership(const SolMir *mir,
         : calloc(mir->value_count, 1);
     unsigned char *edges = mir->edge_value_count == 0 ? NULL
         : calloc(mir->edge_value_count, 1);
+    unsigned char *arguments = mir->call_argument_count == 0 ? NULL
+        : calloc(mir->call_argument_count, 1);
     if ((mir->value_count != 0 && values == NULL)
-        || (mir->edge_value_count != 0 && edges == NULL)) {
+        || (mir->edge_value_count != 0 && edges == NULL)
+        || (mir->call_argument_count != 0 && arguments == NULL)) {
         free(values);
         free(edges);
+        free(arguments);
         return mir_error(diagnostics, span,
             "MIR ownership validation allocation failed");
     }
@@ -655,6 +1139,19 @@ static bool mir_validate_arena_ownership(const SolMir *mir,
         } else if (terminator->kind == SOL_MIR_TERM_BRANCH) {
             slices[count++] = terminator->as.branch.true_edge.arguments;
             slices[count++] = terminator->as.branch.false_edge.arguments;
+        } else if (terminator->kind == SOL_MIR_TERM_INVOKE) {
+            slices[count++] = terminator->as.invoke.normal_edge.arguments;
+            slices[count++] = terminator->as.invoke.failure_edge.arguments;
+            SolMirSlice call = terminator->as.invoke.arguments;
+            for (size_t index = 0; valid && index < call.count; ++index) {
+                size_t slot = call.offset + index;
+                valid = slot < mir->call_argument_count
+                    && ++arguments[slot] == 1;
+            }
+            if (terminator->as.invoke.result != SOL_MIR_NONE) {
+                SolMirValueId result = terminator->as.invoke.result;
+                valid = result < mir->value_count && ++values[result] == 1;
+            }
         }
         for (size_t slice = 0; valid && slice < count; ++slice) {
             for (size_t index = 0; valid && index < slices[slice].count; ++index) {
@@ -675,8 +1172,12 @@ static bool mir_validate_arena_ownership(const SolMir *mir,
     for (size_t id = 0; valid && id < mir->edge_value_count; ++id) {
         valid = edges[id] == 1;
     }
+    for (size_t id = 0; valid && id < mir->call_argument_count; ++id) {
+        valid = arguments[id] == 1;
+    }
     free(values);
     free(edges);
+    free(arguments);
     return valid || mir_error(diagnostics, span,
         "MIR value or edge arena is shared or orphaned");
 }
@@ -798,8 +1299,20 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
                 }
             }
             const SolMirTerminator *term = &mir->blocks[block].terminator;
+            if (valid && term->kind == SOL_MIR_TERM_INVOKE) {
+                SolMirSlice arguments = term->as.invoke.arguments;
+                for (size_t index = 0; valid && index < arguments.count; ++index) {
+                    const SolMirCallArgument *argument
+                        = &mir->call_arguments[arguments.offset + index];
+                    if (argument->access == SOL_ACCESS_OWNED) continue;
+                    const SolIrPlace *place = &ir->places[argument->place];
+                    valid = state[place->local] == MIR_STORAGE_INITIALIZED;
+                }
+            }
             if (valid && (term->kind == SOL_MIR_TERM_RETURN
-                || term->kind == SOL_MIR_TERM_PANIC)) {
+                || term->kind == SOL_MIR_TERM_PANIC
+                || term->kind == SOL_MIR_TERM_RESUME_FAILURE
+                || term->kind == SOL_MIR_TERM_UNREACHABLE)) {
                 SolIrDefinitionId owner = ir->callables[mir->callable].owner;
                 for (size_t local = 0; valid && local < ir->local_count; ++local) {
                     if (ir->locals[local].owner == owner) {
@@ -814,6 +1327,11 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
             } else if (valid && term->kind == SOL_MIR_TERM_BRANCH) {
                 targets[target_count++] = term->as.branch.true_edge.block;
                 targets[target_count++] = term->as.branch.false_edge.block;
+            } else if (valid && term->kind == SOL_MIR_TERM_INVOKE) {
+                if (term->as.invoke.normal_edge.block != SOL_MIR_NONE) {
+                    targets[target_count++] = term->as.invoke.normal_edge.block;
+                }
+                targets[target_count++] = term->as.invoke.failure_edge.block;
             }
             for (size_t index = 0; valid && index < target_count; ++index) {
                 SolMirBlockId target = targets[index];
@@ -840,6 +1358,290 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
         "MIR local storage transitions are inconsistent");
 }
 
+static bool mir_validate_regions(const SolIr *ir, const SolMir *mir,
+    SolDiagnostics *diagnostics) {
+    if (ir->statement_count != 0
+        && mir->block_count > SIZE_MAX / ir->statement_count) {
+        return mir_error(diagnostics, ir->callables[mir->callable].span,
+            "MIR region validation domain is too large");
+    }
+    size_t stack_count = mir->block_count * ir->statement_count;
+    SolIrStatementId *incoming = stack_count == 0 ? NULL
+        : malloc(stack_count * sizeof(*incoming));
+    SolIrStatementId *working = ir->statement_count == 0 ? NULL
+        : malloc(ir->statement_count * sizeof(*working));
+    size_t *depths = calloc(mir->block_count, sizeof(*depths));
+    bool *known = calloc(mir->block_count, sizeof(*known));
+    SolMirBlockId *queue = malloc(mir->block_count * sizeof(*queue));
+    if ((stack_count != 0 && incoming == NULL)
+        || (ir->statement_count != 0 && working == NULL)
+        || depths == NULL || known == NULL || queue == NULL) {
+        free(incoming);
+        free(working);
+        free(depths);
+        free(known);
+        free(queue);
+        return mir_error(diagnostics, ir->callables[mir->callable].span,
+            "MIR region validation allocation failed");
+    }
+    size_t first = 0;
+    size_t count = 1;
+    queue[0] = mir->entry;
+    known[mir->entry] = true;
+    bool valid = true;
+    while (valid && first < count) {
+        SolMirBlockId block = queue[first++];
+        size_t depth = depths[block];
+        if (depth != 0) memcpy(working,
+            &incoming[block * ir->statement_count],
+            depth * sizeof(*working));
+        SolMirSlice instructions = mir->blocks[block].instructions;
+        for (size_t index = 0; valid && index < instructions.count; ++index) {
+            const SolMirInstruction *instruction
+                = &mir->instructions[instructions.offset + index];
+            if (instruction->kind == SOL_MIR_INST_REGION_ENTER) {
+                if (depth == ir->statement_count) valid = false;
+                else working[depth++] = instruction->as.region;
+            } else if (instruction->kind == SOL_MIR_INST_REGION_EXIT) {
+                if (depth == 0
+                    || working[depth - 1] != instruction->as.region) {
+                    valid = false;
+                } else {
+                    --depth;
+                }
+            }
+        }
+        const SolMirTerminator *term = &mir->blocks[block].terminator;
+        if (valid && depth != 0
+            && (term->kind == SOL_MIR_TERM_RETURN
+                || term->kind == SOL_MIR_TERM_PANIC
+                || term->kind == SOL_MIR_TERM_RESUME_FAILURE
+                || term->kind == SOL_MIR_TERM_UNREACHABLE)) valid = false;
+        SolMirBlockId targets[2];
+        size_t target_count = 0;
+        if (valid && term->kind == SOL_MIR_TERM_GOTO) {
+            targets[target_count++] = term->as.go_to.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_BRANCH) {
+            targets[target_count++] = term->as.branch.true_edge.block;
+            targets[target_count++] = term->as.branch.false_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_INVOKE) {
+            if (term->as.invoke.normal_edge.block != SOL_MIR_NONE) {
+                targets[target_count++] = term->as.invoke.normal_edge.block;
+            }
+            targets[target_count++] = term->as.invoke.failure_edge.block;
+        }
+        for (size_t index = 0; valid && index < target_count; ++index) {
+            SolMirBlockId target = targets[index];
+            if (!known[target]) {
+                known[target] = true;
+                depths[target] = depth;
+                if (depth != 0) memcpy(
+                    &incoming[target * ir->statement_count], working,
+                    depth * sizeof(*working));
+                queue[count++] = target;
+            } else {
+                valid = depths[target] == depth
+                    && (depth == 0 || memcmp(
+                        &incoming[target * ir->statement_count], working,
+                        depth * sizeof(*working)) == 0);
+            }
+        }
+    }
+    free(incoming);
+    free(working);
+    free(depths);
+    free(known);
+    free(queue);
+    return valid || mir_error(diagnostics,
+        ir->callables[mir->callable].span,
+        "MIR lexical region stack is inconsistent");
+}
+
+static bool mir_validate_storage_order(const SolIr *ir, const SolMir *mir,
+    SolDiagnostics *diagnostics) {
+    if (ir->local_count != 0
+        && mir->block_count > SIZE_MAX / ir->local_count) {
+        return mir_error(diagnostics, ir->callables[mir->callable].span,
+            "MIR lifetime-order validation domain is too large");
+    }
+    size_t stack_count = mir->block_count * ir->local_count;
+    SolIrLocalId *incoming = stack_count == 0 ? NULL
+        : malloc(stack_count * sizeof(*incoming));
+    SolIrLocalId *working = ir->local_count == 0 ? NULL
+        : malloc(ir->local_count * sizeof(*working));
+    size_t *depths = calloc(mir->block_count, sizeof(*depths));
+    bool *known = calloc(mir->block_count, sizeof(*known));
+    SolMirBlockId *queue = malloc(mir->block_count * sizeof(*queue));
+    if ((stack_count != 0 && incoming == NULL)
+        || (ir->local_count != 0 && working == NULL)
+        || depths == NULL || known == NULL || queue == NULL) {
+        free(incoming);
+        free(working);
+        free(depths);
+        free(known);
+        free(queue);
+        return mir_error(diagnostics, ir->callables[mir->callable].span,
+            "MIR lifetime-order validation allocation failed");
+    }
+    size_t first = 0;
+    size_t count = 1;
+    queue[0] = mir->entry;
+    known[mir->entry] = true;
+    bool valid = true;
+    while (valid && first < count) {
+        SolMirBlockId block = queue[first++];
+        size_t depth = depths[block];
+        if (depth != 0) memcpy(working,
+            &incoming[block * ir->local_count],
+            depth * sizeof(*working));
+        SolMirSlice instructions = mir->blocks[block].instructions;
+        for (size_t index = 0; valid && index < instructions.count; ++index) {
+            size_t instruction_id = instructions.offset + index;
+            const SolMirInstruction *instruction
+                = &mir->instructions[instruction_id];
+            if (instruction->kind == SOL_MIR_INST_PARAMETER_LIVE
+                || instruction->kind == SOL_MIR_INST_STORAGE_LIVE) {
+                if (depth == ir->local_count) valid = false;
+                else working[depth++] = instruction->as.local;
+            } else if (instruction->kind
+                == SOL_MIR_INST_DROP_IF_INITIALIZED) {
+                if (index + 1 >= instructions.count) {
+                    valid = false;
+                } else {
+                    const SolMirInstruction *next
+                        = &mir->instructions[instruction_id + 1];
+                    valid = (next->kind == SOL_MIR_INST_STORAGE_DEAD
+                            && next->as.local == instruction->as.local)
+                        || (next->kind == SOL_MIR_INST_STORE
+                            && next->as.store.local == instruction->as.local);
+                }
+            } else if (instruction->kind == SOL_MIR_INST_STORAGE_DEAD) {
+                valid = depth != 0
+                    && working[depth - 1] == instruction->as.local
+                    && index != 0
+                    && mir->instructions[instruction_id - 1].kind
+                        == SOL_MIR_INST_DROP_IF_INITIALIZED
+                    && mir->instructions[instruction_id - 1].as.local
+                        == instruction->as.local;
+                if (valid) --depth;
+            }
+        }
+        const SolMirTerminator *term = &mir->blocks[block].terminator;
+        if (valid && depth != 0
+            && (term->kind == SOL_MIR_TERM_RETURN
+                || term->kind == SOL_MIR_TERM_PANIC
+                || term->kind == SOL_MIR_TERM_RESUME_FAILURE
+                || term->kind == SOL_MIR_TERM_UNREACHABLE)) valid = false;
+        SolMirBlockId targets[2];
+        size_t target_count = 0;
+        if (valid && term->kind == SOL_MIR_TERM_GOTO) {
+            targets[target_count++] = term->as.go_to.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_BRANCH) {
+            targets[target_count++] = term->as.branch.true_edge.block;
+            targets[target_count++] = term->as.branch.false_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_INVOKE) {
+            if (term->as.invoke.normal_edge.block != SOL_MIR_NONE) {
+                targets[target_count++] = term->as.invoke.normal_edge.block;
+            }
+            targets[target_count++] = term->as.invoke.failure_edge.block;
+        }
+        for (size_t index = 0; valid && index < target_count; ++index) {
+            SolMirBlockId target = targets[index];
+            if (!known[target]) {
+                known[target] = true;
+                depths[target] = depth;
+                if (depth != 0) memcpy(
+                    &incoming[target * ir->local_count], working,
+                    depth * sizeof(*working));
+                queue[count++] = target;
+            } else {
+                valid = depths[target] == depth
+                    && (depth == 0 || memcmp(
+                        &incoming[target * ir->local_count], working,
+                        depth * sizeof(*working)) == 0);
+            }
+        }
+    }
+    free(incoming);
+    free(working);
+    free(depths);
+    free(known);
+    free(queue);
+    return valid || mir_error(diagnostics,
+        ir->callables[mir->callable].span,
+        "MIR lexical storage cleanup order is inconsistent");
+}
+
+static bool mir_validate_source_events(const SolIr *ir, const SolMir *mir,
+    SolDiagnostics *diagnostics) {
+    SolIrStatementId *statements = ir->statement_count == 0 ? NULL
+        : malloc(ir->statement_count * sizeof(*statements));
+    bool *orders = calloc(mir->block_count, sizeof(*orders));
+    if ((ir->statement_count != 0 && statements == NULL) || orders == NULL) {
+        free(statements);
+        free(orders);
+        return mir_error(diagnostics, ir->callables[mir->callable].span,
+            "MIR source-event validation allocation failed");
+    }
+    size_t statement_count = 0;
+    bool valid = mir_collect_source_statements(ir,
+        ir->callables[mir->callable].body, statements, &statement_count, 0);
+    for (size_t block = 0; valid && block < mir->block_count; ++block) {
+        size_t order = mir->blocks[block].order;
+        valid = order < mir->block_count && !orders[order];
+        if (valid) orders[order] = true;
+    }
+    size_t previous_offset = 0;
+    for (size_t order = 0; valid && order < mir->block_count; ++order) {
+        SolMirBlockId block = SOL_MIR_NONE;
+        for (size_t candidate = 0; candidate < mir->block_count; ++candidate) {
+            if (mir->blocks[candidate].order == order) {
+                block = candidate;
+                break;
+            }
+        }
+        valid = block != SOL_MIR_NONE
+            && mir->blocks[block].instructions.offset >= previous_offset;
+        if (valid) previous_offset = mir->blocks[block].instructions.offset;
+    }
+    size_t cursor = 0;
+    for (size_t index = 0; valid && index < mir->instruction_count; ++index) {
+        const SolMirInstruction *instruction = &mir->instructions[index];
+        if (instruction->kind != SOL_MIR_INST_REGION_ENTER) continue;
+        valid = mir_next_source_statement(ir, statements, statement_count,
+                &cursor, SOL_IR_STATEMENT_REGION) == instruction->as.region;
+    }
+    if (valid) {
+        valid = mir_next_source_statement(ir, statements, statement_count,
+            &cursor, SOL_IR_STATEMENT_REGION) == SOL_IR_NONE;
+    }
+    cursor = 0;
+    for (size_t order = 0; valid && order < mir->block_count; ++order) {
+        SolMirBlockId block = SOL_MIR_NONE;
+        for (size_t candidate = 0; candidate < mir->block_count; ++candidate) {
+            if (mir->blocks[candidate].order == order) {
+                block = candidate;
+                break;
+            }
+        }
+        if (block == SOL_MIR_NONE
+            || mir->blocks[block].terminator.kind
+                != SOL_MIR_TERM_UNREACHABLE) continue;
+        valid = mir_next_source_statement(ir, statements, statement_count,
+                &cursor, SOL_IR_STATEMENT_UNREACHABLE)
+            == mir->blocks[block].terminator.as.unreachable.statement;
+    }
+    if (valid) {
+        valid = mir_next_source_statement(ir, statements, statement_count,
+            &cursor, SOL_IR_STATEMENT_UNREACHABLE) == SOL_IR_NONE;
+    }
+    free(statements);
+    free(orders);
+    return valid || mir_error(diagnostics,
+        ir->callables[mir->callable].span,
+        "MIR source control events are missing or reordered");
+}
+
 bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
     SolDiagnostics *diagnostics) {
     if (ir == NULL || mir == NULL || !sol_ir_validate(ir, diagnostics)
@@ -851,11 +1653,13 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         || mir->value_count > mir->value_capacity
         || mir->parameter_value_count > mir->parameter_value_capacity
         || mir->edge_value_count > mir->edge_value_capacity
+        || mir->call_argument_count > mir->call_argument_capacity
         || (mir->block_count != 0 && mir->blocks == NULL)
         || (mir->instruction_count != 0 && mir->instructions == NULL)
         || (mir->value_count != 0 && mir->values == NULL)
         || (mir->parameter_value_count != 0 && mir->parameter_values == NULL)
-        || (mir->edge_value_count != 0 && mir->edge_values == NULL)) {
+        || (mir->edge_value_count != 0 && mir->edge_values == NULL)
+        || (mir->call_argument_count != 0 && mir->call_arguments == NULL)) {
         return mir_error(diagnostics, (SolSpan){0}, "malformed MIR arena header");
     }
     const SolIrCallable *callable = &ir->callables[mir->callable];
@@ -881,7 +1685,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || !mir_slice_valid(block->parameters, mir->parameter_value_count)
             || !mir_slice_valid(block->instructions, mir->instruction_count)
             || block->terminator.kind <= SOL_MIR_TERM_INVALID
-            || block->terminator.kind > SOL_MIR_TERM_PANIC
+            || block->terminator.kind > SOL_MIR_TERM_UNREACHABLE
             || !mir_span_valid(ir, block->terminator.span)) {
             free(instruction_owners);
             free(parameter_owners);
@@ -903,7 +1707,8 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 || ++parameter_owners[slot] != 1
                 || mir->values[id].kind != SOL_MIR_VALUE_BLOCK_PARAMETER
                 || mir->values[id].block != block_id
-                || mir->values[id].definition != index) {
+                || mir->values[id].definition != index
+                || mir->values[id].source_expression >= ir->expression_count) {
                 free(instruction_owners);
                 free(parameter_owners);
                 return mir_error(diagnostics, block->span,
@@ -913,7 +1718,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         switch (block->terminator.kind) {
             case SOL_MIR_TERM_GOTO:
                 if (!mir_validate_edge(mir, block_id,
-                    &block->terminator.as.go_to)) {
+                    &block->terminator.as.go_to, SOL_MIR_NONE)) {
                     free(instruction_owners);
                     free(parameter_owners);
                     return mir_error(diagnostics, block->terminator.span,
@@ -929,9 +1734,9 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                         block->terminator.as.branch.condition, block_id,
                         block->instructions.offset + block->instructions.count)
                     || !mir_validate_edge(mir, block_id,
-                        &block->terminator.as.branch.true_edge)
+                        &block->terminator.as.branch.true_edge, SOL_MIR_NONE)
                     || !mir_validate_edge(mir, block_id,
-                        &block->terminator.as.branch.false_edge)) {
+                        &block->terminator.as.branch.false_edge, SOL_MIR_NONE)) {
                     free(instruction_owners);
                     free(parameter_owners);
                     return mir_error(diagnostics, block->terminator.span,
@@ -964,6 +1769,183 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                         "malformed MIR panic");
                 }
                 break;
+            case SOL_MIR_TERM_INVOKE: {
+                const SolMirTerminator *term = &block->terminator;
+                const SolIrExpression *source
+                    = term->as.invoke.source_expression < ir->expression_count
+                    ? &ir->expressions[term->as.invoke.source_expression] : NULL;
+                bool never = source != NULL
+                    && mir_type_is(ir, source->type, SOL_IR_TYPE_NEVER);
+                bool invoke_valid = source != NULL
+                    && source->kind == SOL_IR_EXPR_CALL
+                    && source->as.call.kind == SOL_IR_CALL_FUNCTION
+                    && source->as.call.callable == term->as.invoke.callable
+                    && term->as.invoke.callable < ir->callable_count
+                    && ir->callables[term->as.invoke.callable].kind
+                        == SOL_IR_CALLABLE_FUNCTION
+                    && ir->callables[term->as.invoke.callable].generic_parameters.count == 0
+                    && ir->callables[term->as.invoke.callable].effect_parameters.count == 0
+                    && ir->callables[term->as.invoke.callable].receiver == SOL_IR_NONE
+                    && ir->callables[term->as.invoke.callable].capability_source
+                        == SOL_IR_NONE
+                    && source->type
+                        == ir->callables[term->as.invoke.callable].result
+                    && source->as.call.type_arguments.count == 0
+                    && source->as.call.evidence.count == 0
+                    && source->as.call.effect_parameter == SOL_IR_NONE
+                    && mir_slice_valid(term->as.invoke.arguments,
+                        mir->call_argument_count)
+                    && term->as.invoke.arguments.count
+                        == source->as.call.operands.count
+                    && term->as.invoke.arguments.count
+                        == ir->callables[term->as.invoke.callable].parameters.count
+                    && term->as.invoke.failure_edge.arguments.count == 0
+                    && mir_validate_edge(mir, block_id,
+                        &term->as.invoke.failure_edge, SOL_MIR_NONE)
+                    && mir->blocks[term->as.invoke.failure_edge.block]
+                        .terminator.kind == SOL_MIR_TERM_RESUME_FAILURE;
+                if (invoke_valid && never) {
+                    invoke_valid = term->as.invoke.result == SOL_MIR_NONE
+                        && term->as.invoke.normal_edge.block == SOL_MIR_NONE
+                        && mir_slice_valid(term->as.invoke.normal_edge.arguments,
+                            mir->edge_value_count)
+                        && term->as.invoke.normal_edge.arguments.count == 0;
+                } else if (invoke_valid) {
+                    SolMirValueId result = term->as.invoke.result;
+                    invoke_valid = result < mir->value_count
+                        && mir->values[result].kind
+                            == SOL_MIR_VALUE_TERMINATOR
+                        && mir->values[result].block == block_id
+                        && mir->values[result].definition == block_id
+                        && mir->values[result].source_expression
+                            == term->as.invoke.source_expression
+                        && mir->values[result].type == source->type
+                        && source->type
+                            == ir->callables[term->as.invoke.callable].result
+                        && mir_validate_edge(mir, block_id,
+                            &term->as.invoke.normal_edge, result)
+                        && term->as.invoke.normal_edge.arguments.count == 1
+                        && mir->edge_values[
+                            term->as.invoke.normal_edge.arguments.offset]
+                            == result;
+                }
+                for (size_t index = 0; invoke_valid
+                    && index < term->as.invoke.arguments.count; ++index) {
+                    const SolMirCallArgument *argument = &mir->call_arguments[
+                        term->as.invoke.arguments.offset + index];
+                    const SolIrOperand *operand = &ir->operands[
+                        source->as.call.operands.offset + index];
+                    SolIrLocalId formal = ir->roots[
+                        ir->callables[term->as.invoke.callable].parameters.offset
+                            + index];
+                    invoke_valid = argument->formal == operand->formal
+                        && argument->formal == index
+                        && argument->access == operand->access
+                        && argument->access == ir->locals[formal].access
+                        && argument->source_expression == operand->value
+                        && operand->value < ir->expression_count
+                        && ir->expressions[operand->value].type
+                            == ir->locals[formal].type;
+                    if (!invoke_valid) break;
+                    if (argument->access == SOL_ACCESS_OWNED) {
+                        invoke_valid = argument->place == SOL_IR_NONE
+                            && mir_value_available(mir, argument->value,
+                                block_id, block->instructions.offset
+                                    + block->instructions.count)
+                            && mir->values[argument->value].type
+                                == ir->expressions[operand->value].type
+                            && mir->values[argument->value].kind
+                                == SOL_MIR_VALUE_INSTRUCTION
+                            && mir->instructions[mir->values[
+                                argument->value].definition].kind
+                                == SOL_MIR_INST_CALL_ARGUMENT
+                            && mir->instructions[mir->values[
+                                argument->value].definition].source_expression
+                                == operand->value
+                            && mir->instructions[mir->values[
+                                argument->value].definition].as.operand
+                                < mir->value_count
+                            && mir->values[mir->instructions[mir->values[
+                                argument->value].definition].as.operand]
+                                .source_expression == operand->value;
+                    } else {
+                        SolIrLocalUse use = argument->access == SOL_ACCESS_SHARED
+                            ? SOL_IR_LOCAL_USE_SHARED
+                            : SOL_IR_LOCAL_USE_EXCLUSIVE;
+                        const SolIrExpression *actual
+                            = &ir->expressions[operand->value];
+                        invoke_valid = (argument->access == SOL_ACCESS_SHARED
+                                || argument->access == SOL_ACCESS_EXCLUSIVE)
+                            && argument->value == SOL_MIR_NONE
+                            && argument->place < ir->place_count
+                            && actual->kind == SOL_IR_EXPR_PLACE
+                            && actual->local_use == use
+                            && actual->as.place == argument->place
+                            && ir->places[argument->place].root_kind
+                                == SOL_IR_PLACE_ROOT_LOCAL
+                            && ir->places[argument->place].projections.count == 0
+                            && ir->locals[ir->places[argument->place].local].owner
+                                == callable->owner;
+                    }
+                }
+                for (size_t left = 0; invoke_valid
+                    && left < term->as.invoke.arguments.count; ++left) {
+                    const SolMirCallArgument *a = &mir->call_arguments[
+                        term->as.invoke.arguments.offset + left];
+                    if (a->access == SOL_ACCESS_OWNED) continue;
+                    for (size_t right = left + 1;
+                        right < term->as.invoke.arguments.count; ++right) {
+                        const SolMirCallArgument *b = &mir->call_arguments[
+                            term->as.invoke.arguments.offset + right];
+                        if (b->access != SOL_ACCESS_OWNED
+                            && ir->places[a->place].local
+                                == ir->places[b->place].local
+                            && (a->access == SOL_ACCESS_EXCLUSIVE
+                                || b->access == SOL_ACCESS_EXCLUSIVE)) {
+                            invoke_valid = false;
+                            break;
+                        }
+                    }
+                }
+                if (!invoke_valid) {
+                    free(instruction_owners);
+                    free(parameter_owners);
+                    return mir_error(diagnostics, block->terminator.span,
+                        "malformed MIR direct invocation");
+                }
+                break;
+            }
+            case SOL_MIR_TERM_RESUME_FAILURE:
+                break;
+            case SOL_MIR_TERM_UNREACHABLE: {
+                size_t obligation
+                    = block->terminator.as.unreachable.obligation;
+                SolIrStatementId statement
+                    = block->terminator.as.unreachable.statement;
+                if (obligation
+                        >= ir->unreachable_obligation_count
+                    || ir->unreachable_obligations[
+                        obligation].callable != mir->callable
+                    || statement >= ir->statement_count
+                    || ir->unreachable_obligations[obligation].statement
+                        != statement
+                    || ir->statements[statement].kind
+                        != SOL_IR_STATEMENT_UNREACHABLE
+                    || ir->statements[statement].unreachable_obligations.offset
+                        != obligation
+                    || block->terminator.span.start
+                        != ir->statements[statement].span.start
+                    || block->terminator.span.end
+                        != ir->statements[statement].span.end
+                    || !mir_expression_contains_statement(ir, callable->body,
+                        statement, 0)) {
+                    free(instruction_owners);
+                    free(parameter_owners);
+                    return mir_error(diagnostics, block->terminator.span,
+                        "malformed MIR unreachable proof edge");
+                }
+                break;
+            }
             case SOL_MIR_TERM_INVALID: break;
         }
     }
@@ -987,7 +1969,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || id - mir->blocks[instruction->block].instructions.offset
                 >= mir->blocks[instruction->block].instructions.count
             || (int)instruction->kind < 0
-            || instruction->kind > SOL_MIR_INST_BINARY
+            || instruction->kind > SOL_MIR_INST_REGION_EXIT
             || !mir_span_valid(ir, instruction->span)) {
             return mir_error(diagnostics, instruction->span,
                 "malformed MIR instruction");
@@ -996,7 +1978,8 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || instruction->kind == SOL_MIR_INST_LOAD_COPY
             || instruction->kind == SOL_MIR_INST_LOAD_MOVE
             || instruction->kind == SOL_MIR_INST_UNARY
-            || instruction->kind == SOL_MIR_INST_BINARY;
+            || instruction->kind == SOL_MIR_INST_BINARY
+            || instruction->kind == SOL_MIR_INST_CALL_ARGUMENT;
         if (result_kind && (instruction->type >= ir->type_count
             || (instruction->source_expression != SOL_IR_NONE
                 && (instruction->source_expression >= ir->expression_count
@@ -1038,7 +2021,9 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                     != SOL_MIR_VALUE_INSTRUCTION
                 || mir->values[instruction->result].definition != id
                 || mir->values[instruction->result].block != instruction->block
-                || mir->values[instruction->result].type != instruction->type) {
+                || mir->values[instruction->result].type != instruction->type
+                || mir->values[instruction->result].source_expression
+                    != instruction->source_expression) {
                 return mir_error(diagnostics, instruction->span,
                     "malformed MIR instruction result");
             }
@@ -1110,12 +2095,43 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 return mir_error(diagnostics, instruction->span,
                     "malformed MIR binary operand");
             }
+        } else if (instruction->kind == SOL_MIR_INST_CALL_ARGUMENT) {
+            if (source == NULL
+                || !mir_value_available(mir, instruction->as.operand,
+                    instruction->block, id)
+                || mir->values[instruction->as.operand].type
+                    != source->type
+                || mir->values[instruction->as.operand].source_expression
+                    != instruction->source_expression) {
+                return mir_error(diagnostics, instruction->span,
+                    "malformed MIR owned call argument");
+            }
+        } else if (instruction->kind == SOL_MIR_INST_REGION_ENTER
+            || instruction->kind == SOL_MIR_INST_REGION_EXIT) {
+            if (instruction->source_expression != SOL_IR_NONE
+                || instruction->as.region >= ir->statement_count
+                || ir->statements[instruction->as.region].kind
+                    != SOL_IR_STATEMENT_REGION
+                || !mir_expression_contains_statement(ir, callable->body,
+                    instruction->as.region, 0)
+                || (instruction->kind == SOL_MIR_INST_REGION_ENTER
+                    && (instruction->span.start
+                            != ir->statements[instruction->as.region].span.start
+                        || instruction->span.end
+                            != ir->statements[instruction->as.region].span.end))) {
+                return mir_error(diagnostics, instruction->span,
+                    "malformed MIR lexical region marker");
+            }
         }
     }
     for (size_t id = 0; id < mir->value_count; ++id) {
         const SolMirValue *value = &mir->values[id];
-        if ((int)value->kind < 0 || value->kind > SOL_MIR_VALUE_INSTRUCTION
+        if ((int)value->kind < 0 || value->kind > SOL_MIR_VALUE_TERMINATOR
             || value->type >= ir->type_count || value->block >= mir->block_count
+            || (value->source_expression != SOL_IR_NONE
+                && (value->source_expression >= ir->expression_count
+                    || ir->expressions[value->source_expression].type
+                        != value->type))
             || !mir_span_valid(ir, value->span)) {
             return mir_error(diagnostics, value->span,
                 "malformed MIR value metadata");
@@ -1166,6 +2182,11 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         } else if (term->kind == SOL_MIR_TERM_BRANCH) {
             ++predecessors[term->as.branch.true_edge.block];
             ++predecessors[term->as.branch.false_edge.block];
+        } else if (term->kind == SOL_MIR_TERM_INVOKE) {
+            if (term->as.invoke.normal_edge.block != SOL_MIR_NONE) {
+                ++predecessors[term->as.invoke.normal_edge.block];
+            }
+            ++predecessors[term->as.invoke.failure_edge.block];
         }
     }
     size_t first = 0;
@@ -1181,6 +2202,11 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         else if (term->kind == SOL_MIR_TERM_BRANCH) {
             targets[target_count++] = term->as.branch.true_edge.block;
             targets[target_count++] = term->as.branch.false_edge.block;
+        } else if (term->kind == SOL_MIR_TERM_INVOKE) {
+            if (term->as.invoke.normal_edge.block != SOL_MIR_NONE) {
+                targets[target_count++] = term->as.invoke.normal_edge.block;
+            }
+            targets[target_count++] = term->as.invoke.failure_edge.block;
         }
         for (size_t index = 0; index < target_count; ++index) {
             if (!reachable[targets[index]]) {
@@ -1199,7 +2225,10 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
     if (!valid) return mir_error(diagnostics, callable->span,
         "MIR contains an unreachable block or entry predecessor");
     return mir_validate_arena_ownership(mir, diagnostics, callable->span)
-        && mir_validate_storage(ir, mir, diagnostics);
+        && mir_validate_storage(ir, mir, diagnostics)
+        && mir_validate_regions(ir, mir, diagnostics)
+        && mir_validate_storage_order(ir, mir, diagnostics)
+        && mir_validate_source_events(ir, mir, diagnostics);
 }
 
 SolMirLowerOutcome sol_mir_lower_callable(const SolIr *ir,
