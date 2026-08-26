@@ -405,4 +405,12 @@ if(BUILD_TESTING)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/inspection_cli/test_inspection_cli.cmake
     )
     set_tests_properties(inspection_cli PROPERTIES LABELS inspection_cli)
+    add_test(
+        NAME e6_conformance
+        COMMAND ${CMAKE_COMMAND}
+            -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
+            -DPACKAGE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/conformance/e6
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/conformance/test_e6_conformance.cmake
+    )
+    set_tests_properties(e6_conformance PROPERTIES LABELS conformance)
 endif()

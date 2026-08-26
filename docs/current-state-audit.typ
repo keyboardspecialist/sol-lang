@@ -23,7 +23,7 @@
   #v(4pt)
   #text(size: 14pt)[Remaining Work, Risks, and the Shortest End-to-End Path]
   #v(10pt)
-  #text(size: 9pt)[Roadmap state after E1c - August 25, 2026]
+  #text(size: 9pt)[Executable-core state after E6 - August 25, 2026]
 ]
 
 #v(16pt)
@@ -50,8 +50,8 @@ Sol now has a bounded end-to-end interpreter application profile with explicit e
 
 Current verification is healthy:
 
-- Normal test suite: 37/37 passed.
-- Clean ASan/UBSan suite: 37/37 passed.
+- Normal warning-clean test suite: 38/38 passed.
+- Clean ASan/UBSan suite: 38/38 passed.
 - Worktree was clean except the intentionally untracked session file.
 
 = Current State
@@ -283,6 +283,8 @@ Loop invariant and decreases checking may follow as a second increment if needed
 Add one multi-file executable fixture exercising imports, semantic IDs, records, enums, tuples, generics, traits, recursive matching, ownership, mutation, `Option`/`Result`, capability-injected console output, contracts, runtime failures, and cleanup.
 
 The same fixture should pass through `sol fmt`, `sol check`, `sol test`, `sol effects`, `sol inspect`, and `sol run`. This becomes the acceptance test for the versioned executable-core profile.
+
+#status("IMPLEMENTED", [`tests/conformance/e6` is one canonical three-module application covering imports and a stable identity; records, enums, tuples, generics, trait dispatch, recursive matching, ownership, `inout` mutation, regions and cleanup; `Option`/`Result` propagation, typed errors, and runtime failure/unwind; executable contracts/refinement; and exact Console/Arguments/Configuration effects. One CTest case runs the unchanged directory through formatter check, compilation, four checked tests, effect inspection, inspection-v3 emission, and hosted execution with deterministic configuration/arguments and exact `E6 ok\n` output, then executes a configured panic path and checks its structured diagnostic.])
 
 = Recommended Immediate Sequence
 
