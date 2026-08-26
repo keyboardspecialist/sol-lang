@@ -1394,6 +1394,120 @@ static void test_propagation_lowering(void) {
     free_compilation(&compilation);
 }
 
+static void test_projected_place_lowering(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_projected_places\n"
+        "record Pair { left: Int64, right: Int64 }\n"
+        "record Nested { pair: (Pair, Int64) }\n"
+        "record Box<T> { value: T }\n"
+        "record Holder { left: Box<Int64>, right: Box<Int64> }\n"
+        "function set(value: inout Int64) -> () { value = 7 }\n"
+        "function inspect(value: borrow Int64) -> Int64 { return value }\n"
+        "function set_both(left: inout Int64, right: inout Int64) -> () { "
+        "left = 8 right = 9 }\n"
+        "function read(value: Nested) -> Int64 { "
+        "return value.pair.0.left + value.pair.1 }\n"
+        "function replace() -> Int64 { var pair = Pair { left = 1, right = 2 } "
+        "pair.left = 3 return pair.left }\n"
+        "function shared() -> Int64 { let pair = Pair { left = 1, right = 2 } "
+        "return inspect(pair.left) }\n"
+        "function writeback() -> Int64 { "
+        "var pair = Pair { left = 1, right = 2 } "
+        "set_both(pair.left, pair.right) return pair.left + pair.right }\n"
+        "function moved(value: Holder) -> Box<Int64> { return value.left }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    const char *names[] = {"read", "replace", "shared", "writeback"};
+    for (size_t name = 0; name < 4; ++name) {
+        SolMir mir;
+        sol_mir_init(&mir);
+        CHECK(sol_mir_lower_callable(&compilation.ir,
+            callable(&compilation.ir, names[name]), &mir,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        bool projected_load = false;
+        bool projected_drop = false;
+        SolMirInstructionId load = SOL_MIR_NONE;
+        SolMirInstructionId projected_store = SOL_MIR_NONE;
+        SolMirValueId alternate = SOL_MIR_NONE;
+        for (size_t instruction = 0; instruction < mir.instruction_count;
+            ++instruction) {
+            const SolMirInstruction *item = &mir.instructions[instruction];
+            if (item->kind == SOL_MIR_INST_LOAD_COPY
+                && item->as.place.source_place < compilation.ir.place_count
+                && compilation.ir.places[item->as.place.source_place]
+                    .projections.count != 0) {
+                projected_load = true;
+                load = instruction;
+            }
+            projected_drop = projected_drop
+                || item->kind == SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED;
+            if (item->kind == SOL_MIR_INST_STORE
+                && item->as.store.place.source_place != SOL_IR_NONE) {
+                projected_store = instruction;
+            }
+            if (item->kind == SOL_MIR_INST_CONST_INT64
+                && alternate == SOL_MIR_NONE) alternate = item->result;
+        }
+        if (name != 2) CHECK(projected_load);
+        if (name == 1) CHECK(projected_drop);
+        if (name == 1 && projected_store != SOL_MIR_NONE
+            && alternate != SOL_MIR_NONE) {
+            SolMirValueId stored
+                = mir.instructions[projected_store].as.store.value;
+            CHECK(alternate != stored);
+            mir.instructions[projected_store].as.store.value = alternate;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            mir.instructions[projected_store].as.store.value = stored;
+            CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        }
+        bool saw_projected_shared = false;
+        SolMirTerminator *exclusive = NULL;
+        for (size_t block = 0; block < mir.block_count; ++block) {
+            SolMirTerminator *term = &mir.blocks[block].terminator;
+            if (term->kind != SOL_MIR_TERM_INVOKE) continue;
+            SolMirSlice arguments = term->as.invoke.arguments;
+            if (arguments.count == 2) exclusive = term;
+            for (size_t index = 0; index < arguments.count; ++index) {
+                const SolMirCallArgument *argument
+                    = &mir.call_arguments[arguments.offset + index];
+                saw_projected_shared = saw_projected_shared
+                    || (argument->access == SOL_ACCESS_SHARED
+                        && compilation.ir.places[argument->place]
+                            .projections.count != 0);
+            }
+        }
+        if (name == 2) CHECK(saw_projected_shared);
+        if (name == 3) {
+            CHECK(exclusive != NULL);
+            SolMirSlice arguments = exclusive->as.invoke.arguments;
+            SolIrPlaceId second = mir.call_arguments[arguments.offset + 1].place;
+            CHECK(mir.call_arguments[arguments.offset].place != second);
+            mir.call_arguments[arguments.offset + 1].place
+                = mir.call_arguments[arguments.offset].place;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            mir.call_arguments[arguments.offset + 1].place = second;
+            CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        }
+        if (load != SOL_MIR_NONE) {
+            SolIrPlaceId place = mir.instructions[load].as.place.source_place;
+            mir.instructions[load].as.place.source_place = SOL_IR_NONE;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            mir.instructions[load].as.place.source_place = place;
+            CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        }
+        sol_mir_free(&mir);
+    }
+    SolMir moved;
+    sol_mir_init(&moved);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "moved"), &moved,
+        &compilation.diagnostics) == SOL_MIR_LOWER_UNSUPPORTED);
+    CHECK(moved.callable == SOL_IR_NONE && moved.blocks == NULL);
+    sol_mir_free(&moved);
+    free_compilation(&compilation);
+}
+
 static void test_owned_temporary_cleanup(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -1650,6 +1764,7 @@ int main(void) {
     test_refined_failure_cleanup();
     test_recursive_match_lowering();
     test_propagation_lowering();
+    test_projected_place_lowering();
     test_owned_temporary_cleanup();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

@@ -622,8 +622,11 @@ binding cleanup CFG. Option/Result propagation uses a two-result semantic termin
 that transfers either an unwrapped success value or a callable-result-typed residual;
 the residual path performs complete cleanup before an ordinary return. P1a.3b5 is not
 connected to compilation sessions or execution and does not choose how a backend
-evaluates predicates, patterns, or sum discriminants. It does not yet cover projected
-places, authority-bearing construction,
+evaluates predicates, patterns, or sum discriminants. Canonical local-rooted
+record/tuple paths now support projected copies, fully initialized replacement, and
+direct shared/exclusive operands with sibling-aware overlap and abstract normal-edge
+writeback. Projected moves and hole reinitialization remain deferred until MIR has a
+path-state lattice. It does not yet cover authority-bearing construction,
 dynamic/method/capability calls, handlers, contracts, generic lowering,
 representation, runtime ABI, or a backend.
 

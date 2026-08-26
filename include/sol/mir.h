@@ -13,6 +13,12 @@ typedef size_t SolMirTemporaryId;
 #define SOL_MIR_NONE SIZE_MAX
 
 typedef struct {
+    SolIrLocalId local;
+    /* SOL_IR_NONE denotes a synthetic whole-local place. */
+    SolIrPlaceId source_place;
+} SolMirPlace;
+
+typedef struct {
     size_t offset;
     size_t count;
 } SolMirSlice;
@@ -61,6 +67,7 @@ typedef enum {
     SOL_MIR_INST_PATTERN_TEST,
     SOL_MIR_INST_PATTERN_VALUE,
     SOL_MIR_INST_MATCH_ARM,
+    SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED,
     SOL_MIR_INST_CONSTRUCT,
 } SolMirInstructionKind;
 
@@ -86,6 +93,7 @@ typedef struct {
         int64_t integer;
         bool boolean;
         SolIrLocalId local;
+        SolMirPlace place;
         struct {
             SolTokenKind operator_kind;
             SolMirValueId operand;
@@ -96,7 +104,7 @@ typedef struct {
             SolMirValueId right;
         } binary;
         struct {
-            SolIrLocalId local;
+            SolMirPlace place;
             SolMirValueId value;
         } store;
         SolMirValueId operand;
@@ -141,7 +149,7 @@ typedef struct {
     size_t formal;
     SolAccessMode access;
     SolIrExpressionId source_expression;
-    /* Owned operands carry a temporary; borrows carry a whole-local place.
+    /* Owned operands carry a temporary; borrows carry a local-rooted place.
        Exclusive places write back only when the invoke takes its normal edge. */
     SolMirTemporaryId temporary;
     SolIrPlaceId place;

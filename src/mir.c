@@ -722,11 +722,10 @@ static LoweredValue mir_lower_direct_call(MirLowerer *lowerer,
             return mir_unreachable();
         }
         const SolIrPlace *place = &lowerer->ir->places[source->as.place];
-        if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
-            || place->projections.count != 0) {
+        if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL) {
             free(arguments);
             mir_unsupported(lowerer, source->span,
-                "P1a.2 MIR does not lower projected call borrows");
+                "P1a MIR supports only local-rooted call borrows");
             return mir_unreachable();
         }
         argument->place = source->as.place;
@@ -1119,7 +1118,13 @@ static bool mir_emit_pattern_bindings(MirLowerer *lowerer,
                 .type = SOL_IR_NONE,
                 .source_expression = SOL_IR_NONE,
                 .span = pattern->span,
-                .as.store = {.local = pattern->binding, .value = value},
+                .as.store = {
+                    .place = {
+                        .local = pattern->binding,
+                        .source_place = SOL_IR_NONE,
+                    },
+                    .value = value,
+                },
             }, false) != SOL_MIR_NONE;
     }
     for (size_t index = 0; index < pattern->children.count; ++index) {
@@ -1473,7 +1478,10 @@ static LoweredValue mir_lower_block(MirLowerer *lowerer,
                         .source_expression = statement->expression,
                         .span = statement->span,
                         .as.store = {
-                            .local = statement->local,
+                            .place = {
+                                .local = statement->local,
+                                .source_place = SOL_IR_NONE,
+                            },
                             .value = value.value,
                         },
                     }, false) == SOL_MIR_NONE) return mir_failure(lowerer);
@@ -1501,24 +1509,36 @@ static LoweredValue mir_lower_block(MirLowerer *lowerer,
                     return mir_failure(lowerer);
                 }
                 const SolIrPlace *place = &lowerer->ir->places[target->as.place];
-                if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
-                    || place->projections.count != 0) {
+                if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL) {
                     mir_unsupported(lowerer, statement->span,
-                        "P1a MIR checkpoint does not lower projected assignment");
+                        "P1a MIR supports only local-rooted assignment");
                     return mir_unreachable();
                 }
                 LoweredValue value = mir_lower_expression(lowerer,
                     statement->expression, &scope);
                 if (!value.reachable) return value;
-                if (!mir_emit_local(lowerer,
-                        SOL_MIR_INST_DROP_IF_INITIALIZED,
-                        place->local, statement->span)
+                if (mir_append_instruction(lowerer, (SolMirInstruction){
+                        .kind = SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED,
+                        .type = SOL_IR_NONE,
+                        .source_expression = statement->target,
+                        .span = statement->span,
+                        .as.place = {
+                            .local = place->local,
+                            .source_place = target->as.place,
+                        },
+                    }, false) == SOL_MIR_NONE
                     || mir_append_instruction(lowerer, (SolMirInstruction){
                         .kind = SOL_MIR_INST_STORE,
                         .type = SOL_IR_NONE,
                         .source_expression = statement->expression,
                         .span = statement->span,
-                        .as.store = {.local = place->local, .value = value.value},
+                        .as.store = {
+                            .place = {
+                                .local = place->local,
+                                .source_place = target->as.place,
+                            },
+                            .value = value.value,
+                        },
                     }, false) == SOL_MIR_NONE) return mir_failure(lowerer);
                 last.value = SOL_MIR_NONE;
                 break;
@@ -1708,16 +1728,24 @@ static LoweredValue mir_lower_expression(MirLowerer *lowerer,
             }
             const SolIrPlace *place = &lowerer->ir->places[expression->as.place];
             if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
-                || place->projections.count != 0
                 || (expression->local_use != SOL_IR_LOCAL_USE_COPY
                     && expression->local_use != SOL_IR_LOCAL_USE_MOVE)) {
                 mir_unsupported(lowerer, expression->span,
                     "P1a MIR checkpoint supports only copied or moved whole locals");
                 return mir_unreachable();
             }
+            if (expression->local_use == SOL_IR_LOCAL_USE_MOVE
+                && place->projections.count != 0) {
+                mir_unsupported(lowerer, expression->span,
+                    "projected moves require P1a.3b7 path-state validation");
+                return mir_unreachable();
+            }
             instruction.kind = expression->local_use == SOL_IR_LOCAL_USE_COPY
                 ? SOL_MIR_INST_LOAD_COPY : SOL_MIR_INST_LOAD_MOVE;
-            instruction.as.local = place->local;
+            instruction.as.place = (SolMirPlace){
+                .local = place->local,
+                .source_place = expression->as.place,
+            };
             break;
         }
         case SOL_IR_EXPR_UNARY: {
@@ -1800,6 +1828,51 @@ static bool mir_match_has_arm(const SolIr *ir,
         }
     }
     return false;
+}
+
+static bool mir_place_valid(const SolIr *ir, const SolIrCallable *callable,
+    SolMirPlace place, bool synthetic, SolIrTypeId *type) {
+    if (place.local >= ir->local_count
+        || ir->locals[place.local].owner != callable->owner) return false;
+    if (place.source_place == SOL_IR_NONE) {
+        if (!synthetic) return false;
+        *type = ir->locals[place.local].type;
+        return true;
+    }
+    if (place.source_place >= ir->place_count) return false;
+    const SolIrPlace *source = &ir->places[place.source_place];
+    if (source->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+        || source->local != place.local) return false;
+    for (size_t index = 0; index < source->projections.count; ++index) {
+        SolIrProjectionKind kind = ir->projections[
+            source->projections.offset + index].kind;
+        if (kind != SOL_IR_PROJECTION_FIELD
+            && kind != SOL_IR_PROJECTION_TUPLE_FIELD) return false;
+    }
+    *type = source->type;
+    return true;
+}
+
+static bool mir_places_overlap(const SolIr *ir, SolIrPlaceId left_id,
+    SolIrPlaceId right_id) {
+    const SolIrPlace *left = &ir->places[left_id];
+    const SolIrPlace *right = &ir->places[right_id];
+    if (left->local != right->local) return false;
+    size_t count = left->projections.count < right->projections.count
+        ? left->projections.count : right->projections.count;
+    for (size_t index = 0; index < count; ++index) {
+        const SolIrProjection *a
+            = &ir->projections[left->projections.offset + index];
+        const SolIrProjection *b
+            = &ir->projections[right->projections.offset + index];
+        if (a->kind != b->kind) return false;
+        if (a->kind == SOL_IR_PROJECTION_FIELD && a->field != b->field) {
+            return false;
+        }
+        if (a->kind == SOL_IR_PROJECTION_TUPLE_FIELD
+            && a->ordinal != b->ordinal) return false;
+    }
+    return true;
 }
 
 static bool mir_source_reaches_match(const SolIr *ir,
@@ -2500,9 +2573,15 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
                     = &mir->instructions[instructions.offset + index];
                 SolIrLocalId local = SOL_IR_NONE;
                 if (instruction->kind == SOL_MIR_INST_STORE) {
-                    local = instruction->as.store.local;
+                    local = instruction->as.store.place.local;
+                } else if (instruction->kind
+                    == SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED) {
+                    local = instruction->as.place.local;
+                } else if (instruction->kind == SOL_MIR_INST_LOAD_COPY
+                    || instruction->kind == SOL_MIR_INST_LOAD_MOVE) {
+                    local = instruction->as.place.local;
                 } else if (instruction->kind >= SOL_MIR_INST_PARAMETER_LIVE
-                    && instruction->kind <= SOL_MIR_INST_LOAD_MOVE) {
+                    && instruction->kind <= SOL_MIR_INST_STORAGE_DEAD) {
                     local = instruction->as.local;
                 }
                 if (local == SOL_IR_NONE) continue;
@@ -2525,6 +2604,15 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
                         valid = state[local] != MIR_STORAGE_DEAD;
                         state[local] = MIR_STORAGE_UNINITIALIZED;
                         break;
+                    case SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED: {
+                        SolIrPlaceId place = instruction->as.place.source_place;
+                        valid = state[local] == MIR_STORAGE_INITIALIZED
+                            && place < ir->place_count;
+                        if (valid && ir->places[place].projections.count == 0) {
+                            state[local] = MIR_STORAGE_UNINITIALIZED;
+                        }
+                        break;
+                    }
                     case SOL_MIR_INST_STORAGE_DEAD:
                         valid = state[local] == MIR_STORAGE_UNINITIALIZED;
                         state[local] = MIR_STORAGE_DEAD;
@@ -2537,8 +2625,14 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
                         state[local] = MIR_STORAGE_UNINITIALIZED;
                         break;
                     case SOL_MIR_INST_STORE:
-                        valid = state[local] == MIR_STORAGE_UNINITIALIZED;
-                        state[local] = MIR_STORAGE_INITIALIZED;
+                        if (instruction->as.store.place.source_place != SOL_IR_NONE
+                            && ir->places[instruction->as.store.place.source_place]
+                                .projections.count != 0) {
+                            valid = state[local] == MIR_STORAGE_INITIALIZED;
+                        } else {
+                            valid = state[local] == MIR_STORAGE_UNINITIALIZED;
+                            state[local] = MIR_STORAGE_INITIALIZED;
+                        }
                         break;
                     default: break;
                 }
@@ -2780,7 +2874,20 @@ static bool mir_validate_storage_order(const SolIr *ir, const SolMir *mir,
                     valid = (next->kind == SOL_MIR_INST_STORAGE_DEAD
                             && next->as.local == instruction->as.local)
                         || (next->kind == SOL_MIR_INST_STORE
-                            && next->as.store.local == instruction->as.local);
+                            && next->as.store.place.local
+                                == instruction->as.local);
+                }
+            } else if (instruction->kind
+                == SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED) {
+                valid = index + 1 < instructions.count;
+                if (valid) {
+                    const SolMirInstruction *next
+                        = &mir->instructions[instruction_id + 1];
+                    valid = next->kind == SOL_MIR_INST_STORE
+                        && next->as.store.place.local
+                            == instruction->as.place.local
+                        && next->as.store.place.source_place
+                            == instruction->as.place.source_place;
                 }
             } else if (instruction->kind == SOL_MIR_INST_STORAGE_DEAD) {
                 valid = depth != 0
@@ -3481,6 +3588,26 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                             term->as.invoke.normal_edge.arguments.offset]
                             == result;
                 }
+                for (size_t left = 0; invoke_valid
+                    && left < term->as.invoke.arguments.count; ++left) {
+                    const SolMirCallArgument *a = &mir->call_arguments[
+                        term->as.invoke.arguments.offset + left];
+                    if (a->access == SOL_ACCESS_OWNED) continue;
+                    invoke_valid = a->place < ir->place_count;
+                    for (size_t right = left + 1; invoke_valid
+                        && right < term->as.invoke.arguments.count; ++right) {
+                        const SolMirCallArgument *b = &mir->call_arguments[
+                            term->as.invoke.arguments.offset + right];
+                        if (b->access == SOL_ACCESS_OWNED) continue;
+                        invoke_valid = b->place < ir->place_count;
+                        if (invoke_valid
+                            && (a->access == SOL_ACCESS_EXCLUSIVE
+                                || b->access == SOL_ACCESS_EXCLUSIVE)
+                            && mir_places_overlap(ir, a->place, b->place)) {
+                            invoke_valid = false;
+                        }
+                    }
+                }
                 for (size_t index = 0; invoke_valid
                     && index < term->as.invoke.arguments.count; ++index) {
                     const SolMirCallArgument *argument = &mir->call_arguments[
@@ -3521,28 +3648,8 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                             && actual->as.place == argument->place
                             && ir->places[argument->place].root_kind
                                 == SOL_IR_PLACE_ROOT_LOCAL
-                            && ir->places[argument->place].projections.count == 0
                             && ir->locals[ir->places[argument->place].local].owner
                                 == callable->owner;
-                    }
-                }
-                for (size_t left = 0; invoke_valid
-                    && left < term->as.invoke.arguments.count; ++left) {
-                    const SolMirCallArgument *a = &mir->call_arguments[
-                        term->as.invoke.arguments.offset + left];
-                    if (a->access == SOL_ACCESS_OWNED) continue;
-                    for (size_t right = left + 1;
-                        right < term->as.invoke.arguments.count; ++right) {
-                        const SolMirCallArgument *b = &mir->call_arguments[
-                            term->as.invoke.arguments.offset + right];
-                        if (b->access != SOL_ACCESS_OWNED
-                            && ir->places[a->place].local
-                                == ir->places[b->place].local
-                            && (a->access == SOL_ACCESS_EXCLUSIVE
-                                || b->access == SOL_ACCESS_EXCLUSIVE)) {
-                            invoke_valid = false;
-                            break;
-                        }
                     }
                 }
                 if (!invoke_valid) {
@@ -3883,39 +3990,61 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         if (instruction->kind == SOL_MIR_INST_PARAMETER_LIVE
             || instruction->kind == SOL_MIR_INST_STORAGE_LIVE
             || instruction->kind == SOL_MIR_INST_DROP_IF_INITIALIZED
-            || instruction->kind == SOL_MIR_INST_STORAGE_DEAD
-            || instruction->kind == SOL_MIR_INST_LOAD_COPY
-            || instruction->kind == SOL_MIR_INST_LOAD_MOVE) {
+            || instruction->kind == SOL_MIR_INST_STORAGE_DEAD) {
             if (instruction->as.local >= ir->local_count
                 || ir->locals[instruction->as.local].owner != callable->owner) {
                 return mir_error(diagnostics, instruction->span,
                     "MIR instruction references a foreign local");
             }
-            if ((instruction->kind == SOL_MIR_INST_LOAD_COPY
-                    || instruction->kind == SOL_MIR_INST_LOAD_MOVE)
-                && (source == NULL || source->kind != SOL_IR_EXPR_PLACE
-                    || source->as.place >= ir->place_count
-                    || ir->places[source->as.place].root_kind
-                        != SOL_IR_PLACE_ROOT_LOCAL
-                    || ir->places[source->as.place].local != instruction->as.local
-                    || ir->places[source->as.place].projections.count != 0
-                    || source->local_use != (instruction->kind
-                        == SOL_MIR_INST_LOAD_COPY ? SOL_IR_LOCAL_USE_COPY
-                        : SOL_IR_LOCAL_USE_MOVE)
-                    || instruction->type != ir->locals[instruction->as.local].type)) {
+        } else if (instruction->kind == SOL_MIR_INST_LOAD_COPY
+            || instruction->kind == SOL_MIR_INST_LOAD_MOVE) {
+            SolIrTypeId place_type = SOL_IR_NONE;
+            if (!mir_place_valid(ir, callable, instruction->as.place, false,
+                    &place_type)
+                || source == NULL || source->kind != SOL_IR_EXPR_PLACE
+                || source->as.place != instruction->as.place.source_place
+                || source->local_use != (instruction->kind
+                    == SOL_MIR_INST_LOAD_COPY ? SOL_IR_LOCAL_USE_COPY
+                    : SOL_IR_LOCAL_USE_MOVE)
+                || (instruction->kind == SOL_MIR_INST_LOAD_MOVE
+                    && ir->places[source->as.place].projections.count != 0)
+                || instruction->type != place_type) {
                 return mir_error(diagnostics, instruction->span,
                     "MIR local load is inconsistent with source ownership");
             }
         } else if (instruction->kind == SOL_MIR_INST_STORE) {
-            if (instruction->as.store.local >= ir->local_count
-                || ir->locals[instruction->as.store.local].owner != callable->owner
+            SolIrTypeId place_type = SOL_IR_NONE;
+            if (!mir_place_valid(ir, callable, instruction->as.store.place,
+                    true, &place_type)
                 || instruction->as.store.value >= mir->value_count
                 || !mir_value_available(mir, instruction->as.store.value,
                     instruction->block, id)
+                || mir->values[instruction->as.store.value].source_expression
+                    != instruction->source_expression
                 || mir->values[instruction->as.store.value].type
-                    != ir->locals[instruction->as.store.local].type) {
+                    != place_type
+                || (instruction->as.store.place.source_place != SOL_IR_NONE
+                    && (id == 0
+                        || mir->instructions[id - 1].block
+                            != instruction->block
+                        || mir->instructions[id - 1].kind
+                            != SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED
+                        || mir->instructions[id - 1].as.place.local
+                            != instruction->as.store.place.local
+                        || mir->instructions[id - 1].as.place.source_place
+                            != instruction->as.store.place.source_place))) {
                 return mir_error(diagnostics, instruction->span,
                     "malformed MIR store");
+            }
+        } else if (instruction->kind
+            == SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED) {
+            SolIrTypeId place_type = SOL_IR_NONE;
+            if (!mir_place_valid(ir, callable, instruction->as.place, false,
+                    &place_type)
+                || source == NULL || source->kind != SOL_IR_EXPR_PLACE
+                || source->as.place != instruction->as.place.source_place) {
+                return mir_error(diagnostics, instruction->span,
+                    "malformed MIR projected replacement drop");
             }
         } else if (instruction->kind == SOL_MIR_INST_UNARY) {
             if (!mir_value_available(mir, instruction->as.unary.operand,
@@ -4083,8 +4212,10 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                     && mir->instructions[id + 1].as.local == pattern->binding
                     && mir->instructions[id + 2].block == instruction->block
                     && mir->instructions[id + 2].kind == SOL_MIR_INST_STORE
-                    && mir->instructions[id + 2].as.store.local
+                    && mir->instructions[id + 2].as.store.place.local
                         == pattern->binding
+                    && mir->instructions[id + 2].as.store.place.source_place
+                        == SOL_IR_NONE
                     && mir->instructions[id + 2].as.store.value
                         == instruction->result;
             }
