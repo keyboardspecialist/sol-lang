@@ -589,20 +589,23 @@ CFG/MIR, explicit monomorphization and data layout, a target-independent runtime
 ABI, a WebAssembly backend, reproducible `sol build`, and interpreter/WebAssembly
 differential tests.
 
-The first two internal MIR checkpoints are now present in `include/sol/mir.h` and
-`src/mir.c`. They lower one selected validated nongeneric free/test callable from
+The first internal MIR control checkpoints are now present in `include/sol/mir.h`
+and `src/mir.c`. They lower one selected validated nongeneric free/test callable from
 owning IR into deterministic target-neutral basic blocks with SSA temporaries and
 block parameters over explicit local storage, whole-local copy/move/store,
 conditional cleanup/storage death, scalar operations, `if`, short-circuit Boolean
-control, return, panic, lexical regions, `require`, and proof-backed unreachable.
+control, return, panic, lexical regions, `require`, proof-backed unreachable, and
+statement-form `loop`/`while` with nearest-loop break/continue.
 Nongeneric direct function calls use an abstract invoke terminator with distinct
 normal and failure-cleanup edges; ordered operands distinguish owned values from
 call-scoped whole-local shared and exclusive borrows, with exclusive writeback only
 on normal completion. `sol_mir_validate` independently checks arena ownership,
 edges, invoke result transport and argument provenance, source/type/control-event
 relations, exact parameter activation, local initialization/moves, lexical cleanup
-order, and balanced regions. Unsupported constructs fail transactionally. P1a.2 is
-not connected to compilation sessions or execution and does not yet cover loops,
+order, balanced regions, loop source/parent identity, condition/body/exit edges,
+natural backedges, and cleanup at transfer boundaries. Loop obligations are retained
+as proof-only metadata and not executed. Unsupported constructs fail transactionally.
+P1a.3a is not connected to compilation sessions or execution and does not yet cover
 patterns, propagation, aggregates, projected places, dynamic/method/capability
 calls, handlers, contracts, generic lowering, representation, runtime ABI, or a
 backend.

@@ -4,11 +4,18 @@
 #include <string.h>
 
 typedef struct Scope Scope;
+typedef struct LoopContext LoopContext;
 
 struct Scope {
     const Scope *parent;
     SolIrSlice cleanup;
     SolIrStatementId region;
+};
+
+struct LoopContext {
+    const LoopContext *parent;
+    SolMirLoopId id;
+    const Scope *boundary;
 };
 
 typedef struct {
@@ -23,6 +30,7 @@ typedef struct {
     SolDiagnostics *diagnostics;
     SolMirBlockId current;
     size_t next_block_order;
+    const LoopContext *loop;
     bool unsupported;
     bool failed;
 } MirLowerer;
@@ -75,6 +83,7 @@ void sol_mir_free(SolMir *mir) {
     free(mir->parameter_values);
     free(mir->edge_values);
     free(mir->call_arguments);
+    free(mir->loops);
     sol_mir_init(mir);
 }
 
@@ -89,7 +98,8 @@ static bool mir_empty(const SolMir *mir) {
         && mir->parameter_value_capacity == 0 && mir->edge_values == NULL
         && mir->edge_value_count == 0 && mir->edge_value_capacity == 0
         && mir->call_arguments == NULL && mir->call_argument_count == 0
-        && mir->call_argument_capacity == 0;
+        && mir->call_argument_capacity == 0 && mir->loops == NULL
+        && mir->loop_count == 0 && mir->loop_capacity == 0;
 }
 
 static SolMirBlockId mir_append_block(MirLowerer *lowerer, SolSpan span) {
@@ -232,6 +242,19 @@ static bool mir_append_call_argument(MirLowerer *lowerer,
     return true;
 }
 
+static SolMirLoopId mir_append_loop(MirLowerer *lowerer,
+    SolMirLoop loop) {
+    SolMir *mir = lowerer->mir;
+    if (!mir_grow((void **)&mir->loops, &mir->loop_capacity,
+        mir->loop_count, sizeof(*mir->loops))) {
+        lowerer->failed = true;
+        return SOL_MIR_NONE;
+    }
+    SolMirLoopId id = mir->loop_count++;
+    mir->loops[id] = loop;
+    return id;
+}
+
 static bool mir_set_goto(MirLowerer *lowerer, SolMirBlockId source,
     SolMirBlockId target, SolMirValueId value, bool has_value, SolSpan span) {
     if (source >= lowerer->mir->block_count
@@ -358,6 +381,27 @@ static bool mir_emit_exit_cleanup(MirLowerer *lowerer,
                 local, span)
             || !mir_emit_local(lowerer, SOL_MIR_INST_STORAGE_DEAD,
                 local, span)) return false;
+    }
+    return true;
+}
+
+static bool mir_emit_cleanup_to(MirLowerer *lowerer,
+    const Scope *scope, const Scope *boundary, SolSpan span) {
+    const Scope *current = scope;
+    while (current != boundary) {
+        if (current == NULL
+            || !mir_emit_cleanup_slice(lowerer, current->cleanup, span)) {
+            return false;
+        }
+        if (current->region != SOL_IR_NONE
+            && mir_append_instruction(lowerer, (SolMirInstruction){
+                .kind = SOL_MIR_INST_REGION_EXIT,
+                .type = SOL_IR_NONE,
+                .source_expression = SOL_IR_NONE,
+                .span = span,
+                .as.region = current->region,
+            }, false) == SOL_MIR_NONE) return false;
+        current = current->parent;
     }
     return true;
 }
@@ -643,6 +687,148 @@ static bool mir_set_panic(MirLowerer *lowerer, SolMirValueId value,
     return true;
 }
 
+static SolMirBlockId mir_ensure_loop_exit(MirLowerer *lowerer,
+    SolMirLoopId loop, SolSpan span) {
+    if (loop >= lowerer->mir->loop_count) {
+        lowerer->failed = true;
+        return SOL_MIR_NONE;
+    }
+    if (lowerer->mir->loops[loop].exit == SOL_MIR_NONE) {
+        lowerer->mir->loops[loop].exit = mir_append_block(lowerer, span);
+    }
+    return lowerer->mir->loops[loop].exit;
+}
+
+static bool mir_set_loop_transfer(MirLowerer *lowerer,
+    SolIrStatementId statement, bool is_break, const Scope *scope,
+    SolSpan span) {
+    if (lowerer->loop == NULL || lowerer->current >= lowerer->mir->block_count
+        || lowerer->mir->blocks[lowerer->current].terminator.kind
+            != SOL_MIR_TERM_INVALID
+        || !mir_emit_cleanup_to(lowerer, scope,
+            lowerer->loop->boundary, span)) return false;
+    SolMirBlockId target = is_break
+        ? mir_ensure_loop_exit(lowerer, lowerer->loop->id, span)
+        : lowerer->mir->loops[lowerer->loop->id].header;
+    if (target == SOL_MIR_NONE) return false;
+    SolMirSlice arguments = {lowerer->mir->edge_value_count, 0};
+    lowerer->mir->blocks[lowerer->current].terminator = (SolMirTerminator){
+        .kind = is_break ? SOL_MIR_TERM_BREAK : SOL_MIR_TERM_CONTINUE,
+        .span = span,
+        .as.transfer = {
+            .statement = statement,
+            .loop = lowerer->loop->id,
+            .edge = {.block = target, .arguments = arguments},
+        },
+    };
+    return true;
+}
+
+static LoweredValue mir_lower_loop_statement(MirLowerer *lowerer,
+    SolIrStatementId statement_id, const SolIrStatement *statement,
+    const Scope *scope) {
+    bool is_while = statement->kind == SOL_IR_STATEMENT_WHILE;
+    SolMirBlockId preheader = lowerer->current;
+    SolMirBlockId header = mir_append_block(lowerer, statement->span);
+    SolMirLoopId loop = mir_append_loop(lowerer, (SolMirLoop){
+        .statement = statement_id,
+        .parent = lowerer->loop == NULL ? SOL_MIR_NONE : lowerer->loop->id,
+        .preheader = preheader,
+        .header = header,
+        .condition = is_while ? SOL_MIR_NONE : header,
+        .body = SOL_MIR_NONE,
+        .backedge = SOL_MIR_NONE,
+        .exit = SOL_MIR_NONE,
+        .obligations = statement->loop_obligations,
+        .span = statement->span,
+    });
+    if (header == SOL_MIR_NONE || loop == SOL_MIR_NONE
+        || !mir_set_goto(lowerer, preheader, header, SOL_MIR_NONE, false,
+            statement->span)
+        || !mir_start_block(lowerer, header)) return mir_failure(lowerer);
+    LoopContext context = {
+        .parent = lowerer->loop,
+        .id = loop,
+        .boundary = scope,
+    };
+    const LoopContext *saved_loop = lowerer->loop;
+    lowerer->loop = &context;
+    if (is_while) {
+        LoweredValue condition = mir_lower_expression(lowerer,
+            statement->condition, scope);
+        if (condition.reachable) {
+            SolMirBlockId condition_end = lowerer->current;
+            lowerer->mir->loops[loop].condition = condition_end;
+            SolMirBlockId body = mir_append_block(lowerer,
+                lowerer->ir->expressions[statement->expression].span);
+            SolMirBlockId exit = mir_ensure_loop_exit(lowerer, loop,
+                statement->span);
+            lowerer->mir->loops[loop].body = body;
+            if (body == SOL_MIR_NONE || exit == SOL_MIR_NONE
+                || !mir_set_branch(lowerer, condition_end, condition.value,
+                    body, exit, statement->span)
+                || !mir_start_block(lowerer, body)) {
+                lowerer->loop = saved_loop;
+                return mir_failure(lowerer);
+            }
+            LoweredValue body_value = mir_lower_expression(lowerer,
+                statement->expression, scope);
+            if (body_value.reachable) {
+                lowerer->mir->loops[loop].backedge = lowerer->current;
+                if (!mir_set_goto(lowerer, lowerer->current, header,
+                    SOL_MIR_NONE, false, statement->span)) {
+                    lowerer->loop = saved_loop;
+                    return mir_failure(lowerer);
+                }
+            }
+        }
+    } else {
+        SolMirBlockId body = mir_append_block(lowerer,
+            lowerer->ir->expressions[statement->expression].span);
+        lowerer->mir->loops[loop].body = body;
+        if (body == SOL_MIR_NONE
+            || !mir_set_goto(lowerer, header, body, SOL_MIR_NONE, false,
+                statement->span)
+            || !mir_start_block(lowerer, body)) {
+            lowerer->loop = saved_loop;
+            return mir_failure(lowerer);
+        }
+        LoweredValue body_value = mir_lower_expression(lowerer,
+            statement->expression, scope);
+        if (body_value.reachable) {
+            lowerer->mir->loops[loop].backedge = lowerer->current;
+            if (!mir_set_goto(lowerer, lowerer->current, header,
+                SOL_MIR_NONE, false, statement->span)) {
+                lowerer->loop = saved_loop;
+                return mir_failure(lowerer);
+            }
+        }
+    }
+    lowerer->loop = saved_loop;
+    SolMirBlockId exit = lowerer->mir->loops[loop].exit;
+    if (exit == SOL_MIR_NONE) {
+        lowerer->current = SOL_MIR_NONE;
+        return mir_unreachable();
+    }
+    if (!mir_start_block(lowerer, exit)) return mir_failure(lowerer);
+    SolIrTypeId unit = SOL_IR_NONE;
+    for (size_t type = 0; type < lowerer->ir->type_count; ++type) {
+        if (lowerer->ir->types[type].kind == SOL_IR_TYPE_UNIT) {
+            unit = type;
+            break;
+        }
+    }
+    if (unit == SOL_IR_NONE) return mir_failure(lowerer);
+    SolMirValueId value = mir_instruction_result(lowerer, (SolMirInstruction){
+        .kind = SOL_MIR_INST_CONST_UNIT,
+        .type = unit,
+        .source_expression = SOL_IR_NONE,
+        .span = statement->span,
+    });
+    return value == SOL_MIR_NONE ? mir_failure(lowerer)
+        : (LoweredValue){.reachable = true, .value = value};
+}
+
 static LoweredValue mir_lower_block(MirLowerer *lowerer,
     const SolIrExpression *expression, const Scope *parent) {
     Scope scope = {
@@ -743,6 +929,17 @@ static LoweredValue mir_lower_block(MirLowerer *lowerer,
                 }
                 return mir_unreachable();
             }
+            case SOL_IR_STATEMENT_LOOP:
+            case SOL_IR_STATEMENT_WHILE:
+                last = mir_lower_loop_statement(lowerer, statement_id,
+                    statement, &scope);
+                break;
+            case SOL_IR_STATEMENT_BREAK:
+            case SOL_IR_STATEMENT_CONTINUE:
+                if (!mir_set_loop_transfer(lowerer, statement_id,
+                    statement->kind == SOL_IR_STATEMENT_BREAK,
+                    &scope, statement->span)) return mir_failure(lowerer);
+                return mir_unreachable();
             case SOL_IR_STATEMENT_REGION: {
                 if (mir_append_instruction(lowerer, (SolMirInstruction){
                     .kind = SOL_MIR_INST_REGION_ENTER,
@@ -1003,7 +1200,87 @@ static bool mir_expression_contains_statement(const SolIr *ir,
     }
 }
 
-static bool mir_collect_source_statements(const SolIr *ir,
+static bool mir_find_statement_loop_parent(const SolIr *ir,
+    SolIrExpressionId expression_id, SolIrStatementId sought,
+    SolIrStatementId active_loop, SolIrStatementId *parent, size_t depth) {
+    if (expression_id >= ir->expression_count || depth > ir->expression_count) {
+        return false;
+    }
+    const SolIrExpression *expression = &ir->expressions[expression_id];
+    switch (expression->kind) {
+        case SOL_IR_EXPR_UNARY:
+            return mir_find_statement_loop_parent(ir,
+                expression->as.unary.operand, sought, active_loop, parent,
+                depth + 1);
+        case SOL_IR_EXPR_BINARY:
+            return mir_find_statement_loop_parent(ir,
+                    expression->as.binary.left, sought, active_loop, parent,
+                    depth + 1)
+                || mir_find_statement_loop_parent(ir,
+                    expression->as.binary.right, sought, active_loop, parent,
+                    depth + 1);
+        case SOL_IR_EXPR_CALL:
+            for (size_t index = 0;
+                index < expression->as.call.operands.count; ++index) {
+                if (mir_find_statement_loop_parent(ir, ir->operands[
+                        expression->as.call.operands.offset + index].value,
+                    sought, active_loop, parent, depth + 1)) return true;
+            }
+            return false;
+        case SOL_IR_EXPR_IF:
+            return mir_find_statement_loop_parent(ir,
+                    expression->as.if_expr.condition, sought, active_loop,
+                    parent, depth + 1)
+                || mir_find_statement_loop_parent(ir,
+                    expression->as.if_expr.then_branch, sought, active_loop,
+                    parent, depth + 1)
+                || mir_find_statement_loop_parent(ir,
+                    expression->as.if_expr.else_branch, sought, active_loop,
+                    parent, depth + 1);
+        case SOL_IR_EXPR_BLOCK:
+            for (size_t index = 0;
+                index < expression->as.block.statements.count; ++index) {
+                SolIrStatementId statement_id = ir->statement_ids[
+                    expression->as.block.statements.offset + index];
+                if (statement_id == sought) {
+                    *parent = active_loop;
+                    return true;
+                }
+                const SolIrStatement *statement = &ir->statements[statement_id];
+                SolIrStatementId nested_loop
+                    = statement->kind == SOL_IR_STATEMENT_LOOP
+                        || statement->kind == SOL_IR_STATEMENT_WHILE
+                    ? statement_id : active_loop;
+                if (statement->condition != SOL_IR_NONE
+                    && mir_find_statement_loop_parent(ir,
+                        statement->condition, sought, nested_loop, parent,
+                        depth + 1)) return true;
+                if (statement->expression != SOL_IR_NONE
+                    && mir_find_statement_loop_parent(ir,
+                        statement->expression, sought, nested_loop, parent,
+                        depth + 1)) return true;
+            }
+            return false;
+        default:
+            return false;
+    }
+}
+
+static bool mir_source_loop_falls_through(const SolIr *ir,
+    const SolMir *mir, SolIrStatementId statement) {
+    if (ir->statements[statement].kind == SOL_IR_STATEMENT_WHILE
+        && mir_type_is(ir,
+            ir->expressions[ir->statements[statement].condition].type,
+            SOL_IR_TYPE_BOOL)) return true;
+    for (size_t loop = 0; loop < mir->loop_count; ++loop) {
+        if (mir->loops[loop].statement == statement) {
+            return mir->loops[loop].exit != SOL_MIR_NONE;
+        }
+    }
+    return false;
+}
+
+static bool mir_collect_source_statements(const SolIr *ir, const SolMir *mir,
     SolIrExpressionId expression_id, SolIrStatementId *statements,
     size_t *count, size_t depth) {
     if (expression_id >= ir->expression_count || depth > ir->expression_count) {
@@ -1012,29 +1289,40 @@ static bool mir_collect_source_statements(const SolIr *ir,
     const SolIrExpression *expression = &ir->expressions[expression_id];
     switch (expression->kind) {
         case SOL_IR_EXPR_UNARY:
-            return mir_collect_source_statements(ir, expression->as.unary.operand,
-                statements, count, depth + 1);
+            return mir_collect_source_statements(ir, mir,
+                expression->as.unary.operand, statements, count, depth + 1);
         case SOL_IR_EXPR_BINARY:
-            return mir_collect_source_statements(ir, expression->as.binary.left,
-                    statements, count, depth + 1)
-                && mir_collect_source_statements(ir, expression->as.binary.right,
-                    statements, count, depth + 1);
+            if (!mir_collect_source_statements(ir, mir,
+                expression->as.binary.left, statements, count, depth + 1)) {
+                return false;
+            }
+            return mir_type_is(ir,
+                    ir->expressions[expression->as.binary.left].type,
+                    SOL_IR_TYPE_NEVER)
+                || mir_collect_source_statements(ir, mir,
+                    expression->as.binary.right, statements, count, depth + 1);
         case SOL_IR_EXPR_CALL:
             for (size_t index = 0;
                 index < expression->as.call.operands.count; ++index) {
-                if (!mir_collect_source_statements(ir, ir->operands[
-                        expression->as.call.operands.offset + index].value,
+                SolIrExpressionId operand = ir->operands[
+                    expression->as.call.operands.offset + index].value;
+                if (!mir_collect_source_statements(ir, mir, operand,
                     statements, count, depth + 1)) return false;
+                if (mir_type_is(ir, ir->expressions[operand].type,
+                    SOL_IR_TYPE_NEVER)) return true;
             }
             return true;
         case SOL_IR_EXPR_IF:
-            return mir_collect_source_statements(ir,
+            if (!mir_collect_source_statements(ir, mir,
                     expression->as.if_expr.condition, statements, count,
-                    depth + 1)
-                && mir_collect_source_statements(ir,
+                    depth + 1)) return false;
+            if (mir_type_is(ir,
+                ir->expressions[expression->as.if_expr.condition].type,
+                SOL_IR_TYPE_NEVER)) return true;
+            return mir_collect_source_statements(ir, mir,
                     expression->as.if_expr.then_branch, statements, count,
                     depth + 1)
-                && mir_collect_source_statements(ir,
+                && mir_collect_source_statements(ir, mir,
                     expression->as.if_expr.else_branch, statements, count,
                     depth + 1);
         case SOL_IR_EXPR_BLOCK:
@@ -1046,14 +1334,39 @@ static bool mir_collect_source_statements(const SolIr *ir,
                 statements[(*count)++] = statement_id;
                 const SolIrStatement *statement = &ir->statements[statement_id];
                 if (statement->target != SOL_IR_NONE
-                    && !mir_collect_source_statements(ir, statement->target,
+                    && !mir_collect_source_statements(ir, mir,
+                        statement->target,
                         statements, count, depth + 1)) return false;
                 if (statement->condition != SOL_IR_NONE
-                    && !mir_collect_source_statements(ir, statement->condition,
+                    && !mir_collect_source_statements(ir, mir,
+                        statement->condition,
                         statements, count, depth + 1)) return false;
-                if (statement->expression != SOL_IR_NONE
-                    && !mir_collect_source_statements(ir, statement->expression,
-                        statements, count, depth + 1)) return false;
+                bool condition_terminates = statement->condition != SOL_IR_NONE
+                    && mir_type_is(ir,
+                        ir->expressions[statement->condition].type,
+                        SOL_IR_TYPE_NEVER);
+                if (!condition_terminates
+                    && statement->expression != SOL_IR_NONE
+                    && !mir_collect_source_statements(ir, mir,
+                        statement->expression, statements, count,
+                        depth + 1)) return false;
+                bool terminal = statement->kind == SOL_IR_STATEMENT_RETURN
+                    || statement->kind == SOL_IR_STATEMENT_PANIC
+                    || statement->kind == SOL_IR_STATEMENT_UNREACHABLE
+                    || statement->kind == SOL_IR_STATEMENT_BREAK
+                    || statement->kind == SOL_IR_STATEMENT_CONTINUE;
+                if (statement->kind == SOL_IR_STATEMENT_LOOP
+                    || statement->kind == SOL_IR_STATEMENT_WHILE) {
+                    terminal = !mir_source_loop_falls_through(ir, mir,
+                        statement_id);
+                } else if (statement->kind != SOL_IR_STATEMENT_REQUIRE
+                    && statement->expression != SOL_IR_NONE
+                    && mir_type_is(ir,
+                        ir->expressions[statement->expression].type,
+                        SOL_IR_TYPE_NEVER)) {
+                    terminal = true;
+                }
+                if (terminal) break;
             }
             return true;
         default:
@@ -1067,6 +1380,30 @@ static SolIrStatementId mir_next_source_statement(const SolIr *ir,
     while (*cursor < count) {
         SolIrStatementId statement = statements[(*cursor)++];
         if (ir->statements[statement].kind == kind) return statement;
+    }
+    return SOL_IR_NONE;
+}
+
+static SolIrStatementId mir_next_source_loop(const SolIr *ir,
+    const SolIrStatementId *statements, size_t count, size_t *cursor) {
+    while (*cursor < count) {
+        SolIrStatementId statement = statements[(*cursor)++];
+        if (ir->statements[statement].kind == SOL_IR_STATEMENT_LOOP
+            || ir->statements[statement].kind == SOL_IR_STATEMENT_WHILE) {
+            return statement;
+        }
+    }
+    return SOL_IR_NONE;
+}
+
+static SolIrStatementId mir_next_source_transfer(const SolIr *ir,
+    const SolIrStatementId *statements, size_t count, size_t *cursor) {
+    while (*cursor < count) {
+        SolIrStatementId statement = statements[(*cursor)++];
+        if (ir->statements[statement].kind == SOL_IR_STATEMENT_BREAK
+            || ir->statements[statement].kind == SOL_IR_STATEMENT_CONTINUE) {
+            return statement;
+        }
     }
     return SOL_IR_NONE;
 }
@@ -1152,6 +1489,9 @@ static bool mir_validate_arena_ownership(const SolMir *mir,
                 SolMirValueId result = terminator->as.invoke.result;
                 valid = result < mir->value_count && ++values[result] == 1;
             }
+        } else if (terminator->kind == SOL_MIR_TERM_BREAK
+            || terminator->kind == SOL_MIR_TERM_CONTINUE) {
+            slices[count++] = terminator->as.transfer.edge.arguments;
         }
         for (size_t slice = 0; valid && slice < count; ++slice) {
             for (size_t index = 0; valid && index < slices[slice].count; ++index) {
@@ -1332,6 +1672,9 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
                     targets[target_count++] = term->as.invoke.normal_edge.block;
                 }
                 targets[target_count++] = term->as.invoke.failure_edge.block;
+            } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
+                || term->kind == SOL_MIR_TERM_CONTINUE)) {
+                targets[target_count++] = term->as.transfer.edge.block;
             }
             for (size_t index = 0; valid && index < target_count; ++index) {
                 SolMirBlockId target = targets[index];
@@ -1429,6 +1772,9 @@ static bool mir_validate_regions(const SolIr *ir, const SolMir *mir,
                 targets[target_count++] = term->as.invoke.normal_edge.block;
             }
             targets[target_count++] = term->as.invoke.failure_edge.block;
+        } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
+            || term->kind == SOL_MIR_TERM_CONTINUE)) {
+            targets[target_count++] = term->as.transfer.edge.block;
         }
         for (size_t index = 0; valid && index < target_count; ++index) {
             SolMirBlockId target = targets[index];
@@ -1544,6 +1890,9 @@ static bool mir_validate_storage_order(const SolIr *ir, const SolMir *mir,
                 targets[target_count++] = term->as.invoke.normal_edge.block;
             }
             targets[target_count++] = term->as.invoke.failure_edge.block;
+        } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
+            || term->kind == SOL_MIR_TERM_CONTINUE)) {
+            targets[target_count++] = term->as.transfer.edge.block;
         }
         for (size_t index = 0; valid && index < target_count; ++index) {
             SolMirBlockId target = targets[index];
@@ -1584,7 +1933,7 @@ static bool mir_validate_source_events(const SolIr *ir, const SolMir *mir,
             "MIR source-event validation allocation failed");
     }
     size_t statement_count = 0;
-    bool valid = mir_collect_source_statements(ir,
+    bool valid = mir_collect_source_statements(ir, mir,
         ir->callables[mir->callable].body, statements, &statement_count, 0);
     for (size_t block = 0; valid && block < mir->block_count; ++block) {
         size_t order = mir->blocks[block].order;
@@ -1616,6 +1965,15 @@ static bool mir_validate_source_events(const SolIr *ir, const SolMir *mir,
             &cursor, SOL_IR_STATEMENT_REGION) == SOL_IR_NONE;
     }
     cursor = 0;
+    for (size_t loop = 0; valid && loop < mir->loop_count; ++loop) {
+        valid = mir_next_source_loop(ir, statements, statement_count, &cursor)
+            == mir->loops[loop].statement;
+    }
+    if (valid) {
+        valid = mir_next_source_loop(ir, statements, statement_count, &cursor)
+            == SOL_IR_NONE;
+    }
+    cursor = 0;
     for (size_t order = 0; valid && order < mir->block_count; ++order) {
         SolMirBlockId block = SOL_MIR_NONE;
         for (size_t candidate = 0; candidate < mir->block_count; ++candidate) {
@@ -1635,6 +1993,27 @@ static bool mir_validate_source_events(const SolIr *ir, const SolMir *mir,
         valid = mir_next_source_statement(ir, statements, statement_count,
             &cursor, SOL_IR_STATEMENT_UNREACHABLE) == SOL_IR_NONE;
     }
+    cursor = 0;
+    for (size_t order = 0; valid && order < mir->block_count; ++order) {
+        SolMirBlockId block = SOL_MIR_NONE;
+        for (size_t candidate = 0; candidate < mir->block_count; ++candidate) {
+            if (mir->blocks[candidate].order == order) {
+                block = candidate;
+                break;
+            }
+        }
+        if (block == SOL_MIR_NONE
+            || (mir->blocks[block].terminator.kind != SOL_MIR_TERM_BREAK
+                && mir->blocks[block].terminator.kind
+                    != SOL_MIR_TERM_CONTINUE)) continue;
+        valid = mir_next_source_transfer(ir, statements, statement_count,
+                &cursor)
+            == mir->blocks[block].terminator.as.transfer.statement;
+    }
+    if (valid) {
+        valid = mir_next_source_transfer(ir, statements, statement_count,
+            &cursor) == SOL_IR_NONE;
+    }
     free(statements);
     free(orders);
     return valid || mir_error(diagnostics,
@@ -1648,24 +2027,151 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         || mir->callable >= ir->callable_count
         || mir->entry >= mir->block_count
         || mir->block_count > SIZE_MAX / sizeof(SolMirBlockId)
+        || mir->loop_count > SIZE_MAX / sizeof(SolMirLoop)
         || mir->block_count > mir->block_capacity
         || mir->instruction_count > mir->instruction_capacity
         || mir->value_count > mir->value_capacity
         || mir->parameter_value_count > mir->parameter_value_capacity
         || mir->edge_value_count > mir->edge_value_capacity
         || mir->call_argument_count > mir->call_argument_capacity
+        || mir->loop_count > mir->loop_capacity
         || (mir->block_count != 0 && mir->blocks == NULL)
         || (mir->instruction_count != 0 && mir->instructions == NULL)
         || (mir->value_count != 0 && mir->values == NULL)
         || (mir->parameter_value_count != 0 && mir->parameter_values == NULL)
         || (mir->edge_value_count != 0 && mir->edge_values == NULL)
-        || (mir->call_argument_count != 0 && mir->call_arguments == NULL)) {
+        || (mir->call_argument_count != 0 && mir->call_arguments == NULL)
+        || (mir->loop_count != 0 && mir->loops == NULL)) {
         return mir_error(diagnostics, (SolSpan){0}, "malformed MIR arena header");
     }
     const SolIrCallable *callable = &ir->callables[mir->callable];
     if (mir->blocks[mir->entry].parameters.count != 0) {
         return mir_error(diagnostics, callable->span,
             "MIR entry block cannot have SSA parameters");
+    }
+    for (size_t loop_id = 0; loop_id < mir->loop_count; ++loop_id) {
+        const SolMirLoop *loop = &mir->loops[loop_id];
+        const SolIrStatement *source_loop = loop->statement < ir->statement_count
+            ? &ir->statements[loop->statement] : NULL;
+        SolIrStatementId parent_statement = SOL_IR_NONE;
+        bool found_loop = mir_find_statement_loop_parent(ir, callable->body,
+            loop->statement, SOL_IR_NONE, &parent_statement, 0);
+        SolMirLoopId expected_parent = SOL_MIR_NONE;
+        if (parent_statement != SOL_IR_NONE) {
+            for (size_t previous = 0; previous < loop_id; ++previous) {
+                if (mir->loops[previous].statement == parent_statement) {
+                    expected_parent = previous;
+                    break;
+                }
+            }
+        }
+        bool is_while = source_loop != NULL
+            && source_loop->kind == SOL_IR_STATEMENT_WHILE;
+        if (source_loop == NULL
+            || (source_loop->kind != SOL_IR_STATEMENT_LOOP && !is_while)
+            || !mir_expression_contains_statement(ir, callable->body,
+                loop->statement, 0)
+            || !found_loop
+            || (parent_statement != SOL_IR_NONE
+                && expected_parent == SOL_MIR_NONE)
+            || loop->parent != expected_parent
+            || loop->preheader >= mir->block_count
+            || loop->header >= mir->block_count
+            || loop->header == mir->entry
+            || loop->preheader == loop->header
+            || mir->blocks[loop->preheader].terminator.kind
+                != SOL_MIR_TERM_GOTO
+            || mir->blocks[loop->preheader].terminator.as.go_to.block
+                != loop->header
+            || mir->blocks[loop->preheader].terminator.as.go_to.arguments.count
+                != 0
+            || mir->blocks[loop->header].parameters.count != 0
+            || (loop->body != SOL_MIR_NONE
+                && (loop->body >= mir->block_count
+                    || loop->body == loop->preheader
+                    || loop->body == loop->header
+                    || mir->blocks[loop->body].parameters.count != 0))
+            || (loop->body == SOL_MIR_NONE
+                ? loop->backedge != SOL_MIR_NONE
+                : (mir_type_is(ir,
+                        ir->expressions[source_loop->expression].type,
+                        SOL_IR_TYPE_UNIT)
+                    ? loop->backedge >= mir->block_count
+                        || loop->backedge == loop->preheader
+                        || loop->backedge == loop->header
+                        || loop->backedge == loop->exit
+                        || mir->blocks[loop->backedge].terminator.kind
+                            != SOL_MIR_TERM_GOTO
+                        || mir->blocks[loop->backedge].terminator.as.go_to.block
+                            != loop->header
+                        || mir->blocks[loop->backedge].terminator.as.go_to
+                            .arguments.count != 0
+                    : loop->backedge != SOL_MIR_NONE))
+            || (loop->exit != SOL_MIR_NONE
+                && (loop->exit >= mir->block_count
+                    || loop->exit == loop->preheader
+                    || loop->exit == loop->header
+                    || loop->exit == loop->body
+                    || mir->blocks[loop->exit].parameters.count != 0))
+            || loop->obligations.offset
+                != source_loop->loop_obligations.offset
+            || loop->obligations.count
+                != source_loop->loop_obligations.count
+            || loop->span.start != source_loop->span.start
+            || loop->span.end != source_loop->span.end
+            || (!is_while
+                && loop->body == SOL_MIR_NONE)
+            || (!is_while
+                && (loop->condition != loop->header
+                    || mir->blocks[loop->header].terminator.kind
+                        != SOL_MIR_TERM_GOTO
+                    || mir->blocks[loop->header].terminator.as.go_to.block
+                        != loop->body
+                    || mir->blocks[loop->header].terminator.as.go_to.arguments.count
+                        != 0))
+            || (is_while
+                && mir_type_is(ir,
+                    ir->expressions[source_loop->condition].type,
+                    SOL_IR_TYPE_BOOL)
+                && (loop->condition >= mir->block_count
+                    || loop->body == SOL_MIR_NONE
+                    || loop->exit == SOL_MIR_NONE
+                    || loop->condition == loop->body
+                    || loop->condition == loop->exit
+                    || loop->body == loop->exit
+                    || mir->blocks[loop->condition].terminator.kind
+                        != SOL_MIR_TERM_BRANCH
+                    || mir->blocks[loop->condition].terminator.as.branch
+                        .true_edge.block != loop->body
+                    || mir->blocks[loop->condition].terminator.as.branch
+                        .false_edge.block != loop->exit
+                    || mir->blocks[loop->condition].terminator.as.branch
+                        .true_edge.arguments.count != 0
+                    || mir->blocks[loop->condition].terminator.as.branch
+                        .false_edge.arguments.count != 0))
+            || (is_while
+                && mir_type_is(ir, ir->expressions[source_loop->condition].type,
+                    SOL_IR_TYPE_NEVER)
+                && (loop->condition != SOL_MIR_NONE
+                    || loop->body != SOL_MIR_NONE))) {
+            return mir_error(diagnostics, callable->span,
+                "malformed MIR loop metadata");
+        }
+        for (size_t previous = 0; previous < loop_id; ++previous) {
+            if (mir->loops[previous].statement == loop->statement) {
+                return mir_error(diagnostics, callable->span,
+                    "MIR loop source statement is duplicated");
+            }
+        }
+        for (size_t index = 0; index < loop->obligations.count; ++index) {
+            const SolIrLoopObligation *obligation = &ir->loop_obligations[
+                loop->obligations.offset + index];
+            if (obligation->loop_statement != loop->statement
+                || obligation->callable != mir->callable) {
+                return mir_error(diagnostics, obligation->span,
+                    "MIR loop obligation metadata is inconsistent");
+            }
+        }
     }
     unsigned char *instruction_owners = mir->instruction_count == 0 ? NULL
         : calloc(mir->instruction_count, 1);
@@ -1685,7 +2191,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || !mir_slice_valid(block->parameters, mir->parameter_value_count)
             || !mir_slice_valid(block->instructions, mir->instruction_count)
             || block->terminator.kind <= SOL_MIR_TERM_INVALID
-            || block->terminator.kind > SOL_MIR_TERM_UNREACHABLE
+            || block->terminator.kind > SOL_MIR_TERM_CONTINUE
             || !mir_span_valid(ir, block->terminator.span)) {
             free(instruction_owners);
             free(parameter_owners);
@@ -1946,6 +2452,39 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 }
                 break;
             }
+            case SOL_MIR_TERM_BREAK:
+            case SOL_MIR_TERM_CONTINUE: {
+                const SolMirTerminator *term = &block->terminator;
+                bool is_break = term->kind == SOL_MIR_TERM_BREAK;
+                SolMirLoopId loop = term->as.transfer.loop;
+                SolIrStatementId statement = term->as.transfer.statement;
+                SolIrStatementId parent_statement = SOL_IR_NONE;
+                bool found_transfer = mir_find_statement_loop_parent(ir,
+                    callable->body, statement, SOL_IR_NONE,
+                    &parent_statement, 0);
+                bool valid = loop < mir->loop_count
+                    && statement < ir->statement_count
+                    && ir->statements[statement].kind == (is_break
+                        ? SOL_IR_STATEMENT_BREAK : SOL_IR_STATEMENT_CONTINUE)
+                    && term->span.start == ir->statements[statement].span.start
+                    && term->span.end == ir->statements[statement].span.end
+                    && mir_expression_contains_statement(ir, callable->body,
+                        statement, 0)
+                    && found_transfer
+                    && mir->loops[loop].statement == parent_statement
+                    && term->as.transfer.edge.arguments.count == 0
+                    && mir_validate_edge(mir, block_id,
+                        &term->as.transfer.edge, SOL_MIR_NONE)
+                    && term->as.transfer.edge.block == (is_break
+                        ? mir->loops[loop].exit : mir->loops[loop].header);
+                if (!valid) {
+                    free(instruction_owners);
+                    free(parameter_owners);
+                    return mir_error(diagnostics, term->span,
+                        "malformed MIR loop transfer");
+                }
+                break;
+            }
             case SOL_MIR_TERM_INVALID: break;
         }
     }
@@ -2187,6 +2726,9 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 ++predecessors[term->as.invoke.normal_edge.block];
             }
             ++predecessors[term->as.invoke.failure_edge.block];
+        } else if (term->kind == SOL_MIR_TERM_BREAK
+            || term->kind == SOL_MIR_TERM_CONTINUE) {
+            ++predecessors[term->as.transfer.edge.block];
         }
     }
     size_t first = 0;
@@ -2207,6 +2749,9 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 targets[target_count++] = term->as.invoke.normal_edge.block;
             }
             targets[target_count++] = term->as.invoke.failure_edge.block;
+        } else if (term->kind == SOL_MIR_TERM_BREAK
+            || term->kind == SOL_MIR_TERM_CONTINUE) {
+            targets[target_count++] = term->as.transfer.edge.block;
         }
         for (size_t index = 0; index < target_count; ++index) {
             if (!reachable[targets[index]]) {

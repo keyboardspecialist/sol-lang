@@ -101,6 +101,7 @@ static bool mir_equal(const SolMir *left, const SolMir *right) {
         && left->parameter_value_count == right->parameter_value_count
         && left->edge_value_count == right->edge_value_count
         && left->call_argument_count == right->call_argument_count
+        && left->loop_count == right->loop_count
         && bytes_equal(left->blocks, right->blocks,
             left->block_count, sizeof(*left->blocks))
         && bytes_equal(left->instructions, right->instructions,
@@ -112,7 +113,9 @@ static bool mir_equal(const SolMir *left, const SolMir *right) {
         && bytes_equal(left->edge_values, right->edge_values,
             left->edge_value_count, sizeof(*left->edge_values))
         && bytes_equal(left->call_arguments, right->call_arguments,
-            left->call_argument_count, sizeof(*left->call_arguments));
+            left->call_argument_count, sizeof(*left->call_arguments))
+        && bytes_equal(left->loops, right->loops,
+            left->loop_count, sizeof(*left->loops));
 }
 
 static void test_initial_lowering_and_determinism(void) {
@@ -713,11 +716,275 @@ static void test_validator_rejects_corruption(void) {
     free_compilation(&compilation);
 }
 
+static void test_loop_control_lowering(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_loops\n"
+        "function counted(limit: Int64) -> Int64 { var n = 0 "
+        "while n < limit decreases { limit - n } { let item = \"x\" "
+        "n = n + 1 if n == 2 { continue } else { () } } return n }\n"
+        "function transfers(flag: Bool) -> Int64 effects { diverge } { "
+        "var n = 0 loop { region inner { if flag { break } else { "
+        "n = n + 1 continue } } } return n }\n"
+        "function nested() -> Int64 { loop { loop { break } break } return 1 }\n"
+        "function condition_break() -> Int64 { while { break } {} return 6 }\n"
+        "function condition_continue(flag: Bool) -> Int64 effects { diverge } { "
+        "while if flag { region condition { continue } } else { false } {} "
+        "return 7 }\n"
+        "function trailing() -> Int64 { return 1 loop {} }\n"
+        "function skipped_break() -> Int64 { loop { return 2 break } }\n"
+        "function endless() -> () effects { diverge } { loop {} }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+
+    SolMir counted;
+    SolMir repeated;
+    sol_mir_init(&counted);
+    sol_mir_init(&repeated);
+    SolIrCallableId counted_id = callable(&compilation.ir, "counted");
+    CHECK(sol_mir_lower_callable(&compilation.ir, counted_id, &counted,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_lower_callable(&compilation.ir, counted_id, &repeated,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_validate(&compilation.ir, &counted, NULL));
+    CHECK(mir_equal(&counted, &repeated));
+    CHECK(counted.loop_count == 1);
+    const SolMirLoop *while_loop = &counted.loops[0];
+    CHECK(compilation.ir.statements[while_loop->statement].kind
+        == SOL_IR_STATEMENT_WHILE);
+    CHECK(while_loop->header < counted.block_count);
+    CHECK(while_loop->body < counted.block_count);
+    CHECK(while_loop->exit < counted.block_count);
+    CHECK(while_loop->obligations.count == 2);
+    bool saw_continue = false;
+    bool saw_backedge = false;
+    bool continue_cleaned_item = false;
+    SolIrDefinitionId counted_owner = compilation.ir.callables[counted_id].owner;
+    SolIrLocalId item = local(&compilation.ir, counted_owner, "item");
+    for (size_t block = 0; block < counted.block_count; ++block) {
+        const SolMirTerminator *term = &counted.blocks[block].terminator;
+        if (term->kind == SOL_MIR_TERM_CONTINUE) {
+            saw_continue = true;
+            CHECK(term->as.transfer.loop == 0);
+            CHECK(term->as.transfer.edge.block == while_loop->header);
+            SolMirSlice instructions = counted.blocks[block].instructions;
+            for (size_t index = 0; index < instructions.count; ++index) {
+                const SolMirInstruction *instruction
+                    = &counted.instructions[instructions.offset + index];
+                continue_cleaned_item = continue_cleaned_item
+                    || (instruction->kind == SOL_MIR_INST_STORAGE_DEAD
+                        && instruction->as.local == item);
+            }
+        }
+        saw_backedge = saw_backedge
+            || (term->kind == SOL_MIR_TERM_GOTO
+                && term->as.go_to.block == while_loop->header
+                && block != counted.entry);
+    }
+    CHECK(saw_continue && saw_backedge && continue_cleaned_item);
+    size_t obligation_count = counted.loops[0].obligations.count;
+    counted.loops[0].obligations.count = 0;
+    CHECK(!sol_mir_validate(&compilation.ir, &counted, NULL));
+    counted.loops[0].obligations.count = obligation_count;
+    SolMirBlockId backedge_target = counted.blocks[while_loop->backedge]
+        .terminator.as.go_to.block;
+    counted.blocks[while_loop->backedge].terminator.as.go_to.block
+        = while_loop->exit;
+    CHECK(!sol_mir_validate(&compilation.ir, &counted, NULL));
+    counted.blocks[while_loop->backedge].terminator.as.go_to.block
+        = backedge_target;
+    CHECK(sol_mir_validate(&compilation.ir, &counted, NULL));
+    sol_mir_free(&counted);
+    sol_mir_free(&repeated);
+
+    SolMir transfers;
+    sol_mir_init(&transfers);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "transfers"), &transfers,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(transfers.loop_count == 1);
+    size_t breaks = 0;
+    size_t continues = 0;
+    for (size_t block = 0; block < transfers.block_count; ++block) {
+        const SolMirTerminator *term = &transfers.blocks[block].terminator;
+        if (term->kind != SOL_MIR_TERM_BREAK
+            && term->kind != SOL_MIR_TERM_CONTINUE) continue;
+        breaks += term->kind == SOL_MIR_TERM_BREAK;
+        continues += term->kind == SOL_MIR_TERM_CONTINUE;
+        bool exited_region = false;
+        SolMirSlice instructions = transfers.blocks[block].instructions;
+        for (size_t index = 0; index < instructions.count; ++index) {
+            exited_region = exited_region
+                || transfers.instructions[instructions.offset + index].kind
+                    == SOL_MIR_INST_REGION_EXIT;
+        }
+        CHECK(exited_region);
+        CHECK(term->as.transfer.edge.block == (term->kind == SOL_MIR_TERM_BREAK
+            ? transfers.loops[0].exit : transfers.loops[0].header));
+    }
+    CHECK(breaks == 1 && continues == 1);
+    CHECK(sol_mir_validate(&compilation.ir, &transfers, NULL));
+    SolMirBlockId continue_block = SOL_MIR_NONE;
+    for (size_t block = 0; block < transfers.block_count; ++block) {
+        if (transfers.blocks[block].terminator.kind
+            == SOL_MIR_TERM_CONTINUE) {
+            continue_block = block;
+            break;
+        }
+    }
+    CHECK(continue_block != SOL_MIR_NONE);
+    SolMirTerminator saved_continue
+        = transfers.blocks[continue_block].terminator;
+    transfers.blocks[continue_block].terminator = (SolMirTerminator){
+        .kind = SOL_MIR_TERM_GOTO,
+        .span = saved_continue.span,
+        .as.go_to = saved_continue.as.transfer.edge,
+    };
+    CHECK(!sol_mir_validate(&compilation.ir, &transfers, NULL));
+    transfers.blocks[continue_block].terminator = saved_continue;
+    SolMirBlockId saved_header = transfers.loops[0].header;
+    transfers.loops[0].header = transfers.loops[0].body;
+    CHECK(!sol_mir_validate(&compilation.ir, &transfers, NULL));
+    transfers.loops[0].header = saved_header;
+    CHECK(sol_mir_validate(&compilation.ir, &transfers, NULL));
+    sol_mir_free(&transfers);
+
+    SolMir nested;
+    sol_mir_init(&nested);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "nested"), &nested,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(nested.loop_count == 2);
+    CHECK(nested.loops[0].parent == SOL_MIR_NONE);
+    CHECK(nested.loops[1].parent == 0);
+    size_t nested_breaks[2] = {0, 0};
+    for (size_t block = 0; block < nested.block_count; ++block) {
+        const SolMirTerminator *term = &nested.blocks[block].terminator;
+        if (term->kind != SOL_MIR_TERM_BREAK) continue;
+        CHECK(term->as.transfer.loop < 2);
+        ++nested_breaks[term->as.transfer.loop];
+        CHECK(term->as.transfer.edge.block
+            == nested.loops[term->as.transfer.loop].exit);
+    }
+    CHECK(nested_breaks[0] == 1 && nested_breaks[1] == 1);
+    CHECK(sol_mir_validate(&compilation.ir, &nested, NULL));
+    nested.loops[1].parent = SOL_MIR_NONE;
+    CHECK(!sol_mir_validate(&compilation.ir, &nested, NULL));
+    nested.loops[1].parent = 0;
+    SolMirBlockId inner_break_block = SOL_MIR_NONE;
+    for (size_t block = 0; block < nested.block_count; ++block) {
+        if (nested.blocks[block].terminator.kind == SOL_MIR_TERM_BREAK
+            && nested.blocks[block].terminator.as.transfer.loop == 1) {
+            inner_break_block = block;
+            break;
+        }
+    }
+    CHECK(inner_break_block != SOL_MIR_NONE);
+    SolMirTerminator *inner_break
+        = &nested.blocks[inner_break_block].terminator;
+    inner_break->as.transfer.loop = 0;
+    inner_break->as.transfer.edge.block = nested.loops[0].exit;
+    CHECK(!sol_mir_validate(&compilation.ir, &nested, NULL));
+    inner_break->as.transfer.loop = 1;
+    inner_break->as.transfer.edge.block = nested.loops[1].exit;
+    CHECK(sol_mir_validate(&compilation.ir, &nested, NULL));
+    sol_mir_free(&nested);
+
+    SolMir condition;
+    sol_mir_init(&condition);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "condition_break"), &condition,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(condition.loop_count == 1);
+    CHECK(condition.loops[0].body == SOL_MIR_NONE);
+    CHECK(condition.loops[0].exit < condition.block_count);
+    CHECK(condition.blocks[condition.loops[0].header].terminator.kind
+        == SOL_MIR_TERM_BREAK);
+    sol_mir_free(&condition);
+
+    SolMir condition_continue;
+    sol_mir_init(&condition_continue);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "condition_continue"),
+        &condition_continue,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(condition_continue.loop_count == 1);
+    bool saw_condition_continue = false;
+    for (size_t block = 0; block < condition_continue.block_count; ++block) {
+        const SolMirTerminator *term
+            = &condition_continue.blocks[block].terminator;
+        if (term->kind != SOL_MIR_TERM_CONTINUE) continue;
+        saw_condition_continue = true;
+        CHECK(term->as.transfer.edge.block
+            == condition_continue.loops[0].header);
+        bool exited_region = false;
+        SolMirSlice instructions
+            = condition_continue.blocks[block].instructions;
+        for (size_t index = 0; index < instructions.count; ++index) {
+            exited_region = exited_region
+                || condition_continue.instructions[
+                    instructions.offset + index].kind
+                    == SOL_MIR_INST_REGION_EXIT;
+        }
+        CHECK(exited_region);
+    }
+    CHECK(saw_condition_continue);
+    CHECK(sol_mir_validate(&compilation.ir, &condition_continue, NULL));
+    sol_mir_free(&condition_continue);
+
+    SolMir trailing;
+    sol_mir_init(&trailing);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "trailing"), &trailing,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(trailing.loop_count == 0);
+    CHECK(sol_mir_validate(&compilation.ir, &trailing, NULL));
+    sol_mir_free(&trailing);
+
+    SolMir skipped_break;
+    sol_mir_init(&skipped_break);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "skipped_break"), &skipped_break,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(skipped_break.loop_count == 1);
+    CHECK(skipped_break.loops[0].exit == SOL_MIR_NONE);
+    for (size_t block = 0; block < skipped_break.block_count; ++block) {
+        CHECK(skipped_break.blocks[block].terminator.kind != SOL_MIR_TERM_BREAK);
+    }
+    CHECK(sol_mir_validate(&compilation.ir, &skipped_break, NULL));
+    sol_mir_free(&skipped_break);
+
+    SolMir endless;
+    sol_mir_init(&endless);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "endless"), &endless,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(endless.loop_count == 1);
+    CHECK(endless.loops[0].exit == SOL_MIR_NONE);
+    CHECK(endless.blocks[endless.loops[0].body].terminator.kind
+        == SOL_MIR_TERM_GOTO);
+    CHECK(endless.blocks[endless.loops[0].body].terminator.as.go_to.block
+        == endless.loops[0].header);
+    CHECK(sol_mir_validate(&compilation.ir, &endless, NULL));
+    size_t loop_count = endless.loop_count;
+    size_t loop_capacity = endless.loop_capacity;
+    endless.loop_count = SIZE_MAX / sizeof(SolMirLoop) + 1;
+    endless.loop_capacity = endless.loop_count;
+    CHECK(!sol_mir_validate(&compilation.ir, &endless, NULL));
+    endless.loop_count = 0;
+    endless.loop_capacity = loop_capacity;
+    CHECK(!sol_mir_validate(&compilation.ir, &endless, NULL));
+    endless.loop_count = loop_count;
+    CHECK(sol_mir_validate(&compilation.ir, &endless, NULL));
+    sol_mir_free(&endless);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_initial_lowering_and_determinism();
     test_transactional_unsupported();
     test_calls_and_remaining_local_control();
     test_validator_rejects_corruption();
+    test_loop_control_lowering();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

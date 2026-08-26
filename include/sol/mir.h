@@ -7,6 +7,7 @@
 typedef size_t SolMirBlockId;
 typedef size_t SolMirInstructionId;
 typedef size_t SolMirValueId;
+typedef size_t SolMirLoopId;
 
 #define SOL_MIR_NONE SIZE_MAX
 
@@ -96,6 +97,20 @@ typedef struct {
 } SolMirCallArgument;
 
 typedef struct {
+    SolIrStatementId statement;
+    SolMirLoopId parent;
+    SolMirBlockId preheader;
+    SolMirBlockId header;
+    SolMirBlockId condition;
+    SolMirBlockId body;
+    SolMirBlockId backedge;
+    SolMirBlockId exit;
+    /* Proof-only owning-IR metadata; expressions are not executed by MIR. */
+    SolIrSlice obligations;
+    SolSpan span;
+} SolMirLoop;
+
+typedef struct {
     SolMirBlockId block;
     SolMirSlice arguments;
 } SolMirEdge;
@@ -109,6 +124,8 @@ typedef enum {
     SOL_MIR_TERM_INVOKE,
     SOL_MIR_TERM_RESUME_FAILURE,
     SOL_MIR_TERM_UNREACHABLE,
+    SOL_MIR_TERM_BREAK,
+    SOL_MIR_TERM_CONTINUE,
 } SolMirTerminatorKind;
 
 typedef struct {
@@ -134,6 +151,11 @@ typedef struct {
             SolIrStatementId statement;
             size_t obligation;
         } unreachable;
+        struct {
+            SolIrStatementId statement;
+            SolMirLoopId loop;
+            SolMirEdge edge;
+        } transfer;
     } as;
 } SolMirTerminator;
 
@@ -168,6 +190,9 @@ typedef struct {
     SolMirCallArgument *call_arguments;
     size_t call_argument_count;
     size_t call_argument_capacity;
+    SolMirLoop *loops;
+    size_t loop_count;
+    size_t loop_capacity;
 } SolMir;
 
 void sol_mir_init(SolMir *mir);
