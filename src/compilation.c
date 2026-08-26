@@ -16,16 +16,14 @@
 #include "resource_internal.h"
 #include <string.h>
 
+#include "validated_ir_internal.h"
+
 typedef enum {
     SOL_SESSION_EMPTY,
     SOL_SESSION_COMPILED,
     SOL_SESSION_FAILED,
     SOL_SESSION_IR_TAKEN,
 } SolSessionState;
-
-struct SolValidatedIr {
-    SolIr ir;
-};
 
 struct SolCompilationSession {
     SolPackage package;
@@ -491,37 +489,6 @@ const char *sol_validated_ir_path_at(
         }
     }
     return ir->source_path;
-}
-
-bool sol_validated_ir_interpret(
-    const SolValidatedIr *validated,
-    const SolInterpreterRequest *request,
-    SolInterpreterResult *result
-) {
-    if (validated == NULL || request == NULL) {
-        return sol_interpret(NULL, result);
-    }
-    if (result == NULL) return false;
-    if (request->host_operation != NULL) {
-        sol_interpreter_result_init(result);
-        result->diagnostic.code = SOL_INTERPRETER_INVALID_REQUEST;
-        (void)snprintf(result->diagnostic.message,
-            sizeof(result->diagnostic.message),
-            "validated IR handles do not expose raw IR host callbacks; a safe host profile is not yet available");
-        return false;
-    }
-    SolInterpreterRequest private_request = *request;
-    private_request.ir = &validated->ir;
-    return sol_interpret(&private_request, result);
-}
-
-bool sol_validated_ir_effects_render(
-    FILE *stream,
-    const SolValidatedIr *validated,
-    bool json
-) {
-    return stream != NULL && validated != NULL
-        && sol_effects_render(stream, &validated->ir, json);
 }
 
 void sol_validated_ir_free(SolValidatedIr *validated) {

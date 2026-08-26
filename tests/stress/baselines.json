@@ -1,0 +1,17 @@
+{
+  "generic_chain": {
+    "count": 1000,
+    "max_seconds": 30,
+    "sha256": "2dc0ad592d20c4869f334956a6b8a95f05b3ddaa526e3b61b4303c7b81c0fbda"
+  },
+  "validated_tests": {
+    "count": 250,
+    "max_seconds": 30,
+    "sha256": "884e7023e05270d6bc5028e2adee563db827b9d9cfb084c833e1d2fbf9f6d480"
+  },
+  "package": {
+    "count": 128,
+    "max_seconds": 30,
+    "sha256": "fa78d616540368640c134f17fc5a316cc0189754a6ac7db73f96ce9cc9985bef"
+  }
+}

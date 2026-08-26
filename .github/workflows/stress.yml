@@ -1,0 +1,19 @@
+name: Stress Baselines
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang ninja-build
+      - run: CC=clang cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_TESTING=OFF -DSOL_ENABLE_WERROR=ON
+      - run: cmake --build build --parallel 2 --target sol
+      - run: python3 tests/stress/run_stress.py --sol build/sol --baseline tests/stress/baselines.json --work-dir build/stress --enforce-time

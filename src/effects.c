@@ -5,6 +5,8 @@
 #include "resource_internal.h"
 #include <string.h>
 
+#include "validated_ir_internal.h"
+
 typedef struct {
     size_t offset;
     size_t count;
@@ -536,17 +538,32 @@ static void sol_effects_render_json(
     fputs("]}\n", stream);
 }
 
-bool sol_effects_render(FILE *stream, const SolIr *ir, bool json) {
+static bool sol_effects_render_impl(
+    FILE *stream, const SolIr *ir, bool json, bool validate_ir
+) {
     if (stream == NULL || ir == NULL) return false;
-    SolDiagnostics diagnostics;
-    sol_diagnostics_init(&diagnostics);
-    bool valid = sol_ir_validate(ir, &diagnostics);
-    sol_diagnostics_free(&diagnostics);
-    if (!valid) return false;
+    if (validate_ir) {
+        SolDiagnostics diagnostics;
+        sol_diagnostics_init(&diagnostics);
+        bool valid = sol_ir_validate(ir, &diagnostics);
+        sol_diagnostics_free(&diagnostics);
+        if (!valid) return false;
+    }
     SolEffectsReport report;
     if (!sol_effects_report(ir, &report)) return false;
     if (json) sol_effects_render_json(stream, ir, &report);
     else sol_effects_render_human(stream, ir, &report);
     sol_effects_report_free(&report);
     return ferror(stream) == 0;
+}
+
+bool sol_effects_render(FILE *stream, const SolIr *ir, bool json) {
+    return sol_effects_render_impl(stream, ir, json, true);
+}
+
+bool sol_validated_ir_effects_render(
+    FILE *stream, const SolValidatedIr *validated, bool json
+) {
+    return validated != NULL
+        && sol_effects_render_impl(stream, &validated->ir, json, false);
 }

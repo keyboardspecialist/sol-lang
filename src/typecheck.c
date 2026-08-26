@@ -12,6 +12,13 @@ typedef struct {
 } SolTypeLoopFrame;
 
 typedef struct {
+    SolDefId from;
+    SolDefId to;
+    size_t next_outgoing;
+    size_t next_incoming;
+} SolTypeCallEdge;
+
+typedef struct {
     const SolSource *source;
     const SolSyntaxTree *syntax;
     const SolHirModule *hir;
@@ -49,6 +56,160 @@ static void sol_type_error(
 );
 static bool sol_type_span_equal(const SolSource *source, SolSpan span, const char *text);
 static bool sol_type_exact_equal(SolType left, SolType right);
+static size_t sol_type_parameter_count(SolTypeChecker *checker, SolDefId definition);
+
+static bool sol_type_static_call_edge(
+    const SolTypeChecker *checker,
+    SolExprId expression,
+    SolDefId *from,
+    SolDefId *to
+) {
+    if (checker->syntax->expressions[expression].kind != SOL_EXPR_CALL) return false;
+    SolExprId callee = checker->syntax->expressions[expression].as.call.callee;
+    SolType callee_type = checker->types->expressions[callee];
+    SolDefId owner = checker->hir->expression_owners[expression];
+    if (callee_type.kind != SOL_TYPE_FUNCTION
+        || callee_type.definition >= checker->syntax->item_count
+        || owner >= checker->syntax->item_count) return false;
+    *from = owner;
+    *to = callee_type.definition;
+    return true;
+}
+
+static void sol_type_reject_recursive_generics(SolTypeChecker *checker) {
+    size_t count = checker->syntax->item_count;
+    size_t edge_count = 0;
+    for (SolExprId expression = 0;
+        expression < checker->syntax->expression_count;
+        ++expression) {
+        SolDefId from;
+        SolDefId to;
+        if (sol_type_static_call_edge(checker, expression, &from, &to)) ++edge_count;
+    }
+    if (count > SIZE_MAX / sizeof(size_t)
+        || count > SIZE_MAX / sizeof(SolDefId)
+        || edge_count > SIZE_MAX / sizeof(SolTypeCallEdge)) {
+        checker->allocation_failed = true;
+        return;
+    }
+    SolTypeCallEdge *edges = edge_count == 0
+        ? NULL : malloc(edge_count * sizeof(*edges));
+    size_t *first_outgoing = count == 0
+        ? NULL : malloc(count * sizeof(*first_outgoing));
+    size_t *first_incoming = count == 0
+        ? NULL : malloc(count * sizeof(*first_incoming));
+    unsigned char *state = calloc(count, sizeof(*state));
+    size_t *component = count == 0 ? NULL : malloc(count * sizeof(*component));
+    size_t *component_sizes = calloc(count, sizeof(*component_sizes));
+    unsigned char *self_edge = calloc(count, sizeof(*self_edge));
+    SolDefId *order = count == 0 ? NULL : malloc(count * sizeof(*order));
+    SolDefId *stack = count == 0 ? NULL : malloc(count * sizeof(*stack));
+    size_t *edge_stack = count == 0 ? NULL : malloc(count * sizeof(*edge_stack));
+    if ((edge_count != 0 && edges == NULL) || (count != 0
+        && (first_outgoing == NULL || first_incoming == NULL || state == NULL
+            || component == NULL || component_sizes == NULL || self_edge == NULL
+            || order == NULL || stack == NULL || edge_stack == NULL))) {
+        checker->allocation_failed = true;
+        goto cleanup;
+    }
+    for (size_t index = 0; index < count; ++index) {
+        first_outgoing[index] = SOL_AST_NONE;
+        first_incoming[index] = SOL_AST_NONE;
+        component[index] = SOL_AST_NONE;
+    }
+    size_t edge_cursor = 0;
+    for (SolExprId expression = 0;
+        expression < checker->syntax->expression_count;
+        ++expression) {
+        SolDefId from;
+        SolDefId to;
+        if (!sol_type_static_call_edge(checker, expression, &from, &to)) continue;
+        edges[edge_cursor] = (SolTypeCallEdge){
+            .from = from,
+            .to = to,
+            .next_outgoing = first_outgoing[from],
+            .next_incoming = first_incoming[to],
+        };
+        first_outgoing[from] = edge_cursor;
+        first_incoming[to] = edge_cursor;
+        if (from == to) self_edge[from] = 1;
+        ++edge_cursor;
+    }
+
+    size_t order_count = 0;
+    for (SolDefId root = 0; root < count; ++root) {
+        if (state[root] != 0) continue;
+        size_t stack_count = 1;
+        stack[0] = root;
+        edge_stack[0] = first_outgoing[root];
+        state[root] = 1;
+        while (stack_count != 0) {
+            size_t top = stack_count - 1;
+            size_t edge = edge_stack[top];
+            if (edge == SOL_AST_NONE) {
+                SolDefId finished = stack[top];
+                state[finished] = 2;
+                order[order_count++] = finished;
+                --stack_count;
+                continue;
+            }
+            edge_stack[top] = edges[edge].next_outgoing;
+            SolDefId target = edges[edge].to;
+            if (state[target] == 0) {
+                state[target] = 1;
+                stack[stack_count] = target;
+                edge_stack[stack_count] = first_outgoing[target];
+                ++stack_count;
+            }
+        }
+    }
+
+    size_t component_count = 0;
+    while (order_count != 0) {
+        SolDefId root = order[--order_count];
+        if (component[root] != SOL_AST_NONE) continue;
+        size_t stack_count = 1;
+        stack[0] = root;
+        component[root] = component_count;
+        while (stack_count != 0) {
+            SolDefId current = stack[--stack_count];
+            ++component_sizes[component_count];
+            size_t edge = first_incoming[current];
+            while (edge != SOL_AST_NONE) {
+                SolDefId source = edges[edge].from;
+                if (component[source] == SOL_AST_NONE) {
+                    component[source] = component_count;
+                    stack[stack_count++] = source;
+                }
+                edge = edges[edge].next_incoming;
+            }
+        }
+        ++component_count;
+    }
+    for (SolDefId function = 0; function < count; ++function) {
+        bool recursive = self_edge[function] != 0
+            || component_sizes[component[function]] > 1;
+        if (recursive && (sol_type_parameter_count(checker, function) != 0
+            || checker->syntax->items[function].first_effect_parameter
+                != SOL_AST_NONE)) {
+            sol_type_error(checker, "SOL-TYPE-019",
+                checker->syntax->items[function].name,
+                "recursive generic or effect-polymorphic function calls are unsupported");
+        }
+    }
+
+cleanup:
+    free(edges);
+    free(first_outgoing);
+    free(first_incoming);
+    free(state);
+    free(component);
+    free(component_sizes);
+    free(self_edge);
+    free(order);
+    free(stack);
+    free(edge_stack);
+}
 
 static bool sol_type_authority_free_effect(
     const SolTypeChecker *checker,
@@ -8819,54 +8980,7 @@ bool sol_type_check(
             );
         }
     }
-    if (syntax->item_count != 0
-        && syntax->item_count > SIZE_MAX / syntax->item_count) {
-        checker.allocation_failed = true;
-    } else {
-        size_t graph_size = syntax->item_count * syntax->item_count;
-        unsigned char *calls = calloc(graph_size, 1);
-        if (graph_size != 0 && calls == NULL) {
-            checker.allocation_failed = true;
-        } else {
-            for (SolExprId expression = 0;
-                expression < syntax->expression_count;
-                ++expression) {
-                if (syntax->expressions[expression].kind != SOL_EXPR_CALL) continue;
-                SolExprId callee = syntax->expressions[expression].as.call.callee;
-                SolType callee_type = checker.types->expressions[callee];
-                if (callee_type.kind != SOL_TYPE_FUNCTION
-                    || callee_type.definition >= syntax->item_count) continue;
-                SolDefId owner = hir->expression_owners[expression];
-                if (owner < syntax->item_count) {
-                    calls[owner * syntax->item_count + callee_type.definition] = 1;
-                }
-            }
-            for (size_t through = 0; through < syntax->item_count; ++through) {
-                for (size_t from = 0; from < syntax->item_count; ++from) {
-                    if (!calls[from * syntax->item_count + through]) continue;
-                    for (size_t to = 0; to < syntax->item_count; ++to) {
-                        if (calls[through * syntax->item_count + to]) {
-                            calls[from * syntax->item_count + to] = 1;
-                        }
-                    }
-                }
-            }
-            for (SolDefId function = 0; function < syntax->item_count; ++function) {
-                if (calls[function * syntax->item_count + function]
-                    && (sol_type_parameter_count(&checker, function) != 0
-                        || syntax->items[function].first_effect_parameter
-                            != SOL_AST_NONE)) {
-                    sol_type_error(
-                        &checker,
-                        "SOL-TYPE-019",
-                        syntax->items[function].name,
-                        "recursive generic or effect-polymorphic function calls are unsupported"
-                    );
-                }
-            }
-        }
-        free(calls);
-    }
+    sol_type_reject_recursive_generics(&checker);
     unsigned char *call_callees = calloc(syntax->expression_count, sizeof(*call_callees));
     if (syntax->expression_count != 0 && call_callees == NULL) {
         checker.allocation_failed = true;

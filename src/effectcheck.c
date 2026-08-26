@@ -4466,6 +4466,36 @@ static void sol_effect_infer_functions(
     size_t component_count
 ) {
     size_t count = checker->syntax->item_count;
+    if (component_count == SIZE_MAX
+        || component_count > SIZE_MAX / sizeof(size_t)
+        || count > SIZE_MAX / sizeof(SolDefId)) {
+        checker->allocation_failed = true;
+        return;
+    }
+    size_t *component_offsets = calloc(component_count + 1, sizeof(*component_offsets));
+    size_t *component_cursors = component_count == 0
+        ? NULL : malloc(component_count * sizeof(*component_cursors));
+    SolDefId *component_members = count == 0
+        ? NULL : malloc(count * sizeof(*component_members));
+    if (component_offsets == NULL || (component_count != 0 && component_cursors == NULL)
+        || (count != 0 && component_members == NULL)) {
+        free(component_offsets);
+        free(component_cursors);
+        free(component_members);
+        checker->allocation_failed = true;
+        return;
+    }
+    for (size_t index = 0; index < count; ++index) {
+        ++component_offsets[components[index] + 1];
+    }
+    for (size_t component = 0; component < component_count; ++component) {
+        component_offsets[component + 1] += component_offsets[component];
+        component_cursors[component] = component_offsets[component];
+    }
+    for (SolDefId index = 0; index < count; ++index) {
+        size_t component = components[index];
+        component_members[component_cursors[component]++] = index;
+    }
     for (size_t index = 0; index < count; ++index) {
         const SolSyntaxItem *item = &checker->syntax->items[index];
         if ((item->kind == SOL_ITEM_FUNCTION || item->kind == SOL_ITEM_TEST)
@@ -4481,10 +4511,12 @@ static void sol_effect_infer_functions(
         bool changed;
         do {
             changed = false;
-            for (size_t index = 0; index < count; ++index) {
+            for (size_t member = component_offsets[component];
+                member < component_offsets[component + 1];
+                ++member) {
+                SolDefId index = component_members[member];
                 const SolSyntaxItem *item = &checker->syntax->items[index];
-                if (components[index] != component
-                    || (item->kind != SOL_ITEM_FUNCTION && item->kind != SOL_ITEM_TEST)
+                if ((item->kind != SOL_ITEM_FUNCTION && item->kind != SOL_ITEM_TEST)
                     || item->has_effect_clause || item->is_public) {
                     continue;
                 }
@@ -4495,6 +4527,9 @@ static void sol_effect_infer_functions(
             }
         } while (changed && !checker->malformed && !checker->allocation_failed);
     }
+    free(component_offsets);
+    free(component_cursors);
+    free(component_members);
 }
 
 static void sol_effect_validate_function_coercions(SolEffectChecker *checker) {

@@ -1,4 +1,8 @@
-#set document(title: "Sol Current-State Audit and End-to-End Plan", author: "OpenCode")
+#set document(
+  title: "Sol Current-State Audit and End-to-End Plan",
+  author: "OpenCode",
+  date: datetime(year: 2026, month: 8, day: 25, hour: 12, minute: 0, second: 0),
+)
 #set page(paper: "a4", margin: (x: 22mm, y: 20mm), numbering: "1 / 1")
 #set text(font: "Libertinus Serif", size: 10.5pt)
 #set heading(numbering: "1.1")
@@ -10,7 +14,7 @@
   #v(4pt)
   #text(size: 14pt)[Remaining Work, Risks, and the Shortest End-to-End Path]
   #v(10pt)
-  #text(size: 9pt)[Repository state at commit `4dcadde` - August 25, 2026]
+  #text(size: 9pt)[Roadmap state after E1c - August 25, 2026]
 ]
 
 #v(16pt)
@@ -87,11 +91,11 @@ The compiler does not define which declaration is an application entrypoint, whi
 
 Entrypoint semantics should be settled before a backend embeds accidental naming or ABI conventions.
 
-== Unsafe Host Error String
+== Bounded Host Failure Text
 
-The host callback failure path returns an unconstrained C `const char *` that is consumed as a NUL-terminated string. A dangling or unterminated pointer can cause an out-of-bounds read. Successful host values receive substantial validation and cloning, but failed host messages do not have equivalent ownership or length guarantees.
+The raw host callback writes failure text into interpreter-owned fixed-capacity storage with an authoritative length. Empty failures select a stable default; embedded NULs and oversized lengths are rejected. No borrowed failure C string is scanned after callback return.
 
-Replace this boundary with an owned or length-delimited error value before expanding host integration.
+The callback still receives raw IR and remains a trusted compiler-test interface. Opaque validated handles reject it until the safe E3 host profile exists.
 
 == Public C IR Is Not a Hostile-Input Format
 
@@ -99,33 +103,33 @@ The public C IR structure exposes mutable pointers and counts. Logical validatio
 
 A future public serialized IR requires a separate checked decoder and owned representation.
 
-== Unbounded Compilation Resources
+== Bounded Compilation Resources
 
-Interpreter execution has explicit limits, while compilation lacks comprehensive budgets for package bytes, file count, directory depth, tokens, syntax arenas, diagnostics, semantic graph size, and total allocation. Adversarial source can therefore consume excessive memory or native stack.
+Compilation sessions enforce configurable per-file and package bytes, source-file count, directory depth and visited entries, tokens, persistent compiler arenas, diagnostics, cumulative allocation bytes, and allocation-request limits. The first exhausted resource produces a deterministic resource failure and no validated handle.
 
-Package traversal is recursively stack-based and should gain a deterministic depth and resource budget.
+Specialized parser and semantic recursion ceilings remain in addition to the session-wide meter.
 
 == Package Filesystem Races
 
-Directory discovery inspects paths and later reopens them. Concurrent path replacement can change what is loaded after discovery, including replacing a regular file with a symlink. The formatter has stronger transactional checks than normal compilation.
+Directory traversal is anchored to verified open descriptors and uses descriptor-relative inspection/opening. Source reads reject symlinks and non-regular files, match discovered device/inode identity, probe EOF, and recheck identity, size, and nanosecond modification/change timestamps.
 
-Descriptor-based loading or post-open identity verification is required before packages become a security-sensitive build boundary.
+Duplicate source identities are rejected. Formatter commit-time transaction hardening remains distinct from compilation loading.
 
-== Cubic Generic Call Analysis
+== Sparse Generic Call Analysis
 
-Generic recursion analysis currently uses a dense declaration matrix and transitive closure. Its cost is approximately quadratic memory and cubic time in declaration count. Replace it with adjacency lists and strongly connected components before package scale increases substantially.
+Generic recursion analysis uses sparse outgoing/incoming adjacency and iterative strongly connected components with linear graph storage. Effect inference reuses its call-graph SCCs and packed ascending component members while retaining deterministic monotonic fixed-point rounds.
 
 == Repeated Whole-IR Validation
 
-IR is validated during lowering, ownership analysis, interpreter startup, and repeatedly across authored tests. This can approach `O(test count * package IR size)` even though the IR is immutable.
+Lowering retains independent pre-ownership and final validation. The opaque validated handle then serves as the immutable validation certificate for repeated interpretation and effects rendering, eliminating per-test whole-IR rescans.
 
-A validated immutable IR handle or internal validation certificate would preserve safety without rerunning every full invariant pass for every test.
+Public raw mutable-IR interpreter and effects APIs still validate every call, preserving malformed-table test and trust boundaries.
 
 == Syntax-Indexed Side Tables
 
 HIR, types, effects, and contracts are broad parallel tables indexed by syntax IDs. Every new construct requires coordinated updates across many arenas and validators. This architecture also forces package-global invalidation and makes caching or serialization difficult.
 
-Before incremental compilation or public semantic tooling, add an owned compilation session and consider a coherent typed semantic layer.
+The owned compilation session now centralizes phase order and teardown. A more coherent typed semantic layer remains desirable before incremental compilation or public semantic tooling.
 
 == Duplicated Semantic Rules
 
@@ -135,13 +139,13 @@ Shared specifications, generated tables, or common constructor-domain utilities 
 
 == Portability and Release Infrastructure
 
-The build has MSVC branches, but production sources depend directly on POSIX APIs and filesystem behavior. Windows is not currently a realistic supported target. There is also no checked-in CI workflow, install/export target, release packaging, fuzz target, coverage gate, cross-platform matrix, or performance baseline.
+The bootstrap explicitly remains POSIX-only. Checked-in CI performs clean warning-as-error GCC and Clang ASan/UBSan builds. Optional Clang/libFuzzer parser, package, and bounded scalar-IR harnesses have fixed corpora and smoke runs. Scheduled deterministic stress cases track hashes, functional outcomes, and broad Linux timing ceilings.
 
-Either introduce a platform layer or explicitly declare POSIX-only support for the current bootstrap.
+Install/export targets, release packaging, coverage gates, and a platform abstraction remain future work.
 
 == Testing Gaps
 
-The handwritten positive, negative, sanitizer, and malformed-metadata tests are strong. Missing categories include parser/package fuzzing, IR and runtime-value fuzzing, allocation-failure injection, generated properties, large-package stress, standard JSON Schema validation, and interpreter/backend differential execution.
+The handwritten positive, negative, sanitizer, malformed-metadata, parser/package/scalar-IR fuzz, and sparse/package/repeated-execution stress coverage is strong. Missing categories include runtime-value fuzzing, systematic allocation-failure injection, generated semantic properties, standard JSON Schema validation, and interpreter/backend differential execution.
 
 = Remaining Roadmap
 

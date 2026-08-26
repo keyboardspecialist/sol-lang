@@ -5,6 +5,34 @@ project(sol VERSION 0.1.0 LANGUAGES C)
 set(CMAKE_C_EXTENSIONS OFF)
 
 option(SOL_ENABLE_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
+option(SOL_ENABLE_WERROR "Treat compiler warnings as errors" OFF)
+option(SOL_BUILD_FUZZERS "Build Clang libFuzzer targets" OFF)
+
+if(SOL_ENABLE_WERROR)
+    if(MSVC)
+        add_compile_options(/WX)
+    elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+        add_compile_options(-Werror)
+    endif()
+endif()
+
+if(SOL_BUILD_FUZZERS)
+    if(CMAKE_C_COMPILER_ID MATCHES "Clang" AND UNIX)
+        include(CheckCSourceCompiles)
+        set(SOL_SAVED_REQUIRED_FLAGS "${CMAKE_REQUIRED_FLAGS}")
+        set(CMAKE_REQUIRED_FLAGS
+            "${CMAKE_REQUIRED_FLAGS} -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer")
+        check_c_source_compiles(
+            "#include <stddef.h>\n#include <stdint.h>\nint LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) { (void)data; (void)size; return 0; }"
+            SOL_HAS_LIBFUZZER
+        )
+        set(CMAKE_REQUIRED_FLAGS "${SOL_SAVED_REQUIRED_FLAGS}")
+    endif()
+    if(NOT SOL_HAS_LIBFUZZER)
+        message(WARNING "SOL_BUILD_FUZZERS requires a usable Clang libFuzzer runtime; fuzz targets are disabled")
+        set(SOL_BUILD_FUZZERS OFF)
+    endif()
+endif()
 
 find_program(TYPST_EXECUTABLE typst)
 if(TYPST_EXECUTABLE)
@@ -48,8 +76,19 @@ add_library(sol_compiler STATIC
 
 target_include_directories(sol_compiler PUBLIC include)
 
+if(SOL_BUILD_FUZZERS)
+    target_compile_options(sol_compiler PRIVATE
+        -fsanitize=fuzzer-no-link,address,undefined
+        -fno-omit-frame-pointer
+    )
+endif()
+
 add_executable(sol src/main.c)
 target_link_libraries(sol PRIVATE sol_compiler)
+
+if(SOL_BUILD_FUZZERS)
+    target_link_options(sol PRIVATE -fsanitize=address,undefined)
+endif()
 
 if(MSVC)
     target_compile_options(sol_compiler PRIVATE /std:c17 /W4)
@@ -77,6 +116,10 @@ if(SOL_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
     target_link_options(sol_compiler PRIVATE -fsanitize=address,undefined)
     target_compile_options(sol PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
     target_link_options(sol PRIVATE -fsanitize=address,undefined)
+endif()
+
+if(SOL_BUILD_FUZZERS)
+    add_subdirectory(fuzz)
 endif()
 
 include(CTest)

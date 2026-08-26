@@ -7,6 +7,8 @@
 #include "resource_internal.h"
 #include <string.h>
 
+#include "validated_ir_internal.h"
+
 typedef enum {
     FLOW_VALUE, FLOW_RETURN, FLOW_BREAK, FLOW_CONTINUE, FLOW_ERROR
 } FlowKind;
@@ -2513,7 +2515,11 @@ static SolInterpreterLimits default_limits(void) {
     };
 }
 
-bool sol_interpret(const SolInterpreterRequest *request, SolInterpreterResult *result) {
+static bool sol_interpret_impl(
+    const SolInterpreterRequest *request,
+    SolInterpreterResult *result,
+    bool validate_ir
+) {
     if (result == NULL) return false;
     sol_interpreter_result_init(result);
     if (request == NULL || request->ir == NULL) {
@@ -2528,15 +2534,17 @@ bool sol_interpret(const SolInterpreterRequest *request, SolInterpreterResult *r
         normalized.limits = default_limits();
     }
     Interpreter interpreter = {.request = &normalized, .result = result};
-    SolDiagnostics diagnostics;
-    sol_diagnostics_init(&diagnostics);
-    if (!sol_ir_validate(request->ir, &diagnostics)) {
-        diagnostic(&interpreter, SOL_INTERPRETER_INVALID_IR, (SolSpan){0},
-            "interpreter input IR failed validation");
+    if (validate_ir) {
+        SolDiagnostics diagnostics;
+        sol_diagnostics_init(&diagnostics);
+        bool valid = sol_ir_validate(request->ir, &diagnostics);
         sol_diagnostics_free(&diagnostics);
-        return false;
+        if (!valid) {
+            diagnostic(&interpreter, SOL_INTERPRETER_INVALID_IR, (SolSpan){0},
+                "interpreter input IR failed validation");
+            return false;
+        }
     }
-    sol_diagnostics_free(&diagnostics);
     if (request->contracts != SOL_INTERPRETER_CONTRACTS_IGNORE) {
         diagnostic(&interpreter, SOL_INTERPRETER_UNSUPPORTED_CONTRACT_POLICY,
             (SolSpan){0}, "runtime contract checking is not supported");
@@ -2605,4 +2613,30 @@ bool sol_interpret(const SolInterpreterRequest *request, SolInterpreterResult *r
     }
     result->value = flow.value;
     return true;
+}
+
+bool sol_interpret(const SolInterpreterRequest *request, SolInterpreterResult *result) {
+    return sol_interpret_impl(request, result, true);
+}
+
+bool sol_validated_ir_interpret(
+    const SolValidatedIr *validated,
+    const SolInterpreterRequest *request,
+    SolInterpreterResult *result
+) {
+    if (validated == NULL || request == NULL) {
+        return sol_interpret_impl(NULL, result, false);
+    }
+    if (result == NULL) return false;
+    if (request->host_operation != NULL) {
+        sol_interpreter_result_init(result);
+        result->diagnostic.code = SOL_INTERPRETER_INVALID_REQUEST;
+        (void)snprintf(result->diagnostic.message,
+            sizeof(result->diagnostic.message),
+            "validated IR handles do not expose raw IR host callbacks; a safe host profile is not yet available");
+        return false;
+    }
+    SolInterpreterRequest private_request = *request;
+    private_request.ir = &validated->ir;
+    return sol_interpret_impl(&private_request, result, false);
 }
