@@ -46,12 +46,12 @@ source/package
 
 This is real functionality rather than scaffolding. Records, enums, tuples, bounded generics, traits, effects, capabilities, contracts-as-obligations, ownership, mutation, loops, handlers, recursive patterns, cleanup, and host operations cross the complete pipeline.
 
-Sol now has a bounded end-to-end interpreter application profile with explicit entrypoints, trusted host capabilities, executable core contracts/refinements, and `sol run`. It is not yet a production application toolchain: there is no MIR, native or WebAssembly backend, linker, target runtime ABI, `sol build`, package manifest, dependency system, or public semantic IR.
+Sol now has a bounded end-to-end interpreter application profile with explicit entrypoints, trusted host capabilities, executable core contracts/refinements, and `sol run`, plus an initial restricted callable-scoped CFG MIR checkpoint. It is not yet a production application toolchain: there is no complete executable-core MIR, native or WebAssembly backend, linker, target runtime ABI, `sol build`, package manifest, dependency system, or public semantic IR.
 
 Current verification is healthy:
 
-- Normal warning-clean test suite: 38/38 passed.
-- Clean ASan/UBSan suite: 38/38 passed.
+- Normal warning-clean test suite: 39/39 passed.
+- Clean ASan/UBSan suite: 39/39 passed.
 - Worktree was clean except the intentionally untracked session file.
 
 = Current State
@@ -73,6 +73,8 @@ The current HIR is primarily syntax-indexed semantic metadata rather than an ind
 The compiler lowers successful programs to a genuine self-contained owning typed IR. The IR retains executable types, calls, places, effects, contract templates, cleanup, pattern trees, and dispatch metadata. Ownership checking covers affine moves, structural Copy, loans, partial moves, definite initialization, projected mutation, `inout` writeback, loops, regions, and deterministic cleanup.
 
 This IR is an unstable interpreter IR. It is not a control-flow MIR, stable serialized Sol IR, target-independent layout IR, or safe hostile-input format.
+
+#status("IMPLEMENTED", [P1a.1 adds a separate unstable `SolMir` owner for one selected validated nongeneric free/test callable. The initial target-neutral subset normalizes scalar literals and operations, whole-local copy/move/store, lexical storage and conditional cleanup, blocks, `if`, return, and panic into deterministic basic blocks with SSA instruction values and block parameters. Independent validation checks arenas, edges, source/type relations, local value availability, parameter activation, initialization/move transitions, and dead storage on every return/panic path. Unsupported forms fail transactionally. The production compilation session and interpreter do not consume MIR; calls/borrows, remaining local control, loops, patterns, propagation, aggregates, projected places, handlers, contracts, generic lowering, layout, ABI, and backend execution remain P1a.2+.])
 
 == Interpreter and CLI
 

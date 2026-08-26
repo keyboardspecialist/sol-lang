@@ -114,6 +114,16 @@ The production track begins only after E6:
 | P4 | Integrate a WebAssembly backend and host adapter | P2, P3, 47W, 48C |
 | P5 | Implement reproducible `sol build` artifacts and interpreter/Wasm differential tests | P4, 49C |
 
+P1 is split into independently reviewable internal checkpoints; P1 and task 45 remain
+open until the complete frozen executable core lowers:
+
+| Done | Order | Checkpoint | Exit criteria |
+| --- | ---: | --- | --- |
+| [x] | P1a.1 | Establish callable-scoped CFG MIR invariants | An unstable target-neutral MIR owner lowers validated nongeneric free/test callables containing scalar literals, whole-local copy/move/store, unary/binary operations, blocks, `if`, return, and panic into deterministic basic blocks with SSA temporaries/block parameters, explicit parameter/local storage lifetime, conditional cleanup, transactional unsupported results, and independent structure/type/value/storage validation |
+| [ ] | P1a.2 | Add direct calls and remaining local control | Lower call-scoped shared/exclusive borrows, direct calls, short-circuit Boolean control, lexical regions, `require`, and proof-backed unreachable with explicit normal/failure and cleanup edges |
+| [ ] | P1a.3 | Complete structured executable-core CFG lowering | Lower loops, break/continue, recursive matches/guards, propagation, aggregate/sum/refined construction, projected places, handlers, capability/method/callback calls, contracts/snapshots, and every E6 callable |
+| [ ] | P1b | Freeze backend-facing value/CFG invariants | Complete dominance/SSA and ownership validation, generic/evidence retention, canonical internal rendering, and a bounded MIR evaluator/trace for interpreter differential semantics without choosing representation or ABI |
+
 Items 28-39, 41-42, 44, 46, 50B+, and 52-61 are deferred until a
 concrete E- or P-track requirement pulls in their smallest coherent subset.
 
