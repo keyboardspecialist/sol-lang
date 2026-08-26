@@ -82,9 +82,13 @@ static void free_compilation(TestCompilation *compilation) {
     sol_diagnostics_free(&compilation->diagnostics);
 }
 
+static bool memory_equal(const void *left, const void *right, size_t size) {
+    return size == 0 || memcmp(left, right, size) == 0;
+}
+
 static bool ir_equal(const SolIr *left, const SolIr *right) {
     if (left->source_length != right->source_length
-        || memcmp(left->source_bytes, right->source_bytes, left->source_length) != 0
+        || !memory_equal(left->source_bytes, right->source_bytes, left->source_length)
         || left->type_count != right->type_count
         || left->type_id_count != right->type_id_count
         || left->access_count != right->access_count
@@ -114,39 +118,40 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
         || left->unreachable_obligation_count
             != right->unreachable_obligation_count
         || left->file_count != right->file_count) return false;
-    if (memcmp(left->types, right->types, left->type_count * sizeof(*left->types)) != 0
-        || memcmp(left->type_ids, right->type_ids,
-            left->type_id_count * sizeof(*left->type_ids)) != 0
-        || memcmp(left->accesses, right->accesses,
-            left->access_count * sizeof(*left->accesses)) != 0
-        || memcmp(left->operands, right->operands,
-            left->operand_count * sizeof(*left->operands)) != 0
-        || memcmp(left->members, right->members,
-            left->member_count * sizeof(*left->members)) != 0
-        || memcmp(left->evidence, right->evidence,
-            left->evidence_count * sizeof(*left->evidence)) != 0
-        || memcmp(left->statement_ids, right->statement_ids,
-            left->statement_id_count * sizeof(*left->statement_ids)) != 0
-        || memcmp(left->arm_ids, right->arm_ids,
-            left->arm_id_count * sizeof(*left->arm_ids)) != 0
-        || memcmp(left->patterns, right->patterns,
-            left->pattern_count * sizeof(*left->patterns)) != 0
-        || memcmp(left->pattern_children, right->pattern_children,
-            left->pattern_child_count * sizeof(*left->pattern_children)) != 0
-        || memcmp(left->cleanup_locals, right->cleanup_locals,
-            left->cleanup_local_count * sizeof(*left->cleanup_locals)) != 0
-        || memcmp(left->roots, right->roots,
-            left->root_count * sizeof(*left->roots)) != 0
-        || memcmp(left->places, right->places,
-            left->place_count * sizeof(*left->places)) != 0
-        || memcmp(left->projections, right->projections,
-            left->projection_count * sizeof(*left->projections)) != 0
-        || memcmp(left->loop_obligations, right->loop_obligations,
-            left->loop_obligation_count * sizeof(*left->loop_obligations)) != 0
-        || memcmp(left->unreachable_obligations,
+    if (!memory_equal(left->types, right->types,
+            left->type_count * sizeof(*left->types))
+        || !memory_equal(left->type_ids, right->type_ids,
+            left->type_id_count * sizeof(*left->type_ids))
+        || !memory_equal(left->accesses, right->accesses,
+            left->access_count * sizeof(*left->accesses))
+        || !memory_equal(left->operands, right->operands,
+            left->operand_count * sizeof(*left->operands))
+        || !memory_equal(left->members, right->members,
+            left->member_count * sizeof(*left->members))
+        || !memory_equal(left->evidence, right->evidence,
+            left->evidence_count * sizeof(*left->evidence))
+        || !memory_equal(left->statement_ids, right->statement_ids,
+            left->statement_id_count * sizeof(*left->statement_ids))
+        || !memory_equal(left->arm_ids, right->arm_ids,
+            left->arm_id_count * sizeof(*left->arm_ids))
+        || !memory_equal(left->patterns, right->patterns,
+            left->pattern_count * sizeof(*left->patterns))
+        || !memory_equal(left->pattern_children, right->pattern_children,
+            left->pattern_child_count * sizeof(*left->pattern_children))
+        || !memory_equal(left->cleanup_locals, right->cleanup_locals,
+            left->cleanup_local_count * sizeof(*left->cleanup_locals))
+        || !memory_equal(left->roots, right->roots,
+            left->root_count * sizeof(*left->roots))
+        || !memory_equal(left->places, right->places,
+            left->place_count * sizeof(*left->places))
+        || !memory_equal(left->projections, right->projections,
+            left->projection_count * sizeof(*left->projections))
+        || !memory_equal(left->loop_obligations, right->loop_obligations,
+            left->loop_obligation_count * sizeof(*left->loop_obligations))
+        || !memory_equal(left->unreachable_obligations,
             right->unreachable_obligations,
             left->unreachable_obligation_count
-                * sizeof(*left->unreachable_obligations)) != 0) {
+                * sizeof(*left->unreachable_obligations))) {
         return false;
     }
     for (size_t index = 0; index < left->definition_count; ++index) {
