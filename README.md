@@ -625,8 +625,10 @@ connected to compilation sessions or execution and does not choose how a backend
 evaluates predicates, patterns, or sum discriminants. Canonical local-rooted
 record/tuple paths now support projected copies, fully initialized replacement, and
 direct shared/exclusive operands with sibling-aware overlap and abstract normal-edge
-writeback. Projected moves and hole reinitialization remain deferred until MIR has a
-path-state lattice. It does not yet cover authority-bearing construction,
+writeback. A separate layout-free path-state fixed point now tracks projected moves,
+sibling availability, exact/ancestor hole restoration, conservative joins and loop
+backedges, borrow availability, and whole-local cleanup of partial aggregates. It does
+not yet cover authority-bearing construction,
 dynamic/method/capability calls, handlers, contracts, generic lowering,
 representation, runtime ABI, or a backend.
 

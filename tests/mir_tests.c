@@ -1502,9 +1502,86 @@ static void test_projected_place_lowering(void) {
     sol_mir_init(&moved);
     CHECK(sol_mir_lower_callable(&compilation.ir,
         callable(&compilation.ir, "moved"), &moved,
-        &compilation.diagnostics) == SOL_MIR_LOWER_UNSUPPORTED);
-    CHECK(moved.callable == SOL_IR_NONE && moved.blocks == NULL);
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_validate(&compilation.ir, &moved, NULL));
     sol_mir_free(&moved);
+    free_compilation(&compilation);
+}
+
+static void test_partial_move_path_state(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_partial_moves\n"
+        "record Box<T> { value: T }\n"
+        "record Pair { left: Box<Int64>, right: Box<Int64> }\n"
+        "function inspect(value: borrow Box<Int64>) -> Int64 { "
+        "return value.value }\n"
+        "function sibling(value: Pair) -> Box<Int64> { "
+        "let moved = value.left return value.right }\n"
+        "function reinitialize(value: Pair) -> Pair { var work = value "
+        "let moved = work.left work.left = moved return work }\n"
+        "function branch(flag: Bool, value: Pair) -> Box<Int64> { "
+        "if flag { let moved = value.left } else { () } return value.right }\n"
+        "function borrow_sibling(value: Pair) -> Int64 { "
+        "let moved = value.left return inspect(value.right) }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    const char *names[] = {
+        "sibling", "reinitialize", "branch", "borrow_sibling",
+    };
+    for (size_t name = 0; name < 4; ++name) {
+        SolMir mir;
+        SolMir repeated;
+        sol_mir_init(&mir);
+        sol_mir_init(&repeated);
+        SolIrCallableId id = callable(&compilation.ir, names[name]);
+        CHECK(sol_mir_lower_callable(&compilation.ir, id, &mir,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_lower_callable(&compilation.ir, id, &repeated,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        CHECK(mir_equal(&mir, &repeated));
+        bool projected_move = false;
+        bool whole_cleanup = false;
+        bool projected_restore = false;
+        for (size_t instruction = 0; instruction < mir.instruction_count;
+            ++instruction) {
+            const SolMirInstruction *item = &mir.instructions[instruction];
+            projected_move = projected_move
+                || (item->kind == SOL_MIR_INST_LOAD_MOVE
+                    && compilation.ir.places[item->as.place.source_place]
+                        .projections.count != 0);
+            whole_cleanup = whole_cleanup
+                || item->kind == SOL_MIR_INST_DROP_IF_INITIALIZED;
+            projected_restore = projected_restore
+                || item->kind == SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED;
+        }
+        CHECK(projected_move && whole_cleanup);
+        if (name == 1) CHECK(projected_restore);
+        if (name == 2) {
+            SolMirBlockId move_block = SOL_MIR_NONE;
+            for (size_t block = 0; block < mir.block_count; ++block) {
+                SolMirSlice instructions = mir.blocks[block].instructions;
+                for (size_t index = 0; index < instructions.count; ++index) {
+                    const SolMirInstruction *item
+                        = &mir.instructions[instructions.offset + index];
+                    if (item->kind == SOL_MIR_INST_LOAD_MOVE
+                        && compilation.ir.places[item->as.place.source_place]
+                            .projections.count != 0
+                        && mir.blocks[block].terminator.kind
+                            == SOL_MIR_TERM_GOTO) move_block = block;
+                }
+            }
+            CHECK(move_block != SOL_MIR_NONE);
+            SolMirBlockId target
+                = mir.blocks[move_block].terminator.as.go_to.block;
+            mir.blocks[move_block].terminator.as.go_to.block = move_block;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            mir.blocks[move_block].terminator.as.go_to.block = target;
+            CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        }
+        sol_mir_free(&mir);
+        sol_mir_free(&repeated);
+    }
     free_compilation(&compilation);
 }
 
@@ -1765,6 +1842,7 @@ int main(void) {
     test_recursive_match_lowering();
     test_propagation_lowering();
     test_projected_place_lowering();
+    test_partial_move_path_state();
     test_owned_temporary_cleanup();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
