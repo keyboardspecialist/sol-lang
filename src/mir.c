@@ -569,6 +569,8 @@ static LoweredValue mir_lower_expression(MirLowerer *lowerer,
     SolIrExpressionId id, const Scope *scope);
 static bool mir_type_is(const SolIr *ir, SolIrTypeId id,
     SolIrTypeKind kind);
+static bool mir_set_return(MirLowerer *lowerer, SolMirValueId value,
+    SolSpan span);
 
 static LoweredValue mir_unreachable(void) {
     return (LoweredValue){.reachable = false, .value = SOL_MIR_NONE};
@@ -849,6 +851,62 @@ static LoweredValue mir_lower_checked_refined(MirLowerer *lowerer,
     }
     if (!mir_start_block(lowerer, normal)) return mir_failure(lowerer);
     return (LoweredValue){.reachable = true, .value = parameter};
+}
+
+static LoweredValue mir_lower_propagate(MirLowerer *lowerer,
+    SolIrExpressionId id, const SolIrExpression *expression,
+    const Scope *scope) {
+    size_t operation_depth = lowerer->pending_temporary_count;
+    SolIrExpressionId operand_id = expression->as.propagate.operand;
+    LoweredValue operand = mir_lower_expression(lowerer, operand_id, scope);
+    if (!operand.reachable) return operand;
+    SolMirTemporaryId temporary = SOL_MIR_NONE;
+    if (!mir_stage_temporary(lowerer, operand_id, operand.value, &temporary)) {
+        return mir_failure(lowerer);
+    }
+    SolMirBlockId source = lowerer->current;
+    SolMirBlockId value_block = mir_append_block(lowerer, expression->span);
+    SolMirValueId value_parameter = mir_append_parameter(lowerer, value_block,
+        expression->type, id, expression->span);
+    SolMirBlockId residual_block = mir_append_block(lowerer, expression->span);
+    SolMirValueId residual_parameter = mir_append_parameter(lowerer,
+        residual_block, lowerer->callable->result, id,
+        expression->span);
+    SolMirValueId value_result = mir_append_terminator_result(lowerer, source,
+        expression->type, id, expression->span);
+    SolMirValueId residual_result = mir_append_terminator_result(lowerer,
+        source, lowerer->callable->result, id, expression->span);
+    if (value_block == SOL_MIR_NONE || residual_block == SOL_MIR_NONE
+        || value_result == SOL_MIR_NONE || residual_result == SOL_MIR_NONE
+        || value_parameter == SOL_MIR_NONE
+        || residual_parameter == SOL_MIR_NONE) return mir_failure(lowerer);
+    SolMirSlice value_arguments
+        = mir_append_edge_arguments(lowerer, &value_result, 1);
+    SolMirSlice residual_arguments
+        = mir_append_edge_arguments(lowerer, &residual_result, 1);
+    if (lowerer->failed) return mir_failure(lowerer);
+    lowerer->pending_temporary_count = operation_depth;
+    lowerer->mir->blocks[source].terminator = (SolMirTerminator){
+        .kind = SOL_MIR_TERM_PROPAGATE,
+        .span = expression->span,
+        .as.propagate = {
+            .source_expression = id,
+            .kind = expression->as.propagate.kind,
+            .operand = temporary,
+            .value_result = value_result,
+            .residual_result = residual_result,
+            .value_edge = {.block = value_block, .arguments = value_arguments},
+            .residual_edge = {
+                .block = residual_block,
+                .arguments = residual_arguments,
+            },
+        },
+    };
+    if (!mir_start_block(lowerer, residual_block)
+        || !mir_emit_exit_cleanup(lowerer, scope, expression->span)
+        || !mir_set_return(lowerer, residual_parameter, expression->span)
+        || !mir_start_block(lowerer, value_block)) return mir_failure(lowerer);
+    return (LoweredValue){.reachable = true, .value = value_parameter};
 }
 
 static LoweredValue mir_lower_construct(MirLowerer *lowerer,
@@ -1694,6 +1752,8 @@ static LoweredValue mir_lower_expression(MirLowerer *lowerer,
             return mir_lower_if(lowerer, expression, scope);
         case SOL_IR_EXPR_MATCH:
             return mir_lower_match(lowerer, id, expression, scope);
+        case SOL_IR_EXPR_PROPAGATE:
+            return mir_lower_propagate(lowerer, id, expression, scope);
         case SOL_IR_EXPR_BLOCK:
             return mir_lower_block(lowerer, expression, scope);
         case SOL_IR_EXPR_CALL:
@@ -1749,14 +1809,21 @@ static bool mir_source_reaches_match(const SolIr *ir,
     }
     const SolIrExpression *expression = &ir->expressions[expression_id];
     if (expression_id == sought) {
-        return expression->kind != SOL_IR_EXPR_MATCH
-            || !mir_type_is(ir, ir->expressions[
-                expression->as.match_expr.scrutinee].type, SOL_IR_TYPE_NEVER);
+        SolIrExpressionId prerequisite = expression->kind == SOL_IR_EXPR_MATCH
+            ? expression->as.match_expr.scrutinee
+            : expression->kind == SOL_IR_EXPR_PROPAGATE
+            ? expression->as.propagate.operand : SOL_IR_NONE;
+        return prerequisite == SOL_IR_NONE
+            || !mir_type_is(ir, ir->expressions[prerequisite].type,
+                SOL_IR_TYPE_NEVER);
     }
     switch (expression->kind) {
         case SOL_IR_EXPR_UNARY:
             return mir_source_reaches_match(ir, expression->as.unary.operand,
                 sought, depth + 1);
+        case SOL_IR_EXPR_PROPAGATE:
+            return mir_source_reaches_match(ir,
+                expression->as.propagate.operand, sought, depth + 1);
         case SOL_IR_EXPR_BINARY:
             if (mir_source_reaches_match(ir, expression->as.binary.left,
                 sought, depth + 1)) return true;
@@ -1872,6 +1939,9 @@ static bool mir_expression_contains_statement(const SolIr *ir,
         case SOL_IR_EXPR_UNARY:
             return mir_expression_contains_statement(ir,
                 expression->as.unary.operand, sought, depth + 1);
+        case SOL_IR_EXPR_PROPAGATE:
+            return mir_expression_contains_statement(ir,
+                expression->as.propagate.operand, sought, depth + 1);
         case SOL_IR_EXPR_BINARY:
             return mir_expression_contains_statement(ir,
                     expression->as.binary.left, sought, depth + 1)
@@ -1953,6 +2023,10 @@ static bool mir_find_statement_loop_parent(const SolIr *ir,
         case SOL_IR_EXPR_UNARY:
             return mir_find_statement_loop_parent(ir,
                 expression->as.unary.operand, sought, active_loop, parent,
+                depth + 1);
+        case SOL_IR_EXPR_PROPAGATE:
+            return mir_find_statement_loop_parent(ir,
+                expression->as.propagate.operand, sought, active_loop, parent,
                 depth + 1);
         case SOL_IR_EXPR_BINARY:
             return mir_find_statement_loop_parent(ir,
@@ -2059,6 +2133,10 @@ static bool mir_collect_source_statements(const SolIr *ir, const SolMir *mir,
         case SOL_IR_EXPR_UNARY:
             return mir_collect_source_statements(ir, mir,
                 expression->as.unary.operand, statements, count, depth + 1);
+        case SOL_IR_EXPR_PROPAGATE:
+            return mir_collect_source_statements(ir, mir,
+                expression->as.propagate.operand, statements, count,
+                depth + 1);
         case SOL_IR_EXPR_BINARY:
             if (!mir_collect_source_statements(ir, mir,
                 expression->as.binary.left, statements, count, depth + 1)) {
@@ -2297,6 +2375,13 @@ static bool mir_validate_arena_ownership(const SolMir *mir,
                 = terminator->as.check_refined.failure_edge.arguments;
             SolMirValueId result = terminator->as.check_refined.result;
             valid = result < mir->value_count && ++values[result] == 1;
+        } else if (terminator->kind == SOL_MIR_TERM_PROPAGATE) {
+            slices[count++] = terminator->as.propagate.value_edge.arguments;
+            slices[count++] = terminator->as.propagate.residual_edge.arguments;
+            SolMirValueId value = terminator->as.propagate.value_result;
+            SolMirValueId residual = terminator->as.propagate.residual_result;
+            valid = value < mir->value_count && ++values[value] == 1
+                && residual < mir->value_count && ++values[residual] == 1;
         } else if (terminator->kind == SOL_MIR_TERM_BREAK
             || terminator->kind == SOL_MIR_TERM_CONTINUE) {
             slices[count++] = terminator->as.transfer.edge.arguments;
@@ -2498,6 +2583,9 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
                     = term->as.check_refined.normal_edge.block;
                 targets[target_count++]
                     = term->as.check_refined.failure_edge.block;
+            } else if (valid && term->kind == SOL_MIR_TERM_PROPAGATE) {
+                targets[target_count++] = term->as.propagate.value_edge.block;
+                targets[target_count++] = term->as.propagate.residual_edge.block;
             } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
                 || term->kind == SOL_MIR_TERM_CONTINUE)) {
                 targets[target_count++] = term->as.transfer.edge.block;
@@ -2602,6 +2690,9 @@ static bool mir_validate_regions(const SolIr *ir, const SolMir *mir,
         } else if (valid && term->kind == SOL_MIR_TERM_CHECK_REFINED) {
             targets[target_count++] = term->as.check_refined.normal_edge.block;
             targets[target_count++] = term->as.check_refined.failure_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_PROPAGATE) {
+            targets[target_count++] = term->as.propagate.value_edge.block;
+            targets[target_count++] = term->as.propagate.residual_edge.block;
         } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE)) {
             targets[target_count++] = term->as.transfer.edge.block;
@@ -2724,6 +2815,9 @@ static bool mir_validate_storage_order(const SolIr *ir, const SolMir *mir,
         } else if (valid && term->kind == SOL_MIR_TERM_CHECK_REFINED) {
             targets[target_count++] = term->as.check_refined.normal_edge.block;
             targets[target_count++] = term->as.check_refined.failure_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_PROPAGATE) {
+            targets[target_count++] = term->as.propagate.value_edge.block;
+            targets[target_count++] = term->as.propagate.residual_edge.block;
         } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE)) {
             targets[target_count++] = term->as.transfer.edge.block;
@@ -2903,6 +2997,10 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
             valid = depth != 0
                 && working[depth - 1] == term->as.check_refined.representation;
             if (valid) --depth;
+        } else if (valid && term->kind == SOL_MIR_TERM_PROPAGATE) {
+            valid = depth != 0
+                && working[depth - 1] == term->as.propagate.operand;
+            if (valid) --depth;
         }
         if (valid && depth != 0
             && (term->kind == SOL_MIR_TERM_RETURN
@@ -2925,6 +3023,9 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
         } else if (valid && term->kind == SOL_MIR_TERM_CHECK_REFINED) {
             targets[target_count++] = term->as.check_refined.normal_edge.block;
             targets[target_count++] = term->as.check_refined.failure_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_PROPAGATE) {
+            targets[target_count++] = term->as.propagate.value_edge.block;
+            targets[target_count++] = term->as.propagate.residual_edge.block;
         } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE)) {
             targets[target_count++] = term->as.transfer.edge.block;
@@ -3236,7 +3337,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || !mir_slice_valid(block->parameters, mir->parameter_value_count)
             || !mir_slice_valid(block->instructions, mir->instruction_count)
             || block->terminator.kind <= SOL_MIR_TERM_INVALID
-            || block->terminator.kind > SOL_MIR_TERM_MATCH_FAILURE
+            || block->terminator.kind > SOL_MIR_TERM_PROPAGATE
             || !mir_span_valid(ir, block->terminator.span)) {
             free(instruction_owners);
             free(parameter_owners);
@@ -3616,6 +3717,77 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                     free(parameter_owners);
                     return mir_error(diagnostics, block->terminator.span,
                         "malformed MIR match failure");
+                }
+                break;
+            }
+            case SOL_MIR_TERM_PROPAGATE: {
+                const SolMirTerminator *term = &block->terminator;
+                SolIrExpressionId source_id
+                    = term->as.propagate.source_expression;
+                const SolIrExpression *source = source_id < ir->expression_count
+                    ? &ir->expressions[source_id] : NULL;
+                SolMirTemporaryId operand = term->as.propagate.operand;
+                SolMirValueId value = term->as.propagate.value_result;
+                SolMirValueId residual = term->as.propagate.residual_result;
+                SolIrTypeKind expected_type
+                    = term->as.propagate.kind == SOL_IR_PROPAGATE_OPTION
+                    ? SOL_IR_TYPE_OPTION : SOL_IR_TYPE_RESULT;
+                bool valid = source != NULL
+                    && source->kind == SOL_IR_EXPR_PROPAGATE
+                    && source->as.propagate.kind == term->as.propagate.kind
+                    && (term->as.propagate.kind == SOL_IR_PROPAGATE_OPTION
+                        || term->as.propagate.kind == SOL_IR_PROPAGATE_RESULT)
+                    && source->as.propagate.operand < ir->expression_count
+                    && ir->expressions[source->as.propagate.operand].type
+                        < ir->type_count
+                    && ir->types[ir->expressions[
+                        source->as.propagate.operand].type].kind == expected_type
+                    && operand < mir->temporary_count
+                    && mir->temporaries[operand].source_expression
+                        == source->as.propagate.operand
+                    && mir->temporaries[operand].type
+                        == ir->expressions[source->as.propagate.operand].type
+                    && value < mir->value_count
+                    && mir->values[value].kind == SOL_MIR_VALUE_TERMINATOR
+                    && mir->values[value].block == block_id
+                    && mir->values[value].definition == block_id
+                    && mir->values[value].type == source->type
+                    && mir->values[value].source_expression == source_id
+                    && residual < mir->value_count
+                    && mir->values[residual].kind == SOL_MIR_VALUE_TERMINATOR
+                    && mir->values[residual].block == block_id
+                    && mir->values[residual].definition == block_id
+                    && mir->values[residual].type == callable->result
+                    && mir->values[residual].source_expression == source_id
+                    && mir_validate_edge(mir, block_id,
+                        &term->as.propagate.value_edge, value)
+                    && term->as.propagate.value_edge.arguments.count == 1
+                    && mir->edge_values[
+                        term->as.propagate.value_edge.arguments.offset] == value
+                    && mir_validate_edge(mir, block_id,
+                        &term->as.propagate.residual_edge, residual)
+                    && term->as.propagate.residual_edge.arguments.count == 1
+                    && mir->edge_values[
+                        term->as.propagate.residual_edge.arguments.offset]
+                        == residual
+                    && mir->blocks[term->as.propagate.residual_edge.block]
+                        .parameters.count == 1
+                    && mir->values[mir->parameter_values[
+                        mir->blocks[term->as.propagate.residual_edge.block]
+                            .parameters.offset]].source_expression == source_id
+                    && mir->blocks[term->as.propagate.residual_edge.block]
+                        .terminator.kind == SOL_MIR_TERM_RETURN
+                    && mir->blocks[term->as.propagate.residual_edge.block]
+                        .terminator.as.value == mir->parameter_values[
+                            mir->blocks[term->as.propagate.residual_edge.block]
+                                .parameters.offset]
+                    && term->span.start == source->span.start
+                    && term->span.end == source->span.end;
+                if (!valid) {
+                    free(instruction_owners);
+                    free(parameter_owners);
+                    return mir_error(diagnostics, term->span,
+                        "malformed MIR propagation");
                 }
                 break;
             }
@@ -4054,14 +4226,53 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 "MIR match arms are missing or reordered");
         }
     }
+    for (size_t source = 0; source < ir->expression_count; ++source) {
+        if (ir->expressions[source].kind != SOL_IR_EXPR_PROPAGATE) continue;
+        size_t count = 0;
+        for (size_t block = 0; block < mir->block_count; ++block) {
+            count += mir->blocks[block].terminator.kind
+                    == SOL_MIR_TERM_PROPAGATE
+                && mir->blocks[block].terminator.as.propagate.source_expression
+                    == source;
+        }
+        bool required = mir_source_reaches_match(ir, callable->body, source, 0);
+        if (count != (required ? 1u : 0u)) {
+            return mir_error(diagnostics, ir->expressions[source].span,
+                "MIR propagation is missing, duplicated, or foreign");
+        }
+    }
     for (size_t id = 0; id < mir->value_count; ++id) {
         const SolMirValue *value = &mir->values[id];
+        bool propagation_residual = false;
+        for (size_t block = 0; block < mir->block_count; ++block) {
+            const SolMirTerminator *term = &mir->blocks[block].terminator;
+            if (term->kind != SOL_MIR_TERM_PROPAGATE) continue;
+            propagation_residual = propagation_residual
+                || (id == term->as.propagate.residual_result
+                    && value->source_expression
+                        == term->as.propagate.source_expression);
+            SolMirBlockId residual_block
+                = term->as.propagate.residual_edge.block;
+            if (residual_block < mir->block_count
+                && mir->blocks[residual_block].parameters.count == 1) {
+                propagation_residual = propagation_residual
+                    || (id == mir->parameter_values[
+                            mir->blocks[residual_block].parameters.offset]
+                        && value->source_expression
+                            == term->as.propagate.source_expression);
+            }
+        }
+        propagation_residual = propagation_residual
+            && value->source_expression < ir->expression_count
+            && ir->expressions[value->source_expression].kind
+                == SOL_IR_EXPR_PROPAGATE
+            && value->type == callable->result;
         if ((int)value->kind < 0 || value->kind > SOL_MIR_VALUE_TERMINATOR
             || value->type >= ir->type_count || value->block >= mir->block_count
             || (value->source_expression != SOL_IR_NONE
                 && (value->source_expression >= ir->expression_count
                     || ir->expressions[value->source_expression].type
-                        != value->type))
+                        != value->type) && !propagation_residual)
             || !mir_span_valid(ir, value->span)) {
             return mir_error(diagnostics, value->span,
                 "malformed MIR value metadata");
@@ -4120,6 +4331,9 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         } else if (term->kind == SOL_MIR_TERM_CHECK_REFINED) {
             ++predecessors[term->as.check_refined.normal_edge.block];
             ++predecessors[term->as.check_refined.failure_edge.block];
+        } else if (term->kind == SOL_MIR_TERM_PROPAGATE) {
+            ++predecessors[term->as.propagate.value_edge.block];
+            ++predecessors[term->as.propagate.residual_edge.block];
         } else if (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE) {
             ++predecessors[term->as.transfer.edge.block];
@@ -4146,6 +4360,9 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         } else if (term->kind == SOL_MIR_TERM_CHECK_REFINED) {
             targets[target_count++] = term->as.check_refined.normal_edge.block;
             targets[target_count++] = term->as.check_refined.failure_edge.block;
+        } else if (term->kind == SOL_MIR_TERM_PROPAGATE) {
+            targets[target_count++] = term->as.propagate.value_edge.block;
+            targets[target_count++] = term->as.propagate.residual_edge.block;
         } else if (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE) {
             targets[target_count++] = term->as.transfer.edge.block;

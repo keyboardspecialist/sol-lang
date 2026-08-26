@@ -618,9 +618,12 @@ local, and region cleanup before resuming failure. Unsupported constructs fail
 transactionally. Recursive matches stage one scrutinee across source-ordered
 structural tests and false guards, use source-bound provisional pattern values,
 consume the scrutinee only on selection, and retain explicit no-match failure and
-binding cleanup CFG. P1a.3b4 is not connected to compilation sessions or execution
-and does not choose how a backend evaluates predicates or patterns. It does not yet
-cover propagation, projected places, authority-bearing construction,
+binding cleanup CFG. Option/Result propagation uses a two-result semantic terminator
+that transfers either an unwrapped success value or a callable-result-typed residual;
+the residual path performs complete cleanup before an ordinary return. P1a.3b5 is not
+connected to compilation sessions or execution and does not choose how a backend
+evaluates predicates, patterns, or sum discriminants. It does not yet cover projected
+places, authority-bearing construction,
 dynamic/method/capability calls, handlers, contracts, generic lowering,
 representation, runtime ABI, or a backend.
 

@@ -1327,6 +1327,73 @@ static void test_recursive_match_lowering(void) {
     free_compilation(&compilation);
 }
 
+static void test_propagation_lowering(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_propagation\n"
+        "record Box<T> { value: T }\n"
+        "function make(value: Int64) -> Box<Int64> "
+        "{ Box<Int64> { value } }\n"
+        "function consume(box: Box<Int64>, value: Int64) -> () {}\n"
+        "function staged(value: Option<Int64>) -> Option<()> { "
+        "consume(make(1), value?) return some(()) }\n"
+        "function result(value: Result<Int64, Text>) -> Result<Bool, Text> { "
+        "return ok(value? > 0) }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    const char *names[] = {"staged", "result"};
+    for (size_t name = 0; name < 2; ++name) {
+        SolMir mir;
+        sol_mir_init(&mir);
+        SolMirLowerOutcome outcome = sol_mir_lower_callable(&compilation.ir,
+            callable(&compilation.ir, names[name]), &mir,
+            &compilation.diagnostics);
+        CHECK(outcome == SOL_MIR_LOWER_SUCCEEDED);
+        if (outcome != SOL_MIR_LOWER_SUCCEEDED) {
+            sol_mir_free(&mir);
+            continue;
+        }
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        SolMirBlockId propagation = SOL_MIR_NONE;
+        for (size_t block = 0; block < mir.block_count; ++block) {
+            if (mir.blocks[block].terminator.kind
+                == SOL_MIR_TERM_PROPAGATE) propagation = block;
+        }
+        CHECK(propagation != SOL_MIR_NONE);
+        SolMirTerminator *term = &mir.blocks[propagation].terminator;
+        CHECK(term->as.propagate.value_edge.arguments.count == 1);
+        CHECK(term->as.propagate.residual_edge.arguments.count == 1);
+        CHECK(mir.values[term->as.propagate.residual_result].type
+            == compilation.ir.callables[mir.callable].result);
+        CHECK(mir.blocks[term->as.propagate.residual_edge.block]
+            .terminator.kind == SOL_MIR_TERM_RETURN);
+        if (name == 0) {
+            bool saw_outer_drop = false;
+            SolMirSlice instructions
+                = mir.blocks[term->as.propagate.residual_edge.block].instructions;
+            for (size_t index = 0; index < instructions.count; ++index) {
+                saw_outer_drop = saw_outer_drop
+                    || mir.instructions[instructions.offset + index].kind
+                        == SOL_MIR_INST_TEMPORARY_DROP;
+            }
+            CHECK(saw_outer_drop);
+        }
+        SolMirTemporaryId operand = term->as.propagate.operand;
+        term->as.propagate.operand = SOL_MIR_NONE;
+        CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+        term->as.propagate.operand = operand;
+        SolMirValueId residual_argument = mir.edge_values[
+            term->as.propagate.residual_edge.arguments.offset];
+        mir.edge_values[term->as.propagate.residual_edge.arguments.offset]
+            = term->as.propagate.value_result;
+        CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+        mir.edge_values[term->as.propagate.residual_edge.arguments.offset]
+            = residual_argument;
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        sol_mir_free(&mir);
+    }
+    free_compilation(&compilation);
+}
+
 static void test_owned_temporary_cleanup(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -1582,6 +1649,7 @@ int main(void) {
     test_bounded_value_construction();
     test_refined_failure_cleanup();
     test_recursive_match_lowering();
+    test_propagation_lowering();
     test_owned_temporary_cleanup();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

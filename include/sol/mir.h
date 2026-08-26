@@ -26,7 +26,7 @@ typedef enum {
 typedef enum {
     SOL_MIR_VALUE_BLOCK_PARAMETER,
     SOL_MIR_VALUE_INSTRUCTION,
-    /* Available only as the normal-edge result of its defining terminator. */
+    /* Available only on its designated edge from the defining terminator. */
     SOL_MIR_VALUE_TERMINATOR,
 } SolMirValueKind;
 
@@ -179,6 +179,7 @@ typedef enum {
     SOL_MIR_TERM_CONTINUE,
     SOL_MIR_TERM_CHECK_REFINED,
     SOL_MIR_TERM_MATCH_FAILURE,
+    SOL_MIR_TERM_PROPAGATE,
 } SolMirTerminatorKind;
 
 typedef struct {
@@ -221,6 +222,15 @@ typedef struct {
             SolMirEdge failure_edge;
         } check_refined;
         SolIrExpressionId match_failure;
+        struct {
+            SolIrExpressionId source_expression;
+            SolIrPropagationKind kind;
+            SolMirTemporaryId operand;
+            SolMirValueId value_result;
+            SolMirValueId residual_result;
+            SolMirEdge value_edge;
+            SolMirEdge residual_edge;
+        } propagate;
     } as;
 } SolMirTerminator;
 
