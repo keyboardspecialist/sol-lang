@@ -283,11 +283,16 @@ static void test_transactional_unsupported(void) {
     size_t before = compilation.diagnostics.count;
     CHECK(sol_mir_lower_callable(&compilation.ir,
         callable(&compilation.ir, "classify"), &mir,
-        &compilation.diagnostics) == SOL_MIR_LOWER_UNSUPPORTED);
-    CHECK(mir.callable == SOL_IR_NONE && mir.blocks == NULL
-        && mir.block_count == 0 && mir.instructions == NULL);
-    CHECK(compilation.diagnostics.count == before + 1);
-    CHECK(strcmp(compilation.diagnostics.items[before].code, "SOL-MIR-001") == 0);
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+    CHECK(compilation.diagnostics.count == before);
+    size_t pattern_tests = 0;
+    for (size_t instruction = 0; instruction < mir.instruction_count;
+        ++instruction) {
+        pattern_tests += mir.instructions[instruction].kind
+            == SOL_MIR_INST_PATTERN_TEST;
+    }
+    CHECK(pattern_tests == 2);
     sol_mir_free(&mir);
 
     sol_mir_init(&mir);
@@ -1278,6 +1283,50 @@ static void test_refined_failure_cleanup(void) {
     free_compilation(&compilation);
 }
 
+static void test_recursive_match_lowering(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_recursive_match\n"
+        "record Packet { data: (Int64, Bool) }\n"
+        "function select(value: Packet, gate: Bool) -> Int64 { "
+        "return match value { "
+        "Packet { data = (number, true) } if gate => number "
+        "_ => 0 } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolMir mir;
+    sol_mir_init(&mir);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "select"), &mir,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+    SolMirInstructionId pattern_value = SOL_MIR_NONE;
+    bool saw_binding_drop = false;
+    bool saw_match_failure = false;
+    for (size_t instruction = 0; instruction < mir.instruction_count;
+        ++instruction) {
+        if (mir.instructions[instruction].kind == SOL_MIR_INST_PATTERN_VALUE) {
+            pattern_value = instruction;
+        }
+        saw_binding_drop = saw_binding_drop
+            || mir.instructions[instruction].kind
+                == SOL_MIR_INST_DROP_IF_INITIALIZED;
+    }
+    for (size_t block = 0; block < mir.block_count; ++block) {
+        saw_match_failure = saw_match_failure
+            || mir.blocks[block].terminator.kind
+                == SOL_MIR_TERM_MATCH_FAILURE;
+    }
+    CHECK(pattern_value != SOL_MIR_NONE);
+    CHECK(saw_binding_drop && saw_match_failure);
+    SolIrArmId arm = mir.instructions[pattern_value].as.pattern.arm;
+    mir.instructions[pattern_value].as.pattern.arm = SOL_IR_NONE;
+    CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+    mir.instructions[pattern_value].as.pattern.arm = arm;
+    CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+    sol_mir_free(&mir);
+    free_compilation(&compilation);
+}
+
 static void test_owned_temporary_cleanup(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -1532,6 +1581,7 @@ int main(void) {
     test_loop_control_lowering();
     test_bounded_value_construction();
     test_refined_failure_cleanup();
+    test_recursive_match_lowering();
     test_owned_temporary_cleanup();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

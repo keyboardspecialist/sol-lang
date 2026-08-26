@@ -615,9 +615,12 @@ dominance. Checked refined construction retains its exact type-owned predicate
 obligation in a target-neutral terminator, consumes the representation on either
 outcome, transports the nominal result only on success, and performs pending,
 local, and region cleanup before resuming failure. Unsupported constructs fail
-transactionally. P1a.3b3 is not connected to compilation sessions or execution and
-does not choose how a backend evaluates predicates. It does not yet cover patterns,
-propagation, projected places, authority-bearing construction,
+transactionally. Recursive matches stage one scrutinee across source-ordered
+structural tests and false guards, use source-bound provisional pattern values,
+consume the scrutinee only on selection, and retain explicit no-match failure and
+binding cleanup CFG. P1a.3b4 is not connected to compilation sessions or execution
+and does not choose how a backend evaluates predicates or patterns. It does not yet
+cover propagation, projected places, authority-bearing construction,
 dynamic/method/capability calls, handlers, contracts, generic lowering,
 representation, runtime ABI, or a backend.
 

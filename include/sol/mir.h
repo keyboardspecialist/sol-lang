@@ -58,6 +58,9 @@ typedef enum {
     SOL_MIR_INST_TEMPORARY_INIT,
     SOL_MIR_INST_TEMPORARY_DROP,
     SOL_MIR_INST_EXPRESSION_RESULT,
+    SOL_MIR_INST_PATTERN_TEST,
+    SOL_MIR_INST_PATTERN_VALUE,
+    SOL_MIR_INST_MATCH_ARM,
     SOL_MIR_INST_CONSTRUCT,
 } SolMirInstructionKind;
 
@@ -106,6 +109,13 @@ typedef struct {
             SolMirTemporaryId temporary;
             size_t preserve_depth;
         } temporary_drop;
+        struct {
+            SolIrExpressionId match_expression;
+            SolIrArmId arm;
+            size_t arm_ordinal;
+            SolIrPatternId pattern;
+            SolMirTemporaryId scrutinee;
+        } pattern;
         struct {
             SolMirConstructKind kind;
             SolIrDefinitionId definition;
@@ -168,6 +178,7 @@ typedef enum {
     SOL_MIR_TERM_BREAK,
     SOL_MIR_TERM_CONTINUE,
     SOL_MIR_TERM_CHECK_REFINED,
+    SOL_MIR_TERM_MATCH_FAILURE,
 } SolMirTerminatorKind;
 
 typedef struct {
@@ -209,6 +220,7 @@ typedef struct {
             SolMirEdge normal_edge;
             SolMirEdge failure_edge;
         } check_refined;
+        SolIrExpressionId match_failure;
     } as;
 } SolMirTerminator;
 

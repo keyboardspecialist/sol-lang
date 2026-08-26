@@ -10,6 +10,10 @@ struct Scope {
     const Scope *parent;
     SolIrSlice cleanup;
     SolIrStatementId region;
+    bool cleanup_forward;
+    bool cleanup_before_temporaries;
+    size_t temporary_cleanup_boundary;
+    size_t temporary_parent_boundary;
 };
 
 struct LoopContext {
@@ -333,6 +337,24 @@ static bool mir_emit_temporary_cleanup_to(MirLowerer *lowerer,
     return true;
 }
 
+static bool mir_emit_temporary_cleanup_range(MirLowerer *lowerer,
+    size_t begin, size_t end, size_t preserve_depth, SolSpan span) {
+    if (begin > end || end > lowerer->pending_temporary_count) return false;
+    for (size_t index = begin; index < end; ++index) {
+        if (mir_append_instruction(lowerer, (SolMirInstruction){
+            .kind = SOL_MIR_INST_TEMPORARY_DROP,
+            .type = SOL_IR_NONE,
+            .source_expression = SOL_IR_NONE,
+            .span = span,
+            .as.temporary_drop = {
+                .temporary = lowerer->pending_temporaries[index],
+                .preserve_depth = preserve_depth,
+            },
+        }, false) == SOL_MIR_NONE) return false;
+    }
+    return true;
+}
+
 static SolMirLoopId mir_append_loop(MirLowerer *lowerer,
     SolMirLoop loop) {
     SolMir *mir = lowerer->mir;
@@ -449,20 +471,65 @@ static bool mir_emit_cleanup_slice(MirLowerer *lowerer,
     return true;
 }
 
-static bool mir_emit_exit_cleanup(MirLowerer *lowerer,
+static bool mir_emit_scope_cleanup(MirLowerer *lowerer,
     const Scope *scope, SolSpan span) {
-    if (!mir_emit_temporary_cleanup_to(lowerer, 0, span)) return false;
-    for (const Scope *current = scope; current != NULL;
-        current = current->parent) {
-        if (!mir_emit_cleanup_slice(lowerer, current->cleanup, span)) return false;
-        if (current->region != SOL_IR_NONE
-            && mir_append_instruction(lowerer, (SolMirInstruction){
+    if (!scope->cleanup_forward) {
+        return mir_emit_cleanup_slice(lowerer, scope->cleanup, span);
+    }
+    for (size_t index = 0; index < scope->cleanup.count; ++index) {
+        SolIrLocalId local = lowerer->ir->cleanup_locals[
+            scope->cleanup.offset + index];
+        if (!mir_emit_local(lowerer, SOL_MIR_INST_DROP_IF_INITIALIZED,
+                local, span)
+            || !mir_emit_local(lowerer, SOL_MIR_INST_STORAGE_DEAD,
+                local, span)) return false;
+    }
+    return true;
+}
+
+static bool mir_emit_scope_exit(MirLowerer *lowerer,
+    const Scope *scope, SolSpan span) {
+    return mir_emit_scope_cleanup(lowerer, scope, span)
+        && (scope->region == SOL_IR_NONE
+            || mir_append_instruction(lowerer, (SolMirInstruction){
                 .kind = SOL_MIR_INST_REGION_EXIT,
                 .type = SOL_IR_NONE,
                 .source_expression = SOL_IR_NONE,
                 .span = span,
-                .as.region = current->region,
-            }, false) == SOL_MIR_NONE) return false;
+                .as.region = scope->region,
+            }, false) != SOL_MIR_NONE);
+}
+
+static bool mir_emit_exit_cleanup(MirLowerer *lowerer,
+    const Scope *scope, SolSpan span) {
+    const Scope *current = scope;
+    size_t temporary_end = lowerer->pending_temporary_count;
+    while (current != NULL) {
+        const Scope *boundary = current;
+        while (boundary != NULL && !boundary->cleanup_before_temporaries) {
+            boundary = boundary->parent;
+        }
+        if (boundary == NULL) break;
+        size_t temporary_boundary = boundary->temporary_cleanup_boundary;
+        if (!mir_emit_temporary_cleanup_range(lowerer, temporary_boundary,
+            temporary_end, temporary_boundary, span)) {
+            return false;
+        }
+        while (current != boundary->parent) {
+            if (!mir_emit_scope_exit(lowerer, current, span)) return false;
+            current = current->parent;
+        }
+        if (!mir_emit_temporary_cleanup_range(lowerer,
+            boundary->temporary_parent_boundary, temporary_boundary,
+            boundary->temporary_parent_boundary, span)) return false;
+        temporary_end = boundary->temporary_parent_boundary;
+    }
+    if (!mir_emit_temporary_cleanup_range(lowerer, 0,
+        temporary_end, 0, span)) {
+        return false;
+    }
+    for (; current != NULL; current = current->parent) {
+        if (!mir_emit_scope_exit(lowerer, current, span)) return false;
     }
     SolIrSlice parameters = lowerer->callable->parameters;
     while (parameters.count != 0) {
@@ -482,7 +549,7 @@ static bool mir_emit_cleanup_to(MirLowerer *lowerer,
     const Scope *current = scope;
     while (current != boundary) {
         if (current == NULL
-            || !mir_emit_cleanup_slice(lowerer, current->cleanup, span)) {
+            || !mir_emit_scope_cleanup(lowerer, current, span)) {
             return false;
         }
         if (current->region != SOL_IR_NONE
@@ -961,6 +1028,176 @@ static LoweredValue mir_lower_if(MirLowerer *lowerer,
         then_value.value, true, expression->span)) return mir_failure(lowerer);
     if (else_value.reachable && !mir_set_goto(lowerer, else_end, join,
         else_value.value, true, expression->span)) return mir_failure(lowerer);
+    if (!mir_start_block(lowerer, join)) return mir_failure(lowerer);
+    return (LoweredValue){.reachable = true, .value = parameter};
+}
+
+static bool mir_emit_pattern_bindings(MirLowerer *lowerer,
+    SolIrExpressionId match_expression, SolIrArmId arm_id,
+    size_t arm_ordinal, SolIrPatternId pattern_id,
+    SolMirTemporaryId scrutinee, size_t depth) {
+    if (depth > 64 || pattern_id >= lowerer->ir->pattern_count) return false;
+    const SolIrPattern *pattern = &lowerer->ir->patterns[pattern_id];
+    if (pattern->kind == SOL_IR_PATTERN_BINDING) {
+        SolMirValueId value = mir_instruction_result(lowerer,
+            (SolMirInstruction){
+                .kind = SOL_MIR_INST_PATTERN_VALUE,
+                .type = pattern->type,
+                .source_expression = SOL_IR_NONE,
+                .span = pattern->span,
+                .as.pattern = {
+                    .match_expression = match_expression,
+                    .arm = arm_id,
+                    .arm_ordinal = arm_ordinal,
+                    .pattern = pattern_id,
+                    .scrutinee = scrutinee,
+                },
+            });
+        return value != SOL_MIR_NONE
+            && mir_emit_local(lowerer, SOL_MIR_INST_STORAGE_LIVE,
+                pattern->binding, pattern->span)
+            && mir_append_instruction(lowerer, (SolMirInstruction){
+                .kind = SOL_MIR_INST_STORE,
+                .type = SOL_IR_NONE,
+                .source_expression = SOL_IR_NONE,
+                .span = pattern->span,
+                .as.store = {.local = pattern->binding, .value = value},
+            }, false) != SOL_MIR_NONE;
+    }
+    for (size_t index = 0; index < pattern->children.count; ++index) {
+        SolIrPatternId child = lowerer->ir->pattern_children[
+            pattern->children.offset + index].pattern;
+        if (!mir_emit_pattern_bindings(lowerer, match_expression, arm_id,
+            arm_ordinal, child, scrutinee, depth + 1)) return false;
+    }
+    return true;
+}
+
+static LoweredValue mir_lower_match(MirLowerer *lowerer,
+    SolIrExpressionId id, const SolIrExpression *expression,
+    const Scope *scope) {
+    size_t operation_depth = lowerer->pending_temporary_count;
+    LoweredValue scrutinee = mir_lower_expression(lowerer,
+        expression->as.match_expr.scrutinee, scope);
+    if (!scrutinee.reachable) return scrutinee;
+    SolMirTemporaryId temporary = SOL_MIR_NONE;
+    if (!mir_stage_temporary(lowerer, expression->as.match_expr.scrutinee,
+        scrutinee.value, &temporary)) return mir_failure(lowerer);
+    size_t match_depth = lowerer->pending_temporary_count;
+    SolIrTypeId bool_type = SOL_IR_NONE;
+    for (size_t type = 0; type < lowerer->ir->type_count; ++type) {
+        if (lowerer->ir->types[type].kind == SOL_IR_TYPE_BOOL) {
+            bool_type = type;
+            break;
+        }
+    }
+    if (bool_type == SOL_IR_NONE) return mir_failure(lowerer);
+    SolMirBlockId join = SOL_MIR_NONE;
+    SolMirValueId parameter = SOL_MIR_NONE;
+    for (size_t index = 0; index < expression->as.match_expr.arms.count;
+        ++index) {
+        SolIrArmId arm_id = lowerer->ir->arm_ids[
+            expression->as.match_expr.arms.offset + index];
+        const SolIrArm *arm = &lowerer->ir->arms[arm_id];
+        SolMirValueId matched = mir_instruction_result(lowerer,
+            (SolMirInstruction){
+                .kind = SOL_MIR_INST_PATTERN_TEST,
+                .type = bool_type,
+                .source_expression = SOL_IR_NONE,
+                .span = arm->span,
+                .as.pattern = {
+                    .match_expression = id,
+                    .arm = arm_id,
+                    .arm_ordinal = index,
+                    .pattern = arm->pattern,
+                    .scrutinee = temporary,
+                },
+            });
+        SolMirBlockId selected = mir_append_block(lowerer, arm->span);
+        SolMirBlockId next = mir_append_block(lowerer, expression->span);
+        if (matched == SOL_MIR_NONE || selected == SOL_MIR_NONE
+            || next == SOL_MIR_NONE
+            || !mir_set_branch(lowerer, lowerer->current, matched,
+                selected, next, arm->span)
+            || !mir_start_block(lowerer, selected)) return mir_failure(lowerer);
+        if (mir_append_instruction(lowerer, (SolMirInstruction){
+                .kind = SOL_MIR_INST_MATCH_ARM,
+                .type = SOL_IR_NONE,
+                .source_expression = arm->body,
+                .span = arm->span,
+                .as.pattern = {
+                    .match_expression = id,
+                    .arm = arm_id,
+                    .arm_ordinal = index,
+                    .pattern = arm->pattern,
+                    .scrutinee = temporary,
+                },
+            }, false) == SOL_MIR_NONE
+            || !mir_emit_pattern_bindings(lowerer, id, arm_id, index,
+                arm->pattern, temporary, 0)) return mir_failure(lowerer);
+        Scope arm_scope = {
+            .parent = scope,
+            .cleanup = arm->cleanup,
+            .region = SOL_IR_NONE,
+            .cleanup_forward = true,
+        };
+        if (arm->guard != SOL_IR_NONE) {
+            Scope guard_scope = arm_scope;
+            guard_scope.cleanup_before_temporaries = true;
+            guard_scope.temporary_cleanup_boundary = match_depth;
+            guard_scope.temporary_parent_boundary = operation_depth;
+            LoweredValue guard = mir_lower_expression(lowerer,
+                arm->guard, &guard_scope);
+            SolMirBlockId accepted = mir_append_block(lowerer, arm->span);
+            SolMirBlockId rejected = mir_append_block(lowerer, arm->span);
+            if (!guard.reachable || accepted == SOL_MIR_NONE
+                || rejected == SOL_MIR_NONE
+                || !mir_set_branch(lowerer, lowerer->current, guard.value,
+                    accepted, rejected, arm->span)
+                || !mir_start_block(lowerer, rejected)
+                || !mir_emit_scope_cleanup(lowerer, &arm_scope, arm->span)
+                || !mir_set_goto(lowerer, lowerer->current, next,
+                    SOL_MIR_NONE, false, arm->span)
+                || !mir_start_block(lowerer, accepted)) {
+                return mir_failure(lowerer);
+            }
+        }
+        if (!mir_emit_temporary_cleanup_to(lowerer, operation_depth, arm->span)) {
+            return mir_failure(lowerer);
+        }
+        lowerer->pending_temporary_count = operation_depth;
+        LoweredValue body = mir_lower_expression(lowerer, arm->body, &arm_scope);
+        if (body.reachable) {
+            if (!mir_emit_scope_cleanup(lowerer, &arm_scope, arm->span)) {
+                return mir_failure(lowerer);
+            }
+            if (join == SOL_MIR_NONE) {
+                join = mir_append_block(lowerer, expression->span);
+                parameter = mir_append_parameter(lowerer, join,
+                    expression->type, id, expression->span);
+                if (join == SOL_MIR_NONE || parameter == SOL_MIR_NONE) {
+                    return mir_failure(lowerer);
+                }
+            }
+            if (!mir_set_goto(lowerer, lowerer->current, join,
+                body.value, true, arm->span)) return mir_failure(lowerer);
+        }
+        lowerer->pending_temporary_count = match_depth;
+        if (!mir_start_block(lowerer, next)) return mir_failure(lowerer);
+    }
+    if (!mir_emit_exit_cleanup(lowerer, scope, expression->span)) {
+        return mir_failure(lowerer);
+    }
+    lowerer->mir->blocks[lowerer->current].terminator = (SolMirTerminator){
+        .kind = SOL_MIR_TERM_MATCH_FAILURE,
+        .span = expression->span,
+        .as.match_failure = id,
+    };
+    lowerer->pending_temporary_count = operation_depth;
+    if (join == SOL_MIR_NONE) {
+        lowerer->current = SOL_MIR_NONE;
+        return mir_unreachable();
+    }
     if (!mir_start_block(lowerer, join)) return mir_failure(lowerer);
     return (LoweredValue){.reachable = true, .value = parameter};
 }
@@ -1455,6 +1692,8 @@ static LoweredValue mir_lower_expression(MirLowerer *lowerer,
         }
         case SOL_IR_EXPR_IF:
             return mir_lower_if(lowerer, expression, scope);
+        case SOL_IR_EXPR_MATCH:
+            return mir_lower_match(lowerer, id, expression, scope);
         case SOL_IR_EXPR_BLOCK:
             return mir_lower_block(lowerer, expression, scope);
         case SOL_IR_EXPR_CALL:
@@ -1478,6 +1717,144 @@ static bool mir_slice_valid(SolMirSlice slice, size_t count) {
 
 static bool mir_span_valid(const SolIr *ir, SolSpan span) {
     return span.start <= span.end && span.end <= ir->source_length;
+}
+
+static bool mir_pattern_contains(const SolIr *ir, SolIrPatternId root,
+    SolIrPatternId target, size_t depth) {
+    if (depth > 64 || root >= ir->pattern_count) return false;
+    if (root == target) return true;
+    const SolIrPattern *pattern = &ir->patterns[root];
+    for (size_t index = 0; index < pattern->children.count; ++index) {
+        if (mir_pattern_contains(ir, ir->pattern_children[
+                pattern->children.offset + index].pattern, target,
+            depth + 1)) return true;
+    }
+    return false;
+}
+
+static bool mir_match_has_arm(const SolIr *ir,
+    const SolIrExpression *match, SolIrArmId arm) {
+    for (size_t index = 0; index < match->as.match_expr.arms.count; ++index) {
+        if (ir->arm_ids[match->as.match_expr.arms.offset + index] == arm) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool mir_source_reaches_match(const SolIr *ir,
+    SolIrExpressionId expression_id, SolIrExpressionId sought, size_t depth) {
+    if (expression_id >= ir->expression_count || depth > ir->expression_count) {
+        return false;
+    }
+    const SolIrExpression *expression = &ir->expressions[expression_id];
+    if (expression_id == sought) {
+        return expression->kind != SOL_IR_EXPR_MATCH
+            || !mir_type_is(ir, ir->expressions[
+                expression->as.match_expr.scrutinee].type, SOL_IR_TYPE_NEVER);
+    }
+    switch (expression->kind) {
+        case SOL_IR_EXPR_UNARY:
+            return mir_source_reaches_match(ir, expression->as.unary.operand,
+                sought, depth + 1);
+        case SOL_IR_EXPR_BINARY:
+            if (mir_source_reaches_match(ir, expression->as.binary.left,
+                sought, depth + 1)) return true;
+            return !mir_type_is(ir,
+                    ir->expressions[expression->as.binary.left].type,
+                    SOL_IR_TYPE_NEVER)
+                && mir_source_reaches_match(ir, expression->as.binary.right,
+                    sought, depth + 1);
+        case SOL_IR_EXPR_CALL:
+            for (size_t index = 0; index < expression->as.call.operands.count;
+                ++index) {
+                SolIrExpressionId operand = ir->operands[
+                    expression->as.call.operands.offset + index].value;
+                if (mir_source_reaches_match(ir, operand, sought, depth + 1)) {
+                    return true;
+                }
+                if (mir_type_is(ir, ir->expressions[operand].type,
+                    SOL_IR_TYPE_NEVER)) return false;
+            }
+            return false;
+        case SOL_IR_EXPR_RECORD:
+        case SOL_IR_EXPR_TUPLE: {
+            SolIrSlice operands = expression->kind == SOL_IR_EXPR_RECORD
+                ? expression->as.record.fields : expression->as.tuple.operands;
+            for (size_t index = 0; index < operands.count; ++index) {
+                SolIrExpressionId operand
+                    = ir->operands[operands.offset + index].value;
+                if (mir_source_reaches_match(ir, operand, sought, depth + 1)) {
+                    return true;
+                }
+                if (mir_type_is(ir, ir->expressions[operand].type,
+                    SOL_IR_TYPE_NEVER)) return false;
+            }
+            return false;
+        }
+        case SOL_IR_EXPR_IF:
+            if (mir_source_reaches_match(ir,
+                expression->as.if_expr.condition, sought, depth + 1)) {
+                return true;
+            }
+            return !mir_type_is(ir, ir->expressions[
+                    expression->as.if_expr.condition].type, SOL_IR_TYPE_NEVER)
+                && (mir_source_reaches_match(ir,
+                        expression->as.if_expr.then_branch, sought, depth + 1)
+                    || mir_source_reaches_match(ir,
+                        expression->as.if_expr.else_branch, sought, depth + 1));
+        case SOL_IR_EXPR_MATCH:
+            if (mir_source_reaches_match(ir,
+                expression->as.match_expr.scrutinee, sought, depth + 1)) {
+                return true;
+            }
+            if (mir_type_is(ir, ir->expressions[
+                expression->as.match_expr.scrutinee].type,
+                SOL_IR_TYPE_NEVER)) return false;
+            for (size_t index = 0; index < expression->as.match_expr.arms.count;
+                ++index) {
+                const SolIrArm *arm = &ir->arms[ir->arm_ids[
+                    expression->as.match_expr.arms.offset + index]];
+                if ((arm->guard != SOL_IR_NONE
+                        && mir_source_reaches_match(ir, arm->guard, sought,
+                            depth + 1))
+                    || mir_source_reaches_match(ir, arm->body, sought,
+                        depth + 1)) return true;
+            }
+            return false;
+        case SOL_IR_EXPR_BLOCK:
+            for (size_t index = 0; index < expression->as.block.statements.count;
+                ++index) {
+                const SolIrStatement *statement = &ir->statements[
+                    ir->statement_ids[expression->as.block.statements.offset
+                        + index]];
+                if (statement->target != SOL_IR_NONE
+                    && mir_source_reaches_match(ir, statement->target, sought,
+                        depth + 1)) return true;
+                if (statement->condition != SOL_IR_NONE
+                    && mir_source_reaches_match(ir, statement->condition,
+                        sought, depth + 1)) return true;
+                if (statement->condition != SOL_IR_NONE
+                    && mir_type_is(ir,
+                        ir->expressions[statement->condition].type,
+                        SOL_IR_TYPE_NEVER)) return false;
+                if (statement->expression != SOL_IR_NONE
+                    && mir_source_reaches_match(ir, statement->expression,
+                        sought, depth + 1)) return true;
+                if (statement->kind == SOL_IR_STATEMENT_RETURN
+                    || statement->kind == SOL_IR_STATEMENT_PANIC
+                    || statement->kind == SOL_IR_STATEMENT_BREAK
+                    || statement->kind == SOL_IR_STATEMENT_CONTINUE
+                    || statement->kind == SOL_IR_STATEMENT_UNREACHABLE
+                    || (statement->expression != SOL_IR_NONE
+                        && mir_type_is(ir,
+                            ir->expressions[statement->expression].type,
+                            SOL_IR_TYPE_NEVER))) return false;
+            }
+            return false;
+        default:
+            return false;
+    }
 }
 
 static bool mir_type_is(const SolIr *ir, SolIrTypeId id,
@@ -1526,6 +1903,22 @@ static bool mir_expression_contains_statement(const SolIr *ir,
                     expression->as.if_expr.then_branch, sought, depth + 1)
                 || mir_expression_contains_statement(ir,
                     expression->as.if_expr.else_branch, sought, depth + 1);
+        case SOL_IR_EXPR_MATCH:
+            if (mir_expression_contains_statement(ir,
+                expression->as.match_expr.scrutinee, sought, depth + 1)) {
+                return true;
+            }
+            for (size_t index = 0; index < expression->as.match_expr.arms.count;
+                ++index) {
+                const SolIrArm *arm = &ir->arms[ir->arm_ids[
+                    expression->as.match_expr.arms.offset + index]];
+                if ((arm->guard != SOL_IR_NONE
+                        && mir_expression_contains_statement(ir, arm->guard,
+                            sought, depth + 1))
+                    || mir_expression_contains_statement(ir, arm->body,
+                        sought, depth + 1)) return true;
+            }
+            return false;
         case SOL_IR_EXPR_BLOCK:
             for (size_t index = 0;
                 index < expression->as.block.statements.count; ++index) {
@@ -1597,6 +1990,21 @@ static bool mir_find_statement_loop_parent(const SolIr *ir,
                 || mir_find_statement_loop_parent(ir,
                     expression->as.if_expr.else_branch, sought, active_loop,
                     parent, depth + 1);
+        case SOL_IR_EXPR_MATCH:
+            if (mir_find_statement_loop_parent(ir,
+                expression->as.match_expr.scrutinee, sought, active_loop,
+                parent, depth + 1)) return true;
+            for (size_t index = 0; index < expression->as.match_expr.arms.count;
+                ++index) {
+                const SolIrArm *arm = &ir->arms[ir->arm_ids[
+                    expression->as.match_expr.arms.offset + index]];
+                if ((arm->guard != SOL_IR_NONE
+                        && mir_find_statement_loop_parent(ir, arm->guard,
+                            sought, active_loop, parent, depth + 1))
+                    || mir_find_statement_loop_parent(ir, arm->body, sought,
+                        active_loop, parent, depth + 1)) return true;
+            }
+            return false;
         case SOL_IR_EXPR_BLOCK:
             for (size_t index = 0;
                 index < expression->as.block.statements.count; ++index) {
@@ -1699,6 +2107,21 @@ static bool mir_collect_source_statements(const SolIr *ir, const SolMir *mir,
                 && mir_collect_source_statements(ir, mir,
                     expression->as.if_expr.else_branch, statements, count,
                     depth + 1);
+        case SOL_IR_EXPR_MATCH:
+            if (!mir_collect_source_statements(ir, mir,
+                expression->as.match_expr.scrutinee, statements, count,
+                depth + 1)) return false;
+            for (size_t index = 0; index < expression->as.match_expr.arms.count;
+                ++index) {
+                const SolIrArm *arm = &ir->arms[ir->arm_ids[
+                    expression->as.match_expr.arms.offset + index]];
+                if (arm->guard != SOL_IR_NONE
+                    && !mir_collect_source_statements(ir, mir, arm->guard,
+                        statements, count, depth + 1)) return false;
+                if (!mir_collect_source_statements(ir, mir, arm->body,
+                    statements, count, depth + 1)) return false;
+            }
+            return true;
         case SOL_IR_EXPR_BLOCK:
             for (size_t index = 0;
                 index < expression->as.block.statements.count; ++index) {
@@ -2049,6 +2472,7 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
             if (valid && (term->kind == SOL_MIR_TERM_RETURN
                 || term->kind == SOL_MIR_TERM_PANIC
                 || term->kind == SOL_MIR_TERM_RESUME_FAILURE
+                || term->kind == SOL_MIR_TERM_MATCH_FAILURE
                 || term->kind == SOL_MIR_TERM_UNREACHABLE)) {
                 SolIrDefinitionId owner = ir->callables[mir->callable].owner;
                 for (size_t local = 0; valid && local < ir->local_count; ++local) {
@@ -2161,6 +2585,7 @@ static bool mir_validate_regions(const SolIr *ir, const SolMir *mir,
             && (term->kind == SOL_MIR_TERM_RETURN
                 || term->kind == SOL_MIR_TERM_PANIC
                 || term->kind == SOL_MIR_TERM_RESUME_FAILURE
+                || term->kind == SOL_MIR_TERM_MATCH_FAILURE
                 || term->kind == SOL_MIR_TERM_UNREACHABLE)) valid = false;
         SolMirBlockId targets[2];
         size_t target_count = 0;
@@ -2282,6 +2707,7 @@ static bool mir_validate_storage_order(const SolIr *ir, const SolMir *mir,
             && (term->kind == SOL_MIR_TERM_RETURN
                 || term->kind == SOL_MIR_TERM_PANIC
                 || term->kind == SOL_MIR_TERM_RESUME_FAILURE
+                || term->kind == SOL_MIR_TERM_MATCH_FAILURE
                 || term->kind == SOL_MIR_TERM_UNREACHABLE)) valid = false;
         SolMirBlockId targets[2];
         size_t target_count = 0;
@@ -2403,6 +2829,11 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
         for (size_t index = 0; valid && index < instructions.count; ++index) {
             const SolMirInstruction *instruction
                 = &mir->instructions[instructions.offset + index];
+            if (instruction->kind != SOL_MIR_INST_TEMPORARY_DROP
+                && drop_floor != SOL_MIR_NONE) {
+                valid = depth == drop_floor;
+                drop_floor = SOL_MIR_NONE;
+            }
             if (instruction->kind == SOL_MIR_INST_TEMPORARY_INIT) {
                 SolMirTemporaryId temporary
                     = instruction->as.temporary_init.temporary;
@@ -2435,6 +2866,16 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
                             operands.offset + operand].temporary;
                 }
                 if (valid) depth -= operands.count;
+            } else if (instruction->kind == SOL_MIR_INST_PATTERN_TEST
+                || instruction->kind == SOL_MIR_INST_PATTERN_VALUE
+                || instruction->kind == SOL_MIR_INST_MATCH_ARM) {
+                bool active = false;
+                for (size_t active_index = 0; active_index < depth;
+                    ++active_index) {
+                    active = active || working[active_index]
+                        == instruction->as.pattern.scrutinee;
+                }
+                valid = active;
             }
         }
         if (valid && drop_floor != SOL_MIR_NONE && depth != drop_floor) {
@@ -2467,6 +2908,7 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
             && (term->kind == SOL_MIR_TERM_RETURN
                 || term->kind == SOL_MIR_TERM_PANIC
                 || term->kind == SOL_MIR_TERM_RESUME_FAILURE
+                || term->kind == SOL_MIR_TERM_MATCH_FAILURE
                 || term->kind == SOL_MIR_TERM_UNREACHABLE)) valid = false;
         SolMirBlockId targets[2];
         size_t target_count = 0;
@@ -2794,7 +3236,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || !mir_slice_valid(block->parameters, mir->parameter_value_count)
             || !mir_slice_valid(block->instructions, mir->instruction_count)
             || block->terminator.kind <= SOL_MIR_TERM_INVALID
-            || block->terminator.kind > SOL_MIR_TERM_CHECK_REFINED
+            || block->terminator.kind > SOL_MIR_TERM_MATCH_FAILURE
             || !mir_span_valid(ir, block->terminator.span)) {
             free(instruction_owners);
             free(parameter_owners);
@@ -3149,6 +3591,34 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 }
                 break;
             }
+            case SOL_MIR_TERM_MATCH_FAILURE: {
+                SolIrExpressionId source
+                    = block->terminator.as.match_failure;
+                size_t tests = 0;
+                if (source < ir->expression_count) {
+                    for (size_t instruction = 0;
+                        instruction < mir->instruction_count; ++instruction) {
+                        tests += mir->instructions[instruction].kind
+                                == SOL_MIR_INST_PATTERN_TEST
+                            && mir->instructions[instruction].as.pattern
+                                .match_expression == source;
+                    }
+                }
+                if (source >= ir->expression_count
+                    || ir->expressions[source].kind != SOL_IR_EXPR_MATCH
+                    || tests != ir->expressions[source]
+                        .as.match_expr.arms.count
+                    || block->terminator.span.start
+                        != ir->expressions[source].span.start
+                    || block->terminator.span.end
+                        != ir->expressions[source].span.end) {
+                    free(instruction_owners);
+                    free(parameter_owners);
+                    return mir_error(diagnostics, block->terminator.span,
+                        "malformed MIR match failure");
+                }
+                break;
+            }
             case SOL_MIR_TERM_INVALID: break;
         }
     }
@@ -3183,6 +3653,8 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || instruction->kind == SOL_MIR_INST_UNARY
             || instruction->kind == SOL_MIR_INST_BINARY
             || instruction->kind == SOL_MIR_INST_EXPRESSION_RESULT
+            || instruction->kind == SOL_MIR_INST_PATTERN_TEST
+            || instruction->kind == SOL_MIR_INST_PATTERN_VALUE
             || instruction->kind == SOL_MIR_INST_CONSTRUCT;
         if (result_kind && (instruction->type >= ir->type_count
             || (instruction->source_expression != SOL_IR_NONE
@@ -3342,6 +3814,110 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 return mir_error(diagnostics, instruction->span,
                     "malformed MIR block expression result");
             }
+        } else if (instruction->kind == SOL_MIR_INST_PATTERN_TEST
+            || instruction->kind == SOL_MIR_INST_PATTERN_VALUE
+            || instruction->kind == SOL_MIR_INST_MATCH_ARM) {
+            SolIrExpressionId match_id
+                = instruction->as.pattern.match_expression;
+            SolIrArmId arm_id = instruction->as.pattern.arm;
+            SolIrPatternId pattern_id = instruction->as.pattern.pattern;
+            SolMirTemporaryId scrutinee
+                = instruction->as.pattern.scrutinee;
+            const SolIrExpression *match = match_id < ir->expression_count
+                ? &ir->expressions[match_id] : NULL;
+            const SolIrArm *arm = arm_id < ir->arm_count
+                ? &ir->arms[arm_id] : NULL;
+            const SolIrPattern *pattern = pattern_id < ir->pattern_count
+                ? &ir->patterns[pattern_id] : NULL;
+            bool test = instruction->kind == SOL_MIR_INST_PATTERN_TEST;
+            bool marker = instruction->kind == SOL_MIR_INST_MATCH_ARM;
+            bool valid = (marker
+                    ? instruction->source_expression
+                        == (arm == NULL ? SOL_IR_NONE : arm->body)
+                    : instruction->source_expression == SOL_IR_NONE)
+                && match != NULL && match->kind == SOL_IR_EXPR_MATCH
+                && arm != NULL && pattern != NULL
+                && instruction->as.pattern.arm_ordinal
+                    < match->as.match_expr.arms.count
+                && ir->arm_ids[match->as.match_expr.arms.offset
+                    + instruction->as.pattern.arm_ordinal] == arm_id
+                && mir_match_has_arm(ir, match, arm_id)
+                && mir_pattern_contains(ir, arm->pattern, pattern_id, 0)
+                && scrutinee < mir->temporary_count
+                && mir->temporaries[scrutinee].source_expression
+                    == match->as.match_expr.scrutinee
+                && mir->temporaries[scrutinee].type
+                    == ir->expressions[match->as.match_expr.scrutinee].type;
+            if (test) {
+                valid = valid && pattern_id == arm->pattern
+                    && mir_type_is(ir, instruction->type, SOL_IR_TYPE_BOOL)
+                    && instruction->span.start == arm->span.start
+                    && instruction->span.end == arm->span.end
+                    && mir->blocks[instruction->block].terminator.kind
+                        == SOL_MIR_TERM_BRANCH
+                    && mir->blocks[instruction->block].terminator
+                        .as.branch.condition == instruction->result;
+                if (valid) {
+                    const SolMirTerminator *branch
+                        = &mir->blocks[instruction->block].terminator;
+                    const SolMirBlock *selected
+                        = &mir->blocks[branch->as.branch.true_edge.block];
+                    valid = selected->instructions.count != 0;
+                    if (valid) {
+                        const SolMirInstruction *arm_marker
+                            = &mir->instructions[selected->instructions.offset];
+                        valid = arm_marker->kind == SOL_MIR_INST_MATCH_ARM
+                            && arm_marker->as.pattern.match_expression == match_id
+                            && arm_marker->as.pattern.arm_ordinal
+                                == instruction->as.pattern.arm_ordinal
+                            && arm_marker->as.pattern.arm == arm_id;
+                    }
+                    const SolMirBlock *otherwise
+                        = &mir->blocks[branch->as.branch.false_edge.block];
+                    if (valid && instruction->as.pattern.arm_ordinal + 1
+                        < match->as.match_expr.arms.count) {
+                        valid = otherwise->instructions.count != 0;
+                        if (valid) {
+                            const SolMirInstruction *next_test
+                                = &mir->instructions[
+                                    otherwise->instructions.offset];
+                            valid = next_test->kind == SOL_MIR_INST_PATTERN_TEST
+                                && next_test->as.pattern.match_expression
+                                    == match_id
+                                && next_test->as.pattern.arm_ordinal
+                                    == instruction->as.pattern.arm_ordinal + 1;
+                        }
+                    } else if (valid) {
+                        valid = otherwise->terminator.kind
+                                == SOL_MIR_TERM_MATCH_FAILURE
+                            && otherwise->terminator.as.match_failure == match_id;
+                    }
+                }
+            } else if (marker) {
+                valid = valid && pattern_id == arm->pattern
+                    && instruction->span.start == arm->span.start
+                    && instruction->span.end == arm->span.end;
+            } else {
+                valid = valid && pattern->kind == SOL_IR_PATTERN_BINDING
+                    && pattern->binding < ir->local_count
+                    && instruction->type == pattern->type
+                    && ir->locals[pattern->binding].type == pattern->type
+                    && instruction->span.start == pattern->span.start
+                    && instruction->span.end == pattern->span.end
+                    && id + 2 < mir->instruction_count
+                    && mir->instructions[id + 1].block == instruction->block
+                    && mir->instructions[id + 1].kind
+                        == SOL_MIR_INST_STORAGE_LIVE
+                    && mir->instructions[id + 1].as.local == pattern->binding
+                    && mir->instructions[id + 2].block == instruction->block
+                    && mir->instructions[id + 2].kind == SOL_MIR_INST_STORE
+                    && mir->instructions[id + 2].as.store.local
+                        == pattern->binding
+                    && mir->instructions[id + 2].as.store.value
+                        == instruction->result;
+            }
+            if (!valid) return mir_error(diagnostics, instruction->span,
+                "malformed MIR pattern operation");
         } else if (instruction->kind == SOL_MIR_INST_CONSTRUCT) {
             SolMirSlice operands = instruction->as.construct.operands;
             SolIrSlice source_operands = {0};
@@ -3444,6 +4020,38 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 return mir_error(diagnostics, instruction->span,
                     "malformed MIR lexical region marker");
             }
+        }
+    }
+    for (size_t match_id = 0; match_id < ir->expression_count; ++match_id) {
+        const SolIrExpression *match = &ir->expressions[match_id];
+        if (match->kind != SOL_IR_EXPR_MATCH) continue;
+        size_t expected = 0;
+        size_t failures = 0;
+        bool represented = mir_source_reaches_match(ir, callable->body,
+            match_id, 0);
+        for (size_t block = 0; block < mir->block_count; ++block) {
+            failures += mir->blocks[block].terminator.kind
+                    == SOL_MIR_TERM_MATCH_FAILURE
+                && mir->blocks[block].terminator.as.match_failure == match_id;
+        }
+        for (size_t id = 0; id < mir->instruction_count; ++id) {
+            const SolMirInstruction *instruction = &mir->instructions[id];
+            if (instruction->kind != SOL_MIR_INST_PATTERN_TEST
+                || instruction->as.pattern.match_expression != match_id) {
+                continue;
+            }
+            if (expected >= match->as.match_expr.arms.count
+                || instruction->as.pattern.arm_ordinal != expected) {
+                return mir_error(diagnostics, instruction->span,
+                    "MIR match arms are missing or reordered");
+            }
+            ++expected;
+        }
+        if ((represented && (expected != match->as.match_expr.arms.count
+                || failures != 1))
+            || (!represented && (expected != 0 || failures != 0))) {
+            return mir_error(diagnostics, match->span,
+                "MIR match arms are missing or reordered");
         }
     }
     for (size_t id = 0; id < mir->value_count; ++id) {
