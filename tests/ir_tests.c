@@ -160,6 +160,8 @@ static bool ir_equal(const SolIr *left, const SolIr *right) {
             || left->definitions[index].semantic_id.low
                 != right->definitions[index].semantic_id.low
             || left->definitions[index].open != right->definitions[index].open
+            || left->definitions[index].is_entrypoint
+                != right->definitions[index].is_entrypoint
             || strcmp(left->definitions[index].name, right->definitions[index].name) != 0) {
             return false;
         }
@@ -3522,6 +3524,43 @@ static void test_recursive_uninhabited_ir_coverage(void) {
     free_compilation(&compilation);
 }
 
+static void test_entrypoint_metadata_validation(void) {
+    TestCompilation compilation;
+    CHECK(compile_ir(&compilation,
+        "module entrypoint_ir\n"
+        "capability Console {}\n"
+        "@entry public function launch() -> Int64 effects { pure } { return 0 }\n"
+        "public function other() -> Int64 effects { pure } { return 1 }\n"
+        "function value(input: Int64) -> Int64 { return input }\n"
+        "function truth() -> Bool { return true }\n"));
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+
+    SolIrDefinition *launch = &compilation.ir.definitions[1];
+    SolIrDefinition *other = &compilation.ir.definitions[2];
+    SolIrDefinition *value = &compilation.ir.definitions[3];
+    SolIrDefinition *truth = &compilation.ir.definitions[4];
+    other->is_entrypoint = true;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    other->is_entrypoint = false;
+
+    SolIrTypeId result = compilation.ir.callables[launch->callable].result;
+    compilation.ir.callables[launch->callable].result
+        = compilation.ir.callables[truth->callable].result;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    compilation.ir.callables[launch->callable].result = result;
+
+    launch->is_entrypoint = false;
+    value->is_entrypoint = true;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    value->is_entrypoint = false;
+    compilation.ir.definitions[0].is_entrypoint = true;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    compilation.ir.definitions[0].is_entrypoint = false;
+    launch->is_entrypoint = true;
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_geometric_growth();
     test_complete_ir_and_lifetime();
@@ -3549,6 +3588,7 @@ int main(void) {
     test_tuple_ir_ownership_and_validation();
     test_recursive_pattern_ir_and_guards();
     test_recursive_uninhabited_ir_coverage();
+    test_entrypoint_metadata_validation();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

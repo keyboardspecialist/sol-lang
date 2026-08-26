@@ -33,6 +33,7 @@ typedef struct {
     /* Quoted token for @stable("..."); empty when no stable identity is declared. */
     SolSpan stable_identity;
     bool is_public;
+    bool is_entrypoint;
     SolExprId body;
     SolParameterId first_parameter;
     SolSpan return_type;

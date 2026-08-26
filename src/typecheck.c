@@ -469,7 +469,8 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             || definition->name.start != item->name.start
             || definition->name.end != item->name.end
             || definition->stable_identity.start != item->stable_identity.start
-            || definition->stable_identity.end != item->stable_identity.end) {
+            || definition->stable_identity.end != item->stable_identity.end
+            || definition->is_entrypoint != item->is_entrypoint) {
             sol_type_malformed(checker);
             return false;
         }
@@ -9046,6 +9047,44 @@ bool sol_type_check(
         }
     }
     free(applied_heads);
+
+    for (size_t index = 0; index < syntax->item_count; ++index) {
+        const SolSyntaxItem *item = &syntax->items[index];
+        if (!item->is_entrypoint) continue;
+        bool valid = types->definitions[index].kind == SOL_TYPE_UNIT
+            || types->definitions[index].kind == SOL_TYPE_INT64;
+        SolParameterId parameter = item->first_parameter;
+        size_t traversed = 0;
+        while (parameter != SOL_AST_NONE) {
+            if (parameter >= syntax->parameter_count
+                || traversed++ >= syntax->parameter_count) {
+                checker.malformed = true;
+                valid = false;
+                break;
+            }
+            const SolParameter *entry = &syntax->parameters[parameter];
+            if (entry->access != SOL_ACCESS_OWNED
+                || entry->type_id >= syntax->type_count
+                || syntax->types[entry->type_id].kind != SOL_SYNTAX_TYPE_PATH
+                || !syntax->types[entry->type_id].is_capability
+                || syntax->types[entry->type_id].first_argument != SOL_AST_NONE
+                || types->declared_types[entry->type_id].kind != SOL_TYPE_NOMINAL
+                || types->declared_types[entry->type_id].definition >= syntax->item_count
+                || syntax->items[types->declared_types[entry->type_id].definition].kind
+                    != SOL_ITEM_CAPABILITY) {
+                valid = false;
+            }
+            parameter = entry->next;
+        }
+        if (!valid) {
+            sol_type_error(
+                &checker,
+                "SOL-ENTRY-003",
+                item->span,
+                "entrypoint parameters must be owned root capabilities and its result must be () or Int64"
+            );
+        }
+    }
 
     free(checker.states);
     free(checker.declared_states);

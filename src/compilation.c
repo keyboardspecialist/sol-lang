@@ -472,7 +472,72 @@ bool sol_validated_ir_definition_at(
         .callable = entry->callable,
         .span = {entry->span.start, entry->span.end},
         .name = entry->name,
+        .is_entrypoint = entry->is_entrypoint,
     };
+    return true;
+}
+
+bool sol_validated_ir_entrypoint(
+    const SolValidatedIr *validated,
+    SolEntrypointView *entrypoint
+) {
+    if (validated == NULL || entrypoint == NULL) return false;
+    const SolIr *ir = &validated->ir;
+    for (size_t index = 0; index < ir->definition_count; ++index) {
+        const SolIrDefinition *definition = &ir->definitions[index];
+        if (!definition->is_entrypoint) continue;
+        const SolIrCallable *callable = &ir->callables[definition->callable];
+        *entrypoint = (SolEntrypointView){
+            .definition = index,
+            .callable = definition->callable,
+            .parameter_count = callable->parameters.count,
+            .result = ir->types[callable->result].kind == SOL_IR_TYPE_UNIT
+                ? SOL_ENTRYPOINT_RESULT_UNIT : SOL_ENTRYPOINT_RESULT_INT64,
+            .span = {definition->span.start, definition->span.end},
+            .name = definition->name,
+        };
+        return true;
+    }
+    return false;
+}
+
+bool sol_validated_ir_entrypoint_parameter_at(
+    const SolValidatedIr *validated,
+    size_t index,
+    SolEntrypointParameterView *parameter
+) {
+    SolEntrypointView entrypoint;
+    if (parameter == NULL || !sol_validated_ir_entrypoint(validated, &entrypoint)
+        || index >= entrypoint.parameter_count) return false;
+    const SolIr *ir = &validated->ir;
+    const SolIrCallable *callable = &ir->callables[entrypoint.callable];
+    const SolIrLocal *local = &ir->locals[ir->roots[callable->parameters.offset + index]];
+    SolIrDefinitionId capability = ir->types[local->type].definition;
+    *parameter = (SolEntrypointParameterView){
+        .capability_definition = capability,
+        .name = local->name,
+        .capability = ir->definitions[capability].name,
+    };
+    return true;
+}
+
+bool sol_validated_ir_entrypoint_exit_status(
+    const SolValidatedIr *validated,
+    const SolInterpreterResult *result,
+    int *status
+) {
+    SolEntrypointView entrypoint;
+    if (result == NULL || status == NULL
+        || result->diagnostic.code != SOL_INTERPRETER_OK
+        || !sol_validated_ir_entrypoint(validated, &entrypoint)) return false;
+    if (entrypoint.result == SOL_ENTRYPOINT_RESULT_UNIT) {
+        if (result->value.kind != SOL_INTERPRETER_VALUE_UNIT) return false;
+        *status = 0;
+        return true;
+    }
+    if (result->value.kind != SOL_INTERPRETER_VALUE_INT64
+        || result->value.as.integer < 0 || result->value.as.integer > 255) return false;
+    *status = (int)result->value.as.integer;
     return true;
 }
 

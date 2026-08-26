@@ -62,7 +62,7 @@ static SolIrCallableId callable(const SolValidatedIr *validated, const char *nam
 static void test_text_success_and_transfer(void) {
     static const char source[] =
         "module compilation_api\n"
-        "function answer() -> Int64 effects { pure } { return 42 }\n"
+        "@entry public function answer() -> Int64 effects { pure } { return 42 }\n"
         "test \"answer works\" { answer() == 42 }\n";
     SolCompilationSession *session = sol_compilation_create();
     CHECK(session != NULL);
@@ -109,6 +109,7 @@ static void test_text_success_and_transfer(void) {
     CHECK(sol_validated_ir_definition_at(validated, 0, &definition));
     CHECK(definition.kind == SOL_VALIDATED_DEFINITION_FUNCTION);
     CHECK(strcmp(definition.name, "answer") == 0);
+    CHECK(definition.is_entrypoint);
     CHECK(sol_validated_ir_path_at(validated, definition.span) != NULL);
     CHECK(sol_validated_ir_file_count(validated) == 1);
     SolInterpreterRequest request = {
@@ -121,6 +122,22 @@ static void test_text_success_and_transfer(void) {
     CHECK(sol_validated_ir_interpret(validated, &request, &result));
     CHECK(result.value.kind == SOL_INTERPRETER_VALUE_INT64);
     CHECK(result.value.as.integer == 42);
+    SolEntrypointView entrypoint;
+    CHECK(sol_validated_ir_entrypoint(validated, &entrypoint));
+    CHECK(entrypoint.definition == 0);
+    CHECK(entrypoint.callable == request.callable);
+    CHECK(entrypoint.parameter_count == 0);
+    CHECK(entrypoint.result == SOL_ENTRYPOINT_RESULT_INT64);
+    CHECK(strcmp(entrypoint.name, "answer") == 0);
+    int status = -1;
+    CHECK(sol_validated_ir_entrypoint_exit_status(validated, &result, &status));
+    CHECK(status == 42);
+    result.value.as.integer = 256;
+    CHECK(!sol_validated_ir_entrypoint_exit_status(validated, &result, &status));
+    result.value.as.integer = 42;
+    result.diagnostic.code = SOL_INTERPRETER_PANIC;
+    CHECK(!sol_validated_ir_entrypoint_exit_status(validated, &result, &status));
+    result.diagnostic.code = SOL_INTERPRETER_OK;
     sol_interpreter_result_free(&result);
 
     HostProbe probe = {0};
@@ -152,6 +169,10 @@ static void test_text_success_and_transfer(void) {
     CHECK(sol_validated_ir_definition_count(NULL) == 0);
     CHECK(sol_validated_ir_file_count(NULL) == 0);
     CHECK(!sol_validated_ir_definition_at(NULL, 0, &definition));
+    CHECK(!sol_validated_ir_entrypoint(NULL, &entrypoint));
+    SolEntrypointParameterView parameter;
+    CHECK(!sol_validated_ir_entrypoint_parameter_at(NULL, 0, &parameter));
+    CHECK(!sol_validated_ir_entrypoint_exit_status(NULL, &result, &status));
     CHECK(sol_validated_ir_path_at(NULL, (SolCompilationSpan){0}) == NULL);
     CHECK(!sol_validated_ir_interpret(NULL, &request, &result));
     sol_interpreter_result_free(&result);
@@ -213,6 +234,41 @@ static void test_rejections_and_failure_teardown(void) {
         "  return clock.read()\n"
         "}\n",
         "SOL-OWNERSHIP-001");
+    check_rejected(
+        "module duplicate_entry\n"
+        "@entry public function first() -> () effects { pure } { () }\n"
+        "@entry public function second() -> Int64 effects { pure } { return 0 }\n",
+        "SOL-ENTRY-002");
+    check_rejected(
+        "module private_entry\n"
+        "@entry function run() -> () effects { pure } { () }\n",
+        "SOL-ENTRY-001");
+    check_rejected(
+        "module generic_entry\n"
+        "@entry public function run<T>() -> () effects { pure } { () }\n",
+        "SOL-ENTRY-001");
+    check_rejected(
+        "module value_parameter\n"
+        "@entry public function run(value: Int64) -> () effects { pure } { () }\n",
+        "SOL-ENTRY-003");
+    check_rejected(
+        "module bad_result\n"
+        "@entry public function run() -> Bool effects { pure } { true }\n",
+        "SOL-ENTRY-003");
+    check_rejected(
+        "module borrowed_parameter\n"
+        "capability Console {}\n"
+        "@entry public function run(console: borrow capability Console) -> () "
+        "effects { pure } { () }\n",
+        "SOL-ENTRY-003");
+    check_rejected(
+        "module entry_arguments\n"
+        "@entry(\"run\") public function run() -> () effects { pure } { () }\n",
+        "SOL-PARSE-025");
+    check_rejected(
+        "module duplicate_annotation\n"
+        "@entry @entry public function run() -> () effects { pure } { () }\n",
+        "SOL-PARSE-026");
 
     for (size_t index = 0; index < 8; ++index) {
         SolCompilationSession *session = sol_compilation_create();
@@ -221,6 +277,47 @@ static void test_rejections_and_failure_teardown(void) {
             == SOL_COMPILATION_REJECTED);
         sol_compilation_free(session);
     }
+}
+
+static void test_entrypoint_abi(void) {
+    static const char source[] =
+        "module entrypoint_abi\n"
+        "capability Console {}\n"
+        "@entry public function launch(console: capability Console) -> () "
+        "effects { pure } { () }\n";
+    SolCompilationSession *session = sol_compilation_create();
+    CHECK(session != NULL);
+    CHECK(sol_compilation_compile_text(session, "entry.sol", source)
+        == SOL_COMPILATION_SUCCEEDED);
+    SolValidatedIr *validated = NULL;
+    CHECK(sol_compilation_take_ir(session, &validated) == SOL_COMPILATION_SUCCEEDED);
+    sol_compilation_free(session);
+    SolEntrypointView entrypoint;
+    CHECK(sol_validated_ir_entrypoint(validated, &entrypoint));
+    CHECK(entrypoint.result == SOL_ENTRYPOINT_RESULT_UNIT);
+    CHECK(entrypoint.parameter_count == 1);
+    SolEntrypointParameterView parameter;
+    CHECK(sol_validated_ir_entrypoint_parameter_at(validated, 0, &parameter));
+    CHECK(strcmp(parameter.name, "console") == 0);
+    CHECK(strcmp(parameter.capability, "Console") == 0);
+    CHECK(!sol_validated_ir_entrypoint_parameter_at(validated, 1, &parameter));
+    SolInterpreterResult result = {0};
+    result.value.kind = SOL_INTERPRETER_VALUE_UNIT;
+    int status = -1;
+    CHECK(sol_validated_ir_entrypoint_exit_status(validated, &result, &status));
+    CHECK(status == 0);
+    sol_validated_ir_free(validated);
+
+    session = sol_compilation_create();
+    CHECK(session != NULL);
+    CHECK(sol_compilation_compile_text(session, "library.sol",
+        "module library\nfunction value() -> Int64 { return 1 }\n")
+        == SOL_COMPILATION_SUCCEEDED);
+    validated = NULL;
+    CHECK(sol_compilation_take_ir(session, &validated) == SOL_COMPILATION_SUCCEEDED);
+    sol_compilation_free(session);
+    CHECK(!sol_validated_ir_entrypoint(validated, &entrypoint));
+    sol_validated_ir_free(validated);
 }
 
 static void test_invalid_arguments_and_state(void) {
@@ -419,6 +516,7 @@ static void test_resource_limits(void) {
 int main(void) {
     test_text_success_and_transfer();
     test_rejections_and_failure_teardown();
+    test_entrypoint_abi();
     test_invalid_arguments_and_state();
     test_source_bytes_validation_and_retry();
     test_paths_and_scopes();

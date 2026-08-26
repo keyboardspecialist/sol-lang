@@ -54,6 +54,7 @@ typedef struct {
     SolSpan stable_identity;
     SolSemanticId semantic_id;
     size_t syntax_item;
+    bool is_entrypoint;
 } SolHirDefinition;
 
 typedef enum {

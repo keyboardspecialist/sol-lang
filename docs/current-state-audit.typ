@@ -37,12 +37,12 @@ source/package
 
 This is real functionality rather than scaffolding. Records, enums, tuples, bounded generics, traits, effects, capabilities, contracts-as-obligations, ownership, mutation, loops, handlers, recursive patterns, cleanup, and host operations cross the complete pipeline.
 
-Sol is not yet an end-to-end *application toolchain*. There is no `sol run`, application entrypoint model, standard host capability profile, runtime contract enforcement, MIR, native or WebAssembly backend, linker, runtime ABI, `sol build`, package manifest, dependency system, host wiring, or public semantic IR.
+Sol is not yet an end-to-end *application toolchain*. The compiler now has an explicit bounded application entrypoint model, but there is no `sol run`, standard host capability profile, runtime contract enforcement, MIR, native or WebAssembly backend, linker, target runtime ABI, `sol build`, package manifest, dependency system, host wiring, or public semantic IR.
 
 Current verification is healthy:
 
-- Normal test suite: 35/35 passed.
-- Clean ASan/UBSan suite: 35/35 passed.
+- Normal test suite: 36/36 passed.
+- Clean ASan/UBSan suite: 36/36 passed.
 - Worktree was clean except the intentionally untracked session file.
 
 = Current State
@@ -69,7 +69,7 @@ This IR is an unstable interpreter IR. It is not a control-flow MIR, stable seri
 
 The deterministic reference interpreter executes the bounded core with checked arithmetic, aggregate values, functions, callbacks, traits, capabilities, exact handlers, mutation, loops, patterns, cleanup, host operations, and explicit resource limits.
 
-The implemented commands are `sol check`, `sol test`, `sol effects`, `sol inspect`, and `sol fmt`. The only user-facing execution path is authored Boolean tests. There is no application entrypoint, `sol run`, `sol build`, or executable artifact.
+The implemented commands are `sol check`, `sol test`, `sol effects`, `sol inspect`, and `sol fmt`. The compiler retains and validates explicit `@entry` metadata, but the only user-facing execution path is still authored Boolean tests. There is no `sol run`, `sol build`, or executable artifact.
 
 == Contracts and Verification
 
@@ -85,11 +85,11 @@ Preconditions, postconditions, refinements, loop invariants, decreases clauses, 
 
 Priority: high. Runtime contract semantics should be implemented before Sol is presented as an application language with progressive verification.
 
-== No Application Boundary
+== Application Execution Boundary Is Incomplete
 
-The compiler does not define which declaration is an application entrypoint, which signatures are legal, how capabilities are injected, how arguments are represented, how results map to process status, or how panic and runtime diagnostics are surfaced.
+The compiler defines argumentless `@entry`, package uniqueness, its bounded signature, capability-only parameters, successful result-to-status mapping, and owning-IR/opaque-handle metadata. Trusted capability injection, missing-entry command diagnostics, and stable panic/runtime rendering remain E3/E4 work.
 
-Entrypoint semantics should be settled before a backend embeds accidental naming or ABI conventions.
+This keeps later interpreter and backend work from embedding accidental function-name or truncating exit-status conventions.
 
 == Bounded Host Failure Text
 
@@ -199,7 +199,8 @@ Define:
 A bounded shape could resemble:
 
 ```sol
-public entry function main(console: capability Console) -> Int64
+@entry
+public function launch(console: capability Console) -> Int64
 effects { console.write<console> } {
     console.write("hello")
     return 0
@@ -207,6 +208,8 @@ effects { console.write<console> } {
 ```
 
 Entrypoint identity should be retained explicitly in owning IR rather than inferred from a function-name scan.
+
+#status("IMPLEMENTED", [Argumentless `@entry` is package-unique when present and retained through syntax, HIR, and owning IR. It requires a public nongeneric free function with a body, explicit closed effects, owned nongeneric root-capability parameters, and exact `()` or `Int64` result. The opaque validated-IR handle resolves the marker and maps only successful `()` to 0 or in-range `Int64` to the identical 0-through-255 process status. Panic and other runtime failures remain structured interpreter failures. Ordinary compilation permits entrypoint absence for libraries; `sol run` will require one.])
 
 == Milestone 3: Minimal Trusted Host Profile
 

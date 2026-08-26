@@ -81,7 +81,30 @@ typedef struct {
     SolCompilationSpan span;
     /* Borrowed from the validated handle and valid until that handle is freed. */
     const char *name;
+    bool is_entrypoint;
 } SolValidatedDefinitionView;
+
+typedef enum {
+    SOL_ENTRYPOINT_RESULT_UNIT,
+    SOL_ENTRYPOINT_RESULT_INT64,
+} SolEntrypointResultKind;
+
+typedef struct {
+    size_t definition;
+    size_t callable;
+    size_t parameter_count;
+    SolEntrypointResultKind result;
+    SolCompilationSpan span;
+    /* Borrowed from the validated handle and valid until that handle is freed. */
+    const char *name;
+} SolEntrypointView;
+
+typedef struct {
+    size_t capability_definition;
+    /* Borrowed from the validated handle and valid until that handle is freed. */
+    const char *name;
+    const char *capability;
+} SolEntrypointParameterView;
 
 SolCompilationSession *sol_compilation_create(void);
 void sol_compilation_limits_default(SolCompilationLimits *limits);
@@ -151,6 +174,22 @@ bool sol_validated_ir_definition_at(
     const SolValidatedIr *validated,
     size_t index,
     SolValidatedDefinitionView *definition
+);
+/* False means the validated program is a library with no declared entrypoint. */
+bool sol_validated_ir_entrypoint(
+    const SolValidatedIr *validated,
+    SolEntrypointView *entrypoint
+);
+bool sol_validated_ir_entrypoint_parameter_at(
+    const SolValidatedIr *validated,
+    size_t index,
+    SolEntrypointParameterView *parameter
+);
+/* Maps a successful entrypoint result to the exact process status ABI. */
+bool sol_validated_ir_entrypoint_exit_status(
+    const SolValidatedIr *validated,
+    const SolInterpreterResult *result,
+    int *status
 );
 /* Returned paths are borrowed and valid until the validated handle is freed. */
 const char *sol_validated_ir_path_at(

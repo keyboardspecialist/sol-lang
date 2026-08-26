@@ -1203,6 +1203,7 @@ static bool sol_ir_lower_declarations(SolIrLowerer *lowerer) {
         definition->kind = sol_ir_definition_kind(source);
         definition->semantic_id = lowerer->hir->definitions[index].semantic_id;
         definition->open = source->is_open;
+        definition->is_entrypoint = source->is_entrypoint;
         definition->name = sol_ir_copy_span(lowerer->source, source->name);
         definition->span = source->span;
         definition->callable = SOL_IR_NONE;
@@ -5457,6 +5458,44 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             && callable->receiver == callable->capability_source) {
             return sol_ir_error(diagnostics,
                 "IR callable receiver bindings are duplicated");
+        }
+    }
+    for (size_t index = 0; index < ir->definition_count; ++index) {
+        const SolIrDefinition *definition = &ir->definitions[index];
+        if (!definition->is_entrypoint) continue;
+        for (size_t previous = 0; previous < index; ++previous) {
+            if (ir->definitions[previous].is_entrypoint) {
+                return sol_ir_error(diagnostics, "IR contains multiple entrypoints");
+            }
+        }
+        if (definition->kind != SOL_IR_DEFINITION_FUNCTION
+            || definition->callable >= ir->callable_count) {
+            return sol_ir_error(diagnostics, "IR entrypoint declaration is malformed");
+        }
+        const SolIrCallable *callable = &ir->callables[definition->callable];
+        if (callable->kind != SOL_IR_CALLABLE_FUNCTION
+            || callable->owner != index || callable->body == SOL_IR_NONE
+            || callable->generic_parameters.count != 0
+            || callable->effect_parameters.count != 0
+            || callable->effect_parameter != SOL_IR_NONE
+            || callable->receiver != SOL_IR_NONE
+            || callable->result >= ir->type_count
+            || (ir->types[callable->result].kind != SOL_IR_TYPE_UNIT
+                && ir->types[callable->result].kind != SOL_IR_TYPE_INT64)) {
+            return sol_ir_error(diagnostics, "IR entrypoint callable has an invalid ABI");
+        }
+        for (size_t parameter = 0; parameter < callable->parameters.count; ++parameter) {
+            SolIrLocalId local = ir->roots[callable->parameters.offset + parameter];
+            if (local >= ir->local_count || ir->locals[local].access != SOL_ACCESS_OWNED
+                || ir->locals[local].type >= ir->type_count
+                || ir->types[ir->locals[local].type].kind != SOL_IR_TYPE_NOMINAL
+                || ir->types[ir->locals[local].type].definition >= ir->definition_count
+                || ir->definitions[ir->types[
+                    ir->locals[local].type
+                ].definition].kind != SOL_IR_DEFINITION_CAPABILITY) {
+                return sol_ir_error(diagnostics,
+                    "IR entrypoint parameter is not an owned root capability");
+            }
         }
     }
     for (size_t index = 0; index < ir->generic_parameter_count; ++index) {

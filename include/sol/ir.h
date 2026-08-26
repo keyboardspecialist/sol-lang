@@ -114,6 +114,7 @@ typedef struct {
     SolIrSlice effect_parameters;
     SolIrLocalId capability_source;
     bool open;
+    bool is_entrypoint;
 } SolIrDefinition;
 
 typedef enum {

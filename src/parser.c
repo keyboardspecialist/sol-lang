@@ -3730,25 +3730,58 @@ static bool sol_parser_trait_like(
     return true;
 }
 
-static SolSpan sol_parser_annotation(SolParser *parser) {
+typedef enum {
+    SOL_ANNOTATION_OTHER,
+    SOL_ANNOTATION_STABLE,
+    SOL_ANNOTATION_ENTRY,
+} SolAnnotationKind;
+
+typedef struct {
+    SolAnnotationKind kind;
+    SolSpan argument;
+    SolSpan span;
+} SolParsedAnnotation;
+
+static SolParsedAnnotation sol_parser_annotation(SolParser *parser) {
     sol_parser_advance(parser);
     SolToken name = sol_parser_current(parser);
     if (!sol_parser_expect(parser, SOL_TOKEN_IDENTIFIER, "expected an annotation name")) {
-        return (SolSpan){0};
+        return (SolParsedAnnotation){0};
+    }
+    if (sol_token_text_equal(parser->source, name, "entry")) {
+        if (sol_parser_kind(parser) == SOL_TOKEN_LEFT_PAREN) {
+            SolToken opening = sol_parser_advance(parser);
+            sol_diagnostics_add(
+                parser->diagnostics,
+                "SOL-PARSE-025",
+                SOL_SEVERITY_ERROR,
+                opening.span,
+                "@entry does not accept arguments"
+            );
+            if (sol_parser_kind(parser) != SOL_TOKEN_RIGHT_PAREN) sol_parser_advance(parser);
+            sol_parser_expect(parser, SOL_TOKEN_RIGHT_PAREN, "expected ')' after annotation");
+        }
+        return (SolParsedAnnotation){
+            .kind = SOL_ANNOTATION_ENTRY,
+            .span = name.span,
+        };
     }
     if (!sol_parser_expect(parser, SOL_TOKEN_LEFT_PAREN, "expected '(' after annotation name")) {
-        return (SolSpan){0};
+        return (SolParsedAnnotation){0};
     }
     SolToken argument = sol_parser_current(parser);
     if (!sol_parser_expect(parser, SOL_TOKEN_STRING, "expected a string annotation argument")) {
-        return (SolSpan){0};
+        return (SolParsedAnnotation){0};
     }
     if (!sol_parser_expect(parser, SOL_TOKEN_RIGHT_PAREN, "expected ')' after annotation")) {
-        return (SolSpan){0};
+        return (SolParsedAnnotation){0};
     }
-    return sol_token_text_equal(parser->source, name, "stable")
-        ? argument.span
-        : (SolSpan){0};
+    return (SolParsedAnnotation){
+        .kind = sol_token_text_equal(parser->source, name, "stable")
+            ? SOL_ANNOTATION_STABLE : SOL_ANNOTATION_OTHER,
+        .argument = argument.span,
+        .span = name.span,
+    };
 }
 
 static bool sol_parser_is_declaration_start(SolTokenKind kind) {
@@ -3795,20 +3828,32 @@ static void sol_parser_declaration(SolParser *parser) {
     size_t contract_condition_mark = parser->tree->contract_condition_count;
     size_t start = sol_parser_current(parser).span.start;
     SolSpan stable_identity = {0};
+    bool is_entrypoint = false;
     while (sol_parser_kind(parser) == SOL_TOKEN_AT) {
-        SolSpan annotation = sol_parser_annotation(parser);
-        if (annotation.start != annotation.end) {
+        SolParsedAnnotation annotation = sol_parser_annotation(parser);
+        if (annotation.kind == SOL_ANNOTATION_STABLE) {
             if (stable_identity.start != stable_identity.end) {
                 sol_diagnostics_add(
                     parser->diagnostics,
                     "SOL-PARSE-020",
                     SOL_SEVERITY_ERROR,
-                    annotation,
+                    annotation.argument,
                     "a declaration may have only one @stable annotation"
                 );
             } else {
-                stable_identity = annotation;
+                stable_identity = annotation.argument;
             }
+        } else if (annotation.kind == SOL_ANNOTATION_ENTRY) {
+            if (is_entrypoint) {
+                sol_diagnostics_add(
+                    parser->diagnostics,
+                    "SOL-PARSE-026",
+                    SOL_SEVERITY_ERROR,
+                    annotation.span,
+                    "a declaration may have only one @entry annotation"
+                );
+            }
+            is_entrypoint = true;
         }
     }
     bool is_public = sol_parser_match(parser, SOL_TOKEN_PUBLIC);
@@ -3933,7 +3978,7 @@ static void sol_parser_declaration(SolParser *parser) {
         item_kind = SOL_ITEM_TEST;
         SolToken test_token = sol_parser_advance(parser);
         SolToken label = sol_parser_current(parser);
-        if (stable_identity.start != stable_identity.end || has_modifier) {
+        if (stable_identity.start != stable_identity.end || is_entrypoint || has_modifier) {
             sol_diagnostics_add(
                 parser->diagnostics,
                 "SOL-PARSE-021",
@@ -3953,6 +3998,7 @@ static void sol_parser_declaration(SolParser *parser) {
                 parsed = true;
                 is_public = false;
                 stable_identity = (SolSpan){0};
+                is_entrypoint = false;
             }
         }
     } else {
@@ -3973,6 +4019,7 @@ static void sol_parser_declaration(SolParser *parser) {
             .span = whole,
             .stable_identity = stable_identity,
             .is_public = is_public,
+            .is_entrypoint = is_entrypoint,
             .body = body,
             .first_parameter = first_parameter,
             .return_type = return_type,

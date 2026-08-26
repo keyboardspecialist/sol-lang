@@ -466,6 +466,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
                 || resolver->source->text[item->name.end - 1] != '"'
                 || item->is_public || item->body == SOL_AST_NONE
                 || item->stable_identity.start != item->stable_identity.end
+                || item->is_entrypoint
                 || item->first_parameter != SOL_AST_NONE
                 || item->return_type.start != 0 || item->return_type.end != 0
                 || item->return_type_id != SOL_AST_NONE
@@ -1890,7 +1891,35 @@ static void sol_resolver_collect_definitions(SolResolver *resolver) {
             .stable_identity = item->stable_identity,
             .semantic_id = sol_resolver_semantic_id(resolver, index),
             .syntax_item = index,
+            .is_entrypoint = item->is_entrypoint,
         };
+        if (item->is_entrypoint) {
+            if (item->kind != SOL_ITEM_FUNCTION || !item->is_public
+                || item->body == SOL_AST_NONE
+                || item->first_type_parameter != SOL_AST_NONE
+                || item->first_effect_parameter != SOL_AST_NONE
+                || !item->has_effect_clause) {
+                sol_diagnostics_add(
+                    resolver->diagnostics,
+                    "SOL-ENTRY-001",
+                    SOL_SEVERITY_ERROR,
+                    item->span,
+                    "@entry requires a public nongeneric function with a body and an explicit closed effects clause"
+                );
+            }
+            for (size_t previous = 0; previous < index; ++previous) {
+                if (resolver->syntax->items[previous].is_entrypoint) {
+                    sol_diagnostics_add(
+                        resolver->diagnostics,
+                        "SOL-ENTRY-002",
+                        SOL_SEVERITY_ERROR,
+                        item->span,
+                        "a package may declare at most one @entry function"
+                    );
+                    break;
+                }
+            }
+        }
         if (item->stable_identity.start != item->stable_identity.end
             && (!item->is_public || item->kind == SOL_ITEM_IMPLEMENTATION)) {
             sol_diagnostics_add(
