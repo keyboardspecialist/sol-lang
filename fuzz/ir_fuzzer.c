@@ -73,50 +73,78 @@ int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size) {
         destroy(&compilation);
         return 0;
     }
-    for (size_t index = 0; index + 1 < size; index += 2) {
-        size_t value = data[index + 1];
-        switch (data[index] % 6) {
-            case 0:
-                if (compilation.ir.expression_count != 0) {
-                    compilation.ir.expressions[value % compilation.ir.expression_count].kind
-                        = (SolIrExpressionKind)value;
-                }
-                break;
-            case 1:
-                if (compilation.ir.expression_count != 0) {
-                    compilation.ir.expressions[value % compilation.ir.expression_count].type
-                        = value;
-                }
-                break;
-            case 2:
-                if (compilation.ir.definition_count != 0) {
-                    compilation.ir.definitions[value % compilation.ir.definition_count].kind
-                        = (SolIrDefinitionKind)value;
-                }
-                break;
-            case 3:
-                if (compilation.ir.callable_count != 0) {
-                    compilation.ir.callables[value % compilation.ir.callable_count].body = value;
-                }
-                break;
-            case 4:
-                if (compilation.ir.local_count != 0) {
-                    compilation.ir.locals[value % compilation.ir.local_count].access
-                        = (SolAccessMode)value;
-                }
-                break;
-            case 5:
-                if (compilation.ir.expression_count != 0) {
-                    compilation.ir.expressions[value % compilation.ir.expression_count].local_use
-                        = (SolIrLocalUse)value;
-                }
-                break;
-        }
+    size_t operation = size == 0 ? 0 : data[0];
+    size_t value = size < 2 ? 0 : data[1];
+    SolIrExpression *expression = NULL;
+    SolIrDefinition *definition = NULL;
+    SolIrCallable *callable = NULL;
+    SolIrLocal *local = NULL;
+    SolIrExpressionKind old_expression_kind = 0;
+    SolIrTypeId old_type = 0;
+    SolIrDefinitionKind old_definition_kind = 0;
+    SolIrExpressionId old_body = 0;
+    SolAccessMode old_access = 0;
+    SolIrLocalUse old_local_use = 0;
+    switch (operation % 6) {
+        case 0:
+            if (compilation.ir.expression_count != 0) {
+                expression = &compilation.ir.expressions[
+                    value % compilation.ir.expression_count];
+                old_expression_kind = expression->kind;
+                expression->kind = (SolIrExpressionKind)-1;
+            }
+            break;
+        case 1:
+            if (compilation.ir.expression_count != 0) {
+                expression = &compilation.ir.expressions[
+                    value % compilation.ir.expression_count];
+                old_type = expression->type;
+                expression->type = value;
+            }
+            break;
+        case 2:
+            if (compilation.ir.definition_count != 0) {
+                definition = &compilation.ir.definitions[
+                    value % compilation.ir.definition_count];
+                old_definition_kind = definition->kind;
+                definition->kind = (SolIrDefinitionKind)-1;
+            }
+            break;
+        case 3:
+            if (compilation.ir.callable_count != 0) {
+                callable = &compilation.ir.callables[value % compilation.ir.callable_count];
+                old_body = callable->body;
+                callable->body = value;
+            }
+            break;
+        case 4:
+            if (compilation.ir.local_count != 0) {
+                local = &compilation.ir.locals[value % compilation.ir.local_count];
+                old_access = local->access;
+                local->access = (SolAccessMode)-1;
+            }
+            break;
+        case 5:
+            if (compilation.ir.expression_count != 0) {
+                expression = &compilation.ir.expressions[
+                    value % compilation.ir.expression_count];
+                old_local_use = expression->local_use;
+                expression->local_use = (SolIrLocalUse)-1;
+            }
+            break;
     }
     SolDiagnostics diagnostics;
     sol_diagnostics_init(&diagnostics);
     (void)sol_ir_validate(&compilation.ir, &diagnostics);
     sol_diagnostics_free(&diagnostics);
+    switch (operation % 6) {
+        case 0: if (expression != NULL) expression->kind = old_expression_kind; break;
+        case 1: if (expression != NULL) expression->type = old_type; break;
+        case 2: if (definition != NULL) definition->kind = old_definition_kind; break;
+        case 3: if (callable != NULL) callable->body = old_body; break;
+        case 4: if (local != NULL) local->access = old_access; break;
+        case 5: if (expression != NULL) expression->local_use = old_local_use; break;
+    }
     destroy(&compilation);
     return 0;
 }
