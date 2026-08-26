@@ -604,11 +604,14 @@ edges, invoke result transport and argument provenance, source/type/control-even
 relations, exact parameter activation, local initialization/moves, lexical cleanup
 order, balanced regions, loop source/parent identity, condition/body/exit edges,
 natural backedges, and cleanup at transfer boundaries. Loop obligations are retained
-as proof-only metadata and not executed. Unsupported constructs fail transactionally.
-P1a.3a is not connected to compilation sessions or execution and does not yet cover
-patterns, propagation, aggregates, projected places, dynamic/method/capability
-calls, handlers, contracts, generic lowering, representation, runtime ABI, or a
-backend.
+as proof-only metadata and not executed. Authority-free infallible zero/one-payload
+records, enum variants, Option/Result cases, and non-refined distinct wrappers use
+semantic construction instructions and ordered operand metadata without choosing
+layout. Unsupported constructs fail transactionally. P1a.3b1 is not connected to
+compilation sessions or execution and does not yet cover owned temporary cleanup,
+multi-operand records/tuples/enums, checked refinement, patterns, propagation,
+projected places, dynamic/method/capability calls, handlers, contracts, generic
+lowering, representation, runtime ABI, or a backend.
 
 ### Phase 0 — Executable language model
 

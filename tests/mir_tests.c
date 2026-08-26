@@ -102,6 +102,7 @@ static bool mir_equal(const SolMir *left, const SolMir *right) {
         && left->edge_value_count == right->edge_value_count
         && left->call_argument_count == right->call_argument_count
         && left->loop_count == right->loop_count
+        && left->construct_operand_count == right->construct_operand_count
         && bytes_equal(left->blocks, right->blocks,
             left->block_count, sizeof(*left->blocks))
         && bytes_equal(left->instructions, right->instructions,
@@ -115,7 +116,9 @@ static bool mir_equal(const SolMir *left, const SolMir *right) {
         && bytes_equal(left->call_arguments, right->call_arguments,
             left->call_argument_count, sizeof(*left->call_arguments))
         && bytes_equal(left->loops, right->loops,
-            left->loop_count, sizeof(*left->loops));
+            left->loop_count, sizeof(*left->loops))
+        && bytes_equal(left->construct_operands, right->construct_operands,
+            left->construct_operand_count, sizeof(*left->construct_operands));
 }
 
 static void test_initial_lowering_and_determinism(void) {
@@ -979,12 +982,202 @@ static void test_loop_control_lowering(void) {
     free_compilation(&compilation);
 }
 
+static void test_bounded_value_construction(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_construct\n"
+        "record Empty {}\n"
+        "record Box { value: Int64 }\n"
+        "enum Choice { yes(value: Int64), no }\n"
+        "type Meter = distinct Int64\n"
+        "function empty() -> Empty { Empty {} }\n"
+        "function box() -> Box { Box { value = 3 } }\n"
+        "function box_after() -> Box { 1 Box { value = 3 } }\n"
+        "function no() -> Choice { Choice.no }\n"
+        "function yes() -> Choice { Choice.yes(4) }\n"
+        "function option(flag: Bool) -> Option<Int64> { "
+        "if flag { some(1) } else { none() } }\n"
+        "function result(flag: Bool) -> Result<Int64, Choice> { "
+        "if flag { ok(1) } else { err(Choice.no) } }\n"
+        "function meter() -> Meter { Meter(4) }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+
+    struct {
+        const char *name;
+        SolMirConstructKind kind;
+        size_t operands;
+    } cases[] = {
+        {"empty", SOL_MIR_CONSTRUCT_RECORD, 0},
+        {"box", SOL_MIR_CONSTRUCT_RECORD, 1},
+        {"no", SOL_MIR_CONSTRUCT_ENUM, 0},
+        {"yes", SOL_MIR_CONSTRUCT_ENUM, 1},
+        {"meter", SOL_MIR_CONSTRUCT_DISTINCT, 1},
+    };
+    for (size_t case_index = 0;
+        case_index < sizeof(cases) / sizeof(cases[0]); ++case_index) {
+        SolMir mir;
+        SolMir repeated;
+        sol_mir_init(&mir);
+        sol_mir_init(&repeated);
+        SolIrCallableId id = callable(&compilation.ir, cases[case_index].name);
+        CHECK(sol_mir_lower_callable(&compilation.ir, id, &mir,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_lower_callable(&compilation.ir, id, &repeated,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        CHECK(mir_equal(&mir, &repeated));
+        size_t constructs = 0;
+        for (size_t instruction = 0; instruction < mir.instruction_count;
+            ++instruction) {
+            if (mir.instructions[instruction].kind != SOL_MIR_INST_CONSTRUCT) {
+                continue;
+            }
+            ++constructs;
+            CHECK(mir.instructions[instruction].as.construct.kind
+                == cases[case_index].kind);
+            CHECK(mir.instructions[instruction].as.construct.operands.count
+                == cases[case_index].operands);
+        }
+        CHECK(constructs == 1);
+        CHECK(mir.construct_operand_count == cases[case_index].operands);
+        sol_mir_free(&mir);
+        sol_mir_free(&repeated);
+    }
+
+    SolMir box_after;
+    sol_mir_init(&box_after);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "box_after"), &box_after,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    SolMirInstructionId wrapper = SOL_MIR_NONE;
+    SolMirValueId earlier = SOL_MIR_NONE;
+    for (size_t instruction = 0; instruction < box_after.instruction_count;
+        ++instruction) {
+        if (box_after.instructions[instruction].kind
+            == SOL_MIR_INST_CONST_INT64 && earlier == SOL_MIR_NONE) {
+            earlier = box_after.instructions[instruction].result;
+        }
+        if (box_after.instructions[instruction].kind
+            == SOL_MIR_INST_CONSTRUCT_ARGUMENT) wrapper = instruction;
+    }
+    CHECK(wrapper != SOL_MIR_NONE && earlier != SOL_MIR_NONE);
+    SolMirValueId wrapped = box_after.instructions[wrapper].as.operand;
+    box_after.instructions[wrapper].as.operand = earlier;
+    CHECK(!sol_mir_validate(&compilation.ir, &box_after, NULL));
+    box_after.instructions[wrapper].as.operand = wrapped;
+    SolSpan wrapper_span = box_after.instructions[wrapper].span;
+    ++box_after.instructions[wrapper].span.start;
+    CHECK(!sol_mir_validate(&compilation.ir, &box_after, NULL));
+    box_after.instructions[wrapper].span = wrapper_span;
+    CHECK(sol_mir_validate(&compilation.ir, &box_after, NULL));
+    sol_mir_free(&box_after);
+
+    SolMir option;
+    sol_mir_init(&option);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "option"), &option,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    bool saw_none = false;
+    bool saw_some = false;
+    for (size_t instruction = 0; instruction < option.instruction_count;
+        ++instruction) {
+        if (option.instructions[instruction].kind != SOL_MIR_INST_CONSTRUCT) {
+            continue;
+        }
+        saw_none = saw_none || option.instructions[instruction].as.construct.kind
+            == SOL_MIR_CONSTRUCT_OPTION_NONE;
+        saw_some = saw_some || option.instructions[instruction].as.construct.kind
+            == SOL_MIR_CONSTRUCT_OPTION_SOME;
+    }
+    CHECK(saw_none && saw_some);
+    CHECK(sol_mir_validate(&compilation.ir, &option, NULL));
+    sol_mir_free(&option);
+
+    SolMir result;
+    sol_mir_init(&result);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "result"), &result,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    bool saw_ok = false;
+    bool saw_err = false;
+    bool saw_nested_enum = false;
+    SolMirInstructionId first_construct = SOL_MIR_NONE;
+    for (size_t instruction = 0; instruction < result.instruction_count;
+        ++instruction) {
+        if (result.instructions[instruction].kind != SOL_MIR_INST_CONSTRUCT) {
+            continue;
+        }
+        if (first_construct == SOL_MIR_NONE) first_construct = instruction;
+        SolMirConstructKind kind
+            = result.instructions[instruction].as.construct.kind;
+        saw_ok = saw_ok || kind == SOL_MIR_CONSTRUCT_RESULT_OK;
+        saw_err = saw_err || kind == SOL_MIR_CONSTRUCT_RESULT_ERR;
+        saw_nested_enum = saw_nested_enum || kind == SOL_MIR_CONSTRUCT_ENUM;
+    }
+    CHECK(saw_ok && saw_err && saw_nested_enum);
+    CHECK(first_construct != SOL_MIR_NONE);
+    SolMirConstructKind construct_kind
+        = result.instructions[first_construct].as.construct.kind;
+    result.instructions[first_construct].as.construct.kind
+        = SOL_MIR_CONSTRUCT_DISTINCT;
+    CHECK(!sol_mir_validate(&compilation.ir, &result, NULL));
+    result.instructions[first_construct].as.construct.kind = construct_kind;
+    SolMirSlice operand_slice
+        = result.instructions[first_construct].as.construct.operands;
+    size_t operand_count = operand_slice.count;
+    result.instructions[first_construct].as.construct.operands.count
+        = operand_count == 0 ? 1 : 0;
+    CHECK(!sol_mir_validate(&compilation.ir, &result, NULL));
+    result.instructions[first_construct].as.construct.operands.count
+        = operand_count;
+    size_t construct_count = result.construct_operand_count;
+    size_t construct_capacity = result.construct_operand_capacity;
+    result.construct_operand_count
+        = SIZE_MAX / sizeof(SolMirConstructOperand) + 1;
+    result.construct_operand_capacity = result.construct_operand_count;
+    CHECK(!sol_mir_validate(&compilation.ir, &result, NULL));
+    result.construct_operand_count = construct_count;
+    result.construct_operand_capacity = construct_capacity;
+    CHECK(sol_mir_validate(&compilation.ir, &result, NULL));
+    sol_mir_free(&result);
+    free_compilation(&compilation);
+
+    Compilation deferred;
+    CHECK(compile(&deferred,
+        "module mir_construct_deferred\n"
+        "record Pair { left: Int64, right: Int64 }\n"
+        "record Box { value: Int64 }\n"
+        "type Positive = refined Int64 where self > 0\n"
+        "function pair() -> Pair { Pair { left = 1, right = 2 } }\n"
+        "function tuple() -> (Int64, Bool) { (1, true) }\n"
+        "function block_box() -> Box { Box { value = { 1 } } }\n"
+        "function positive() -> Positive { Positive(1) }\n"));
+    const char *deferred_names[] = {
+        "pair", "tuple", "block_box", "positive",
+    };
+    for (size_t index = 0;
+        index < sizeof(deferred_names) / sizeof(deferred_names[0]); ++index) {
+        SolMir mir;
+        sol_mir_init(&mir);
+        size_t before = deferred.diagnostics.count;
+        CHECK(sol_mir_lower_callable(&deferred.ir,
+            callable(&deferred.ir, deferred_names[index]), &mir,
+            &deferred.diagnostics) == SOL_MIR_LOWER_UNSUPPORTED);
+        CHECK(mir.callable == SOL_IR_NONE && mir.blocks == NULL
+            && mir.construct_operands == NULL);
+        CHECK(deferred.diagnostics.count == before + 1);
+        sol_mir_free(&mir);
+    }
+    free_compilation(&deferred);
+}
+
 int main(void) {
     test_initial_lowering_and_determinism();
     test_transactional_unsupported();
     test_calls_and_remaining_local_control();
     test_validator_rejects_corruption();
     test_loop_control_lowering();
+    test_bounded_value_construction();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

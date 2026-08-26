@@ -55,7 +55,19 @@ typedef enum {
     SOL_MIR_INST_CALL_ARGUMENT,
     SOL_MIR_INST_REGION_ENTER,
     SOL_MIR_INST_REGION_EXIT,
+    SOL_MIR_INST_CONSTRUCT_ARGUMENT,
+    SOL_MIR_INST_CONSTRUCT,
 } SolMirInstructionKind;
+
+typedef enum {
+    SOL_MIR_CONSTRUCT_RECORD,
+    SOL_MIR_CONSTRUCT_ENUM,
+    SOL_MIR_CONSTRUCT_OPTION_NONE,
+    SOL_MIR_CONSTRUCT_OPTION_SOME,
+    SOL_MIR_CONSTRUCT_RESULT_OK,
+    SOL_MIR_CONSTRUCT_RESULT_ERR,
+    SOL_MIR_CONSTRUCT_DISTINCT,
+} SolMirConstructKind;
 
 typedef struct {
     SolMirInstructionKind kind;
@@ -83,8 +95,20 @@ typedef struct {
         } store;
         SolMirValueId operand;
         SolIrStatementId region;
+        struct {
+            SolMirConstructKind kind;
+            SolIrDefinitionId definition;
+            SolIrVariantId variant;
+            SolMirSlice operands;
+        } construct;
     } as;
 } SolMirInstruction;
+
+typedef struct {
+    size_t formal;
+    SolIrExpressionId source_expression;
+    SolMirValueId value;
+} SolMirConstructOperand;
 
 typedef struct {
     size_t formal;
@@ -193,6 +217,9 @@ typedef struct {
     SolMirLoop *loops;
     size_t loop_count;
     size_t loop_capacity;
+    SolMirConstructOperand *construct_operands;
+    size_t construct_operand_count;
+    size_t construct_operand_capacity;
 } SolMir;
 
 void sol_mir_init(SolMir *mir);
