@@ -471,6 +471,26 @@ static void test_safe_host_registry(void) {
     CHECK(sol_host_registry_bind_root(registry, 2));
     CHECK(!sol_host_registry_bind_root(registry, 2));
     CHECK(sol_host_registry_error(registry) != NULL);
+    CHECK(sol_host_registry_operation_required(
+        registry, 0, "write", "console.write"));
+    CHECK(sol_host_registry_operation_required(
+        registry, 1, "count", "process.arguments.count"));
+    CHECK(sol_host_registry_operation_required(
+        registry, 1, "get", "process.arguments.get"));
+    CHECK(sol_host_registry_operation_required(
+        registry, 2, "read", "configuration.read"));
+    CHECK(!sol_host_registry_operation_required(
+        registry, 0, "write", "filesystem.write"));
+    CHECK(!sol_host_registry_operation_required(
+        registry, 0, "missing", "console.write"));
+    CHECK(sol_host_registry_profile_required(
+        registry, 0, SOL_HOST_PROFILE_CONSOLE_WRITE));
+    CHECK(sol_host_registry_profile_required(
+        registry, 1, SOL_HOST_PROFILE_ARGUMENTS_COUNT));
+    CHECK(sol_host_registry_profile_required(
+        registry, 1, SOL_HOST_PROFILE_ARGUMENTS_GET));
+    CHECK(sol_host_registry_profile_required(
+        registry, 2, SOL_HOST_PROFILE_CONFIGURATION_READ));
     CHECK(sol_host_registry_allow(registry, 0, "write", safe_console, &host));
     CHECK(sol_host_registry_allow(registry, 1, "count", safe_arguments, &host));
     CHECK(sol_host_registry_allow(registry, 1, "get", safe_argument_get, &host));

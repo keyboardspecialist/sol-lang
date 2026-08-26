@@ -364,10 +364,20 @@ if(BUILD_TESTING)
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
             -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli
+            -DRUN_FIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/run_cli/console.sol
+            -DRUN_NONZERO_FIXTURE=${CMAKE_CURRENT_SOURCE_DIR}/tests/run_cli/exit_42.sol
             -DCLI_IO_HELPER=${SOL_CLI_IO_HELPER}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli/test_test_cli.cmake
     )
     set_tests_properties(test_cli PROPERTIES LABELS test_cli)
+    add_test(
+        NAME run_cli
+        COMMAND ${CMAKE_COMMAND}
+            -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
+            -DFIXTURE_DIR=${CMAKE_CURRENT_SOURCE_DIR}/tests/run_cli
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_cli/test_run_cli.cmake
+    )
+    set_tests_properties(run_cli PROPERTIES LABELS run_cli)
     add_test(
         NAME effects_cli
         COMMAND ${CMAKE_COMMAND}

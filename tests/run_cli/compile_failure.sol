@@ -1,0 +1,6 @@
+module run.compile_failure
+
+@entry
+public function launch() -> Int64 effects { pure } {
+    return false
+}

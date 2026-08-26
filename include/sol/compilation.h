@@ -122,6 +122,13 @@ typedef enum {
     SOL_HOST_VALUE_RESULT,
 } SolHostValueKind;
 
+typedef enum {
+    SOL_HOST_PROFILE_CONSOLE_WRITE,
+    SOL_HOST_PROFILE_ARGUMENTS_COUNT,
+    SOL_HOST_PROFILE_ARGUMENTS_GET,
+    SOL_HOST_PROFILE_CONFIGURATION_READ,
+} SolHostOperationProfile;
+
 typedef struct SolHostValue SolHostValue;
 
 struct SolHostValue {
@@ -245,6 +252,19 @@ SolHostRegistry *sol_host_registry_create(const SolValidatedIr *validated);
 void sol_host_registry_free(SolHostRegistry *registry);
 /* Binds one exact entrypoint capability parameter to a fresh opaque root. */
 bool sol_host_registry_bind_root(SolHostRegistry *registry, size_t parameter);
+/* True only for a safe member declared by this exact entrypoint root. */
+bool sol_host_registry_operation_required(
+    const SolHostRegistry *registry,
+    size_t parameter,
+    const char *operation,
+    const char *effect
+);
+/* Recognizes one exact standard E3 capability/member/effect/signature. */
+bool sol_host_registry_profile_required(
+    const SolHostRegistry *registry,
+    size_t parameter,
+    SolHostOperationProfile profile
+);
 /* Allows one bodyless data-only member on that exact root. */
 bool sol_host_registry_allow(
     SolHostRegistry *registry,

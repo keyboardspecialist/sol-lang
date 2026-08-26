@@ -647,6 +647,112 @@ bool sol_host_registry_bind_root(SolHostRegistry *registry, size_t parameter) {
     return true;
 }
 
+bool sol_host_registry_operation_required(
+    const SolHostRegistry *registry,
+    size_t parameter,
+    const char *operation,
+    const char *effect_name
+) {
+    if (registry == NULL || operation == NULL || effect_name == NULL
+        || parameter >= registry->root_count) {
+        return false;
+    }
+    const SolIr *ir = &registry->validated->ir;
+    SolIrCallableId member = sol_host_find_operation(
+        ir, registry->roots[parameter].capability, operation);
+    if (member == SOL_IR_NONE
+        || !sol_host_operation_supported_internal(ir, member)) return false;
+    SolEntrypointView entrypoint;
+    if (!sol_validated_ir_entrypoint(registry->validated, &entrypoint)) return false;
+    const SolIrCallable *entry = &ir->callables[entrypoint.callable];
+    const SolIrEffect *required
+        = &ir->effects[ir->callables[member].effects.offset];
+    if (strcmp(required->name, effect_name) != 0) return false;
+    SolIrLocalId root = ir->roots[entry->parameters.offset + parameter];
+    for (size_t index = 0; index < entry->effects.count; ++index) {
+        const SolIrEffect *effect = &ir->effects[entry->effects.offset + index];
+        if (effect->authority_kind == SOL_IR_AUTHORITY_LOCAL
+            && effect->authority == root
+            && strcmp(effect->name, required->name) == 0) return true;
+    }
+    return false;
+}
+
+static bool sol_host_option_text(const SolIr *ir, SolIrTypeId type_id) {
+    if (type_id >= ir->type_count) return false;
+    const SolIrType *type = &ir->types[type_id];
+    return type->kind == SOL_IR_TYPE_OPTION && type->argument_count == 1
+        && type->argument_offset < ir->type_id_count
+        && ir->type_ids[type->argument_offset] < ir->type_count
+        && ir->types[ir->type_ids[type->argument_offset]].kind == SOL_IR_TYPE_TEXT;
+}
+
+bool sol_host_registry_profile_required(
+    const SolHostRegistry *registry,
+    size_t parameter,
+    SolHostOperationProfile profile
+) {
+    if (registry == NULL || parameter >= registry->root_count
+        || (int)profile < 0 || profile > SOL_HOST_PROFILE_CONFIGURATION_READ) return false;
+    const char *capability = NULL;
+    const char *operation = NULL;
+    const char *effect = NULL;
+    SolIrTypeKind parameter_type = SOL_IR_TYPE_UNIT;
+    SolIrTypeKind result_type = SOL_IR_TYPE_UNIT;
+    size_t parameter_count = 0;
+    bool option_result = false;
+    switch (profile) {
+        case SOL_HOST_PROFILE_CONSOLE_WRITE:
+            capability = "Console";
+            operation = "write";
+            effect = "console.write";
+            parameter_type = SOL_IR_TYPE_TEXT;
+            parameter_count = 1;
+            break;
+        case SOL_HOST_PROFILE_ARGUMENTS_COUNT:
+            capability = "Arguments";
+            operation = "count";
+            effect = "process.arguments.count";
+            result_type = SOL_IR_TYPE_INT64;
+            break;
+        case SOL_HOST_PROFILE_ARGUMENTS_GET:
+            capability = "Arguments";
+            operation = "get";
+            effect = "process.arguments.get";
+            parameter_type = SOL_IR_TYPE_INT64;
+            parameter_count = 1;
+            option_result = true;
+            break;
+        case SOL_HOST_PROFILE_CONFIGURATION_READ:
+            capability = "Configuration";
+            operation = "read";
+            effect = "configuration.read";
+            parameter_type = SOL_IR_TYPE_TEXT;
+            parameter_count = 1;
+            option_result = true;
+            break;
+    }
+    const SolIr *ir = &registry->validated->ir;
+    SolIrDefinitionId owner = registry->roots[parameter].capability;
+    if (owner >= ir->definition_count
+        || strcmp(ir->definitions[owner].name, capability) != 0) return false;
+    SolIrCallableId callable = sol_host_find_operation(ir, owner, operation);
+    if (callable == SOL_IR_NONE
+        || !sol_host_registry_operation_required(
+            registry, parameter, operation, effect)) return false;
+    const SolIrCallable *member = &ir->callables[callable];
+    if (member->parameters.count != parameter_count || member->result >= ir->type_count
+        || (option_result ? !sol_host_option_text(ir, member->result)
+            : ir->types[member->result].kind != result_type)) return false;
+    if (parameter_count != 0) {
+        SolIrLocalId local = ir->roots[member->parameters.offset];
+        if (local >= ir->local_count || ir->locals[local].access != SOL_ACCESS_OWNED
+            || ir->locals[local].type >= ir->type_count
+            || ir->types[ir->locals[local].type].kind != parameter_type) return false;
+    }
+    return true;
+}
+
 bool sol_host_registry_allow(
     SolHostRegistry *registry,
     size_t parameter,

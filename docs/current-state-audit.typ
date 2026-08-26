@@ -37,12 +37,12 @@ source/package
 
 This is real functionality rather than scaffolding. Records, enums, tuples, bounded generics, traits, effects, capabilities, contracts-as-obligations, ownership, mutation, loops, handlers, recursive patterns, cleanup, and host operations cross the complete pipeline.
 
-Sol is not yet an end-to-end *application toolchain*. The compiler now has an explicit bounded application entrypoint model, but there is no `sol run`, standard host capability profile, runtime contract enforcement, MIR, native or WebAssembly backend, linker, target runtime ABI, `sol build`, package manifest, dependency system, host wiring, or public semantic IR.
+Sol now has a bounded end-to-end interpreter application profile with explicit entrypoints, trusted host capabilities, and `sol run`. It is not yet a production application toolchain: there is no runtime contract enforcement, MIR, native or WebAssembly backend, linker, target runtime ABI, `sol build`, package manifest, dependency system, or public semantic IR.
 
 Current verification is healthy:
 
-- Normal test suite: 36/36 passed.
-- Clean ASan/UBSan suite: 36/36 passed.
+- Normal test suite: 37/37 passed.
+- Clean ASan/UBSan suite: 37/37 passed.
 - Worktree was clean except the intentionally untracked session file.
 
 = Current State
@@ -69,7 +69,7 @@ This IR is an unstable interpreter IR. It is not a control-flow MIR, stable seri
 
 The deterministic reference interpreter executes the bounded core with checked arithmetic, aggregate values, functions, callbacks, traits, capabilities, exact handlers, mutation, loops, patterns, cleanup, host operations, and explicit resource limits.
 
-The implemented commands are `sol check`, `sol test`, `sol effects`, `sol inspect`, and `sol fmt`. The compiler retains and validates explicit `@entry` metadata, but the only user-facing execution path is still authored Boolean tests. There is no `sol run`, `sol build`, or executable artifact.
+The implemented commands are `sol check`, `sol test`, `sol run`, `sol effects`, `sol inspect`, and `sol fmt`. `sol run` executes one explicit package entrypoint after frontend teardown with bounded console, argument, and deterministic configuration capabilities. There is no `sol build` or executable artifact.
 
 == Contracts and Verification
 
@@ -87,7 +87,7 @@ Priority: high. Runtime contract semantics should be implemented before Sol is p
 
 == Application Execution Boundary Is Incomplete
 
-The compiler defines argumentless `@entry`, package uniqueness, its bounded signature, capability-only parameters, successful result-to-status mapping, owning-IR/opaque-handle metadata, and trusted capability injection through an exact root/member registry. Missing-entry command diagnostics and stable panic/runtime rendering remain E4 work.
+The compiler defines argumentless `@entry`, package uniqueness, its bounded signature, capability-only parameters, successful result-to-status mapping, owning-IR/opaque-handle metadata, and trusted capability injection through an exact root/member registry. `sol run` adds missing-entry and status-boundary diagnostics plus stable panic/runtime rendering.
 
 This keeps later interpreter and backend work from embedding accidental function-name or truncating exit-status conventions.
 
@@ -248,6 +248,8 @@ Required behavior:
 - Emit human diagnostics and a versioned JSON runtime envelope.
 
 At this point Sol has meaningful end-to-end application execution.
+
+#status("IMPLEMENTED", [`sol run` accepts one file or directory package, optional deterministic `--config=KEY=VALUE` entries, and bounded application arguments after `--`. It compiles through the shared session, transfers owning IR before execution, grants only exact Console/Arguments/Configuration signatures and effects, and rejects unsupported authority before side effects. Human mode preserves exact console bytes on stdout and sends boundary/runtime diagnostics to stderr. JSON mode emits one `sol.run-result` version-1 envelope with base64 console data, symbolic diagnostics, and exact returned status. Successful `()`/`Int64` results map to 0 or identical 0-through-255 status; missing entrypoints, invalid status values, host-profile failures, and runtime failures use driver status 1, while usage uses 2. Runtime contracts remain ignored until E5.])
 
 == Milestone 5: Executable Contracts
 

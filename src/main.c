@@ -23,6 +23,7 @@ static void sol_print_usage(FILE *stream) {
         "       sol inspect <file.sol|package-directory>\n"
         "       sol effects [--diagnostic-format=human|json] <file.sol|package-directory>\n"
         "       sol test [--diagnostic-format=human|json] <file.sol|package-directory>\n"
+        "       sol run [--diagnostic-format=human|json] [--config=KEY=VALUE] <file.sol|package-directory> [-- arguments...]\n"
         "       sol fmt [--check|--stdout] <file.sol|package-directory>\n"
         "       sol --version\n",
         stream
@@ -633,6 +634,363 @@ static void sol_print_json_string(FILE *stream, const char *text) {
     fputc('"', stream);
 }
 
+#define SOL_RUN_INPUT_LIMIT 256
+#define SOL_RUN_INPUT_BYTE_LIMIT 1048576
+#define SOL_RUN_CONSOLE_BYTE_LIMIT 1048576
+
+typedef struct {
+    const char *key;
+    size_t key_length;
+    const char *value;
+    size_t value_length;
+} SolRunConfiguration;
+
+typedef struct {
+    bool json;
+    const char **arguments;
+    size_t argument_count;
+    SolHostValue *argument_values;
+    SolRunConfiguration *configuration;
+    SolHostValue *configuration_values;
+    size_t configuration_count;
+    char *console;
+    size_t console_length;
+    size_t console_capacity;
+} SolRunHost;
+
+static void sol_run_host_failure(
+    SolInterpreterHostFailure *failure,
+    const char *message
+) {
+    size_t length = strlen(message);
+    if (length > sizeof(failure->bytes)) length = sizeof(failure->bytes);
+    memcpy(failure->bytes, message, length);
+    failure->length = length;
+}
+
+static bool sol_run_console_write(
+    void *context,
+    const SolHostValue *arguments,
+    size_t argument_count,
+    SolHostValue *result,
+    SolInterpreterHostFailure *failure
+) {
+    SolRunHost *host = context;
+    if (argument_count != 1 || arguments[0].kind != SOL_HOST_VALUE_TEXT) {
+        sol_run_host_failure(failure, "Console.write received an invalid argument");
+        return false;
+    }
+    const char *bytes = arguments[0].as.text.bytes;
+    size_t length = arguments[0].as.text.length;
+    if (!host->json) {
+        if (!sol_write_all(STDOUT_FILENO, bytes, length)) {
+            sol_run_host_failure(failure, "cannot write application console output");
+            return false;
+        }
+    } else {
+        if (length > SOL_RUN_CONSOLE_BYTE_LIMIT - host->console_length) {
+            sol_run_host_failure(failure, "application console output limit exceeded");
+            return false;
+        }
+        size_t required = host->console_length + length;
+        if (required > host->console_capacity) {
+            size_t capacity = host->console_capacity == 0 ? 256 : host->console_capacity;
+            while (capacity < required) {
+                size_t next = capacity > SOL_RUN_CONSOLE_BYTE_LIMIT / 2
+                    ? SOL_RUN_CONSOLE_BYTE_LIMIT : capacity * 2;
+                if (next <= capacity) break;
+                capacity = next;
+            }
+            char *console = realloc(host->console, capacity);
+            if (console == NULL) {
+                sol_run_host_failure(failure, "cannot buffer application console output");
+                return false;
+            }
+            host->console = console;
+            host->console_capacity = capacity;
+        }
+        if (length != 0) memcpy(host->console + host->console_length, bytes, length);
+        host->console_length += length;
+    }
+    result->kind = SOL_HOST_VALUE_UNIT;
+    return true;
+}
+
+static bool sol_run_arguments_count(
+    void *context,
+    const SolHostValue *arguments,
+    size_t argument_count,
+    SolHostValue *result,
+    SolInterpreterHostFailure *failure
+) {
+    SolRunHost *host = context;
+    (void)arguments;
+    if (argument_count != 0) {
+        sol_run_host_failure(failure, "Arguments.count received an invalid argument");
+        return false;
+    }
+    result->kind = SOL_HOST_VALUE_INT64;
+    result->as.integer = (int64_t)host->argument_count;
+    return true;
+}
+
+static bool sol_run_arguments_get(
+    void *context,
+    const SolHostValue *arguments,
+    size_t argument_count,
+    SolHostValue *result,
+    SolInterpreterHostFailure *failure
+) {
+    SolRunHost *host = context;
+    if (argument_count != 1 || arguments[0].kind != SOL_HOST_VALUE_INT64) {
+        sol_run_host_failure(failure, "Arguments.get received an invalid argument");
+        return false;
+    }
+    result->kind = SOL_HOST_VALUE_OPTION;
+    result->as.sum.is_error = false;
+    int64_t index = arguments[0].as.integer;
+    result->as.sum.value = index < 0 || (uint64_t)index >= host->argument_count
+        ? NULL : &host->argument_values[(size_t)index];
+    return true;
+}
+
+static bool sol_run_configuration_read(
+    void *context,
+    const SolHostValue *arguments,
+    size_t argument_count,
+    SolHostValue *result,
+    SolInterpreterHostFailure *failure
+) {
+    SolRunHost *host = context;
+    if (argument_count != 1 || arguments[0].kind != SOL_HOST_VALUE_TEXT) {
+        sol_run_host_failure(failure, "Configuration.read received an invalid argument");
+        return false;
+    }
+    result->kind = SOL_HOST_VALUE_OPTION;
+    result->as.sum.is_error = false;
+    result->as.sum.value = NULL;
+    for (size_t index = 0; index < host->configuration_count; ++index) {
+        const SolRunConfiguration *entry = &host->configuration[index];
+        if (entry->key_length == arguments[0].as.text.length
+            && memcmp(entry->key, arguments[0].as.text.bytes, entry->key_length) == 0) {
+            result->as.sum.value = &host->configuration_values[index];
+            break;
+        }
+    }
+    return true;
+}
+
+static const char *sol_run_runtime_code(SolInterpreterCode code) {
+    switch (code) {
+        case SOL_INTERPRETER_INVALID_REQUEST: return "SOL-RUNTIME-INVALID-REQUEST";
+        case SOL_INTERPRETER_INVALID_IR: return "SOL-RUNTIME-INVALID-IR";
+        case SOL_INTERPRETER_UNSUPPORTED_CONTRACT_POLICY:
+            return "SOL-RUNTIME-UNSUPPORTED-CONTRACT-POLICY";
+        case SOL_INTERPRETER_TYPE_INVARIANT: return "SOL-RUNTIME-TYPE-INVARIANT";
+        case SOL_INTERPRETER_UNBOUND_OPERATION: return "SOL-RUNTIME-UNBOUND-OPERATION";
+        case SOL_INTERPRETER_HOST_ERROR: return "SOL-RUNTIME-HOST-ERROR";
+        case SOL_INTERPRETER_INTEGER_OVERFLOW: return "SOL-RUNTIME-INTEGER-OVERFLOW";
+        case SOL_INTERPRETER_DIVISION_BY_ZERO: return "SOL-RUNTIME-DIVISION-BY-ZERO";
+        case SOL_INTERPRETER_STEP_LIMIT: return "SOL-RUNTIME-STEP-LIMIT";
+        case SOL_INTERPRETER_CALL_DEPTH_LIMIT: return "SOL-RUNTIME-CALL-DEPTH-LIMIT";
+        case SOL_INTERPRETER_VALUE_LIMIT: return "SOL-RUNTIME-VALUE-LIMIT";
+        case SOL_INTERPRETER_TEXT_LIMIT: return "SOL-RUNTIME-TEXT-LIMIT";
+        case SOL_INTERPRETER_HOST_CALL_LIMIT: return "SOL-RUNTIME-HOST-CALL-LIMIT";
+        case SOL_INTERPRETER_NO_MATCH: return "SOL-RUNTIME-NO-MATCH";
+        case SOL_INTERPRETER_PANIC: return "SOL-RUNTIME-PANIC";
+        case SOL_INTERPRETER_REACHED_UNREACHABLE:
+            return "SOL-RUNTIME-REACHED-UNREACHABLE";
+        case SOL_INTERPRETER_REQUIRE_FALLBACK_RETURNED:
+            return "SOL-RUNTIME-REQUIRE-FALLBACK-RETURNED";
+        case SOL_INTERPRETER_INTERNAL_INVARIANT: return "SOL-RUNTIME-INTERNAL";
+        case SOL_INTERPRETER_OK: return "SOL-RUNTIME-OK";
+    }
+    return "SOL-RUNTIME-UNKNOWN";
+}
+
+static void sol_print_base64(FILE *stream, const char *bytes, size_t length) {
+    static const char alphabet[]
+        = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    fputc('"', stream);
+    for (size_t index = 0; index < length; index += 3) {
+        size_t remaining = length - index;
+        unsigned int value = (unsigned int)(unsigned char)bytes[index] << 16;
+        if (remaining > 1) value |= (unsigned int)(unsigned char)bytes[index + 1] << 8;
+        if (remaining > 2) value |= (unsigned int)(unsigned char)bytes[index + 2];
+        fputc(alphabet[(value >> 18) & 63], stream);
+        fputc(alphabet[(value >> 12) & 63], stream);
+        fputc(remaining > 1 ? alphabet[(value >> 6) & 63] : '=', stream);
+        fputc(remaining > 2 ? alphabet[value & 63] : '=', stream);
+    }
+    fputc('"', stream);
+}
+
+static void sol_run_json_prefix(FILE *stream, const char *outcome, const SolRunHost *host) {
+    fputs("{\"schema\":\"sol.run-result\",\"version\":1,\"outcome\":", stream);
+    sol_print_json_string(stream, outcome);
+    fputs(",\"console\":{\"encoding\":\"base64\",\"data\":", stream);
+    sol_print_base64(stream, host->console, host->console_length);
+    fputc('}', stream);
+}
+
+static void sol_run_render_application_error(
+    bool json,
+    const char *code,
+    const char *message,
+    const char *path,
+    const SolRunHost *host
+) {
+    if (!json) {
+        fprintf(stderr, "sol: application error [%s] %s: %s\n", code, path, message);
+        return;
+    }
+    sol_run_json_prefix(stdout, "application_boundary_error", host);
+    fputs(",\"exit_status\":null,\"diagnostic\":{\"code\":", stdout);
+    sol_print_json_string(stdout, code);
+    fputs(",\"message\":", stdout); sol_print_json_string(stdout, message);
+    fputs(",\"path\":", stdout); sol_print_json_string(stdout, path);
+    fputs(",\"offset\":0}}\n", stdout);
+}
+
+static void sol_run_render_runtime_error(
+    bool json,
+    const SolInterpreterResult *result,
+    const SolRunHost *host
+) {
+    const char *code = sol_run_runtime_code(result->diagnostic.code);
+    if (!json) {
+        fprintf(stderr, "sol: runtime error [%s] %s:%zu: %s\n",
+            code, result->diagnostic.file, result->diagnostic.file_offset,
+            result->diagnostic.message);
+        return;
+    }
+    sol_run_json_prefix(stdout, "runtime_error", host);
+    fputs(",\"exit_status\":null,\"diagnostic\":{\"code\":", stdout);
+    sol_print_json_string(stdout, code);
+    fputs(",\"message\":", stdout);
+    sol_print_json_string(stdout, result->diagnostic.message);
+    fputs(",\"path\":", stdout); sol_print_json_string(stdout, result->diagnostic.file);
+    fprintf(stdout, ",\"offset\":%zu}}\n", result->diagnostic.file_offset);
+}
+
+static bool sol_run_wire_host(
+    const SolValidatedIr *validated,
+    SolHostRegistry *registry,
+    SolRunHost *host
+) {
+    SolEntrypointView entrypoint;
+    if (!sol_validated_ir_entrypoint(validated, &entrypoint)) return false;
+    for (size_t index = 0; index < entrypoint.parameter_count; ++index) {
+        SolEntrypointParameterView parameter;
+        if (!sol_validated_ir_entrypoint_parameter_at(validated, index, &parameter)
+            || !sol_host_registry_bind_root(registry, index)) return false;
+        if (strcmp(parameter.capability, "Console") == 0
+            && sol_host_registry_profile_required(
+                registry, index, SOL_HOST_PROFILE_CONSOLE_WRITE)
+            && !sol_host_registry_allow(
+                registry, index, "write", sol_run_console_write, host)) return false;
+        if (strcmp(parameter.capability, "Arguments") == 0) {
+            if (sol_host_registry_profile_required(
+                    registry, index, SOL_HOST_PROFILE_ARGUMENTS_COUNT)
+                && !sol_host_registry_allow(
+                    registry, index, "count", sol_run_arguments_count, host)) return false;
+            if (sol_host_registry_profile_required(
+                    registry, index, SOL_HOST_PROFILE_ARGUMENTS_GET)
+                && !sol_host_registry_allow(
+                    registry, index, "get", sol_run_arguments_get, host)) return false;
+        }
+        if (strcmp(parameter.capability, "Configuration") == 0
+            && sol_host_registry_profile_required(
+                registry, index, SOL_HOST_PROFILE_CONFIGURATION_READ)
+            && !sol_host_registry_allow(
+                registry, index, "read", sol_run_configuration_read, host)) return false;
+    }
+    return true;
+}
+
+static int sol_run_path(const char *path, bool json, SolRunHost *host) {
+    SolCompilationSession *session = sol_compilation_create();
+    if (session == NULL) return sol_cli_infrastructure_failure(path, json,
+        "compilation stopped because the compiler ran out of memory");
+    SolCompilationOutcome outcome = sol_compilation_compile_path(session, path);
+    SolCompilationSummary summary;
+    if (!sol_compilation_summary(session, &summary)) {
+        sol_compilation_free(session);
+        return sol_cli_infrastructure_failure(path, json, "compilation result is unavailable");
+    }
+    if (outcome != SOL_COMPILATION_SUCCEEDED) {
+        if (json && outcome == SOL_COMPILATION_LOAD_FAILED) {
+            sol_render_cli_error(stdout, "load", sol_compilation_error(session), path);
+        } else if (json && summary.diagnostic_count == 0) {
+            sol_render_cli_error(stdout, "infrastructure",
+                "compilation stopped because the compiler ran out of memory", path);
+        } else if (json) {
+            (void)sol_compilation_diagnostics_render_json(stdout, session);
+        } else if (outcome == SOL_COMPILATION_LOAD_FAILED) {
+            fprintf(stderr, "sol: %s\n", sol_compilation_error(session));
+        } else if (summary.diagnostic_count != 0) {
+            (void)sol_compilation_diagnostics_render_human(stderr, session);
+        } else {
+            fputs("sol: compilation stopped because the compiler ran out of memory\n", stderr);
+        }
+        sol_compilation_free(session);
+        return 1;
+    }
+    if (!json && summary.diagnostic_count != 0) {
+        (void)sol_compilation_diagnostics_render_human(stderr, session);
+    }
+    SolValidatedIr *validated = NULL;
+    SolCompilationOutcome transfer = sol_compilation_take_ir(session, &validated);
+    sol_compilation_free(session);
+    if (transfer != SOL_COMPILATION_SUCCEEDED || validated == NULL) {
+        sol_validated_ir_free(validated);
+        return sol_cli_infrastructure_failure(path, json,
+            "validated compilation result is unavailable");
+    }
+    SolEntrypointView entrypoint;
+    if (!sol_validated_ir_entrypoint(validated, &entrypoint)) {
+        sol_run_render_application_error(json, "SOL-RUN-001",
+            "package declares no @entry function", path, host);
+        sol_validated_ir_free(validated);
+        return 1;
+    }
+    SolHostRegistry *registry = sol_host_registry_create(validated);
+    if (registry == NULL || !sol_run_wire_host(validated, registry, host)) {
+        const char *message = registry == NULL ? "cannot create bounded host registry"
+            : sol_host_registry_error(registry);
+        sol_run_render_application_error(json, "SOL-RUN-003",
+            message == NULL ? "entrypoint requires an unsupported host operation" : message,
+            path, host);
+        sol_host_registry_free(registry);
+        sol_validated_ir_free(validated);
+        return 1;
+    }
+    SolInterpreterRequest request = {
+        .contracts = SOL_INTERPRETER_CONTRACTS_IGNORE,
+    };
+    SolInterpreterResult result;
+    bool executed = sol_validated_ir_interpret_entrypoint(
+        validated, registry, &request, &result);
+    int status = 1;
+    if (!executed && result.diagnostic.code == SOL_INTERPRETER_INVALID_REQUEST) {
+        sol_run_render_application_error(json, "SOL-RUN-003",
+            result.diagnostic.message, path, host);
+    } else if (!executed) {
+        sol_run_render_runtime_error(json, &result, host);
+    } else if (!sol_validated_ir_entrypoint_exit_status(validated, &result, &status)) {
+        sol_run_render_application_error(json, "SOL-RUN-002",
+            "entrypoint Int64 result is outside 0 through 255", path, host);
+        status = 1;
+    } else if (json) {
+        sol_run_json_prefix(stdout, "returned", host);
+        fprintf(stdout, ",\"exit_status\":%d,\"diagnostic\":null}\n", status);
+    }
+    sol_interpreter_result_free(&result);
+    sol_host_registry_free(registry);
+    sol_validated_ir_free(validated);
+    return status;
+}
+
 static int sol_test_path(const char *path, bool json) {
     SolCompilationSession *session = sol_compilation_create();
     if (session == NULL) {
@@ -866,6 +1224,125 @@ static int sol_main(int argc, char **argv) {
         return sol_fmt_path(path, check, to_stdout);
     }
 
+    if (strcmp(argv[1], "run") == 0) {
+        bool json = false;
+        bool arguments_started = false;
+        const char *path = NULL;
+        const char *arguments[SOL_RUN_INPUT_LIMIT];
+        size_t argument_count = 0;
+        size_t argument_bytes = 0;
+        SolRunConfiguration configuration[SOL_RUN_INPUT_LIMIT];
+        size_t configuration_count = 0;
+        size_t configuration_bytes = 0;
+        for (int index = 2; index < argc; ++index) {
+            const char *current = argv[index];
+            if (arguments_started) {
+                size_t length = strlen(current);
+                if (argument_count == SOL_RUN_INPUT_LIMIT
+                    || length > SOL_RUN_INPUT_BYTE_LIMIT - argument_bytes) {
+                    fputs("sol: application argument limit exceeded\n", stderr);
+                    return 2;
+                }
+                arguments[argument_count++] = current;
+                argument_bytes += length;
+            } else if (strcmp(current, "--") == 0) {
+                if (path == NULL) {
+                    fputs("sol: run requires a source path before '--'\n", stderr);
+                    return 2;
+                }
+                arguments_started = true;
+            } else if (strcmp(current, "--diagnostic-format=json") == 0) {
+                json = true;
+            } else if (strcmp(current, "--diagnostic-format=human") == 0) {
+                json = false;
+            } else if (strncmp(current, "--config=", 9) == 0) {
+                const char *entry = current + 9;
+                const char *equal = strchr(entry, '=');
+                if (equal == NULL || equal == entry) {
+                    fputs("sol: --config requires a non-empty KEY=VALUE\n", stderr);
+                    return 2;
+                }
+                size_t key_length = (size_t)(equal - entry);
+                size_t value_length = strlen(equal + 1);
+                if (configuration_count == SOL_RUN_INPUT_LIMIT
+                    || key_length > SOL_RUN_INPUT_BYTE_LIMIT - configuration_bytes
+                    || value_length > SOL_RUN_INPUT_BYTE_LIMIT
+                        - configuration_bytes - key_length) {
+                    fputs("sol: application configuration limit exceeded\n", stderr);
+                    return 2;
+                }
+                for (size_t prior = 0; prior < configuration_count; ++prior) {
+                    if (configuration[prior].key_length == key_length
+                        && memcmp(configuration[prior].key, entry, key_length) == 0) {
+                        fputs("sol: duplicate application configuration key\n", stderr);
+                        return 2;
+                    }
+                }
+                configuration[configuration_count++] = (SolRunConfiguration){
+                    .key = entry,
+                    .key_length = key_length,
+                    .value = equal + 1,
+                    .value_length = value_length,
+                };
+                configuration_bytes += key_length + value_length;
+            } else if (current[0] == '-') {
+                fprintf(stderr, "sol: unknown option '%s'\n", current);
+                return 2;
+            } else if (path != NULL) {
+                fputs("sol: run accepts one source file or package directory before '--'\n",
+                    stderr);
+                return 2;
+            } else {
+                path = current;
+            }
+        }
+        if (path == NULL) {
+            sol_print_usage(stderr);
+            return 2;
+        }
+        SolRunHost host = {
+            .json = json,
+            .arguments = arguments,
+            .argument_count = argument_count,
+            .configuration = configuration,
+            .configuration_count = configuration_count,
+        };
+        if (argument_count != 0) {
+            host.argument_values = calloc(argument_count, sizeof(*host.argument_values));
+        }
+        if (configuration_count != 0) {
+            host.configuration_values = calloc(
+                configuration_count, sizeof(*host.configuration_values));
+        }
+        if ((argument_count != 0 && host.argument_values == NULL)
+            || (configuration_count != 0 && host.configuration_values == NULL)) {
+            free(host.argument_values);
+            free(host.configuration_values);
+            return sol_cli_infrastructure_failure(path, json,
+                "cannot construct application host inputs");
+        }
+        for (size_t index = 0; index < argument_count; ++index) {
+            host.argument_values[index] = (SolHostValue){
+                .kind = SOL_HOST_VALUE_TEXT,
+                .as.text = {.bytes = arguments[index], .length = strlen(arguments[index])},
+            };
+        }
+        for (size_t index = 0; index < configuration_count; ++index) {
+            host.configuration_values[index] = (SolHostValue){
+                .kind = SOL_HOST_VALUE_TEXT,
+                .as.text = {
+                    .bytes = configuration[index].value,
+                    .length = configuration[index].value_length,
+                },
+            };
+        }
+        int result = sol_run_path(path, json, &host);
+        free(host.console);
+        free(host.configuration_values);
+        free(host.argument_values);
+        return result;
+    }
+
     if (strcmp(argv[1], "inspect") == 0) {
         if (argc != 3 || argv[2][0] == '-') {
             fputs("sol: inspect accepts exactly one source file or package directory\n", stderr);
@@ -911,5 +1388,5 @@ static int sol_main(int argc, char **argv) {
 int main(int argc, char **argv) {
     int result = sol_main(argc, argv);
     bool output_failed = fflush(stdout) == EOF || ferror(stdout) != 0;
-    return output_failed && result == 0 ? 1 : result;
+    return output_failed ? 1 : result;
 }

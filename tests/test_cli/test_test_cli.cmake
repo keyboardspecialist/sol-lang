@@ -143,7 +143,7 @@ endif()
 if(UNIX AND NOT "${CLI_IO_HELPER}" STREQUAL "")
     execute_process(
         COMMAND "${CLI_IO_HELPER}" "${SOL_EXECUTABLE}" "${FIXTURE_DIR}/pass.sol"
-            "${FIXTURE_DIR}/non_ascii_é.sol"
+            "${FIXTURE_DIR}/non_ascii_é.sol" "${RUN_FIXTURE}" "${RUN_NONZERO_FIXTURE}"
         RESULT_VARIABLE io_result
     )
     if(NOT io_result EQUAL 0)

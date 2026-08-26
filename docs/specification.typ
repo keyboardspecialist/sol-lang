@@ -1163,7 +1163,7 @@ An application entrypoint is marked by the argumentless `@entry` annotation. Ord
 
 The marked declaration must be a named public top-level free function with a body, no type parameters, no effect-row parameter, and an explicit closed effects clause. Every parameter must use owned access and an unqualified, nongeneric root capability type. Ordinary values, callbacks, tuples, `borrow`, `inout`, and member receivers are not application inputs. The exact result type is either `()` or `Int64`.
 
-A successful `()` result maps to process status 0. A successful `Int64` result maps to the same status only when it is in the inclusive range 0 through 255; values outside that range are application-boundary errors rather than truncating or wrapping. Panic, host failure, contract failure, resource exhaustion, and every other interpreter failure remain structured runtime failures and are never interpreted as returned status values. `sol run` will report those diagnostics and use its stable nonzero driver-failure status. Application execution uses the bounded interpreter limits, with the existing deterministic defaults unless the host profile supplies explicit limits.
+A successful `()` result maps to process status 0. A successful `Int64` result maps to the same status only when it is in the inclusive range 0 through 255; values outside that range are application-boundary errors rather than truncating or wrapping. Panic, host failure, contract failure, resource exhaustion, and every other interpreter failure remain structured runtime failures and are never interpreted as returned status values. `sol run` reports those diagnostics and uses driver-failure status 1. Application execution uses the bounded interpreter limits, with the existing deterministic defaults unless the host profile supplies explicit limits.
 
 #listing([Explicit application entrypoint.], ```sol
 @entry
@@ -1174,7 +1174,7 @@ effects { console.write<console> } {
 }
 ```)
 
-#status("IMPLEMENTED", [The parser accepts argumentless `@entry` and rejects arguments or duplicates on one declaration. Package HIR rejects non-function, private, bodyless, generic, open-effect, and package-duplicate entrypoints. Type checking admits only owned nongeneric root-capability parameters and exact `()` or `Int64` results. Canonical owning IR retains the marker and independently rejects forged duplicate or malformed entrypoint metadata. The opaque validated-IR API resolves the entrypoint and maps only successful correctly typed results to exact process status. Missing-entry application diagnostics, trusted capability injection, and runtime diagnostic rendering are completed by the E3/E4 host and `sol run` boundaries; ordinary library compilation intentionally does not diagnose absence.])
+#status("IMPLEMENTED", [The parser accepts argumentless `@entry` and rejects arguments or duplicates on one declaration. Package HIR rejects non-function, private, bodyless, generic, open-effect, and package-duplicate entrypoints. Type checking admits only owned nongeneric root-capability parameters and exact `()` or `Int64` results. Canonical owning IR retains the marker and independently rejects forged duplicate or malformed entrypoint metadata. The opaque validated-IR API resolves the entrypoint and maps only successful correctly typed results to exact process status. The E3/E4 host and `sol run` boundaries provide trusted capability injection, missing-entry application diagnostics, and runtime rendering; ordinary library compilation intentionally does not diagnose absence.])
 
 == Trusted Interpreter Host Profile
 
@@ -1191,6 +1191,24 @@ The minimal E3 conventions are:
 Argument/configuration text returned by callbacks is validated, cloned, and charged to the interpreter's value-node and text-byte budgets. Every attempted permitted host dispatch is charged to the host-call budget before callback invocation; a zero host-call limit invokes no host code. The profile accepts at most 64 entrypoint roots, 256 outward effects, and 256 candidate capability members/grants, bounding preflight independently of package size. Steps, call depth, value nodes, text bytes, and host calls retain the deterministic interpreter defaults when all limits are zero and accept explicit per-dimension limits otherwise. Host failure bytes are written into interpreter-owned bounded storage and copied into the owned structured runtime diagnostic. Filesystem, network, clock, randomness, console input, live environment access, and process mutation are absent from this profile.
 
 #status("IMPLEMENTED", [The opaque `SolHostRegistry` API creates exact root bindings and root/member grants from validated entrypoint metadata. `sol_validated_ir_interpret_entrypoint` reads only contract policy and interpreter limits from its request, preflights authority, constructs capability arguments privately, and executes through translation-unit-private unchecked interpretation. The raw `SolInterpreterHostOperation` and raw authorization hook remain trusted mutable-IR interfaces and are still rejected by ordinary opaque-handle interpretation. Tests cover console, arguments, configuration, duplicate capability types with root-specific callbacks, missing roots and grants before execution, duplicate grants, cross-handle registries, host failure ownership, host-call limits, and malformed derived-capability entrypoints.])
+
+== Interpreter Application Command
+
+The bounded application command is:
+
+```text
+sol run [--diagnostic-format=human|json] [--config=KEY=VALUE] <file.sol|package-directory> [-- arguments...]
+```
+
+Exactly one source/package operand is required. Application arguments begin only after `--`; index zero is the first following argument. At most 256 arguments and 1 MiB of aggregate argument bytes are accepted. Configuration uses repeated `--config=KEY=VALUE`, splits at the first `=`, rejects empty or duplicate keys, accepts empty values, and is bounded to 256 entries and 1 MiB of aggregate key/value bytes. Neither arguments nor configuration include implicit process, executable, source-path, or environment values.
+
+After successful compilation, `run` transfers the opaque owning IR and destroys all frontend/package state before resolving and executing the entrypoint. Every capability parameter receives a root, but the command grants only exact standard declarations: capability, member, effect, parameter access/type, and result type must all match the Console, Arguments, or Configuration profile. Unsupported and lookalike host operations therefore fail preflight before Sol code or console output. Runtime contracts use the ignore policy until executable contracts are implemented.
+
+Human mode sends exact `Console.write` bytes to stdout with no added newline and sends application/runtime diagnostics to stderr. JSON mode captures at most 1 MiB of console bytes and emits exactly one post-compilation object with schema `sol.run-result`, version 1, outcome `returned`, `application_boundary_error`, or `runtime_error`, nullable `exit_status`, base64 console data, and a nullable symbolic diagnostic. Compilation diagnostics retain `sol.diagnostic/1`; load/infrastructure failures retain `sol.cli-error/1`.
+
+Successful `()` returns status 0 and successful in-range `Int64` returns the identical status from 0 through 255. Missing entrypoints (`SOL-RUN-001`), out-of-range results (`SOL-RUN-002`), profile/preflight failures (`SOL-RUN-003`), and runtime failures return driver status 1; invalid command usage returns 2. Application results of 1 or 2 intentionally overlap driver statuses, so diagnostics or the JSON outcome distinguish them. Output transport failure overrides every otherwise returned application status with driver status 1.
+
+#status("IMPLEMENTED", [`sol run` uses `SolCompilationSession`, `SolValidatedIr`, exact standard-profile discovery, `SolHostRegistry`, and hosted entrypoint interpretation without raw IR access. CLI tests cover file/package execution, Unit and signed status boundaries, missing/duplicate entry behavior, exact console and base64 output including padding, arguments and configuration, partial operation grants, unsupported/lookalike authority before output, panic diagnostics, JSON phase separation, usage errors, and closed-output transport failures.])
 
 == Canonical Typed Interpreter IR
 

@@ -21,7 +21,7 @@ static bool wait_for(pid_t child, int *exit_code) {
     return true;
 }
 
-static bool run_closed(const char *sol, char *const arguments[]) {
+static bool run_closed(const char *sol, char *const arguments[], int expected) {
     int descriptors[2];
     int gate[2];
     if (pipe(descriptors) != 0) return false;
@@ -56,7 +56,7 @@ static bool run_closed(const char *sol, char *const arguments[]) {
     (void)write(gate[1], &ready, 1);
     close(gate[1]);
     int exit_code;
-    return wait_for(child, &exit_code) && exit_code != 0;
+    return wait_for(child, &exit_code) && exit_code == expected;
 }
 
 static bool run_capture(
@@ -208,10 +208,12 @@ static bool write_invalid_source(char *path, size_t capacity) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 4) return 2;
+    if (argc != 6) return 2;
     const char *sol = argv[1];
     const char *valid_source = argv[2];
     const char *unicode_source = argv[3];
+    const char *run_source = argv[4];
+    const char *run_nonzero_source = argv[5];
     char *check_human[] = {(char *)sol, "check", (char *)valid_source, NULL};
     char *check_json[] = {(char *)sol, "check", "--diagnostic-format=json",
         (char *)valid_source, NULL};
@@ -222,10 +224,16 @@ int main(int argc, char **argv) {
     char *effects_json[] = {(char *)sol, "effects", "--diagnostic-format=json",
         (char *)valid_source, NULL};
     char *inspect[] = {(char *)sol, "inspect", (char *)valid_source, NULL};
-    if (!run_closed(sol, check_human) || !run_closed(sol, check_json)
-        || !run_closed(sol, test_human) || !run_closed(sol, test_json)
-        || !run_closed(sol, effects_human) || !run_closed(sol, effects_json)
-        || !run_closed(sol, inspect)) return 1;
+    char *run_human[] = {(char *)sol, "run", (char *)run_source, NULL};
+    char *run_json[] = {(char *)sol, "run", "--diagnostic-format=json",
+        (char *)run_source, NULL};
+    char *run_nonzero_json[] = {(char *)sol, "run", "--diagnostic-format=json",
+        (char *)run_nonzero_source, NULL};
+    if (!run_closed(sol, check_human, 1) || !run_closed(sol, check_json, 1)
+        || !run_closed(sol, test_human, 1) || !run_closed(sol, test_json, 1)
+        || !run_closed(sol, effects_human, 1) || !run_closed(sol, effects_json, 1)
+        || !run_closed(sol, inspect, 1) || !run_closed(sol, run_human, 1)
+        || !run_closed(sol, run_json, 1) || !run_closed(sol, run_nonzero_json, 1)) return 1;
 
     char output[8192];
     char *unicode_json[] = {(char *)sol, "test", "--diagnostic-format=json",
