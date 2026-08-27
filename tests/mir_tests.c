@@ -1799,6 +1799,89 @@ static void test_concrete_method_invoke_lowering(void) {
     free_compilation(&compilation);
 }
 
+static void test_capability_invoke_lowering(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_capability_calls\n"
+        "capability Clock { function read(value: Int64) -> Int64 "
+        "effects { clock.read<Self> } }\n"
+        "capability Derived derives_from source: capability Clock { "
+        "function read(value: Int64) -> Int64 effects { clock.read<Self> } { "
+        "return source.read(value) } }\n"
+        "capability Reader { function copy(other: capability Reader) -> Int64 "
+        "effects { reader.read<other> } }\n"
+        "function call(clock: capability Clock) -> Int64 { "
+        "return clock.read(3) }\n"
+        "function derived(clock: capability Derived) -> Int64 { "
+        "return clock.read(4) }\n"
+        "function call_two(first: capability Clock, second: capability Clock) "
+        "-> Int64 { return first.read(5) }\n"
+        "function dependent(first: capability Reader, second: capability Reader) "
+        "-> Int64 { return first.copy(second) }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    const char *names[] = {"call", "derived", "call_two"};
+    for (size_t name = 0; name < 3; ++name) {
+        SolMir mir;
+        sol_mir_init(&mir);
+        SolMirLowerOutcome outcome = sol_mir_lower_callable(&compilation.ir,
+            callable(&compilation.ir, names[name]), &mir,
+            &compilation.diagnostics);
+        CHECK(outcome == SOL_MIR_LOWER_SUCCEEDED);
+        if (outcome != SOL_MIR_LOWER_SUCCEEDED) {
+            sol_mir_free(&mir);
+            continue;
+        }
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        SolMirTerminator *invoke = NULL;
+        for (size_t block = 0; block < mir.block_count; ++block) {
+            if (mir.blocks[block].terminator.kind == SOL_MIR_TERM_INVOKE
+                && mir.blocks[block].terminator.as.invoke.kind
+                    == SOL_IR_CALL_CAPABILITY) {
+                invoke = &mir.blocks[block].terminator;
+            }
+        }
+        CHECK(invoke != NULL);
+        CHECK(invoke->as.invoke.callable < compilation.ir.callable_count);
+        CHECK(compilation.ir.callables[invoke->as.invoke.callable].kind
+            == SOL_IR_CALLABLE_CAPABILITY);
+        CHECK(invoke->as.invoke.callee == SOL_MIR_NONE);
+        CHECK(invoke->as.invoke.receiver.access == SOL_ACCESS_SHARED);
+        CHECK(invoke->as.invoke.receiver.place < compilation.ir.place_count);
+        SolIrCallableId operation = invoke->as.invoke.callable;
+        invoke->as.invoke.callable = SOL_IR_NONE;
+        CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+        invoke->as.invoke.callable = operation;
+        SolIrPlaceId receiver = invoke->as.invoke.receiver.place;
+        invoke->as.invoke.receiver.place = SOL_IR_NONE;
+        CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+        invoke->as.invoke.receiver.place = receiver;
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        if (name == 2) {
+            SolIrExpression *source = &compilation.ir.expressions[
+                invoke->as.invoke.source_expression];
+            CHECK(source->as.call.effects.count == 1);
+            SolIrEffect *effect
+                = &compilation.ir.effects[source->as.call.effects.offset];
+            SolIrLocalId authority = effect->authority;
+            SolIrDefinitionId owner
+                = compilation.ir.callables[mir.callable].owner;
+            effect->authority = local(&compilation.ir, owner, "second");
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            effect->authority = authority;
+            CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        }
+        sol_mir_free(&mir);
+    }
+    SolMir dependent;
+    sol_mir_init(&dependent);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "dependent"), &dependent,
+        &compilation.diagnostics) == SOL_MIR_LOWER_UNSUPPORTED);
+    CHECK(dependent.callable == SOL_IR_NONE && dependent.blocks == NULL);
+    sol_mir_free(&dependent);
+    free_compilation(&compilation);
+}
+
 static void test_owned_temporary_cleanup(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -2059,6 +2142,7 @@ int main(void) {
     test_partial_move_path_state();
     test_callback_invoke_lowering();
     test_concrete_method_invoke_lowering();
+    test_capability_invoke_lowering();
     test_owned_temporary_cleanup();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;

@@ -660,7 +660,8 @@ static LoweredValue mir_lower_direct_call(MirLowerer *lowerer,
     const Scope *scope) {
     bool callback = expression->as.call.kind == SOL_IR_CALL_CALLBACK;
     bool method = expression->as.call.kind == SOL_IR_CALL_METHOD;
-    if ((!callback && !method
+    bool capability = expression->as.call.kind == SOL_IR_CALL_CAPABILITY;
+    if ((!callback && !method && !capability
             && expression->as.call.kind != SOL_IR_CALL_FUNCTION)
         || expression->as.call.type_arguments.count != 0
         || (method ? expression->as.call.evidence.count != 1
@@ -696,13 +697,25 @@ static LoweredValue mir_lower_direct_call(MirLowerer *lowerer,
         }
         const SolIrCallable *target
             = &lowerer->ir->callables[selected_callable];
-        if ((!method && target->kind != SOL_IR_CALLABLE_FUNCTION)
+        if (capability) {
+            for (size_t index = 0; index < target->effects.count; ++index) {
+                if (lowerer->ir->effects[target->effects.offset + index]
+                    .authority_kind == SOL_IR_AUTHORITY_LOCAL) {
+                    mir_unsupported(lowerer, expression->span,
+                        "P1a MIR capability calls defer operand-dependent effects");
+                    return mir_unreachable();
+                }
+            }
+        }
+        if ((!method && !capability
+                && target->kind != SOL_IR_CALLABLE_FUNCTION)
             || (method && target->kind != SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION)
+            || (capability && target->kind != SOL_IR_CALLABLE_CAPABILITY)
             || target->generic_parameters.count != 0
             || target->effect_parameters.count != 0
             || (!method && target->receiver != SOL_IR_NONE)
             || (method && target->receiver == SOL_IR_NONE)
-            || target->capability_source != SOL_IR_NONE
+            || (!capability && target->capability_source != SOL_IR_NONE)
             || target->result != expression->type) {
             mir_unsupported(lowerer, expression->span,
                 "P1a MIR direct call target is outside the nongeneric free-function subset");
@@ -729,16 +742,24 @@ static LoweredValue mir_lower_direct_call(MirLowerer *lowerer,
         if (!value.reachable) return value;
         if (!mir_stage_temporary(lowerer, expression->as.call.callee,
             value.value, &callee)) return mir_failure(lowerer);
-    } else if (method) {
+    } else if (method || capability) {
         receiver.access = expression->as.call.receiver_access;
-        receiver.source_expression = expression->as.call.receiver;
+        SolIrExpressionId receiver_id = expression->as.call.receiver;
+        if (capability) {
+            if (expression->as.call.callee >= lowerer->ir->expression_count
+                || lowerer->ir->expressions[expression->as.call.callee].kind
+                    != SOL_IR_EXPR_BOUND_OPERATION) return mir_failure(lowerer);
+            receiver_id = lowerer->ir->expressions[
+                expression->as.call.callee].as.operation.receiver;
+        }
+        receiver.source_expression = receiver_id;
         const SolIrExpression *source
-            = &lowerer->ir->expressions[expression->as.call.receiver];
+            = &lowerer->ir->expressions[receiver_id];
         if (receiver.access == SOL_ACCESS_OWNED) {
             LoweredValue value = mir_lower_expression(lowerer,
-                expression->as.call.receiver, scope);
+                receiver_id, scope);
             if (!value.reachable) return value;
-            if (!mir_stage_temporary(lowerer, expression->as.call.receiver,
+            if (!mir_stage_temporary(lowerer, receiver_id,
                 value.value, &receiver.temporary)) return mir_failure(lowerer);
         } else if ((receiver.access == SOL_ACCESS_SHARED
                 || receiver.access == SOL_ACCESS_EXCLUSIVE)
@@ -990,7 +1011,8 @@ static LoweredValue mir_lower_construct(MirLowerer *lowerer,
     if (expression->kind == SOL_IR_EXPR_CALL
         && (expression->as.call.kind == SOL_IR_CALL_FUNCTION
             || expression->as.call.kind == SOL_IR_CALL_CALLBACK
-            || expression->as.call.kind == SOL_IR_CALL_METHOD)) {
+            || expression->as.call.kind == SOL_IR_CALL_METHOD
+            || expression->as.call.kind == SOL_IR_CALL_CAPABILITY)) {
         return mir_lower_direct_call(lowerer, id, expression, scope);
     }
     SolMirConstructKind kind;
@@ -1958,6 +1980,34 @@ static bool mir_places_overlap(const SolIr *ir, SolIrPlaceId left,
         || mir_place_prefix(ir, right, left);
 }
 
+static bool mir_capability_effects_match(const SolIr *ir,
+    const SolIrExpression *call, const SolIrCallable *target,
+    const SolIrExpression *receiver) {
+    size_t actual = 0;
+    for (size_t index = 0; index < target->effects.count; ++index) {
+        const SolIrEffect *expected
+            = &ir->effects[target->effects.offset + index];
+        size_t copies = expected->authority_kind == SOL_IR_AUTHORITY_SELF
+            ? receiver->capability_roots.count : 1;
+        if (expected->authority_kind == SOL_IR_AUTHORITY_LOCAL) return false;
+        for (size_t copy = 0; copy < copies; ++copy) {
+            if (actual >= call->as.call.effects.count) return false;
+            const SolIrEffect *effect
+                = &ir->effects[call->as.call.effects.offset + actual++];
+            if (strcmp(effect->name, expected->name) != 0) return false;
+            if (expected->authority_kind == SOL_IR_AUTHORITY_SELF) {
+                if (effect->authority_kind != SOL_IR_AUTHORITY_LOCAL
+                    || effect->authority != ir->roots[
+                        receiver->capability_roots.offset + copy]) return false;
+            } else if (effect->authority_kind != expected->authority_kind
+                || effect->authority != expected->authority) {
+                return false;
+            }
+        }
+    }
+    return actual == call->as.call.effects.count;
+}
+
 static bool mir_source_reaches_match(const SolIr *ir,
     SolIrExpressionId expression_id, SolIrExpressionId sought, size_t depth) {
     if (expression_id >= ir->expression_count || depth > ir->expression_count) {
@@ -1980,6 +2030,9 @@ static bool mir_source_reaches_match(const SolIr *ir,
         case SOL_IR_EXPR_PROPAGATE:
             return mir_source_reaches_match(ir,
                 expression->as.propagate.operand, sought, depth + 1);
+        case SOL_IR_EXPR_BOUND_OPERATION:
+            return mir_source_reaches_match(ir,
+                expression->as.operation.receiver, sought, depth + 1);
         case SOL_IR_EXPR_BINARY:
             if (mir_source_reaches_match(ir, expression->as.binary.left,
                 sought, depth + 1)) return true;
@@ -2120,6 +2173,9 @@ static bool mir_expression_contains_statement(const SolIr *ir,
         case SOL_IR_EXPR_PROPAGATE:
             return mir_expression_contains_statement(ir,
                 expression->as.propagate.operand, sought, depth + 1);
+        case SOL_IR_EXPR_BOUND_OPERATION:
+            return mir_expression_contains_statement(ir,
+                expression->as.operation.receiver, sought, depth + 1);
         case SOL_IR_EXPR_BINARY:
             return mir_expression_contains_statement(ir,
                     expression->as.binary.left, sought, depth + 1)
@@ -2214,6 +2270,10 @@ static bool mir_find_statement_loop_parent(const SolIr *ir,
         case SOL_IR_EXPR_PROPAGATE:
             return mir_find_statement_loop_parent(ir,
                 expression->as.propagate.operand, sought, active_loop, parent,
+                depth + 1);
+        case SOL_IR_EXPR_BOUND_OPERATION:
+            return mir_find_statement_loop_parent(ir,
+                expression->as.operation.receiver, sought, active_loop, parent,
                 depth + 1);
         case SOL_IR_EXPR_BINARY:
             return mir_find_statement_loop_parent(ir,
@@ -2334,6 +2394,10 @@ static bool mir_collect_source_statements(const SolIr *ir, const SolMir *mir,
         case SOL_IR_EXPR_PROPAGATE:
             return mir_collect_source_statements(ir, mir,
                 expression->as.propagate.operand, statements, count,
+                depth + 1);
+        case SOL_IR_EXPR_BOUND_OPERATION:
+            return mir_collect_source_statements(ir, mir,
+                expression->as.operation.receiver, statements, count,
                 depth + 1);
         case SOL_IR_EXPR_BINARY:
             if (!mir_collect_source_statements(ir, mir,
@@ -2852,7 +2916,8 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
             }
             const SolMirTerminator *term = &mir->blocks[block].terminator;
             if (valid && term->kind == SOL_MIR_TERM_INVOKE) {
-                if (term->as.invoke.kind == SOL_IR_CALL_METHOD
+                if ((term->as.invoke.kind == SOL_IR_CALL_METHOD
+                        || term->as.invoke.kind == SOL_IR_CALL_CAPABILITY)
                     && term->as.invoke.receiver.access != SOL_ACCESS_OWNED) {
                     SolIrPlaceId receiver = term->as.invoke.receiver.place;
                     valid = receiver < ir->place_count
@@ -3039,7 +3104,8 @@ static bool mir_validate_paths(const SolIr *ir, const SolMir *mir,
             }
             const SolMirTerminator *term = &mir->blocks[block].terminator;
             if (valid && term->kind == SOL_MIR_TERM_INVOKE) {
-                if (term->as.invoke.kind == SOL_IR_CALL_METHOD
+                if ((term->as.invoke.kind == SOL_IR_CALL_METHOD
+                        || term->as.invoke.kind == SOL_IR_CALL_CAPABILITY)
                     && term->as.invoke.receiver.access != SOL_ACCESS_OWNED) {
                     valid = term->as.invoke.receiver.place < ir->place_count
                         && mir_path_available(ir, state,
@@ -3488,7 +3554,8 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
                     == SOL_ACCESS_OWNED;
             }
             bool has_callee = term->as.invoke.kind == SOL_IR_CALL_CALLBACK;
-            bool has_receiver = term->as.invoke.kind == SOL_IR_CALL_METHOD
+            bool has_receiver = (term->as.invoke.kind == SOL_IR_CALL_METHOD
+                    || term->as.invoke.kind == SOL_IR_CALL_CAPABILITY)
                 && term->as.invoke.receiver.access == SOL_ACCESS_OWNED;
             size_t consumed = owned + (has_callee ? 1u : 0u)
                 + (has_receiver ? 1u : 0u);
@@ -3947,6 +4014,9 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 bool method = source != NULL
                     && source->kind == SOL_IR_EXPR_CALL
                     && source->as.call.kind == SOL_IR_CALL_METHOD;
+                bool capability = source != NULL
+                    && source->kind == SOL_IR_EXPR_CALL
+                    && source->as.call.kind == SOL_IR_CALL_CAPABILITY;
                 const SolIrType *callback_type = callback
                         && source->as.call.callee < ir->expression_count
                         && ir->expressions[source->as.call.callee].type
@@ -3956,7 +4026,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 bool invoke_valid = source != NULL
                     && source->kind == SOL_IR_EXPR_CALL
                     && source->as.call.kind == term->as.invoke.kind
-                    && (method
+                    && ((method || capability)
                         || (term->as.invoke.receiver.source_expression
                                 == SOL_IR_NONE
                             && term->as.invoke.receiver.temporary == SOL_MIR_NONE
@@ -3973,7 +4043,73 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                         &term->as.invoke.failure_edge, SOL_MIR_NONE)
                     && mir->blocks[term->as.invoke.failure_edge.block]
                         .terminator.kind == SOL_MIR_TERM_RESUME_FAILURE;
-                if (invoke_valid && method) {
+                if (invoke_valid && capability) {
+                    const SolIrExpression *callee
+                        = source->as.call.callee < ir->expression_count
+                        ? &ir->expressions[source->as.call.callee] : NULL;
+                    const SolIrCallable *target
+                        = term->as.invoke.callable < ir->callable_count
+                        ? &ir->callables[term->as.invoke.callable] : NULL;
+                    const SolIrExpression *receiver = callee != NULL
+                            && callee->kind == SOL_IR_EXPR_BOUND_OPERATION
+                            && callee->as.operation.receiver < ir->expression_count
+                        ? &ir->expressions[callee->as.operation.receiver] : NULL;
+                    invoke_valid = callee != NULL && receiver != NULL
+                        && target != NULL
+                        && callee->kind == SOL_IR_EXPR_BOUND_OPERATION
+                        && callee->as.operation.callable
+                            == source->as.call.callable
+                        && source->as.call.callable == term->as.invoke.callable
+                        && target->kind == SOL_IR_CALLABLE_CAPABILITY
+                        && target->receiver == SOL_IR_NONE
+                        && source->as.call.receiver_access == SOL_ACCESS_SHARED
+                        && receiver->type < ir->type_count
+                        && ir->types[receiver->type].kind == SOL_IR_TYPE_NOMINAL
+                        && ir->types[receiver->type].definition == target->owner
+                        && receiver->capability_roots.count != 0
+                        && mir_capability_effects_match(ir, source, target,
+                            receiver)
+                        && target->generic_parameters.count == 0
+                        && target->effect_parameters.count == 0
+                        && target->result == source->type
+                        && target->parameters.count
+                            == term->as.invoke.arguments.count
+                        && term->as.invoke.callee == SOL_MIR_NONE
+                        && term->as.invoke.receiver.formal == SOL_IR_NONE
+                        && term->as.invoke.receiver.access
+                            == source->as.call.receiver_access
+                        && term->as.invoke.receiver.source_expression
+                            == callee->as.operation.receiver;
+                    if (invoke_valid
+                        && term->as.invoke.receiver.access == SOL_ACCESS_OWNED) {
+                        invoke_valid = term->as.invoke.receiver.place == SOL_IR_NONE
+                            && term->as.invoke.receiver.temporary
+                                < mir->temporary_count
+                            && mir->temporaries[term->as.invoke.receiver.temporary]
+                                .source_expression == callee->as.operation.receiver
+                            && mir->temporaries[term->as.invoke.receiver.temporary]
+                                .type == receiver->type;
+                    } else if (invoke_valid) {
+                        SolIrLocalUse use = term->as.invoke.receiver.access
+                                == SOL_ACCESS_SHARED
+                            ? SOL_IR_LOCAL_USE_SHARED
+                            : SOL_IR_LOCAL_USE_EXCLUSIVE;
+                        invoke_valid = (term->as.invoke.receiver.access
+                                == SOL_ACCESS_SHARED
+                                || term->as.invoke.receiver.access
+                                    == SOL_ACCESS_EXCLUSIVE)
+                            && term->as.invoke.receiver.temporary == SOL_MIR_NONE
+                            && term->as.invoke.receiver.place < ir->place_count
+                            && receiver->kind == SOL_IR_EXPR_PLACE
+                            && receiver->local_use == use
+                            && receiver->as.place
+                                == term->as.invoke.receiver.place
+                            && ir->places[receiver->as.place].root_kind
+                                == SOL_IR_PLACE_ROOT_LOCAL
+                            && ir->locals[ir->places[receiver->as.place].local]
+                                .owner == callable->owner;
+                    }
+                } else if (invoke_valid && method) {
                     size_t evidence_id = source->as.call.evidence.offset;
                     const SolIrDispatchEvidence *evidence
                         = evidence_id < ir->evidence_count
@@ -4164,7 +4300,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                     && left < term->as.invoke.arguments.count; ++left) {
                     const SolMirCallArgument *a = &mir->call_arguments[
                         term->as.invoke.arguments.offset + left];
-                    if (method
+                    if ((method || capability)
                         && term->as.invoke.receiver.access != SOL_ACCESS_OWNED
                         && a->access != SOL_ACCESS_OWNED) {
                         invoke_valid = term->as.invoke.receiver.place

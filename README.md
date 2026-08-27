@@ -633,8 +633,11 @@ callee before operands and use the same abstract normal/failure invoke edges, wi
 exact structural signature, access, source-order, temporary-consumption, and cleanup
 validation. Concrete nongeneric method calls now select implementation callables from
 exact non-forwarded evidence and retain owned/shared/exclusive receivers before
-operands, with receiver-first normal writeback and failure suppression. MIR does not
-yet cover capability calls, handlers, contracts, generic lowering,
+operands, with receiver-first normal writeback and failure suppression. Direct
+capability invokes borrow the exact bound-operation receiver and retain operation
+identity plus independently expanded root-specific effects without materializing a
+bound-operation value. Operand-dependent capability effects remain deferred. MIR does
+not yet cover handlers, contracts, generic lowering,
 representation, runtime ABI, or a backend.
 
 ### Phase 0 — Executable language model

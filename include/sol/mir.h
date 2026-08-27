@@ -205,6 +205,7 @@ typedef struct {
             SolIrCallKind kind;
             SolIrCallableId callable;
             SolMirTemporaryId callee;
+            /* Dynamic callee or receiver acquisition precedes arguments. */
             SolMirCallArgument receiver;
             SolMirSlice arguments;
             SolMirValueId result;

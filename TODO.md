@@ -131,7 +131,8 @@ open until the complete frozen executable core lowers:
 | [x] | P1a.3b7 | Add partial-move path state | Track unavailable projection frontiers through moves, exact-hole reinitialization, joins, loops, and whole-local cleanup without choosing aggregate layout |
 | [x] | P1a.3b8 | Add callback invocation | Stage dynamic function callees before ordered operands, retain exact structural signature/access metadata, consume callee and owned arguments atomically, and preserve normal/failure cleanup and writeback edges |
 | [x] | P1a.3b9 | Add concrete method invocation | Select nongeneric implementation callables from exact non-forwarded evidence, lower owned/shared/exclusive receivers before operands, and retain receiver-first normal writeback with failure suppression |
-| [ ] | P1a.3b10 | Complete structured executable-core CFG lowering | Lower handlers, capability calls, contracts/snapshots, authority-bearing construction, and every E6 callable |
+| [x] | P1a.3b10 | Add capability invocation | Borrow the exact receiver embedded by a direct bound operation, retain exact capability member identity, recompute `Self` effects over receiver roots, and reuse invoke failure cleanup without materializing a bound-operation value |
+| [ ] | P1a.3b11 | Complete structured executable-core CFG lowering | Lower handlers, contracts/snapshots, authority-bearing construction, and every E6 callable |
 | [ ] | P1b | Freeze backend-facing value/CFG invariants | Complete dominance/SSA and ownership validation, generic/evidence retention, canonical internal rendering, and a bounded MIR evaluator/trace for interpreter differential semantics without choosing representation or ABI |
 
 Items 28-39, 41-42, 44, 46, 50B+, and 52-61 are deferred until a
