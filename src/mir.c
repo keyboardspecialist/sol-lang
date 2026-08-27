@@ -14,6 +14,8 @@ struct Scope {
     bool cleanup_before_temporaries;
     size_t temporary_cleanup_boundary;
     size_t temporary_parent_boundary;
+    bool exits_handler;
+    SolIrExpressionId handler;
 };
 
 struct LoopContext {
@@ -489,15 +491,22 @@ static bool mir_emit_scope_cleanup(MirLowerer *lowerer,
 
 static bool mir_emit_scope_exit(MirLowerer *lowerer,
     const Scope *scope, SolSpan span) {
-    return mir_emit_scope_cleanup(lowerer, scope, span)
-        && (scope->region == SOL_IR_NONE
-            || mir_append_instruction(lowerer, (SolMirInstruction){
+    if (!mir_emit_scope_cleanup(lowerer, scope, span)) return false;
+    if (scope->region != SOL_IR_NONE
+        && mir_append_instruction(lowerer, (SolMirInstruction){
                 .kind = SOL_MIR_INST_REGION_EXIT,
                 .type = SOL_IR_NONE,
                 .source_expression = SOL_IR_NONE,
                 .span = span,
                 .as.region = scope->region,
-            }, false) != SOL_MIR_NONE);
+            }, false) == SOL_MIR_NONE) return false;
+    return !scope->exits_handler
+        || mir_append_instruction(lowerer, (SolMirInstruction){
+            .kind = SOL_MIR_INST_HANDLER_EXIT,
+            .type = SOL_IR_NONE,
+            .source_expression = scope->handler,
+            .span = lowerer->ir->expressions[scope->handler].span,
+        }, false) != SOL_MIR_NONE;
 }
 
 static bool mir_emit_exit_cleanup(MirLowerer *lowerer,
@@ -548,18 +557,9 @@ static bool mir_emit_cleanup_to(MirLowerer *lowerer,
     const Scope *scope, const Scope *boundary, SolSpan span) {
     const Scope *current = scope;
     while (current != boundary) {
-        if (current == NULL
-            || !mir_emit_scope_cleanup(lowerer, current, span)) {
+        if (current == NULL || !mir_emit_scope_exit(lowerer, current, span)) {
             return false;
         }
-        if (current->region != SOL_IR_NONE
-            && mir_append_instruction(lowerer, (SolMirInstruction){
-                .kind = SOL_MIR_INST_REGION_EXIT,
-                .type = SOL_IR_NONE,
-                .source_expression = SOL_IR_NONE,
-                .span = span,
-                .as.region = current->region,
-            }, false) == SOL_MIR_NONE) return false;
         current = current->parent;
     }
     return true;
@@ -1371,6 +1371,56 @@ static LoweredValue mir_lower_match(MirLowerer *lowerer,
     return (LoweredValue){.reachable = true, .value = parameter};
 }
 
+static LoweredValue mir_lower_handler(MirLowerer *lowerer,
+    SolIrExpressionId id, const SolIrExpression *expression,
+    const Scope *scope) {
+    const SolIrExpression *authority
+        = &lowerer->ir->expressions[expression->as.handler.authority];
+    const SolIrExpression *provider
+        = &lowerer->ir->expressions[expression->as.handler.provider];
+    if (authority->kind != SOL_IR_EXPR_PLACE
+        || provider->kind != SOL_IR_EXPR_PLACE
+        || authority->local_use != SOL_IR_LOCAL_USE_SHARED
+        || provider->local_use != SOL_IR_LOCAL_USE_SHARED
+        || lowerer->ir->places[authority->as.place].root_kind
+            != SOL_IR_PLACE_ROOT_LOCAL
+        || lowerer->ir->places[provider->as.place].root_kind
+            != SOL_IR_PLACE_ROOT_LOCAL
+        || lowerer->ir->places[authority->as.place].projections.count != 0
+        || lowerer->ir->places[provider->as.place].projections.count != 0) {
+        mir_unsupported(lowerer, expression->span,
+            "P1a MIR handlers require direct shared local capabilities");
+        return mir_unreachable();
+    }
+    if (mir_append_instruction(lowerer, (SolMirInstruction){
+            .kind = SOL_MIR_INST_HANDLER_ENTER,
+            .type = SOL_IR_NONE,
+            .source_expression = id,
+            .span = expression->span,
+        }, false) == SOL_MIR_NONE) return mir_failure(lowerer);
+    Scope handler_scope = {
+        .parent = scope,
+        .region = SOL_IR_NONE,
+        .exits_handler = true,
+        .handler = id,
+    };
+    LoweredValue body = mir_lower_expression(lowerer,
+        expression->as.handler.body, &handler_scope);
+    if (!body.reachable) return body;
+    if (!mir_emit_scope_exit(lowerer, &handler_scope, expression->span)) {
+        return mir_failure(lowerer);
+    }
+    body.value = mir_instruction_result(lowerer, (SolMirInstruction){
+        .kind = SOL_MIR_INST_EXPRESSION_RESULT,
+        .type = expression->type,
+        .source_expression = id,
+        .span = expression->span,
+        .as.operand = body.value,
+    });
+    if (body.value == SOL_MIR_NONE) return mir_failure(lowerer);
+    return body;
+}
+
 static bool mir_set_return(MirLowerer *lowerer, SolMirValueId value,
     SolSpan span) {
     if (lowerer->current >= lowerer->mir->block_count
@@ -1882,6 +1932,8 @@ static LoweredValue mir_lower_expression(MirLowerer *lowerer,
             return mir_lower_match(lowerer, id, expression, scope);
         case SOL_IR_EXPR_PROPAGATE:
             return mir_lower_propagate(lowerer, id, expression, scope);
+        case SOL_IR_EXPR_HANDLE:
+            return mir_lower_handler(lowerer, id, expression, scope);
         case SOL_IR_EXPR_BLOCK:
             return mir_lower_block(lowerer, expression, scope);
         case SOL_IR_EXPR_CALL:
@@ -2033,6 +2085,20 @@ static bool mir_source_reaches_match(const SolIr *ir,
         case SOL_IR_EXPR_BOUND_OPERATION:
             return mir_source_reaches_match(ir,
                 expression->as.operation.receiver, sought, depth + 1);
+        case SOL_IR_EXPR_HANDLE:
+            return mir_source_reaches_match(ir, expression->as.handler.authority,
+                    sought, depth + 1)
+                || (!mir_type_is(ir, ir->expressions[
+                        expression->as.handler.authority].type,
+                        SOL_IR_TYPE_NEVER)
+                    && (mir_source_reaches_match(ir,
+                            expression->as.handler.provider, sought, depth + 1)
+                        || (!mir_type_is(ir, ir->expressions[
+                                expression->as.handler.provider].type,
+                                SOL_IR_TYPE_NEVER)
+                            && mir_source_reaches_match(ir,
+                                expression->as.handler.body, sought,
+                                depth + 1))));
         case SOL_IR_EXPR_BINARY:
             if (mir_source_reaches_match(ir, expression->as.binary.left,
                 sought, depth + 1)) return true;
@@ -2176,6 +2242,13 @@ static bool mir_expression_contains_statement(const SolIr *ir,
         case SOL_IR_EXPR_BOUND_OPERATION:
             return mir_expression_contains_statement(ir,
                 expression->as.operation.receiver, sought, depth + 1);
+        case SOL_IR_EXPR_HANDLE:
+            return mir_expression_contains_statement(ir,
+                    expression->as.handler.authority, sought, depth + 1)
+                || mir_expression_contains_statement(ir,
+                    expression->as.handler.provider, sought, depth + 1)
+                || mir_expression_contains_statement(ir,
+                    expression->as.handler.body, sought, depth + 1);
         case SOL_IR_EXPR_BINARY:
             return mir_expression_contains_statement(ir,
                     expression->as.binary.left, sought, depth + 1)
@@ -2275,6 +2348,16 @@ static bool mir_find_statement_loop_parent(const SolIr *ir,
             return mir_find_statement_loop_parent(ir,
                 expression->as.operation.receiver, sought, active_loop, parent,
                 depth + 1);
+        case SOL_IR_EXPR_HANDLE:
+            return mir_find_statement_loop_parent(ir,
+                    expression->as.handler.authority, sought, active_loop,
+                    parent, depth + 1)
+                || mir_find_statement_loop_parent(ir,
+                    expression->as.handler.provider, sought, active_loop,
+                    parent, depth + 1)
+                || mir_find_statement_loop_parent(ir,
+                    expression->as.handler.body, sought, active_loop, parent,
+                    depth + 1);
         case SOL_IR_EXPR_BINARY:
             return mir_find_statement_loop_parent(ir,
                     expression->as.binary.left, sought, active_loop, parent,
@@ -2399,6 +2482,21 @@ static bool mir_collect_source_statements(const SolIr *ir, const SolMir *mir,
             return mir_collect_source_statements(ir, mir,
                 expression->as.operation.receiver, statements, count,
                 depth + 1);
+        case SOL_IR_EXPR_HANDLE:
+            if (!mir_collect_source_statements(ir, mir,
+                expression->as.handler.authority, statements, count,
+                depth + 1)) return false;
+            if (mir_type_is(ir, ir->expressions[
+                expression->as.handler.authority].type,
+                SOL_IR_TYPE_NEVER)) return true;
+            if (!mir_collect_source_statements(ir, mir,
+                expression->as.handler.provider, statements, count,
+                depth + 1)) return false;
+            return mir_type_is(ir, ir->expressions[
+                    expression->as.handler.provider].type, SOL_IR_TYPE_NEVER)
+                || mir_collect_source_statements(ir, mir,
+                    expression->as.handler.body, statements, count,
+                    depth + 1);
         case SOL_IR_EXPR_BINARY:
             if (!mir_collect_source_statements(ir, mir,
                 expression->as.binary.left, statements, count, depth + 1)) {
@@ -3279,6 +3377,265 @@ static bool mir_validate_regions(const SolIr *ir, const SolMir *mir,
     return valid || mir_error(diagnostics,
         ir->callables[mir->callable].span,
         "MIR lexical region stack is inconsistent");
+}
+
+static bool mir_collect_handler_parents(const SolIr *ir,
+    SolIrExpressionId id, SolIrExpressionId active,
+    SolIrExpressionId *parents, bool *seen, size_t depth) {
+    if (id >= ir->expression_count || depth > ir->expression_count) return false;
+    if (seen[id]) return parents[id] == active;
+    seen[id] = true;
+    parents[id] = active;
+    const SolIrExpression *expression = &ir->expressions[id];
+#define MIR_HANDLER_CHILD(child, handler) \
+    do { if (!mir_collect_handler_parents(ir, (child), (handler), parents, \
+        seen, depth + 1)) return false; } while (0)
+    switch (expression->kind) {
+        case SOL_IR_EXPR_UNARY:
+            MIR_HANDLER_CHILD(expression->as.unary.operand, active); break;
+        case SOL_IR_EXPR_PROPAGATE:
+            MIR_HANDLER_CHILD(expression->as.propagate.operand, active); break;
+        case SOL_IR_EXPR_BOUND_OPERATION:
+            MIR_HANDLER_CHILD(expression->as.operation.receiver, active); break;
+        case SOL_IR_EXPR_HANDLE:
+            MIR_HANDLER_CHILD(expression->as.handler.authority, active);
+            MIR_HANDLER_CHILD(expression->as.handler.provider, active);
+            MIR_HANDLER_CHILD(expression->as.handler.body, id);
+            break;
+        case SOL_IR_EXPR_BINARY:
+            MIR_HANDLER_CHILD(expression->as.binary.left, active);
+            MIR_HANDLER_CHILD(expression->as.binary.right, active);
+            break;
+        case SOL_IR_EXPR_CALL:
+            if (expression->as.call.kind == SOL_IR_CALL_METHOD) {
+                MIR_HANDLER_CHILD(expression->as.call.receiver, active);
+            } else if (expression->as.call.kind == SOL_IR_CALL_CALLBACK
+                || expression->as.call.kind == SOL_IR_CALL_CAPABILITY) {
+                MIR_HANDLER_CHILD(expression->as.call.callee, active);
+            }
+            for (size_t index = 0; index < expression->as.call.operands.count;
+                ++index) {
+                MIR_HANDLER_CHILD(ir->operands[
+                    expression->as.call.operands.offset + index].value, active);
+            }
+            break;
+        case SOL_IR_EXPR_RECORD:
+        case SOL_IR_EXPR_TUPLE: {
+            SolIrSlice operands = expression->kind == SOL_IR_EXPR_RECORD
+                ? expression->as.record.fields : expression->as.tuple.operands;
+            for (size_t index = 0; index < operands.count; ++index) {
+                MIR_HANDLER_CHILD(ir->operands[operands.offset + index].value,
+                    active);
+            }
+            break;
+        }
+        case SOL_IR_EXPR_IF:
+            MIR_HANDLER_CHILD(expression->as.if_expr.condition, active);
+            MIR_HANDLER_CHILD(expression->as.if_expr.then_branch, active);
+            MIR_HANDLER_CHILD(expression->as.if_expr.else_branch, active);
+            break;
+        case SOL_IR_EXPR_MATCH:
+            MIR_HANDLER_CHILD(expression->as.match_expr.scrutinee, active);
+            for (size_t index = 0; index < expression->as.match_expr.arms.count;
+                ++index) {
+                const SolIrArm *arm = &ir->arms[ir->arm_ids[
+                    expression->as.match_expr.arms.offset + index]];
+                if (arm->guard != SOL_IR_NONE) {
+                    MIR_HANDLER_CHILD(arm->guard, active);
+                }
+                MIR_HANDLER_CHILD(arm->body, active);
+            }
+            break;
+        case SOL_IR_EXPR_BLOCK:
+            for (size_t index = 0; index < expression->as.block.statements.count;
+                ++index) {
+                const SolIrStatement *statement = &ir->statements[
+                    ir->statement_ids[expression->as.block.statements.offset
+                        + index]];
+                if (statement->target != SOL_IR_NONE) {
+                    MIR_HANDLER_CHILD(statement->target, active);
+                }
+                if (statement->condition != SOL_IR_NONE) {
+                    MIR_HANDLER_CHILD(statement->condition, active);
+                }
+                if (statement->expression != SOL_IR_NONE) {
+                    MIR_HANDLER_CHILD(statement->expression, active);
+                }
+            }
+            break;
+        default:
+            break;
+    }
+#undef MIR_HANDLER_CHILD
+    return true;
+}
+
+static size_t mir_expected_handlers(SolIrExpressionId target,
+    const SolIrExpressionId *parents, SolIrExpressionId *expected,
+    size_t expression_count) {
+    size_t count = 0;
+    for (SolIrExpressionId handler = parents[target]; handler != SOL_IR_NONE;
+        handler = parents[handler]) {
+        if (count == expression_count) return SIZE_MAX;
+        expected[count++] = handler;
+    }
+    for (size_t left = 0; left < count / 2; ++left) {
+        SolIrExpressionId swap = expected[left];
+        expected[left] = expected[count - left - 1];
+        expected[count - left - 1] = swap;
+    }
+    return count;
+}
+
+static bool mir_validate_handlers(const SolIr *ir, const SolMir *mir,
+    SolDiagnostics *diagnostics) {
+    if (ir->expression_count > SIZE_MAX / sizeof(SolIrExpressionId)
+        || (ir->expression_count != 0
+            && mir->block_count > SIZE_MAX / ir->expression_count)
+        || mir->block_count * ir->expression_count
+            > SIZE_MAX / sizeof(SolIrExpressionId)) {
+        return mir_error(diagnostics, ir->callables[mir->callable].span,
+            "MIR handler validation domain is too large");
+    }
+    size_t stack_count = mir->block_count * ir->expression_count;
+    SolIrExpressionId *incoming = stack_count == 0 ? NULL
+        : malloc(stack_count * sizeof(*incoming));
+    SolIrExpressionId *working = ir->expression_count == 0 ? NULL
+        : malloc(ir->expression_count * sizeof(*working));
+    SolIrExpressionId *expected = ir->expression_count == 0 ? NULL
+        : malloc(ir->expression_count * sizeof(*expected));
+    SolIrExpressionId *parents = ir->expression_count == 0 ? NULL
+        : malloc(ir->expression_count * sizeof(*parents));
+    bool *seen_expressions = calloc(ir->expression_count,
+        sizeof(*seen_expressions));
+    size_t *depths = calloc(mir->block_count, sizeof(*depths));
+    bool *known = calloc(mir->block_count, sizeof(*known));
+    SolMirBlockId *queue = malloc(mir->block_count * sizeof(*queue));
+    if ((stack_count != 0 && incoming == NULL)
+        || (ir->expression_count != 0
+            && (working == NULL || expected == NULL || parents == NULL
+                || seen_expressions == NULL))
+        || depths == NULL || known == NULL || queue == NULL) {
+        free(incoming); free(working); free(expected); free(parents);
+        free(seen_expressions); free(depths); free(known); free(queue);
+        return mir_error(diagnostics, ir->callables[mir->callable].span,
+            "MIR handler validation allocation failed");
+    }
+    if (!mir_collect_handler_parents(ir, ir->callables[mir->callable].body,
+        SOL_IR_NONE, parents, seen_expressions, 0)) {
+        free(incoming); free(working); free(expected); free(parents);
+        free(seen_expressions); free(depths); free(known); free(queue);
+        return mir_error(diagnostics, ir->callables[mir->callable].span,
+            "MIR handler source ancestry is inconsistent");
+    }
+    size_t first = 0;
+    size_t count = 1;
+    queue[0] = mir->entry;
+    known[mir->entry] = true;
+    bool valid = true;
+    while (valid && first < count) {
+        SolMirBlockId block = queue[first++];
+        size_t depth = depths[block];
+        if (depth != 0) memcpy(working,
+            &incoming[block * ir->expression_count],
+            depth * sizeof(*working));
+        SolMirSlice instructions = mir->blocks[block].instructions;
+        for (size_t index = 0; valid && index < instructions.count; ++index) {
+            const SolMirInstruction *instruction
+                = &mir->instructions[instructions.offset + index];
+            if (instruction->source_expression < ir->expression_count
+                && !seen_expressions[instruction->source_expression]) {
+                valid = false;
+                break;
+            }
+            size_t expected_depth = instruction->source_expression
+                    < ir->expression_count
+                ? mir_expected_handlers(instruction->source_expression,
+                    parents, expected, ir->expression_count) : 0;
+            if (instruction->kind == SOL_MIR_INST_HANDLER_ENTER) {
+                valid = depth == expected_depth
+                    && (depth == 0 || memcmp(working, expected,
+                        depth * sizeof(*working)) == 0);
+                if (valid) {
+                    if (depth == ir->expression_count) valid = false;
+                    else working[depth++] = instruction->source_expression;
+                }
+            } else if (instruction->kind == SOL_MIR_INST_HANDLER_EXIT) {
+                if (depth != expected_depth + 1
+                    || working[depth - 1] != instruction->source_expression
+                    || (expected_depth != 0 && memcmp(working, expected,
+                        expected_depth * sizeof(*working)) != 0)) {
+                    valid = false;
+                } else {
+                    --depth;
+                }
+            }
+        }
+        const SolMirTerminator *term = &mir->blocks[block].terminator;
+        if (valid && term->kind == SOL_MIR_TERM_INVOKE) {
+            if (term->as.invoke.source_expression >= ir->expression_count
+                || !seen_expressions[term->as.invoke.source_expression]) {
+                valid = false;
+            }
+        }
+        if (valid && term->kind == SOL_MIR_TERM_INVOKE) {
+            size_t expected_depth = mir_expected_handlers(
+                term->as.invoke.source_expression, parents, expected,
+                ir->expression_count);
+            valid = depth == expected_depth
+                && (depth == 0 || memcmp(working, expected,
+                    depth * sizeof(*working)) == 0);
+        }
+        if (valid && depth != 0
+            && (term->kind == SOL_MIR_TERM_RETURN
+                || term->kind == SOL_MIR_TERM_PANIC
+                || term->kind == SOL_MIR_TERM_RESUME_FAILURE
+                || term->kind == SOL_MIR_TERM_MATCH_FAILURE
+                || term->kind == SOL_MIR_TERM_UNREACHABLE)) valid = false;
+        SolMirBlockId targets[2];
+        size_t target_count = 0;
+        if (valid && term->kind == SOL_MIR_TERM_GOTO) {
+            targets[target_count++] = term->as.go_to.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_BRANCH) {
+            targets[target_count++] = term->as.branch.true_edge.block;
+            targets[target_count++] = term->as.branch.false_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_INVOKE) {
+            if (term->as.invoke.normal_edge.block != SOL_MIR_NONE) {
+                targets[target_count++] = term->as.invoke.normal_edge.block;
+            }
+            targets[target_count++] = term->as.invoke.failure_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_CHECK_REFINED) {
+            targets[target_count++] = term->as.check_refined.normal_edge.block;
+            targets[target_count++] = term->as.check_refined.failure_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_PROPAGATE) {
+            targets[target_count++] = term->as.propagate.value_edge.block;
+            targets[target_count++] = term->as.propagate.residual_edge.block;
+        } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
+            || term->kind == SOL_MIR_TERM_CONTINUE)) {
+            targets[target_count++] = term->as.transfer.edge.block;
+        }
+        for (size_t index = 0; valid && index < target_count; ++index) {
+            SolMirBlockId target = targets[index];
+            if (!known[target]) {
+                known[target] = true;
+                depths[target] = depth;
+                if (depth != 0) memcpy(
+                    &incoming[target * ir->expression_count], working,
+                    depth * sizeof(*working));
+                queue[count++] = target;
+            } else {
+                valid = depths[target] == depth
+                    && (depth == 0 || memcmp(
+                        &incoming[target * ir->expression_count], working,
+                        depth * sizeof(*working)) == 0);
+            }
+        }
+    }
+    free(incoming); free(working); free(expected); free(parents);
+    free(seen_expressions); free(depths); free(known); free(queue);
+    return valid || mir_error(diagnostics,
+        ir->callables[mir->callable].span,
+        "MIR handler stack is inconsistent");
 }
 
 static bool mir_validate_storage_order(const SolIr *ir, const SolMir *mir,
@@ -4836,13 +5193,19 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                     "malformed MIR temporary drop");
             }
         } else if (instruction->kind == SOL_MIR_INST_EXPRESSION_RESULT) {
-            if (source == NULL || source->kind != SOL_IR_EXPR_BLOCK
+            SolIrExpressionId operand_source = source != NULL
+                    && source->kind == SOL_IR_EXPR_BLOCK
+                ? mir_block_result_source(ir, source)
+                : source != NULL && source->kind == SOL_IR_EXPR_HANDLE
+                    ? source->as.handler.body : SOL_IR_NONE;
+            if (source == NULL || (source->kind != SOL_IR_EXPR_BLOCK
+                    && source->kind != SOL_IR_EXPR_HANDLE)
                 || !mir_value_available(mir, instruction->as.operand,
                     instruction->block, id)
                 || mir->values[instruction->as.operand].type
                     != instruction->type
                 || mir->values[instruction->as.operand].source_expression
-                    != mir_block_result_source(ir, source)
+                    != operand_source
                 || instruction->span.start != source->span.start
                 || instruction->span.end != source->span.end) {
                 return mir_error(diagnostics, instruction->span,
@@ -5056,6 +5419,39 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 return mir_error(diagnostics, instruction->span,
                     "malformed MIR lexical region marker");
             }
+        } else if (instruction->kind == SOL_MIR_INST_HANDLER_ENTER
+            || instruction->kind == SOL_MIR_INST_HANDLER_EXIT) {
+            const SolIrExpression *handler = instruction->source_expression
+                    < ir->expression_count
+                ? &ir->expressions[instruction->source_expression] : NULL;
+            const SolIrExpression *authority = handler != NULL
+                    && handler->kind == SOL_IR_EXPR_HANDLE
+                    && handler->as.handler.authority < ir->expression_count
+                ? &ir->expressions[handler->as.handler.authority] : NULL;
+            const SolIrExpression *provider = handler != NULL
+                    && handler->kind == SOL_IR_EXPR_HANDLE
+                    && handler->as.handler.provider < ir->expression_count
+                ? &ir->expressions[handler->as.handler.provider] : NULL;
+            bool valid = handler != NULL && authority != NULL && provider != NULL
+                && instruction->type == SOL_IR_NONE
+                && authority->kind == SOL_IR_EXPR_PLACE
+                && authority->local_use == SOL_IR_LOCAL_USE_SHARED
+                && authority->as.place < ir->place_count
+                && ir->places[authority->as.place].root_kind
+                    == SOL_IR_PLACE_ROOT_LOCAL
+                && ir->places[authority->as.place].projections.count == 0
+                && provider->kind == SOL_IR_EXPR_PLACE
+                && provider->local_use == SOL_IR_LOCAL_USE_SHARED
+                && provider->as.place < ir->place_count
+                && ir->places[provider->as.place].root_kind
+                    == SOL_IR_PLACE_ROOT_LOCAL
+                && ir->places[provider->as.place].projections.count == 0
+                && instruction->span.start == handler->span.start
+                && instruction->span.end == handler->span.end
+                && mir_source_reaches_match(ir, callable->body,
+                    instruction->source_expression, 0);
+            if (!valid) return mir_error(diagnostics, instruction->span,
+                "malformed MIR handler scope marker");
         }
     }
     for (size_t match_id = 0; match_id < ir->expression_count; ++match_id) {
@@ -5091,6 +5487,20 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         }
     }
     for (size_t source = 0; source < ir->expression_count; ++source) {
+        if (ir->expressions[source].kind == SOL_IR_EXPR_HANDLE) {
+            size_t enters = 0;
+            for (size_t id = 0; id < mir->instruction_count; ++id) {
+                enters += mir->instructions[id].kind
+                        == SOL_MIR_INST_HANDLER_ENTER
+                    && mir->instructions[id].source_expression == source;
+            }
+            bool required = mir_source_reaches_match(ir, callable->body,
+                source, 0);
+            if (enters != (required ? 1u : 0u)) {
+                return mir_error(diagnostics, ir->expressions[source].span,
+                    "MIR handler scope is missing, duplicated, or foreign");
+            }
+        }
         if (ir->expressions[source].kind != SOL_IR_EXPR_PROPAGATE) continue;
         size_t count = 0;
         for (size_t block = 0; block < mir->block_count; ++block) {
@@ -5251,6 +5661,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         && mir_validate_storage(ir, mir, diagnostics)
         && mir_validate_paths(ir, mir, diagnostics)
         && mir_validate_regions(ir, mir, diagnostics)
+        && mir_validate_handlers(ir, mir, diagnostics)
         && mir_validate_storage_order(ir, mir, diagnostics)
         && mir_validate_temporaries(ir, mir, diagnostics)
         && mir_validate_source_events(ir, mir, diagnostics);

@@ -637,7 +637,10 @@ operands, with receiver-first normal writeback and failure suppression. Direct
 capability invokes borrow the exact bound-operation receiver and retain operation
 identity plus independently expanded root-specific effects without materializing a
 bound-operation value. Operand-dependent capability effects remain deferred. MIR does
-not yet cover handlers, contracts, generic lowering,
+now retain exact source-bound handler enter/exit scopes around nested bodies. Lexical
+cleanup emits handler exits on normal, transfer, propagation, and failure paths, while
+an independent CFG fixed point verifies exact metadata, LIFO nesting, identical join
+stacks, and terminal balance. MIR does not yet cover contracts, generic lowering,
 representation, runtime ABI, or a backend.
 
 ### Phase 0 — Executable language model

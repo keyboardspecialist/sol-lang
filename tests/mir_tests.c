@@ -1882,6 +1882,114 @@ static void test_capability_invoke_lowering(void) {
     free_compilation(&compilation);
 }
 
+static void test_handler_lowering(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_handlers\n"
+        "capability Source { function read() -> Int64 "
+        "effects { service.read<Self> } }\n"
+        "capability Provider { function read() -> Int64 effects { pure } }\n"
+        "function normal(source: capability Source, provider: capability Provider) "
+        "-> Int64 { handle service.read<source> with provider { source.read() } }\n"
+        "function nested(source: capability Source, provider: capability Provider) "
+        "-> Int64 { handle service.read<source> with provider { "
+        "handle service.read<source> with provider { source.read() } } }\n"
+        "function early(source: capability Source, provider: capability Provider) "
+        "-> Int64 { handle service.read<source> with provider { return 3 } }\n"
+        "function failing(source: capability Source, provider: capability Provider) "
+        "-> Int64 effects { panic } { handle service.read<source> with provider { "
+        "panic \"failure\" } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    const char *names[] = {"normal", "nested", "early", "failing"};
+    for (size_t name = 0; name < 4; ++name) {
+        SolMir mir;
+        sol_mir_init(&mir);
+        SolMirLowerOutcome outcome = sol_mir_lower_callable(&compilation.ir,
+            callable(&compilation.ir, names[name]), &mir,
+            &compilation.diagnostics);
+        CHECK(outcome == SOL_MIR_LOWER_SUCCEEDED);
+        if (outcome != SOL_MIR_LOWER_SUCCEEDED) {
+            fprintf(stderr, "handler lowering failed for %s: %s\n", names[name],
+                compilation.diagnostics.count == 0 ? "no diagnostic"
+                : compilation.diagnostics.items[
+                    compilation.diagnostics.count - 1].message);
+            sol_mir_free(&mir);
+            continue;
+        }
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        size_t enters = 0;
+        size_t exits = 0;
+        SolMirInstructionId first_enter = SOL_MIR_NONE;
+        SolMirInstructionId second_enter = SOL_MIR_NONE;
+        SolMirInstructionId first_exit = SOL_MIR_NONE;
+        for (size_t id = 0; id < mir.instruction_count; ++id) {
+            const SolMirInstruction *instruction = &mir.instructions[id];
+            if (instruction->kind == SOL_MIR_INST_HANDLER_ENTER) {
+                if (first_enter == SOL_MIR_NONE) first_enter = id;
+                else if (second_enter == SOL_MIR_NONE) second_enter = id;
+                ++enters;
+                CHECK(instruction->source_expression
+                    < compilation.ir.expression_count);
+                CHECK(compilation.ir.expressions[
+                    instruction->source_expression].kind == SOL_IR_EXPR_HANDLE);
+            } else if (instruction->kind == SOL_MIR_INST_HANDLER_EXIT) {
+                if (first_exit == SOL_MIR_NONE) first_exit = id;
+                ++exits;
+            }
+        }
+        CHECK(enters == (name == 1 ? 2u : 1u));
+        CHECK(exits >= enters);
+        CHECK(first_enter != SOL_MIR_NONE && first_exit != SOL_MIR_NONE);
+        if (name == 0) {
+            bool intercepted = false;
+            SolIrExpressionId handler_id
+                = mir.instructions[first_enter].source_expression;
+            const SolIrExpression *handler
+                = &compilation.ir.expressions[handler_id];
+            for (size_t block = 0; block < mir.block_count; ++block) {
+                const SolMirTerminator *term = &mir.blocks[block].terminator;
+                if (term->kind != SOL_MIR_TERM_INVOKE) continue;
+                intercepted = term->as.invoke.callable
+                        == handler->as.handler.source
+                    && compilation.ir.places[term->as.invoke.receiver.place]
+                        .local == handler->as.handler.root;
+            }
+            CHECK(intercepted);
+            SolIrExpressionId source
+                = mir.instructions[first_enter].source_expression;
+            mir.instructions[first_enter].source_expression
+                = handler->as.handler.body;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            mir.instructions[first_enter].source_expression = source;
+            CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+            SolSpan span = mir.instructions[first_enter].span;
+            mir.instructions[first_enter].span
+                = compilation.ir.callables[mir.callable].span;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            mir.instructions[first_enter].span = span;
+            CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+            mir.instructions[first_exit].kind = SOL_MIR_INST_HANDLER_ENTER;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            mir.instructions[first_exit].kind = SOL_MIR_INST_HANDLER_EXIT;
+            CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        } else if (name == 1) {
+            CHECK(second_enter != SOL_MIR_NONE);
+            SolIrExpressionId outer
+                = mir.instructions[first_enter].source_expression;
+            SolSpan outer_span = mir.instructions[first_enter].span;
+            mir.instructions[first_enter].source_expression
+                = mir.instructions[second_enter].source_expression;
+            mir.instructions[first_enter].span
+                = mir.instructions[second_enter].span;
+            mir.instructions[second_enter].source_expression = outer;
+            mir.instructions[second_enter].span = outer_span;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+        }
+        sol_mir_free(&mir);
+    }
+    free_compilation(&compilation);
+}
+
 static void test_owned_temporary_cleanup(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -2143,6 +2251,7 @@ int main(void) {
     test_callback_invoke_lowering();
     test_concrete_method_invoke_lowering();
     test_capability_invoke_lowering();
+    test_handler_lowering();
     test_owned_temporary_cleanup();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
