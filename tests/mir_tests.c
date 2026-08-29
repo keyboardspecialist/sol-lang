@@ -95,6 +95,8 @@ static bool bytes_equal(const void *left, const void *right,
 
 static bool mir_equal(const SolMir *left, const SolMir *right) {
     return left->callable == right->callable && left->entry == right->entry
+        && left->contract_body == right->contract_body
+        && left->contract_epilogue == right->contract_epilogue
         && left->block_count == right->block_count
         && left->instruction_count == right->instruction_count
         && left->value_count == right->value_count
@@ -306,11 +308,12 @@ static void test_transactional_unsupported(void) {
 
     sol_mir_init(&mir);
     before = compilation.diagnostics.count;
-    CHECK(sol_mir_lower_callable(&compilation.ir,
+    SolMirLowerOutcome contracted_outcome = sol_mir_lower_callable(&compilation.ir,
         callable(&compilation.ir, "contracted"), &mir,
-        &compilation.diagnostics) == SOL_MIR_LOWER_UNSUPPORTED);
-    CHECK(mir.callable == SOL_IR_NONE && mir.blocks == NULL);
-    CHECK(compilation.diagnostics.count == before + 1);
+        &compilation.diagnostics);
+    CHECK(contracted_outcome == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+    CHECK(compilation.diagnostics.count == before);
     sol_mir_free(&mir);
 
     SolIrCallableId contracted_id = callable(&compilation.ir, "contracted");
@@ -324,6 +327,188 @@ static void test_transactional_unsupported(void) {
     sol_mir_free(&mir);
     compilation.ir.callables[contracted_id].body = body;
     free_compilation(&compilation);
+}
+
+static void test_callable_contract_envelope(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_contracts\n"
+        "enum Failure { invalid }\n"
+        "function compute(value: Int64, fail: Bool) -> Result<Int64, Failure> "
+        "effects { pure }\n"
+        "requires { value > 0 }\n"
+        "ensures { success => result >= old(value), failure => true } "
+        "{ if fail { return err(Failure.invalid) } else { "
+        "return ok(value + 1) } }\n"
+        "function requires_only(value: Int64) -> Int64 "
+        "requires { value > 0 } { return value }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolIrCallableId id = callable(&compilation.ir, "compute");
+    SolMir mir;
+    SolMir repeated;
+    sol_mir_init(&mir);
+    sol_mir_init(&repeated);
+    SolMirLowerOutcome outcome = sol_mir_lower_callable(&compilation.ir, id,
+        &mir, &compilation.diagnostics);
+    CHECK(outcome == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_lower_callable(&compilation.ir, id, &repeated,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(mir_equal(&mir, &repeated));
+    CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+    CHECK(mir.contract_body < mir.block_count);
+    CHECK(mir.contract_epilogue < mir.block_count);
+
+    SolMirBlockId checks[3] = {SOL_MIR_NONE, SOL_MIR_NONE, SOL_MIR_NONE};
+    SolMirBlockId body_return = SOL_MIR_NONE;
+    SolMirBlockId final_return = SOL_MIR_NONE;
+    SolMirInstructionId snapshot = SOL_MIR_NONE;
+    size_t check_count = 0;
+    size_t epilogue_entries = 0;
+    for (size_t block = 0; block < mir.block_count; ++block) {
+        SolMirTerminator *term = &mir.blocks[block].terminator;
+        if (term->kind == SOL_MIR_TERM_CHECK_CONTRACT && check_count < 3) {
+            checks[check_count++] = block;
+        }
+        if (term->kind == SOL_MIR_TERM_GOTO
+            && term->as.go_to.block == mir.contract_epilogue) {
+            ++epilogue_entries;
+            body_return = block;
+        }
+        if (term->kind == SOL_MIR_TERM_RETURN) final_return = block;
+    }
+    for (size_t instruction = 0; instruction < mir.instruction_count;
+        ++instruction) {
+        if (mir.instructions[instruction].kind
+            == SOL_MIR_INST_CAPTURE_SNAPSHOT) snapshot = instruction;
+    }
+    CHECK(check_count == 3);
+    CHECK(epilogue_entries == 2);
+    CHECK(snapshot != SOL_MIR_NONE);
+    CHECK(mir.instructions[snapshot].block == mir.contract_body);
+    CHECK(final_return != SOL_MIR_NONE);
+    CHECK(mir.values[mir.blocks[final_return].terminator.as.value].type
+        == compilation.ir.callables[id].result);
+    CHECK(compilation.ir.obligations[
+        mir.blocks[checks[1]].terminator.as.check_contract.obligation].outcome
+            == SOL_CONTRACT_OUTCOME_SUCCESS);
+    CHECK(compilation.ir.obligations[
+        mir.blocks[checks[2]].terminator.as.check_contract.obligation].outcome
+            == SOL_CONTRACT_OUTCOME_FAILURE);
+    CHECK(mir.blocks[checks[1]].terminator.as.check_contract.outcome
+        == SOL_CONTRACT_OUTCOME_SUCCESS);
+
+    SolObligationId saved_obligation
+        = mir.blocks[checks[0]].terminator.as.check_contract.obligation;
+    mir.blocks[checks[0]].terminator.as.check_contract.obligation
+        = mir.blocks[checks[1]].terminator.as.check_contract.obligation;
+    CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+    mir.blocks[checks[0]].terminator.as.check_contract.obligation
+        = saved_obligation;
+
+    SolIrSnapshotId saved_snapshot = mir.instructions[snapshot].as.snapshot;
+    mir.instructions[snapshot].as.snapshot = compilation.ir.snapshot_count;
+    CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+    mir.instructions[snapshot].as.snapshot = saved_snapshot;
+    SolSpan saved_span = mir.instructions[snapshot].span;
+    mir.instructions[snapshot].span = compilation.ir.callables[id].span;
+    CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+    mir.instructions[snapshot].span = saved_span;
+
+    SolMirInstructionId first_body = snapshot + 1;
+    CHECK(first_body < mir.instruction_count);
+    CHECK(mir.instructions[first_body].block == mir.contract_body);
+    SolMirInstruction moved_body = mir.instructions[first_body];
+    mir.instructions[first_body] = mir.instructions[snapshot];
+    mir.instructions[snapshot] = moved_body;
+    if (mir.instructions[snapshot].result != SOL_MIR_NONE) {
+        mir.values[mir.instructions[snapshot].result].definition = snapshot;
+    }
+    CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+    moved_body = mir.instructions[snapshot];
+    mir.instructions[snapshot] = mir.instructions[first_body];
+    mir.instructions[first_body] = moved_body;
+    if (mir.instructions[first_body].result != SOL_MIR_NONE) {
+        mir.values[mir.instructions[first_body].result].definition = first_body;
+    }
+
+    SolObligationId first_ensure
+        = mir.blocks[checks[1]].terminator.as.check_contract.obligation;
+    SolObligationId second_ensure
+        = mir.blocks[checks[2]].terminator.as.check_contract.obligation;
+    mir.blocks[checks[1]].terminator.as.check_contract.obligation = second_ensure;
+    mir.blocks[checks[2]].terminator.as.check_contract.obligation = first_ensure;
+    CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+    mir.blocks[checks[1]].terminator.as.check_contract.obligation = first_ensure;
+    mir.blocks[checks[2]].terminator.as.check_contract.obligation = second_ensure;
+
+    mir.blocks[checks[1]].terminator.as.check_contract.outcome
+        = SOL_CONTRACT_OUTCOME_FAILURE;
+    CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+    mir.blocks[checks[1]].terminator.as.check_contract.outcome
+        = SOL_CONTRACT_OUTCOME_SUCCESS;
+
+    SolMirBlockId violation = mir.blocks[checks[0]].terminator
+        .as.check_contract.violation_edge.block;
+    mir.blocks[checks[0]].terminator.as.check_contract.violation_edge.block
+        = mir.blocks[checks[0]].terminator.as.check_contract.failure_edge.block;
+    mir.blocks[checks[0]].terminator.as.check_contract.failure_edge.block
+        = violation;
+    CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+    mir.blocks[checks[0]].terminator.as.check_contract.failure_edge.block
+        = mir.blocks[checks[0]].terminator.as.check_contract
+            .violation_edge.block;
+    mir.blocks[checks[0]].terminator.as.check_contract.violation_edge.block
+        = violation;
+
+    SolMirValueId result
+        = mir.blocks[checks[1]].terminator.as.check_contract.result;
+    mir.blocks[checks[1]].terminator.as.check_contract.result = SOL_MIR_NONE;
+    CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+    mir.blocks[checks[1]].terminator.as.check_contract.result = result;
+
+    SolMirBlockId saved_target = mir.blocks[body_return].terminator.as.go_to.block;
+    mir.blocks[body_return].terminator.as.go_to.block = final_return;
+    CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+    mir.blocks[body_return].terminator.as.go_to.block = saved_target;
+    CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+    sol_mir_free(&mir);
+    sol_mir_free(&repeated);
+
+    sol_mir_init(&mir);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "requires_only"), &mir,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+    CHECK(mir.contract_epilogue < mir.block_count);
+    sol_mir_free(&mir);
+    free_compilation(&compilation);
+
+    Compilation unsupported;
+    CHECK(compile(&unsupported,
+        "module mir_contract_unsupported\n"
+        "function generic<T>(value: T) -> T requires { true } "
+        "{ return value }\n"
+        "function effectful<effects E>(callback: function() -> Int64 effects E) "
+        "-> Int64 effects { E } requires { true } { return callback() }\n"
+        "function exclusive(value: inout Int64) -> Int64 "
+        "requires { value > 0 } { return value }\n"
+        "function fallible_snapshot(value: Int64) -> Int64 "
+        "ensures { result >= old(value / 0) } { return value }\n"
+        "capability Service { function read(value: Int64) -> Int64 "
+        "effects { pure } requires { value > 0 } }\n"));
+    const char *names[] = {
+        "generic", "effectful", "exclusive", "fallible_snapshot", "read",
+    };
+    for (size_t index = 0; index < 5; ++index) {
+        sol_mir_init(&mir);
+        CHECK(sol_mir_lower_callable(&unsupported.ir,
+            callable(&unsupported.ir, names[index]), &mir,
+            &unsupported.diagnostics) == SOL_MIR_LOWER_UNSUPPORTED);
+        CHECK(mir.callable == SOL_IR_NONE && mir.blocks == NULL
+            && mir.instructions == NULL);
+        sol_mir_free(&mir);
+    }
+    free_compilation(&unsupported);
 }
 
 static void test_calls_and_remaining_local_control(void) {
@@ -2239,6 +2424,7 @@ static void test_owned_temporary_cleanup(void) {
 int main(void) {
     test_initial_lowering_and_determinism();
     test_transactional_unsupported();
+    test_callable_contract_envelope();
     test_calls_and_remaining_local_control();
     test_validator_rejects_corruption();
     test_loop_control_lowering();

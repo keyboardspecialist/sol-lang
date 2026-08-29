@@ -43,6 +43,8 @@ typedef struct {
     size_t pending_temporary_capacity;
     bool unsupported;
     bool failed;
+    bool contracted;
+    SolMirBlockId contract_epilogue;
 } MirLowerer;
 
 static bool mir_error(SolDiagnostics *diagnostics, SolSpan span,
@@ -83,6 +85,8 @@ void sol_mir_init(SolMir *mir) {
     memset(mir, 0, sizeof(*mir));
     mir->callable = SOL_IR_NONE;
     mir->entry = SOL_MIR_NONE;
+    mir->contract_body = SOL_MIR_NONE;
+    mir->contract_epilogue = SOL_MIR_NONE;
 }
 
 void sol_mir_free(SolMir *mir) {
@@ -102,6 +106,8 @@ void sol_mir_free(SolMir *mir) {
 static bool mir_empty(const SolMir *mir) {
     return mir != NULL && mir->callable == SOL_IR_NONE
         && mir->entry == SOL_MIR_NONE && mir->blocks == NULL
+        && mir->contract_body == SOL_MIR_NONE
+        && mir->contract_epilogue == SOL_MIR_NONE
         && mir->block_count == 0 && mir->block_capacity == 0
         && mir->instructions == NULL && mir->instruction_count == 0
         && mir->instruction_capacity == 0 && mir->values == NULL
@@ -509,8 +515,8 @@ static bool mir_emit_scope_exit(MirLowerer *lowerer,
         }, false) != SOL_MIR_NONE;
 }
 
-static bool mir_emit_exit_cleanup(MirLowerer *lowerer,
-    const Scope *scope, SolSpan span) {
+static bool mir_emit_exit_cleanup_mode(MirLowerer *lowerer,
+    const Scope *scope, SolSpan span, bool cleanup_parameters) {
     const Scope *current = scope;
     size_t temporary_end = lowerer->pending_temporary_count;
     while (current != NULL) {
@@ -540,7 +546,8 @@ static bool mir_emit_exit_cleanup(MirLowerer *lowerer,
     for (; current != NULL; current = current->parent) {
         if (!mir_emit_scope_exit(lowerer, current, span)) return false;
     }
-    SolIrSlice parameters = lowerer->callable->parameters;
+    SolIrSlice parameters = cleanup_parameters
+        ? lowerer->callable->parameters : (SolIrSlice){0};
     while (parameters.count != 0) {
         --parameters.count;
         SolIrLocalId local = lowerer->ir->roots[
@@ -551,6 +558,11 @@ static bool mir_emit_exit_cleanup(MirLowerer *lowerer,
                 local, span)) return false;
     }
     return true;
+}
+
+static bool mir_emit_exit_cleanup(MirLowerer *lowerer,
+    const Scope *scope, SolSpan span) {
+    return mir_emit_exit_cleanup_mode(lowerer, scope, span, true);
 }
 
 static bool mir_emit_cleanup_to(MirLowerer *lowerer,
@@ -571,6 +583,17 @@ static bool mir_type_is(const SolIr *ir, SolIrTypeId id,
     SolIrTypeKind kind);
 static bool mir_set_return(MirLowerer *lowerer, SolMirValueId value,
     SolSpan span);
+
+static bool mir_finish_success(MirLowerer *lowerer, const Scope *scope,
+    SolMirValueId value, SolSpan span) {
+    if (!lowerer->contracted) {
+        return mir_emit_exit_cleanup(lowerer, scope, span)
+            && mir_set_return(lowerer, value, span);
+    }
+    return mir_emit_exit_cleanup_mode(lowerer, scope, span, false)
+        && mir_set_goto(lowerer, lowerer->current,
+            lowerer->contract_epilogue, value, true, span);
+}
 
 static LoweredValue mir_unreachable(void) {
     return (LoweredValue){.reachable = false, .value = SOL_MIR_NONE};
@@ -999,8 +1022,8 @@ static LoweredValue mir_lower_propagate(MirLowerer *lowerer,
         },
     };
     if (!mir_start_block(lowerer, residual_block)
-        || !mir_emit_exit_cleanup(lowerer, scope, expression->span)
-        || !mir_set_return(lowerer, residual_parameter, expression->span)
+        || !mir_finish_success(lowerer, scope, residual_parameter,
+            expression->span)
         || !mir_start_block(lowerer, value_block)) return mir_failure(lowerer);
     return (LoweredValue){.reachable = true, .value = value_parameter};
 }
@@ -1447,6 +1470,116 @@ static bool mir_set_panic(MirLowerer *lowerer, SolMirValueId value,
     return true;
 }
 
+static bool mir_set_contract_violation(MirLowerer *lowerer,
+    SolObligationId obligation, SolSpan span) {
+    if (lowerer->current >= lowerer->mir->block_count
+        || lowerer->mir->blocks[lowerer->current].terminator.kind
+            != SOL_MIR_TERM_INVALID) return false;
+    lowerer->mir->blocks[lowerer->current].terminator = (SolMirTerminator){
+        .kind = SOL_MIR_TERM_CONTRACT_VIOLATION,
+        .span = span,
+        .as.contract_violation = obligation,
+    };
+    return true;
+}
+
+static bool mir_emit_contract_check(MirLowerer *lowerer,
+    SolObligationId obligation_id, SolMirValueId result,
+    SolMirBlockId satisfied, SolSpan span) {
+    SolMirBlockId source = lowerer->current;
+    SolMirBlockId violation = mir_append_block(lowerer, span);
+    SolMirBlockId failure = mir_append_block(lowerer, span);
+    const SolIrObligation *obligation
+        = &lowerer->ir->obligations[obligation_id];
+    if (violation == SOL_MIR_NONE || failure == SOL_MIR_NONE) return false;
+    SolMirSlice empty = {lowerer->mir->edge_value_count, 0};
+    SolMirSlice satisfied_arguments = empty;
+    if (result != SOL_MIR_NONE) {
+        satisfied_arguments = mir_append_edge_arguments(lowerer, &result, 1);
+    }
+    if (lowerer->failed) return false;
+    lowerer->mir->blocks[source].terminator = (SolMirTerminator){
+        .kind = SOL_MIR_TERM_CHECK_CONTRACT,
+        .span = span,
+        .as.check_contract = {
+            .obligation = obligation_id,
+            .phase = obligation->kind,
+            .outcome = obligation->outcome,
+            .result = result,
+            .satisfied_edge = {
+                .block = satisfied,
+                .arguments = satisfied_arguments,
+            },
+            .violation_edge = {.block = violation, .arguments = empty},
+            .failure_edge = {.block = failure, .arguments = empty},
+        },
+    };
+    if (!mir_start_block(lowerer, violation)
+        || !mir_emit_exit_cleanup(lowerer, NULL, span)
+        || !mir_set_contract_violation(lowerer, obligation_id, span)
+        || !mir_start_block(lowerer, failure)
+        || !mir_emit_exit_cleanup(lowerer, NULL, span)
+        || !mir_set_failure_terminator(lowerer,
+            SOL_MIR_TERM_RESUME_FAILURE, span)) return false;
+    return true;
+}
+
+static bool mir_obligation_owned_by_callable(const SolIrObligation *obligation,
+    const SolIrCallable *callable) {
+    return obligation->owner_kind == SOL_CONTRACT_OWNER_ITEM
+        && obligation->owner == callable->owner;
+}
+
+static bool mir_lower_contract_entry(MirLowerer *lowerer) {
+    for (size_t id = 0; id < lowerer->ir->obligation_count; ++id) {
+        const SolIrObligation *obligation = &lowerer->ir->obligations[id];
+        if (!mir_obligation_owned_by_callable(obligation, lowerer->callable)
+            || obligation->kind != SOL_CONTRACT_REQUIRES) continue;
+        SolMirBlockId satisfied = mir_append_block(lowerer,
+            lowerer->ir->expressions[obligation->predicate].span);
+        if (satisfied == SOL_MIR_NONE
+            || !mir_emit_contract_check(lowerer, id, SOL_MIR_NONE,
+                satisfied, lowerer->ir->expressions[obligation->predicate].span)
+            || !mir_start_block(lowerer, satisfied)) return false;
+    }
+    for (size_t id = 0; id < lowerer->ir->snapshot_count; ++id) {
+        const SolIrSnapshot *snapshot = &lowerer->ir->snapshots[id];
+        if (snapshot->obligation >= lowerer->ir->obligation_count
+            || !mir_obligation_owned_by_callable(
+                &lowerer->ir->obligations[snapshot->obligation],
+                lowerer->callable)) continue;
+        const SolIrExpression *read = &lowerer->ir->expressions[snapshot->read];
+        if (mir_append_instruction(lowerer, (SolMirInstruction){
+                .kind = SOL_MIR_INST_CAPTURE_SNAPSHOT,
+                .type = SOL_IR_NONE,
+                .source_expression = snapshot->read,
+                .span = read->span,
+                .as.snapshot = id,
+            }, false) == SOL_MIR_NONE) return false;
+    }
+    lowerer->mir->contract_body = lowerer->current;
+    return true;
+}
+
+static bool mir_lower_contract_epilogue(MirLowerer *lowerer,
+    SolMirValueId result) {
+    for (size_t id = 0; id < lowerer->ir->obligation_count; ++id) {
+        const SolIrObligation *obligation = &lowerer->ir->obligations[id];
+        if (!mir_obligation_owned_by_callable(obligation, lowerer->callable)
+            || obligation->kind != SOL_CONTRACT_ENSURES) continue;
+        SolSpan span = lowerer->ir->expressions[obligation->predicate].span;
+        SolMirBlockId satisfied = mir_append_block(lowerer, span);
+        SolMirValueId parameter = mir_append_parameter(lowerer, satisfied,
+            lowerer->callable->result, SOL_IR_NONE, span);
+        if (satisfied == SOL_MIR_NONE || parameter == SOL_MIR_NONE
+            || !mir_emit_contract_check(lowerer, id, result, satisfied, span)
+            || !mir_start_block(lowerer, satisfied)) return false;
+        result = parameter;
+    }
+    return mir_emit_exit_cleanup(lowerer, NULL, lowerer->callable->span)
+        && mir_set_return(lowerer, result, lowerer->callable->span);
+}
+
 static SolMirBlockId mir_ensure_loop_exit(MirLowerer *lowerer,
     SolMirLoopId loop, SolSpan span) {
     if (loop >= lowerer->mir->loop_count) {
@@ -1706,8 +1839,8 @@ static LoweredValue mir_lower_block(MirLowerer *lowerer,
                 LoweredValue value = mir_lower_expression(lowerer,
                     statement->expression, &scope);
                 if (!value.reachable) return value;
-                if (!mir_emit_exit_cleanup(lowerer, &scope, statement->span)
-                    || !mir_set_return(lowerer, value.value, statement->span)) {
+                if (!mir_finish_success(lowerer, &scope, value.value,
+                    statement->span)) {
                     return mir_failure(lowerer);
                 }
                 return mir_unreachable();
@@ -2687,6 +2820,7 @@ static SolMirInstructionId mir_temporary_initializer(const SolMir *mir,
 
 static SolIrExpressionId mir_instruction_event_source(
     const SolMirInstruction *instruction) {
+    if (instruction->kind == SOL_MIR_INST_CAPTURE_SNAPSHOT) return SOL_IR_NONE;
     if (instruction->source_expression != SOL_IR_NONE) {
         return instruction->source_expression;
     }
@@ -2793,7 +2927,7 @@ static bool mir_validate_arena_ownership(const SolMir *mir,
             valid = value < mir->value_count && ++values[value] == 1;
         }
         const SolMirTerminator *terminator = &mir->blocks[block].terminator;
-        SolMirSlice slices[2];
+        SolMirSlice slices[3];
         size_t count = 0;
         if (terminator->kind == SOL_MIR_TERM_GOTO) {
             slices[count++] = terminator->as.go_to.arguments;
@@ -2827,6 +2961,13 @@ static bool mir_validate_arena_ownership(const SolMir *mir,
             SolMirValueId residual = terminator->as.propagate.residual_result;
             valid = value < mir->value_count && ++values[value] == 1
                 && residual < mir->value_count && ++values[residual] == 1;
+        } else if (terminator->kind == SOL_MIR_TERM_CHECK_CONTRACT) {
+            slices[count++]
+                = terminator->as.check_contract.satisfied_edge.arguments;
+            slices[count++]
+                = terminator->as.check_contract.violation_edge.arguments;
+            slices[count++]
+                = terminator->as.check_contract.failure_edge.arguments;
         } else if (terminator->kind == SOL_MIR_TERM_BREAK
             || terminator->kind == SOL_MIR_TERM_CONTINUE) {
             slices[count++] = terminator->as.transfer.edge.arguments;
@@ -3035,7 +3176,8 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
                 || term->kind == SOL_MIR_TERM_PANIC
                 || term->kind == SOL_MIR_TERM_RESUME_FAILURE
                 || term->kind == SOL_MIR_TERM_MATCH_FAILURE
-                || term->kind == SOL_MIR_TERM_UNREACHABLE)) {
+                || term->kind == SOL_MIR_TERM_UNREACHABLE
+                || term->kind == SOL_MIR_TERM_CONTRACT_VIOLATION)) {
                 SolIrDefinitionId owner = ir->callables[mir->callable].owner;
                 for (size_t local = 0; valid && local < ir->local_count; ++local) {
                     if (ir->locals[local].owner == owner) {
@@ -3043,7 +3185,7 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
                     }
                 }
             }
-            SolMirBlockId targets[2];
+            SolMirBlockId targets[3];
             size_t target_count = 0;
             if (valid && term->kind == SOL_MIR_TERM_GOTO) {
                 targets[target_count++] = term->as.go_to.block;
@@ -3063,6 +3205,13 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
             } else if (valid && term->kind == SOL_MIR_TERM_PROPAGATE) {
                 targets[target_count++] = term->as.propagate.value_edge.block;
                 targets[target_count++] = term->as.propagate.residual_edge.block;
+            } else if (valid && term->kind == SOL_MIR_TERM_CHECK_CONTRACT) {
+                targets[target_count++]
+                    = term->as.check_contract.satisfied_edge.block;
+                targets[target_count++]
+                    = term->as.check_contract.violation_edge.block;
+                targets[target_count++]
+                    = term->as.check_contract.failure_edge.block;
             } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
                 || term->kind == SOL_MIR_TERM_CONTINUE)) {
                 targets[target_count++] = term->as.transfer.edge.block;
@@ -3219,7 +3368,7 @@ static bool mir_validate_paths(const SolIr *ir, const SolMir *mir,
                     }
                 }
             }
-            SolMirBlockId targets[2];
+            SolMirBlockId targets[3];
             size_t target_count = 0;
             if (valid && term->kind == SOL_MIR_TERM_GOTO) {
                 targets[target_count++] = term->as.go_to.block;
@@ -3237,6 +3386,13 @@ static bool mir_validate_paths(const SolIr *ir, const SolMir *mir,
             } else if (valid && term->kind == SOL_MIR_TERM_PROPAGATE) {
                 targets[target_count++] = term->as.propagate.value_edge.block;
                 targets[target_count++] = term->as.propagate.residual_edge.block;
+            } else if (valid && term->kind == SOL_MIR_TERM_CHECK_CONTRACT) {
+                targets[target_count++]
+                    = term->as.check_contract.satisfied_edge.block;
+                targets[target_count++]
+                    = term->as.check_contract.violation_edge.block;
+                targets[target_count++]
+                    = term->as.check_contract.failure_edge.block;
             } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
                 || term->kind == SOL_MIR_TERM_CONTINUE)) {
                 targets[target_count++] = term->as.transfer.edge.block;
@@ -3329,8 +3485,9 @@ static bool mir_validate_regions(const SolIr *ir, const SolMir *mir,
                 || term->kind == SOL_MIR_TERM_PANIC
                 || term->kind == SOL_MIR_TERM_RESUME_FAILURE
                 || term->kind == SOL_MIR_TERM_MATCH_FAILURE
-                || term->kind == SOL_MIR_TERM_UNREACHABLE)) valid = false;
-        SolMirBlockId targets[2];
+                || term->kind == SOL_MIR_TERM_UNREACHABLE
+                || term->kind == SOL_MIR_TERM_CONTRACT_VIOLATION)) valid = false;
+        SolMirBlockId targets[3];
         size_t target_count = 0;
         if (valid && term->kind == SOL_MIR_TERM_GOTO) {
             targets[target_count++] = term->as.go_to.block;
@@ -3348,6 +3505,13 @@ static bool mir_validate_regions(const SolIr *ir, const SolMir *mir,
         } else if (valid && term->kind == SOL_MIR_TERM_PROPAGATE) {
             targets[target_count++] = term->as.propagate.value_edge.block;
             targets[target_count++] = term->as.propagate.residual_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_CHECK_CONTRACT) {
+            targets[target_count++]
+                = term->as.check_contract.satisfied_edge.block;
+            targets[target_count++]
+                = term->as.check_contract.violation_edge.block;
+            targets[target_count++]
+                = term->as.check_contract.failure_edge.block;
         } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE)) {
             targets[target_count++] = term->as.transfer.edge.block;
@@ -3543,12 +3707,16 @@ static bool mir_validate_handlers(const SolIr *ir, const SolMir *mir,
         for (size_t index = 0; valid && index < instructions.count; ++index) {
             const SolMirInstruction *instruction
                 = &mir->instructions[instructions.offset + index];
-            if (instruction->source_expression < ir->expression_count
+            bool semantic_snapshot = instruction->kind
+                == SOL_MIR_INST_CAPTURE_SNAPSHOT;
+            if (!semantic_snapshot
+                && instruction->source_expression < ir->expression_count
                 && !seen_expressions[instruction->source_expression]) {
                 valid = false;
                 break;
             }
-            size_t expected_depth = instruction->source_expression
+            size_t expected_depth = !semantic_snapshot
+                    && instruction->source_expression
                     < ir->expression_count
                 ? mir_expected_handlers(instruction->source_expression,
                     parents, expected, ir->expression_count) : 0;
@@ -3591,8 +3759,9 @@ static bool mir_validate_handlers(const SolIr *ir, const SolMir *mir,
                 || term->kind == SOL_MIR_TERM_PANIC
                 || term->kind == SOL_MIR_TERM_RESUME_FAILURE
                 || term->kind == SOL_MIR_TERM_MATCH_FAILURE
-                || term->kind == SOL_MIR_TERM_UNREACHABLE)) valid = false;
-        SolMirBlockId targets[2];
+                || term->kind == SOL_MIR_TERM_UNREACHABLE
+                || term->kind == SOL_MIR_TERM_CONTRACT_VIOLATION)) valid = false;
+        SolMirBlockId targets[3];
         size_t target_count = 0;
         if (valid && term->kind == SOL_MIR_TERM_GOTO) {
             targets[target_count++] = term->as.go_to.block;
@@ -3610,6 +3779,13 @@ static bool mir_validate_handlers(const SolIr *ir, const SolMir *mir,
         } else if (valid && term->kind == SOL_MIR_TERM_PROPAGATE) {
             targets[target_count++] = term->as.propagate.value_edge.block;
             targets[target_count++] = term->as.propagate.residual_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_CHECK_CONTRACT) {
+            targets[target_count++]
+                = term->as.check_contract.satisfied_edge.block;
+            targets[target_count++]
+                = term->as.check_contract.violation_edge.block;
+            targets[target_count++]
+                = term->as.check_contract.failure_edge.block;
         } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE)) {
             targets[target_count++] = term->as.transfer.edge.block;
@@ -3726,8 +3902,9 @@ static bool mir_validate_storage_order(const SolIr *ir, const SolMir *mir,
                 || term->kind == SOL_MIR_TERM_PANIC
                 || term->kind == SOL_MIR_TERM_RESUME_FAILURE
                 || term->kind == SOL_MIR_TERM_MATCH_FAILURE
-                || term->kind == SOL_MIR_TERM_UNREACHABLE)) valid = false;
-        SolMirBlockId targets[2];
+                || term->kind == SOL_MIR_TERM_UNREACHABLE
+                || term->kind == SOL_MIR_TERM_CONTRACT_VIOLATION)) valid = false;
+        SolMirBlockId targets[3];
         size_t target_count = 0;
         if (valid && term->kind == SOL_MIR_TERM_GOTO) {
             targets[target_count++] = term->as.go_to.block;
@@ -3745,6 +3922,13 @@ static bool mir_validate_storage_order(const SolIr *ir, const SolMir *mir,
         } else if (valid && term->kind == SOL_MIR_TERM_PROPAGATE) {
             targets[target_count++] = term->as.propagate.value_edge.block;
             targets[target_count++] = term->as.propagate.residual_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_CHECK_CONTRACT) {
+            targets[target_count++]
+                = term->as.check_contract.satisfied_edge.block;
+            targets[target_count++]
+                = term->as.check_contract.violation_edge.block;
+            targets[target_count++]
+                = term->as.check_contract.failure_edge.block;
         } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE)) {
             targets[target_count++] = term->as.transfer.edge.block;
@@ -3944,8 +4128,9 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
                 || term->kind == SOL_MIR_TERM_PANIC
                 || term->kind == SOL_MIR_TERM_RESUME_FAILURE
                 || term->kind == SOL_MIR_TERM_MATCH_FAILURE
-                || term->kind == SOL_MIR_TERM_UNREACHABLE)) valid = false;
-        SolMirBlockId targets[2];
+                || term->kind == SOL_MIR_TERM_UNREACHABLE
+                || term->kind == SOL_MIR_TERM_CONTRACT_VIOLATION)) valid = false;
+        SolMirBlockId targets[3];
         size_t target_count = 0;
         if (valid && term->kind == SOL_MIR_TERM_GOTO) {
             targets[target_count++] = term->as.go_to.block;
@@ -3963,6 +4148,13 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
         } else if (valid && term->kind == SOL_MIR_TERM_PROPAGATE) {
             targets[target_count++] = term->as.propagate.value_edge.block;
             targets[target_count++] = term->as.propagate.residual_edge.block;
+        } else if (valid && term->kind == SOL_MIR_TERM_CHECK_CONTRACT) {
+            targets[target_count++]
+                = term->as.check_contract.satisfied_edge.block;
+            targets[target_count++]
+                = term->as.check_contract.violation_edge.block;
+            targets[target_count++]
+                = term->as.check_contract.failure_edge.block;
         } else if (valid && (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE)) {
             targets[target_count++] = term->as.transfer.edge.block;
@@ -4094,6 +4286,208 @@ static bool mir_validate_source_events(const SolIr *ir, const SolMir *mir,
     return valid || mir_error(diagnostics,
         ir->callables[mir->callable].span,
         "MIR source control events are missing or reordered");
+}
+
+static size_t mir_predecessor_count(const SolMir *mir, SolMirBlockId target) {
+    size_t count = 0;
+    for (size_t block = 0; block < mir->block_count; ++block) {
+        const SolMirTerminator *term = &mir->blocks[block].terminator;
+        if (term->kind == SOL_MIR_TERM_GOTO) {
+            count += term->as.go_to.block == target;
+        } else if (term->kind == SOL_MIR_TERM_BRANCH) {
+            count += term->as.branch.true_edge.block == target;
+            count += term->as.branch.false_edge.block == target;
+        } else if (term->kind == SOL_MIR_TERM_INVOKE) {
+            count += term->as.invoke.normal_edge.block == target;
+            count += term->as.invoke.failure_edge.block == target;
+        } else if (term->kind == SOL_MIR_TERM_CHECK_REFINED) {
+            count += term->as.check_refined.normal_edge.block == target;
+            count += term->as.check_refined.failure_edge.block == target;
+        } else if (term->kind == SOL_MIR_TERM_PROPAGATE) {
+            count += term->as.propagate.value_edge.block == target;
+            count += term->as.propagate.residual_edge.block == target;
+        } else if (term->kind == SOL_MIR_TERM_CHECK_CONTRACT) {
+            count += term->as.check_contract.satisfied_edge.block == target;
+            count += term->as.check_contract.violation_edge.block == target;
+            count += term->as.check_contract.failure_edge.block == target;
+        } else if (term->kind == SOL_MIR_TERM_BREAK
+            || term->kind == SOL_MIR_TERM_CONTINUE) {
+            count += term->as.transfer.edge.block == target;
+        }
+    }
+    return count;
+}
+
+static bool mir_validate_contract_envelope(const SolIr *ir, const SolMir *mir,
+    SolDiagnostics *diagnostics) {
+    const SolIrCallable *callable = &ir->callables[mir->callable];
+    size_t obligation_count = 0;
+    size_t require_count = 0;
+    size_t ensure_count = 0;
+    size_t snapshot_count = 0;
+    for (size_t id = 0; id < ir->obligation_count; ++id) {
+        const SolIrObligation *obligation = &ir->obligations[id];
+        if (!mir_obligation_owned_by_callable(obligation, callable)) continue;
+        ++obligation_count;
+        require_count += obligation->kind == SOL_CONTRACT_REQUIRES;
+        ensure_count += obligation->kind == SOL_CONTRACT_ENSURES;
+        if (!mir_slice_valid((SolMirSlice){obligation->snapshots.offset,
+                obligation->snapshots.count}, ir->snapshot_count)) {
+            return mir_error(diagnostics, callable->span,
+                "malformed owning contract snapshot slice");
+        }
+        for (size_t index = 0; index < obligation->snapshots.count; ++index) {
+            SolIrSnapshotId snapshot = obligation->snapshots.offset + index;
+            if (ir->snapshots[snapshot].id != snapshot
+                || ir->snapshots[snapshot].obligation != id) {
+                return mir_error(diagnostics, callable->span,
+                    "malformed owning contract snapshot order");
+            }
+            ++snapshot_count;
+        }
+    }
+    if (obligation_count == 0) {
+        if (mir->contract_body != SOL_MIR_NONE
+            || mir->contract_epilogue != SOL_MIR_NONE) {
+            return mir_error(diagnostics, callable->span,
+                "uncontracted MIR has a contract envelope");
+        }
+        for (size_t block = 0; block < mir->block_count; ++block) {
+            if (mir->blocks[block].terminator.kind
+                    == SOL_MIR_TERM_CHECK_CONTRACT
+                || mir->blocks[block].terminator.kind
+                    == SOL_MIR_TERM_CONTRACT_VIOLATION) {
+                return mir_error(diagnostics, callable->span,
+                    "uncontracted MIR has contract control flow");
+            }
+        }
+        return true;
+    }
+    if (mir->contract_body >= mir->block_count
+        || mir->contract_epilogue >= mir->block_count
+        || mir->contract_body == mir->contract_epilogue
+        || mir->blocks[mir->contract_epilogue].parameters.count != 1) {
+        return mir_error(diagnostics, callable->span,
+            "malformed MIR contract envelope anchors");
+    }
+    size_t seen_checks = 0;
+    size_t seen_violations = 0;
+    size_t returns = 0;
+    for (size_t block = 0; block < mir->block_count; ++block) {
+        seen_checks += mir->blocks[block].terminator.kind
+            == SOL_MIR_TERM_CHECK_CONTRACT;
+        seen_violations += mir->blocks[block].terminator.kind
+            == SOL_MIR_TERM_CONTRACT_VIOLATION;
+        returns += mir->blocks[block].terminator.kind == SOL_MIR_TERM_RETURN;
+    }
+    if (seen_checks != require_count + ensure_count
+        || seen_violations != seen_checks || returns != 1) {
+        return mir_error(diagnostics, callable->span,
+            "MIR contract checks are missing, duplicated, or bypassed");
+    }
+    SolMirBlockId current = mir->entry;
+    for (size_t id = 0; id < ir->obligation_count; ++id) {
+        const SolIrObligation *obligation = &ir->obligations[id];
+        if (!mir_obligation_owned_by_callable(obligation, callable)
+            || obligation->kind != SOL_CONTRACT_REQUIRES) continue;
+        const SolMirTerminator *term = &mir->blocks[current].terminator;
+        if (term->kind != SOL_MIR_TERM_CHECK_CONTRACT
+            || term->as.check_contract.obligation != id
+            || term->as.check_contract.result != SOL_MIR_NONE) {
+            return mir_error(diagnostics, callable->span,
+                "MIR requires checks are missing or reordered");
+        }
+        current = term->as.check_contract.satisfied_edge.block;
+        if (mir_predecessor_count(mir, current) != 1) {
+            return mir_error(diagnostics, callable->span,
+                "MIR requires continuation has a bypass edge");
+        }
+    }
+    if (current != mir->contract_body) {
+        return mir_error(diagnostics, callable->span,
+            "MIR contract body bypasses requires checks");
+    }
+    size_t seen_snapshots = 0;
+    bool body_started = false;
+    SolMirSlice body_instructions = mir->blocks[mir->contract_body].instructions;
+    for (size_t index = 0; index < body_instructions.count; ++index) {
+        const SolMirInstruction *instruction
+            = &mir->instructions[body_instructions.offset + index];
+        if (instruction->kind != SOL_MIR_INST_CAPTURE_SNAPSHOT) {
+            body_started = body_started
+                || instruction->kind != SOL_MIR_INST_PARAMETER_LIVE;
+            continue;
+        }
+        if (body_started) {
+            return mir_error(diagnostics, instruction->span,
+                "MIR snapshot capture occurs after body execution");
+        }
+        SolIrSnapshotId expected = SOL_IR_NONE;
+        size_t ordinal = 0;
+        for (size_t id = 0; id < ir->snapshot_count; ++id) {
+            if (ir->snapshots[id].obligation < ir->obligation_count
+                && mir_obligation_owned_by_callable(
+                    &ir->obligations[ir->snapshots[id].obligation], callable)) {
+                if (ordinal++ == seen_snapshots) expected = id;
+            }
+        }
+        if (instruction->as.snapshot != expected) {
+            return mir_error(diagnostics, instruction->span,
+                "MIR snapshots are missing or reordered");
+        }
+        ++seen_snapshots;
+    }
+    for (size_t instruction = 0; instruction < mir->instruction_count;
+        ++instruction) {
+        if (mir->instructions[instruction].kind == SOL_MIR_INST_CAPTURE_SNAPSHOT
+            && mir->instructions[instruction].block != mir->contract_body) {
+            return mir_error(diagnostics, mir->instructions[instruction].span,
+                "MIR snapshot is outside the contract entry boundary");
+        }
+    }
+    if (seen_snapshots != snapshot_count) {
+        return mir_error(diagnostics, callable->span,
+            "MIR snapshots are incomplete");
+    }
+    current = mir->contract_epilogue;
+    SolMirValueId result = mir->parameter_values[
+        mir->blocks[current].parameters.offset];
+    for (size_t id = 0; id < ir->obligation_count; ++id) {
+        const SolIrObligation *obligation = &ir->obligations[id];
+        if (!mir_obligation_owned_by_callable(obligation, callable)
+            || obligation->kind != SOL_CONTRACT_ENSURES) continue;
+        const SolMirTerminator *term = &mir->blocks[current].terminator;
+        if (term->kind != SOL_MIR_TERM_CHECK_CONTRACT
+            || term->as.check_contract.obligation != id
+            || term->as.check_contract.result != result) {
+            return mir_error(diagnostics, callable->span,
+                "MIR ensures checks are missing or reordered");
+        }
+        current = term->as.check_contract.satisfied_edge.block;
+        if (mir->blocks[current].parameters.count != 1
+            || mir_predecessor_count(mir, current) != 1) {
+            return mir_error(diagnostics, callable->span,
+                "MIR ensures result transport is incomplete");
+        }
+        result = mir->parameter_values[mir->blocks[current].parameters.offset];
+    }
+    if (mir->blocks[current].terminator.kind != SOL_MIR_TERM_RETURN
+        || mir->blocks[current].terminator.as.value != result) {
+        return mir_error(diagnostics, callable->span,
+            "MIR contract epilogue does not preserve the complete result");
+    }
+    for (size_t block = 0; block < mir->block_count; ++block) {
+        const SolMirTerminator *term = &mir->blocks[block].terminator;
+        if (term->kind != SOL_MIR_TERM_GOTO
+            || term->as.go_to.block != mir->contract_epilogue) continue;
+        if (term->as.go_to.arguments.count != 1
+            || mir->values[mir->edge_values[term->as.go_to.arguments.offset]].type
+                != callable->result) {
+            return mir_error(diagnostics, term->span,
+                "MIR successful result bypasses the contract epilogue");
+        }
+    }
+    return true;
 }
 
 bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
@@ -4274,7 +4668,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || !mir_slice_valid(block->parameters, mir->parameter_value_count)
             || !mir_slice_valid(block->instructions, mir->instruction_count)
             || block->terminator.kind <= SOL_MIR_TERM_INVALID
-            || block->terminator.kind > SOL_MIR_TERM_PROPAGATE
+            || block->terminator.kind > SOL_MIR_TERM_CONTRACT_VIOLATION
             || !mir_span_valid(ir, block->terminator.span)) {
             free(instruction_owners);
             free(parameter_owners);
@@ -4297,7 +4691,9 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 || mir->values[id].kind != SOL_MIR_VALUE_BLOCK_PARAMETER
                 || mir->values[id].block != block_id
                 || mir->values[id].definition != index
-                || mir->values[id].source_expression >= ir->expression_count) {
+                || (mir->values[id].source_expression != SOL_IR_NONE
+                    && mir->values[id].source_expression
+                        >= ir->expression_count)) {
                 free(instruction_owners);
                 free(parameter_owners);
                 return mir_error(diagnostics, block->span,
@@ -4974,12 +5370,26 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                     && mir->values[mir->parameter_values[
                         mir->blocks[term->as.propagate.residual_edge.block]
                             .parameters.offset]].source_expression == source_id
-                    && mir->blocks[term->as.propagate.residual_edge.block]
-                        .terminator.kind == SOL_MIR_TERM_RETURN
-                    && mir->blocks[term->as.propagate.residual_edge.block]
-                        .terminator.as.value == mir->parameter_values[
-                            mir->blocks[term->as.propagate.residual_edge.block]
-                                .parameters.offset]
+                    && (mir->contract_epilogue == SOL_MIR_NONE
+                        ? (mir->blocks[term->as.propagate.residual_edge.block]
+                                .terminator.kind == SOL_MIR_TERM_RETURN
+                            && mir->blocks[term->as.propagate.residual_edge.block]
+                                .terminator.as.value == mir->parameter_values[
+                                    mir->blocks[term->as.propagate.residual_edge.block]
+                                        .parameters.offset])
+                        : (mir->blocks[term->as.propagate.residual_edge.block]
+                                .terminator.kind == SOL_MIR_TERM_GOTO
+                            && mir->blocks[term->as.propagate.residual_edge.block]
+                                .terminator.as.go_to.block
+                                    == mir->contract_epilogue
+                            && mir->blocks[term->as.propagate.residual_edge.block]
+                                .terminator.as.go_to.arguments.count == 1
+                            && mir->edge_values[mir->blocks[
+                                term->as.propagate.residual_edge.block]
+                                    .terminator.as.go_to.arguments.offset]
+                                == mir->parameter_values[mir->blocks[
+                                    term->as.propagate.residual_edge.block]
+                                        .parameters.offset]))
                     && term->span.start == source->span.start
                     && term->span.end == source->span.end;
                 if (!valid) {
@@ -4987,6 +5397,87 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                     free(parameter_owners);
                     return mir_error(diagnostics, term->span,
                         "malformed MIR propagation");
+                }
+                break;
+            }
+            case SOL_MIR_TERM_CHECK_CONTRACT: {
+                const SolMirTerminator *term = &block->terminator;
+                SolObligationId id = term->as.check_contract.obligation;
+                const SolIrObligation *obligation = id < ir->obligation_count
+                    ? &ir->obligations[id] : NULL;
+                const SolIrExpression *predicate = obligation != NULL
+                        && obligation->predicate < ir->expression_count
+                    ? &ir->expressions[obligation->predicate] : NULL;
+                bool requires = obligation != NULL
+                    && obligation->kind == SOL_CONTRACT_REQUIRES;
+                SolMirValueId result = term->as.check_contract.result;
+                bool valid = obligation != NULL && predicate != NULL
+                    && obligation->id == id
+                    && mir_obligation_owned_by_callable(obligation, callable)
+                    && term->as.check_contract.phase == obligation->kind
+                    && term->as.check_contract.outcome == obligation->outcome
+                    && predicate->type < ir->type_count
+                    && mir_type_is(ir, predicate->type, SOL_IR_TYPE_BOOL)
+                    && term->span.start == predicate->span.start
+                    && term->span.end == predicate->span.end
+                    && term->as.check_contract.violation_edge.arguments.count == 0
+                    && term->as.check_contract.failure_edge.arguments.count == 0
+                    && mir_validate_edge(mir, block_id,
+                        &term->as.check_contract.violation_edge, SOL_MIR_NONE)
+                    && mir_validate_edge(mir, block_id,
+                        &term->as.check_contract.failure_edge, SOL_MIR_NONE)
+                    && mir->blocks[term->as.check_contract.violation_edge.block]
+                        .terminator.kind == SOL_MIR_TERM_CONTRACT_VIOLATION
+                    && mir->blocks[term->as.check_contract.violation_edge.block]
+                        .terminator.as.contract_violation == id
+                    && mir->blocks[term->as.check_contract.failure_edge.block]
+                        .terminator.kind == SOL_MIR_TERM_RESUME_FAILURE;
+                if (valid && requires) {
+                    valid = obligation->outcome == SOL_CONTRACT_OUTCOME_ALWAYS
+                        && !obligation->result_available
+                        && result == SOL_MIR_NONE
+                        && term->as.check_contract.satisfied_edge.arguments.count
+                            == 0
+                        && mir_validate_edge(mir, block_id,
+                            &term->as.check_contract.satisfied_edge,
+                            SOL_MIR_NONE);
+                } else if (valid) {
+                    valid = obligation->kind == SOL_CONTRACT_ENSURES
+                        && result < mir->value_count
+                        && mir_value_available(mir, result, block_id,
+                            block->instructions.offset
+                                + block->instructions.count)
+                        && mir->values[result].type == callable->result
+                        && term->as.check_contract.satisfied_edge.arguments.count
+                            == 1
+                        && mir->edge_values[term->as.check_contract
+                            .satisfied_edge.arguments.offset] == result
+                        && mir_validate_edge(mir, block_id,
+                            &term->as.check_contract.satisfied_edge,
+                            SOL_MIR_NONE);
+                }
+                if (!valid) {
+                    free(instruction_owners);
+                    free(parameter_owners);
+                    return mir_error(diagnostics, term->span,
+                        "malformed MIR callable contract check");
+                }
+                break;
+            }
+            case SOL_MIR_TERM_CONTRACT_VIOLATION: {
+                SolObligationId id = block->terminator.as.contract_violation;
+                if (id >= ir->obligation_count
+                    || ir->obligations[id].id != id
+                    || !mir_obligation_owned_by_callable(&ir->obligations[id],
+                        callable)
+                    || block->terminator.span.start
+                        != ir->expressions[ir->obligations[id].predicate].span.start
+                    || block->terminator.span.end
+                        != ir->expressions[ir->obligations[id].predicate].span.end) {
+                    free(instruction_owners);
+                    free(parameter_owners);
+                    return mir_error(diagnostics, block->terminator.span,
+                        "malformed MIR contract violation");
                 }
                 break;
             }
@@ -5013,7 +5504,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || id - mir->blocks[instruction->block].instructions.offset
                 >= mir->blocks[instruction->block].instructions.count
             || (int)instruction->kind < 0
-            || instruction->kind > SOL_MIR_INST_CONSTRUCT
+            || instruction->kind > SOL_MIR_INST_CAPTURE_SNAPSHOT
             || !mir_span_valid(ir, instruction->span)) {
             return mir_error(diagnostics, instruction->span,
                 "malformed MIR instruction");
@@ -5403,6 +5894,42 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 return mir_error(diagnostics, instruction->span,
                     "malformed MIR semantic construction");
             }
+        } else if (instruction->kind == SOL_MIR_INST_CAPTURE_SNAPSHOT) {
+            SolIrSnapshotId snapshot_id = instruction->as.snapshot;
+            const SolIrSnapshot *snapshot = snapshot_id < ir->snapshot_count
+                ? &ir->snapshots[snapshot_id] : NULL;
+            const SolIrExpression *operand = snapshot != NULL
+                    && snapshot->operand < ir->expression_count
+                ? &ir->expressions[snapshot->operand] : NULL;
+            const SolIrPlace *place = operand != NULL
+                    && operand->kind == SOL_IR_EXPR_PLACE
+                    && operand->as.place < ir->place_count
+                ? &ir->places[operand->as.place] : NULL;
+            if (snapshot == NULL || snapshot->id != snapshot_id
+                || snapshot->obligation >= ir->obligation_count
+                || !mir_obligation_owned_by_callable(
+                    &ir->obligations[snapshot->obligation], callable)
+                || snapshot->read != instruction->source_expression
+                || snapshot->read >= ir->expression_count
+                || snapshot->operand >= ir->expression_count
+                || snapshot->type >= ir->type_count
+                || ir->expressions[snapshot->operand].type != snapshot->type
+                || operand == NULL
+                || (operand->local_use != SOL_IR_LOCAL_USE_NONE
+                    && operand->local_use != SOL_IR_LOCAL_USE_COPY
+                    && operand->local_use != SOL_IR_LOCAL_USE_SHARED)
+                || place == NULL || place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+                || place->projections.count != 0
+                || (!mir_type_is(ir, snapshot->type, SOL_IR_TYPE_INT64)
+                    && !mir_type_is(ir, snapshot->type, SOL_IR_TYPE_BOOL)
+                    && !mir_type_is(ir, snapshot->type, SOL_IR_TYPE_UNIT))
+                || instruction->span.start
+                    != ir->expressions[snapshot->read].span.start
+                || instruction->span.end
+                    != ir->expressions[snapshot->read].span.end) {
+                return mir_error(diagnostics, instruction->span,
+                    "malformed MIR callable snapshot capture");
+            }
         } else if (instruction->kind == SOL_MIR_INST_REGION_ENTER
             || instruction->kind == SOL_MIR_INST_REGION_EXIT) {
             if (instruction->source_expression != SOL_IR_NONE
@@ -5608,6 +6135,10 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         } else if (term->kind == SOL_MIR_TERM_PROPAGATE) {
             ++predecessors[term->as.propagate.value_edge.block];
             ++predecessors[term->as.propagate.residual_edge.block];
+        } else if (term->kind == SOL_MIR_TERM_CHECK_CONTRACT) {
+            ++predecessors[term->as.check_contract.satisfied_edge.block];
+            ++predecessors[term->as.check_contract.violation_edge.block];
+            ++predecessors[term->as.check_contract.failure_edge.block];
         } else if (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE) {
             ++predecessors[term->as.transfer.edge.block];
@@ -5620,7 +6151,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
     while (first < count) {
         SolMirBlockId block = queue[first++];
         const SolMirTerminator *term = &mir->blocks[block].terminator;
-        SolMirBlockId targets[2];
+        SolMirBlockId targets[3];
         size_t target_count = 0;
         if (term->kind == SOL_MIR_TERM_GOTO) targets[target_count++] = term->as.go_to.block;
         else if (term->kind == SOL_MIR_TERM_BRANCH) {
@@ -5637,6 +6168,10 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         } else if (term->kind == SOL_MIR_TERM_PROPAGATE) {
             targets[target_count++] = term->as.propagate.value_edge.block;
             targets[target_count++] = term->as.propagate.residual_edge.block;
+        } else if (term->kind == SOL_MIR_TERM_CHECK_CONTRACT) {
+            targets[target_count++] = term->as.check_contract.satisfied_edge.block;
+            targets[target_count++] = term->as.check_contract.violation_edge.block;
+            targets[target_count++] = term->as.check_contract.failure_edge.block;
         } else if (term->kind == SOL_MIR_TERM_BREAK
             || term->kind == SOL_MIR_TERM_CONTINUE) {
             targets[target_count++] = term->as.transfer.edge.block;
@@ -5657,7 +6192,8 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
     free(queue);
     if (!valid) return mir_error(diagnostics, callable->span,
         "MIR contains an unreachable block or entry predecessor");
-    return mir_validate_arena_ownership(mir, diagnostics, callable->span)
+    return mir_validate_contract_envelope(ir, mir, diagnostics)
+        && mir_validate_arena_ownership(mir, diagnostics, callable->span)
         && mir_validate_storage(ir, mir, diagnostics)
         && mir_validate_paths(ir, mir, diagnostics)
         && mir_validate_regions(ir, mir, diagnostics)
@@ -5682,13 +6218,41 @@ SolMirLowerOutcome sol_mir_lower_callable(const SolIr *ir,
             || (ir->obligations[index].owner_kind == SOL_CONTRACT_OWNER_ITEM
                 && ir->obligations[index].owner == callable->owner);
     }
+    bool exclusive_contract_parameter = false;
+    bool fallible_contract_snapshot = false;
+    for (size_t index = 0; index < callable->parameters.count; ++index) {
+        SolIrLocalId local = ir->roots[callable->parameters.offset + index];
+        exclusive_contract_parameter = exclusive_contract_parameter
+            || ir->locals[local].access == SOL_ACCESS_EXCLUSIVE;
+    }
+    for (size_t index = 0; index < ir->snapshot_count; ++index) {
+        const SolIrSnapshot *snapshot = &ir->snapshots[index];
+        if (snapshot->obligation >= ir->obligation_count
+            || !mir_obligation_owned_by_callable(
+                &ir->obligations[snapshot->obligation], callable)) continue;
+        const SolIrExpression *operand = &ir->expressions[snapshot->operand];
+        fallible_contract_snapshot = fallible_contract_snapshot
+            || operand->kind != SOL_IR_EXPR_PLACE
+            || (operand->local_use != SOL_IR_LOCAL_USE_NONE
+                && operand->local_use != SOL_IR_LOCAL_USE_COPY
+                && operand->local_use != SOL_IR_LOCAL_USE_SHARED)
+            || operand->as.place >= ir->place_count
+            || ir->places[operand->as.place].root_kind
+                != SOL_IR_PLACE_ROOT_LOCAL
+            || ir->places[operand->as.place].projections.count != 0
+            || (!mir_type_is(ir, snapshot->type, SOL_IR_TYPE_INT64)
+                && !mir_type_is(ir, snapshot->type, SOL_IR_TYPE_BOOL)
+                && !mir_type_is(ir, snapshot->type, SOL_IR_TYPE_UNIT));
+    }
     if ((callable->kind != SOL_IR_CALLABLE_FUNCTION
             && callable->kind != SOL_IR_CALLABLE_TEST)
         || callable->body == SOL_IR_NONE
         || callable->generic_parameters.count != 0
         || callable->effect_parameters.count != 0
         || callable->receiver != SOL_IR_NONE
-        || callable->capability_source != SOL_IR_NONE || contracted) {
+        || callable->capability_source != SOL_IR_NONE
+        || (contracted
+            && (exclusive_contract_parameter || fallible_contract_snapshot))) {
         sol_diagnostics_add(diagnostics, "SOL-MIR-001", SOL_SEVERITY_ERROR,
             callable->span,
             "callable is outside the initial P1a MIR checkpoint");
@@ -5703,6 +6267,8 @@ SolMirLowerOutcome sol_mir_lower_callable(const SolIr *ir,
         .mir = &lowered,
         .diagnostics = diagnostics,
         .current = SOL_MIR_NONE,
+        .contracted = contracted,
+        .contract_epilogue = SOL_MIR_NONE,
     };
     SolMirBlockId entry = mir_append_block(&lowerer, callable->span);
     lowered.entry = entry;
@@ -5713,12 +6279,37 @@ SolMirLowerOutcome sol_mir_lower_callable(const SolIr *ir,
                 local, callable->span)) break;
         }
     }
+    SolMirValueId contract_result = SOL_MIR_NONE;
+    if (contracted && !lowerer.failed) {
+        lowerer.contract_epilogue = mir_append_block(&lowerer, callable->span);
+        lowered.contract_epilogue = lowerer.contract_epilogue;
+        contract_result = mir_append_parameter(&lowerer,
+            lowerer.contract_epilogue, callable->result,
+            SOL_IR_NONE, callable->span);
+        if (lowerer.contract_epilogue == SOL_MIR_NONE
+            || contract_result == SOL_MIR_NONE
+            || !mir_lower_contract_entry(&lowerer)) lowerer.failed = true;
+    }
     LoweredValue body = lowerer.failed || lowerer.unsupported
         ? mir_unreachable()
         : mir_lower_expression(&lowerer, callable->body, NULL);
     if (body.reachable && !lowerer.failed && !lowerer.unsupported) {
-        if (!mir_emit_exit_cleanup(&lowerer, NULL, callable->span)
-            || !mir_set_return(&lowerer, body.value, callable->span)) {
+        if (!mir_finish_success(&lowerer, NULL, body.value, callable->span)) {
+            lowerer.failed = true;
+        }
+    }
+    if (contracted && !lowerer.failed && !lowerer.unsupported) {
+        bool has_success = false;
+        for (size_t block = 0; block < lowered.block_count; ++block) {
+            const SolMirTerminator *term = &lowered.blocks[block].terminator;
+            has_success = has_success || (term->kind == SOL_MIR_TERM_GOTO
+                && term->as.go_to.block == lowerer.contract_epilogue);
+        }
+        if (!has_success) {
+            mir_unsupported(&lowerer, callable->span,
+                "contracted MIR requires a reachable successful result");
+        } else if (!mir_start_block(&lowerer, lowerer.contract_epilogue)
+            || !mir_lower_contract_epilogue(&lowerer, contract_result)) {
             lowerer.failed = true;
         }
     }

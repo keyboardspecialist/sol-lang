@@ -71,6 +71,9 @@ typedef enum {
     SOL_MIR_INST_HANDLER_ENTER,
     SOL_MIR_INST_HANDLER_EXIT,
     SOL_MIR_INST_CONSTRUCT,
+    /* Captures one infallible logical copy in the callable contract envelope.
+       Every terminal exit destroys all captured snapshots implicitly. */
+    SOL_MIR_INST_CAPTURE_SNAPSHOT,
 } SolMirInstructionKind;
 
 typedef enum {
@@ -132,6 +135,7 @@ typedef struct {
             SolIrVariantId variant;
             SolMirSlice operands;
         } construct;
+        SolIrSnapshotId snapshot;
     } as;
 } SolMirInstruction;
 
@@ -190,6 +194,8 @@ typedef enum {
     SOL_MIR_TERM_CHECK_REFINED,
     SOL_MIR_TERM_MATCH_FAILURE,
     SOL_MIR_TERM_PROPAGATE,
+    SOL_MIR_TERM_CHECK_CONTRACT,
+    SOL_MIR_TERM_CONTRACT_VIOLATION,
 } SolMirTerminatorKind;
 
 typedef struct {
@@ -245,6 +251,19 @@ typedef struct {
             SolMirEdge value_edge;
             SolMirEdge residual_edge;
         } propagate;
+        struct {
+            SolObligationId obligation;
+            SolContractClauseKind phase;
+            SolContractOutcomeKind outcome;
+            /* SOL_MIR_NONE for requires; the complete callable result for ensures.
+               Ensures consume it on violation/failure and forward it only when
+               satisfied. Contract terminals also destroy captured snapshots. */
+            SolMirValueId result;
+            SolMirEdge satisfied_edge;
+            SolMirEdge violation_edge;
+            SolMirEdge failure_edge;
+        } check_contract;
+        SolObligationId contract_violation;
     } as;
 } SolMirTerminator;
 
@@ -261,6 +280,9 @@ typedef struct {
 typedef struct {
     SolIrCallableId callable;
     SolMirBlockId entry;
+    /* SOL_MIR_NONE when the callable has no semantic contract envelope. */
+    SolMirBlockId contract_body;
+    SolMirBlockId contract_epilogue;
     SolMirBlock *blocks;
     size_t block_count;
     size_t block_capacity;

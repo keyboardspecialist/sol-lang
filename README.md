@@ -640,8 +640,16 @@ bound-operation value. Operand-dependent capability effects remain deferred. MIR
 now retain exact source-bound handler enter/exit scopes around nested bodies. Lexical
 cleanup emits handler exits on normal, transfer, propagation, and failure paths, while
 an independent CFG fixed point verifies exact metadata, LIFO nesting, identical join
-stacks, and terminal balance. MIR does not yet cover contracts, generic lowering,
-representation, runtime ABI, or a backend.
+stacks, and terminal balance. A bounded callable-contract envelope now retains
+item-owned requires as ordered three-way semantic checks, captures exact infallible
+direct-local `old` snapshots once after successful preconditions, and routes every
+successful body result through one complete-result epilogue of outcome-qualified ensures. Semantic
+violations and predicate runtime failures remain distinct cleanup terminals; panic
+and invoke failure bypass postconditions. This vocabulary chooses no predicate,
+snapshot, Result, layout, or ABI representation. Contracted generic/effect-parameter,
+capability-member, and exclusive/inout forms remain transactional unsupported, as do
+fallible or projected snapshot operands, authority-bearing construction, generic
+lowering, representation, runtime ABI, and a backend.
 
 ### Phase 0 — Executable language model
 
