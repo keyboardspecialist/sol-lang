@@ -590,8 +590,9 @@ ABI, a WebAssembly backend, reproducible `sol build`, and interpreter/WebAssembl
 differential tests.
 
 The first internal MIR control checkpoints are now present in `include/sol/mir.h`
-and `src/mir.c`. They lower one selected validated nongeneric free/test callable from
-owning IR into deterministic target-neutral basic blocks with SSA temporaries and
+and `src/mir.c`. They lower one selected validated free/test callable or executable
+trait-implementation body from owning IR into deterministic target-neutral basic
+blocks with SSA temporaries and
 block parameters over explicit local storage, whole-local copy/move/store,
 conditional cleanup/storage death, scalar operations, `if`, short-circuit Boolean
 control, return, panic, lexical regions, `require`, proof-backed unreachable, and
@@ -643,13 +644,21 @@ an independent CFG fixed point verifies exact metadata, LIFO nesting, identical 
 stacks, and terminal balance. A bounded callable-contract envelope now retains
 item-owned requires as ordered three-way semantic checks, captures exact infallible
 direct-local `old` snapshots once after successful preconditions, and routes every
-successful body result through one complete-result epilogue of outcome-qualified ensures. Semantic
-violations and predicate runtime failures remain distinct cleanup terminals; panic
+successful body result through one complete-result epilogue of outcome-qualified
+ensures. Semantic violations and predicate runtime failures remain distinct cleanup terminals; panic
 and invoke failure bypass postconditions. This vocabulary chooses no predicate,
 snapshot, Result, layout, or ABI representation. Contracted generic/effect-parameter,
 capability-member, and exclusive/inout forms remain transactional unsupported, as do
-fallible or projected snapshot operands, authority-bearing construction, generic
-lowering, representation, runtime ABI, and a backend.
+fallible or projected snapshot operands. Standalone bounded generic and
+effect-polymorphic free-function bodies preserve their exact symbolic owning-IR
+parameter metadata. Invokes retain owning-IR type-argument, instantiated effect-row
+and tail, and dispatch-evidence slices without monomorphization; forwarded trait
+evidence keeps its requirement, binding, and caller parameter rather than selecting
+a concrete method. Executable trait implementations activate and clean their exact
+receiver before ordinary parameters. Bodyless trait requirements and capability
+members still have no standalone MIR. Compound assignment, authority-bearing
+construction, every other remaining E6 callable, representation, runtime ABI, and a
+backend remain open.
 
 ### Phase 0 — Executable language model
 

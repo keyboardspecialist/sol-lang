@@ -79,6 +79,15 @@ static SolIrCallableId callable(const SolIr *ir, const char *name) {
     return SOL_IR_NONE;
 }
 
+static SolIrCallableId callable_kind(const SolIr *ir, const char *name,
+    SolIrCallableKind kind) {
+    for (size_t index = 0; index < ir->callable_count; ++index) {
+        if (ir->callables[index].kind == kind
+            && strcmp(ir->callables[index].name, name) == 0) return index;
+    }
+    return SOL_IR_NONE;
+}
+
 static SolIrLocalId local(const SolIr *ir, SolIrDefinitionId owner,
     const char *name) {
     for (size_t index = 0; index < ir->local_count; ++index) {
@@ -95,6 +104,10 @@ static bool bytes_equal(const void *left, const void *right,
 
 static bool mir_equal(const SolMir *left, const SolMir *right) {
     return left->callable == right->callable && left->entry == right->entry
+        && left->generic_parameters.offset == right->generic_parameters.offset
+        && left->generic_parameters.count == right->generic_parameters.count
+        && left->effect_parameters.offset == right->effect_parameters.offset
+        && left->effect_parameters.count == right->effect_parameters.count
         && left->contract_body == right->contract_body
         && left->contract_epilogue == right->contract_epilogue
         && left->block_count == right->block_count
@@ -2421,6 +2434,186 @@ static void test_owned_temporary_cleanup(void) {
     free_compilation(&compilation);
 }
 
+static void test_generic_evidence_and_implementation_checkpoint(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_generic_evidence\n"
+        "trait Score { function score(self: Self) -> Int64 effects { pure } }\n"
+        "implementation Score for Int64 { function score(self: Self) -> Int64 "
+        "effects { pure } { return self } }\n"
+        "function score<T: Score>(value: T) -> Int64 effects { pure } { "
+        "return value.score() }\n"
+        "function identity<T>(value: T) -> T effects { pure } { return value }\n"
+        "function noisy() -> Int64 effects { panic } { panic \"noise\" }\n"
+        "function effectful<effects E>(callback: function() -> Int64 effects E) "
+        "-> Int64 effects { E } { return callback() }\n"
+        "function compute(value: Int64) -> Int64 effects { pure } { "
+        "return identity<Int64>(score<Int64>(value)) }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+
+    SolIrCallableId requirement = callable_kind(&compilation.ir, "score",
+        SOL_IR_CALLABLE_TRAIT_REQUIREMENT);
+    SolIrCallableId implementation = callable_kind(&compilation.ir, "score",
+        SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION);
+    SolIrCallableId generic_score = callable_kind(&compilation.ir, "score",
+        SOL_IR_CALLABLE_FUNCTION);
+    SolIrCallableId identity = callable_kind(&compilation.ir, "identity",
+        SOL_IR_CALLABLE_FUNCTION);
+    SolIrCallableId compute = callable_kind(&compilation.ir, "compute",
+        SOL_IR_CALLABLE_FUNCTION);
+    SolIrCallableId effectful = callable_kind(&compilation.ir, "effectful",
+        SOL_IR_CALLABLE_FUNCTION);
+    SolIrCallableId executable[] = {
+        implementation, generic_score, identity, compute,
+    };
+    SolMir lowered[4];
+    for (size_t index = 0; index < 4; ++index) {
+        SolMir repeated;
+        sol_mir_init(&lowered[index]);
+        sol_mir_init(&repeated);
+        SolMirLowerOutcome outcome = sol_mir_lower_callable(&compilation.ir,
+            executable[index], &lowered[index], &compilation.diagnostics);
+        CHECK(outcome == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_lower_callable(&compilation.ir, executable[index],
+            &repeated, &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_validate(&compilation.ir, &lowered[index], NULL));
+        CHECK(mir_equal(&lowered[index], &repeated));
+        CHECK(lowered[index].generic_parameters.offset
+            == compilation.ir.callables[executable[index]]
+                .generic_parameters.offset);
+        CHECK(lowered[index].generic_parameters.count
+            == compilation.ir.callables[executable[index]]
+                .generic_parameters.count);
+        sol_mir_free(&repeated);
+    }
+    SolMir unsupported;
+    sol_mir_init(&unsupported);
+    CHECK(sol_mir_lower_callable(&compilation.ir, requirement, &unsupported,
+        &compilation.diagnostics) == SOL_MIR_LOWER_UNSUPPORTED);
+    CHECK(unsupported.callable == SOL_IR_NONE && unsupported.blocks == NULL);
+    sol_mir_free(&unsupported);
+
+    SolMir *implementation_mir = &lowered[0];
+    SolMirSlice entry
+        = implementation_mir->blocks[implementation_mir->entry].instructions;
+    SolIrLocalId receiver = compilation.ir.callables[implementation].receiver;
+    CHECK(entry.count != 0);
+    CHECK(implementation_mir->instructions[entry.offset].kind
+        == SOL_MIR_INST_PARAMETER_LIVE);
+    CHECK(implementation_mir->instructions[entry.offset].as.local == receiver);
+    bool receiver_cleaned = false;
+    for (size_t instruction = 0;
+        instruction < implementation_mir->instruction_count; ++instruction) {
+        receiver_cleaned = receiver_cleaned
+            || (implementation_mir->instructions[instruction].kind
+                    == SOL_MIR_INST_STORAGE_DEAD
+                && implementation_mir->instructions[instruction].as.local
+                    == receiver);
+    }
+    CHECK(receiver_cleaned);
+    SolIrLocalId saved_receiver
+        = implementation_mir->instructions[entry.offset].as.local;
+    implementation_mir->instructions[entry.offset].as.local
+        = compilation.ir.callables[compute].parameters.count == 0
+        ? SOL_IR_NONE : compilation.ir.roots[
+            compilation.ir.callables[compute].parameters.offset];
+    CHECK(!sol_mir_validate(&compilation.ir, implementation_mir, NULL));
+    implementation_mir->instructions[entry.offset].as.local = saved_receiver;
+    CHECK(sol_mir_validate(&compilation.ir, implementation_mir, NULL));
+
+    SolMir effect_mir;
+    SolMir effect_repeated;
+    sol_mir_init(&effect_mir);
+    sol_mir_init(&effect_repeated);
+    CHECK(sol_mir_lower_callable(&compilation.ir, effectful, &effect_mir,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_lower_callable(&compilation.ir, effectful, &effect_repeated,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(mir_equal(&effect_mir, &effect_repeated));
+    SolMirTerminator *effect_invoke = NULL;
+    for (size_t block = 0; block < effect_mir.block_count; ++block) {
+        if (effect_mir.blocks[block].terminator.kind == SOL_MIR_TERM_INVOKE) {
+            effect_invoke = &effect_mir.blocks[block].terminator;
+        }
+    }
+    CHECK(effect_invoke != NULL);
+    CHECK(effect_invoke->as.invoke.effect_parameter
+        == compilation.ir.callables[effectful].effect_parameters.offset);
+    SolIrEffectParameterId effect_tail
+        = effect_invoke->as.invoke.effect_parameter;
+    effect_invoke->as.invoke.effect_parameter = SOL_IR_NONE;
+    CHECK(!sol_mir_validate(&compilation.ir, &effect_mir, NULL));
+    effect_invoke->as.invoke.effect_parameter = effect_tail;
+    CHECK(sol_mir_validate(&compilation.ir, &effect_mir, NULL));
+    sol_mir_free(&effect_repeated);
+
+    SolMirTerminator *forwarded = NULL;
+    for (size_t block = 0; block < lowered[1].block_count; ++block) {
+        SolMirTerminator *term = &lowered[1].blocks[block].terminator;
+        if (term->kind == SOL_MIR_TERM_INVOKE) forwarded = term;
+    }
+    CHECK(forwarded != NULL);
+    CHECK(forwarded->as.invoke.callable == requirement);
+    CHECK(forwarded->as.invoke.evidence.count == 1);
+    CHECK(compilation.ir.evidence[forwarded->as.invoke.evidence.offset].forwarded);
+
+    SolMirTerminator *identity_call = NULL;
+    SolMirTerminator *score_call = NULL;
+    for (size_t block = 0; block < lowered[3].block_count; ++block) {
+        SolMirTerminator *term = &lowered[3].blocks[block].terminator;
+        if (term->kind != SOL_MIR_TERM_INVOKE) continue;
+        if (term->as.invoke.callable == identity) identity_call = term;
+        if (term->as.invoke.callable == generic_score) score_call = term;
+    }
+    CHECK(identity_call != NULL && score_call != NULL);
+    CHECK(identity_call->as.invoke.type_arguments.count == 1);
+    CHECK(score_call->as.invoke.type_arguments.count == 1);
+    CHECK(score_call->as.invoke.evidence.count == 1);
+    CHECK(!compilation.ir.evidence[score_call->as.invoke.evidence.offset].forwarded);
+
+    size_t type_count = identity_call->as.invoke.type_arguments.count;
+    identity_call->as.invoke.type_arguments.count = 0;
+    CHECK(!sol_mir_validate(&compilation.ir, &lowered[3], NULL));
+    identity_call->as.invoke.type_arguments.count = type_count;
+    size_t type_offset = identity_call->as.invoke.type_arguments.offset;
+    identity_call->as.invoke.type_arguments.offset
+        = compilation.ir.type_id_count;
+    CHECK(!sol_mir_validate(&compilation.ir, &lowered[3], NULL));
+    identity_call->as.invoke.type_arguments.offset = type_offset;
+
+    SolIrSlice effects = identity_call->as.invoke.effects;
+    identity_call->as.invoke.effects
+        = compilation.ir.callables[callable_kind(&compilation.ir, "noisy",
+            SOL_IR_CALLABLE_FUNCTION)].effects;
+    CHECK(!sol_mir_validate(&compilation.ir, &lowered[3], NULL));
+    identity_call->as.invoke.effects = effects;
+
+    SolIrEffectParameterId tail = identity_call->as.invoke.effect_parameter;
+    identity_call->as.invoke.effect_parameter
+        = compilation.ir.callables[effectful].effect_parameters.offset;
+    CHECK(!sol_mir_validate(&compilation.ir, &lowered[3], NULL));
+    identity_call->as.invoke.effect_parameter = tail;
+
+    SolIrSlice concrete_evidence = score_call->as.invoke.evidence;
+    SolIrSlice forwarded_evidence = forwarded->as.invoke.evidence;
+    score_call->as.invoke.evidence = forwarded_evidence;
+    forwarded->as.invoke.evidence = concrete_evidence;
+    CHECK(!sol_mir_validate(&compilation.ir, &lowered[3], NULL));
+    CHECK(!sol_mir_validate(&compilation.ir, &lowered[1], NULL));
+    score_call->as.invoke.evidence = concrete_evidence;
+    forwarded->as.invoke.evidence = forwarded_evidence;
+    SolIrCallableId forwarded_target = forwarded->as.invoke.callable;
+    forwarded->as.invoke.callable = implementation;
+    CHECK(!sol_mir_validate(&compilation.ir, &lowered[1], NULL));
+    forwarded->as.invoke.callable = forwarded_target;
+    CHECK(sol_mir_validate(&compilation.ir, &lowered[1], NULL));
+    CHECK(sol_mir_validate(&compilation.ir, &lowered[3], NULL));
+
+    sol_mir_free(&effect_mir);
+    for (size_t index = 0; index < 4; ++index) sol_mir_free(&lowered[index]);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_initial_lowering_and_determinism();
     test_transactional_unsupported();
@@ -2439,6 +2632,7 @@ int main(void) {
     test_capability_invoke_lowering();
     test_handler_lowering();
     test_owned_temporary_cleanup();
+    test_generic_evidence_and_implementation_checkpoint();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

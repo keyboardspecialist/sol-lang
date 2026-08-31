@@ -212,6 +212,11 @@ typedef struct {
             SolIrExpressionId source_expression;
             SolIrCallKind kind;
             SolIrCallableId callable;
+            /* Exact instantiated metadata remains owned by the source IR. */
+            SolIrSlice type_arguments;
+            SolIrSlice effects;
+            SolIrEffectParameterId effect_parameter;
+            SolIrSlice evidence;
             SolMirTemporaryId callee;
             /* Dynamic callee or receiver acquisition precedes arguments. */
             SolMirCallArgument receiver;
@@ -279,6 +284,9 @@ typedef struct {
 
 typedef struct {
     SolIrCallableId callable;
+    /* Symbolic callable metadata remains owned by the source IR. */
+    SolIrSlice generic_parameters;
+    SolIrSlice effect_parameters;
     SolMirBlockId entry;
     /* SOL_MIR_NONE when the callable has no semantic contract envelope. */
     SolMirBlockId contract_body;
