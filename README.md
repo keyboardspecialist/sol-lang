@@ -665,8 +665,13 @@ reverse-postorder immediate dominators from compact predecessor slices and valid
 every ordinary instruction, terminator, and edge-argument SSA use. Dominating
 instruction and block-parameter values may cross blocks, same-block use-before-definition
 remains invalid, and terminator-produced values remain scoped to their designated
-edges. Affine SSA ownership, canonical rendering, a bounded MIR evaluator/trace,
-representation, runtime ABI, and a backend remain open.
+edges. P1b.2 shares the owning IR's structural `Copy` fixed point and validates
+affine SSA availability path-sensitively. Consuming instruction and terminator uses
+make values unavailable, edge transport consumes each source at most once per edge
+and defines fresh target parameters, alternative edges remain independent, and
+may-unavailable joins converge across branches and loop backedges. Canonical
+rendering, a bounded MIR evaluator/trace, representation, runtime ABI, and a backend
+remain open.
 
 ### Phase 0 — Executable language model
 

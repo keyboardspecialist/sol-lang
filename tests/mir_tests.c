@@ -1,6 +1,7 @@
 #include "sol/mir.h"
 #include "sol/effects.h"
 #include "sol/lexer.h"
+#include "sol/ownership.h"
 #include "sol/package.h"
 
 #include <stdio.h>
@@ -1089,6 +1090,148 @@ static void test_cfg_ssa_dominance(void) {
         }
     }
     sol_mir_free(&looping);
+    free_compilation(&compilation);
+}
+
+static void test_cfg_ssa_ownership(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_ssa_ownership\n"
+        "record Box<T> { value: T }\n"
+        "function copy_value() -> Int64 { return 1 + 2 }\n"
+        "function stale(value: Box<Int64>) -> Box<Int64> { return { value } }\n"
+        "function equal(left: Box<Int64>, right: Box<Int64>) -> Bool { "
+        "return left == right }\n"
+        "function choose(flag: Bool, left: Box<Int64>, right: Box<Int64>) "
+        "-> Box<Int64> { return if flag { left } else { right } }\n"
+        "function consume(value: Box<Int64>) -> () {}\n"
+        "function loop_fresh(flag: Bool) -> () effects { diverge } { "
+        "while flag { consume(Box<Int64> { value = 1 }) } }\n"
+        "function checked(value: Box<Int64>) -> Box<Int64> "
+        "ensures { true } { return value }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+
+    bool *copyable = compilation.ir.type_count == 0 ? NULL
+        : malloc(compilation.ir.type_count * sizeof(*copyable));
+    CHECK(sol_ir_compute_copyability(&compilation.ir, copyable,
+        compilation.ir.type_count));
+    bool saw_copy_int = false;
+    bool saw_affine_box = false;
+    for (SolIrTypeId type = 0; type < compilation.ir.type_count; ++type) {
+        saw_copy_int = saw_copy_int
+            || (compilation.ir.types[type].kind == SOL_IR_TYPE_INT64
+                && copyable[type]);
+        if (compilation.ir.types[type].kind == SOL_IR_TYPE_NOMINAL) {
+            SolIrDefinitionId definition
+                = compilation.ir.types[type].definition;
+            saw_affine_box = saw_affine_box
+                || (definition < compilation.ir.definition_count
+                    && strcmp(compilation.ir.definitions[definition].name,
+                        "Box") == 0
+                    && !copyable[type]);
+        }
+    }
+    CHECK(saw_copy_int && saw_affine_box);
+    free(copyable);
+
+    SolMir copy;
+    sol_mir_init(&copy);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "copy_value"), &copy,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    SolMirInstructionId binary = SOL_MIR_NONE;
+    for (size_t instruction = 0; instruction < copy.instruction_count;
+        ++instruction) {
+        if (copy.instructions[instruction].kind == SOL_MIR_INST_BINARY) {
+            binary = instruction;
+        }
+    }
+    CHECK(binary != SOL_MIR_NONE);
+    if (binary != SOL_MIR_NONE) {
+        SolMirValueId right = copy.instructions[binary].as.binary.right;
+        copy.instructions[binary].as.binary.right
+            = copy.instructions[binary].as.binary.left;
+        CHECK(sol_mir_validate(&compilation.ir, &copy, NULL));
+        copy.instructions[binary].as.binary.right = right;
+    }
+    sol_mir_free(&copy);
+
+    SolMir stale;
+    sol_mir_init(&stale);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "stale"), &stale,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    SolMirValueId moved = SOL_MIR_NONE;
+    SolMirBlockId stale_return = SOL_MIR_NONE;
+    for (size_t instruction = 0; instruction < stale.instruction_count;
+        ++instruction) {
+        if (stale.instructions[instruction].kind == SOL_MIR_INST_LOAD_MOVE) {
+            moved = stale.instructions[instruction].result;
+        }
+    }
+    for (SolMirBlockId block = 0; block < stale.block_count; ++block) {
+        if (stale.blocks[block].terminator.kind == SOL_MIR_TERM_RETURN) {
+            stale_return = block;
+        }
+    }
+    CHECK(moved != SOL_MIR_NONE && stale_return != SOL_MIR_NONE);
+    if (moved != SOL_MIR_NONE && stale_return != SOL_MIR_NONE) {
+        SolMirValueId result = stale.blocks[stale_return].terminator.as.value;
+        stale.blocks[stale_return].terminator.as.value = moved;
+        CHECK(!sol_mir_validate(&compilation.ir, &stale, NULL));
+        stale.blocks[stale_return].terminator.as.value = result;
+        CHECK(sol_mir_validate(&compilation.ir, &stale, NULL));
+    }
+    sol_mir_free(&stale);
+
+    SolMir equal;
+    sol_mir_init(&equal);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "equal"), &equal,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    SolMirInstructionId equality = SOL_MIR_NONE;
+    for (size_t instruction = 0; instruction < equal.instruction_count;
+        ++instruction) {
+        if (equal.instructions[instruction].kind == SOL_MIR_INST_BINARY) {
+            equality = instruction;
+        }
+    }
+    CHECK(equality != SOL_MIR_NONE);
+    if (equality != SOL_MIR_NONE) {
+        SolMirValueId right = equal.instructions[equality].as.binary.right;
+        equal.instructions[equality].as.binary.right
+            = equal.instructions[equality].as.binary.left;
+        CHECK(!sol_mir_validate(&compilation.ir, &equal, NULL));
+        equal.instructions[equality].as.binary.right = right;
+        CHECK(sol_mir_validate(&compilation.ir, &equal, NULL));
+    }
+    sol_mir_free(&equal);
+
+    SolMir choose;
+    sol_mir_init(&choose);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "choose"), &choose,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(sol_mir_validate(&compilation.ir, &choose, NULL));
+    sol_mir_free(&choose);
+
+    SolMir loop_fresh;
+    sol_mir_init(&loop_fresh);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "loop_fresh"), &loop_fresh,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(loop_fresh.loop_count == 1);
+    CHECK(sol_mir_validate(&compilation.ir, &loop_fresh, NULL));
+    sol_mir_free(&loop_fresh);
+
+    SolMir checked;
+    sol_mir_init(&checked);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "checked"), &checked,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(checked.contract_epilogue < checked.block_count);
+    CHECK(sol_mir_validate(&compilation.ir, &checked, NULL));
+    sol_mir_free(&checked);
     free_compilation(&compilation);
 }
 
@@ -3121,6 +3264,7 @@ int main(void) {
     test_calls_and_remaining_local_control();
     test_validator_rejects_corruption();
     test_cfg_ssa_dominance();
+    test_cfg_ssa_ownership();
     test_loop_control_lowering();
     test_bounded_value_construction();
     test_compound_update_lowering();

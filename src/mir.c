@@ -1,4 +1,5 @@
 #include "sol/mir.h"
+#include "sol/ownership.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -4342,12 +4343,9 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
     SolMirBlockId *queue = malloc(mir->block_count * sizeof(*queue));
     size_t *initializers = calloc(mir->temporary_count,
         sizeof(*initializers));
-    unsigned char *staged_values = mir->value_count == 0 ? NULL
-        : calloc(mir->value_count, 1);
     if ((stack_count != 0 && incoming == NULL)
         || (mir->temporary_count != 0
             && (working == NULL || initializers == NULL))
-        || (mir->value_count != 0 && staged_values == NULL)
         || depths == NULL || known == NULL || queue == NULL) {
         free(incoming);
         free(working);
@@ -4355,7 +4353,6 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
         free(known);
         free(queue);
         free(initializers);
-        free(staged_values);
         return mir_error(diagnostics, ir->callables[mir->callable].span,
             "MIR temporary validation allocation failed");
     }
@@ -4367,9 +4364,8 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
             SolMirTemporaryId temporary
                 = mir->instructions[instruction].as.temporary_init.temporary;
             if (temporary < mir->temporary_count) ++initializers[temporary];
-            SolMirValueId value
-                = mir->instructions[instruction].as.temporary_init.value;
-            valid = value < mir->value_count && ++staged_values[value] == 1;
+            valid = mir->instructions[instruction].as.temporary_init.value
+                < mir->value_count;
         }
     }
     for (size_t temporary = 0; valid && temporary < mir->temporary_count;
@@ -4551,7 +4547,6 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
     free(known);
     free(queue);
     free(initializers);
-    free(staged_values);
     return valid || mir_error(diagnostics,
         ir->callables[mir->callable].span,
         "MIR owned temporary transitions are inconsistent");
@@ -5257,6 +5252,252 @@ static bool mir_validate_ssa_dominance(const SolIr *ir, const SolMir *mir,
     free(idom);
     return valid || mir_error(diagnostics, ir->callables[mir->callable].span,
         "MIR SSA use is not dominated by its definition");
+}
+
+static size_t mir_terminator_edges(const SolMirTerminator *term,
+    const SolMirEdge *edges[3]) {
+    size_t count = 0;
+    switch (term->kind) {
+        case SOL_MIR_TERM_GOTO:
+            edges[count++] = &term->as.go_to;
+            break;
+        case SOL_MIR_TERM_BRANCH:
+            edges[count++] = &term->as.branch.true_edge;
+            edges[count++] = &term->as.branch.false_edge;
+            break;
+        case SOL_MIR_TERM_INVOKE:
+            if (term->as.invoke.normal_edge.block != SOL_MIR_NONE) {
+                edges[count++] = &term->as.invoke.normal_edge;
+            }
+            edges[count++] = &term->as.invoke.failure_edge;
+            break;
+        case SOL_MIR_TERM_CHECK_REFINED:
+            edges[count++] = &term->as.check_refined.normal_edge;
+            edges[count++] = &term->as.check_refined.failure_edge;
+            break;
+        case SOL_MIR_TERM_PROPAGATE:
+            edges[count++] = &term->as.propagate.value_edge;
+            edges[count++] = &term->as.propagate.residual_edge;
+            break;
+        case SOL_MIR_TERM_CHECK_CONTRACT:
+            edges[count++] = &term->as.check_contract.satisfied_edge;
+            edges[count++] = &term->as.check_contract.violation_edge;
+            edges[count++] = &term->as.check_contract.failure_edge;
+            break;
+        case SOL_MIR_TERM_BREAK:
+        case SOL_MIR_TERM_CONTINUE:
+            edges[count++] = &term->as.transfer.edge;
+            break;
+        default:
+            break;
+    }
+    return count;
+}
+
+static bool mir_ssa_is_affine(const SolMir *mir, const bool *copyable,
+    SolMirValueId value) {
+    return value < mir->value_count && mir->values[value].type < SIZE_MAX
+        && !copyable[mir->values[value].type];
+}
+
+static bool mir_ssa_take(const SolMir *mir, const bool *copyable,
+    unsigned char *unavailable, SolMirValueId value, bool validating) {
+    if (value >= mir->value_count) return false;
+    if (!mir_ssa_is_affine(mir, copyable, value)) return true;
+    if (validating && unavailable[value]) return false;
+    unavailable[value] = 1;
+    return true;
+}
+
+static void mir_ssa_define(const SolMir *mir, const bool *copyable,
+    unsigned char *unavailable, SolMirValueId value) {
+    if (value < mir->value_count && mir_ssa_is_affine(mir, copyable, value)) {
+        unavailable[value] = 0;
+    }
+}
+
+static bool mir_ssa_transfer_block(const SolMir *mir, const bool *copyable,
+    SolMirBlockId block, unsigned char *unavailable, bool validating) {
+    SolMirSlice instructions = mir->blocks[block].instructions;
+    for (size_t index = 0; index < instructions.count; ++index) {
+        const SolMirInstruction *instruction
+            = &mir->instructions[instructions.offset + index];
+        SolMirValueId uses[2];
+        size_t use_count = 0;
+        switch (instruction->kind) {
+            case SOL_MIR_INST_STORE:
+                uses[use_count++] = instruction->as.store.value;
+                break;
+            case SOL_MIR_INST_UNARY:
+                uses[use_count++] = instruction->as.unary.operand;
+                break;
+            case SOL_MIR_INST_BINARY:
+                uses[use_count++] = instruction->as.binary.left;
+                uses[use_count++] = instruction->as.binary.right;
+                break;
+            case SOL_MIR_INST_COMPOUND_UPDATE:
+                uses[use_count++] = instruction->as.compound_update.right;
+                break;
+            case SOL_MIR_INST_TEMPORARY_INIT:
+                uses[use_count++] = instruction->as.temporary_init.value;
+                break;
+            case SOL_MIR_INST_EXPRESSION_RESULT:
+                uses[use_count++] = instruction->as.operand;
+                break;
+            default:
+                break;
+        }
+        for (size_t use = 0; use < use_count; ++use) {
+            if (!mir_ssa_take(mir, copyable, unavailable, uses[use],
+                validating)) return false;
+        }
+        if (instruction->result != SOL_MIR_NONE) {
+            mir_ssa_define(mir, copyable, unavailable, instruction->result);
+        }
+    }
+    const SolMirTerminator *term = &mir->blocks[block].terminator;
+    if (term->kind == SOL_MIR_TERM_RETURN || term->kind == SOL_MIR_TERM_PANIC) {
+        return mir_ssa_take(mir, copyable, unavailable, term->as.value,
+            validating);
+    }
+    if (term->kind == SOL_MIR_TERM_CHECK_CONTRACT
+        && term->as.check_contract.result != SOL_MIR_NONE
+        && mir_ssa_is_affine(mir, copyable,
+            term->as.check_contract.result)) {
+        return !validating
+            || !unavailable[term->as.check_contract.result];
+    }
+    return true;
+}
+
+static bool mir_ssa_transfer_edge(const SolMir *mir, const bool *copyable,
+    const SolMirTerminator *term, const SolMirEdge *edge,
+    unsigned char *unavailable, unsigned char *seen, bool validating) {
+    if (validating && mir->value_count != 0) {
+        memset(seen, 0, mir->value_count);
+    }
+    if (term->kind == SOL_MIR_TERM_CHECK_CONTRACT
+        && term->as.check_contract.result != SOL_MIR_NONE
+        && edge != &term->as.check_contract.satisfied_edge
+        && !mir_ssa_take(mir, copyable, unavailable,
+            term->as.check_contract.result, validating)) return false;
+    for (size_t index = 0; index < edge->arguments.count; ++index) {
+        SolMirValueId value = mir->edge_values[edge->arguments.offset + index];
+        if (value >= mir->value_count) return false;
+        if (mir->values[value].kind != SOL_MIR_VALUE_TERMINATOR
+            && mir_ssa_is_affine(mir, copyable, value)) {
+            if (validating && (unavailable[value] || seen[value])) return false;
+            if (validating) seen[value] = 1;
+            unavailable[value] = 1;
+        }
+    }
+    const SolMirBlock *target = &mir->blocks[edge->block];
+    for (size_t index = 0; index < target->parameters.count; ++index) {
+        SolMirValueId parameter
+            = mir->parameter_values[target->parameters.offset + index];
+        mir_ssa_define(mir, copyable, unavailable, parameter);
+    }
+    return true;
+}
+
+static bool mir_validate_ssa_ownership(const SolIr *ir, const SolMir *mir,
+    SolDiagnostics *diagnostics) {
+    if ((mir->value_count != 0
+            && mir->block_count > SIZE_MAX / mir->value_count)
+        || ir->type_count > SIZE_MAX / sizeof(bool)) {
+        return mir_error(diagnostics, ir->callables[mir->callable].span,
+            "MIR SSA ownership domain is too large");
+    }
+    size_t state_count = mir->block_count * mir->value_count;
+    bool *copyable = ir->type_count == 0 ? NULL
+        : malloc(ir->type_count * sizeof(*copyable));
+    unsigned char *incoming = state_count == 0 ? NULL
+        : malloc(state_count);
+    unsigned char *working = mir->value_count == 0 ? NULL
+        : malloc(mir->value_count);
+    unsigned char *successor = mir->value_count == 0 ? NULL
+        : malloc(mir->value_count);
+    unsigned char *seen = mir->value_count == 0 ? NULL
+        : malloc(mir->value_count);
+    bool *known = calloc(mir->block_count, sizeof(*known));
+    bool *queued = calloc(mir->block_count, sizeof(*queued));
+    SolMirBlockId *queue = malloc(mir->block_count * sizeof(*queue));
+    bool valid = (ir->type_count == 0 || copyable != NULL)
+        && (state_count == 0 || incoming != NULL)
+        && (mir->value_count == 0
+            || (working != NULL && successor != NULL && seen != NULL))
+        && known != NULL && queued != NULL && queue != NULL
+        && sol_ir_compute_copyability(ir, copyable, ir->type_count);
+    if (valid && state_count != 0) memset(incoming, 1, state_count);
+    size_t queue_count = valid ? 1u : 0u;
+    if (valid) {
+        queue[0] = mir->entry;
+        queued[mir->entry] = true;
+        known[mir->entry] = true;
+    }
+    while (valid && queue_count != 0) {
+        SolMirBlockId block = queue[--queue_count];
+        queued[block] = false;
+        if (mir->value_count != 0) memcpy(working,
+            &incoming[block * mir->value_count], mir->value_count);
+        valid = mir_ssa_transfer_block(mir, copyable, block, working, false);
+        const SolMirEdge *edges[3];
+        size_t edge_count
+            = mir_terminator_edges(&mir->blocks[block].terminator, edges);
+        for (size_t edge_index = 0; valid && edge_index < edge_count;
+            ++edge_index) {
+            const SolMirEdge *edge = edges[edge_index];
+            if (mir->value_count != 0) memcpy(successor, working,
+                mir->value_count);
+            valid = mir_ssa_transfer_edge(mir, copyable,
+                &mir->blocks[block].terminator, edge, successor, seen, false);
+            bool changed = !known[edge->block];
+            unsigned char *target = state_count == 0 ? NULL
+                : &incoming[edge->block * mir->value_count];
+            for (size_t value = 0; valid && value < mir->value_count; ++value) {
+                unsigned char merged = known[edge->block]
+                    ? (unsigned char)(target[value] || successor[value])
+                    : successor[value];
+                changed = changed || merged != target[value];
+                target[value] = merged;
+            }
+            if (valid && changed) {
+                known[edge->block] = true;
+                if (!queued[edge->block]) {
+                    queue[queue_count++] = edge->block;
+                    queued[edge->block] = true;
+                }
+            }
+        }
+    }
+    for (SolMirBlockId block = 0; valid && block < mir->block_count; ++block) {
+        valid = known[block];
+        if (!valid) break;
+        if (mir->value_count != 0) memcpy(working,
+            &incoming[block * mir->value_count], mir->value_count);
+        valid = mir_ssa_transfer_block(mir, copyable, block, working, true);
+        const SolMirEdge *edges[3];
+        size_t edge_count
+            = mir_terminator_edges(&mir->blocks[block].terminator, edges);
+        for (size_t edge_index = 0; valid && edge_index < edge_count;
+            ++edge_index) {
+            if (mir->value_count != 0) memcpy(successor, working,
+                mir->value_count);
+            valid = mir_ssa_transfer_edge(mir, copyable,
+                &mir->blocks[block].terminator, edges[edge_index], successor,
+                seen, true);
+        }
+    }
+    free(copyable);
+    free(incoming);
+    free(working);
+    free(successor);
+    free(seen);
+    free(known);
+    free(queued);
+    free(queue);
+    return valid || mir_error(diagnostics, ir->callables[mir->callable].span,
+        "MIR affine SSA ownership transition is inconsistent");
 }
 
 bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
@@ -7134,6 +7375,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
     if (!valid) return mir_error(diagnostics, callable->span,
         "MIR contains an unreachable block or entry predecessor");
     return mir_validate_ssa_dominance(ir, mir, diagnostics)
+        && mir_validate_ssa_ownership(ir, mir, diagnostics)
         && mir_validate_contract_envelope(ir, mir, diagnostics)
         && mir_validate_arena_ownership(mir, diagnostics, callable->span)
         && mir_validate_storage(ir, mir, diagnostics)

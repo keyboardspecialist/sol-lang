@@ -22,7 +22,7 @@ typedef struct {
     const SolIr *ir;
     SolDiagnostics *diagnostics;
     SolIrLocalUse *uses;
-    unsigned char *copy_states;
+    bool *copy_states;
     SolIrExpressionId *loan_places;
     SolAccessMode *loan_modes;
     size_t loan_count;
@@ -61,7 +61,7 @@ static bool ownership_internal(Ownership *analysis, SolSpan span,
 }
 
 static bool type_is_copy(Ownership *analysis, SolIrTypeId id) {
-    return id < analysis->ir->type_count && analysis->copy_states[id] == 2;
+    return id < analysis->ir->type_count && analysis->copy_states[id];
 }
 
 static bool copy_dependencies_hold(Ownership *analysis, SolIrTypeId id) {
@@ -96,37 +96,40 @@ static bool copy_dependencies_hold(Ownership *analysis, SolIrTypeId id) {
     return true;
 }
 
-static void compute_copy_states(Ownership *analysis) {
-    for (size_t id = 0; id < analysis->ir->type_count; ++id) {
-        const SolIrType *type = &analysis->ir->types[id];
+bool sol_ir_compute_copyability(const SolIr *ir, bool *copyable, size_t count) {
+    if (ir == NULL || count != ir->type_count
+        || (count != 0 && copyable == NULL)) return false;
+    Ownership analysis = {.ir = ir, .copy_states = copyable};
+    for (size_t id = 0; id < ir->type_count; ++id) {
+        const SolIrType *type = &ir->types[id];
         bool candidate = type->kind == SOL_IR_TYPE_INT64
             || type->kind == SOL_IR_TYPE_BOOL || type->kind == SOL_IR_TYPE_TEXT
             || type->kind == SOL_IR_TYPE_UNIT || type->kind == SOL_IR_TYPE_NEVER
             || type->kind == SOL_IR_TYPE_OPTION || type->kind == SOL_IR_TYPE_RESULT
             || type->kind == SOL_IR_TYPE_TUPLE;
         if (type->kind == SOL_IR_TYPE_NOMINAL
-            && type->definition < analysis->ir->definition_count) {
+            && type->definition < ir->definition_count) {
             const SolIrDefinition *definition
-                = &analysis->ir->definitions[type->definition];
+                = &ir->definitions[type->definition];
             candidate = definition->generic_parameters.count == 0
                 && (definition->kind == SOL_IR_DEFINITION_RECORD
                     || definition->kind == SOL_IR_DEFINITION_ENUM
                     || definition->kind == SOL_IR_DEFINITION_DISTINCT
                     || definition->kind == SOL_IR_DEFINITION_REFINED);
         }
-        analysis->copy_states[id] = candidate ? 2 : 3;
+        copyable[id] = candidate;
     }
     bool changed;
     do {
         changed = false;
-        for (size_t id = 0; id < analysis->ir->type_count; ++id) {
-            if (analysis->copy_states[id] == 2
-                && !copy_dependencies_hold(analysis, id)) {
-                analysis->copy_states[id] = 3;
+        for (size_t id = 0; id < ir->type_count; ++id) {
+            if (copyable[id] && !copy_dependencies_hold(&analysis, id)) {
+                copyable[id] = false;
                 changed = true;
             }
         }
     } while (changed);
+    return true;
 }
 
 static bool analyze_expression_inner(Ownership *analysis, SolIrExpressionId id,
@@ -1314,7 +1317,9 @@ static bool ownership_prepare(const SolIr *ir, SolDiagnostics *diagnostics,
         return ownership_internal(analysis, (SolSpan){0},
             "ownership metadata allocation failed");
     }
-    compute_copy_states(analysis);
+    if (!sol_ir_compute_copyability(ir, analysis->copy_states,
+        ir->type_count)) return ownership_internal(analysis, (SolSpan){0},
+            "ownership copyability computation failed");
     return true;
 }
 
