@@ -78,6 +78,8 @@ This IR is an unstable interpreter IR. It is not a control-flow MIR, stable seri
 
 #status("IMPLEMENTED", [P1a.3b4-P1a.3b14 extend the MIR owner through recursive matches and guards, Option/Result propagation, projected and partial-move places, callback/method/capability invokes, exact handler scopes, bounded callable contracts, generic/effect metadata and trait evidence, checked compound updates, and authority-bearing aggregate and derived-capability construction. All 14 bodyful E6 callables lower and validate deterministically; its five bodyless requirements and hosted capability members intentionally have no standalone CFG. P1b dominance, canonical rendering, and differential MIR evaluation remain open.])
 
+#status("IMPLEMENTED", [P1b.1 computes deterministic reverse-postorder immediate dominators over compact predecessor slices and validates every ordinary instruction, terminator, and edge-argument SSA use. Values may cross blocks only when their instruction or block-parameter definition dominates the use; same-block use-before-definition and sibling, join-bypass, backward-loop, and edge-argument leaks are rejected. Edge-produced terminator values retain their existing designated-edge scope. Affine SSA consumption, canonical MIR rendering, and bounded differential evaluation remain open.])
+
 == Interpreter and CLI
 
 The deterministic reference interpreter executes the bounded core with checked arithmetic, aggregate values, functions, callbacks, traits, capabilities, exact handlers, mutation, loops, patterns, cleanup, host operations, and explicit resource limits.

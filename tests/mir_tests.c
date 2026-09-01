@@ -940,6 +940,158 @@ static void test_validator_rejects_corruption(void) {
     free_compilation(&compilation);
 }
 
+static void test_cfg_ssa_dominance(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_dominance\n"
+        "function branch(flag: Bool) -> Int64 { let seed = 7 "
+        "if flag { return 1 } else { return 2 } }\n"
+        "function join(flag: Bool) -> Int64 { "
+        "return if flag { 3 } else { 4 } }\n"
+        "function ordered() -> Int64 { return 1 + 2 }\n"
+        "function looping(flag: Bool) -> () { while flag { "
+        "if flag { () } else { () } break } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+
+    SolMir branch;
+    sol_mir_init(&branch);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "branch"), &branch,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    SolMirValueId seed = SOL_MIR_NONE;
+    SolMirBlockId returns[2] = {SOL_MIR_NONE, SOL_MIR_NONE};
+    size_t return_count = 0;
+    for (size_t instruction = 0; instruction < branch.instruction_count;
+        ++instruction) {
+        const SolMirInstruction *item = &branch.instructions[instruction];
+        if (item->kind == SOL_MIR_INST_CONST_INT64
+            && item->as.integer == 7) seed = item->result;
+    }
+    for (SolMirBlockId block = 0; block < branch.block_count; ++block) {
+        if (branch.blocks[block].terminator.kind == SOL_MIR_TERM_RETURN
+            && return_count < 2) returns[return_count++] = block;
+    }
+    CHECK(seed != SOL_MIR_NONE && return_count == 2);
+    if (seed != SOL_MIR_NONE && return_count == 2) {
+        SolMirValueId first = branch.blocks[returns[0]].terminator.as.value;
+        SolMirValueId second = branch.blocks[returns[1]].terminator.as.value;
+        branch.blocks[returns[0]].terminator.as.value = seed;
+        CHECK(sol_mir_validate(&compilation.ir, &branch, NULL));
+        branch.blocks[returns[0]].terminator.as.value = first;
+        branch.blocks[returns[1]].terminator.as.value = first;
+        CHECK(!sol_mir_validate(&compilation.ir, &branch, NULL));
+        branch.blocks[returns[1]].terminator.as.value = second;
+        CHECK(sol_mir_validate(&compilation.ir, &branch, NULL));
+    }
+    sol_mir_free(&branch);
+
+    SolMir join;
+    sol_mir_init(&join);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "join"), &join,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    SolMirBlockId join_return = SOL_MIR_NONE;
+    SolMirValueId branch_value = SOL_MIR_NONE;
+    SolMirValueId sibling_value = SOL_MIR_NONE;
+    for (SolMirBlockId block = 0; block < join.block_count; ++block) {
+        if (join.blocks[block].terminator.kind == SOL_MIR_TERM_RETURN) {
+            join_return = block;
+        }
+    }
+    for (size_t instruction = 0; instruction < join.instruction_count;
+        ++instruction) {
+        if (join.instructions[instruction].kind == SOL_MIR_INST_CONST_INT64
+            && join.instructions[instruction].as.integer == 3) {
+            branch_value = join.instructions[instruction].result;
+        } else if (join.instructions[instruction].kind
+                == SOL_MIR_INST_CONST_INT64
+            && join.instructions[instruction].as.integer == 4) {
+            sibling_value = join.instructions[instruction].result;
+        }
+    }
+    CHECK(join_return != SOL_MIR_NONE && branch_value != SOL_MIR_NONE
+        && sibling_value != SOL_MIR_NONE);
+    if (join_return != SOL_MIR_NONE && branch_value != SOL_MIR_NONE
+        && sibling_value != SOL_MIR_NONE) {
+        SolMirValueId result = join.blocks[join_return].terminator.as.value;
+        join.blocks[join_return].terminator.as.value = branch_value;
+        CHECK(!sol_mir_validate(&compilation.ir, &join, NULL));
+        join.blocks[join_return].terminator.as.value = result;
+        SolMirBlockId sibling_block = join.values[sibling_value].block;
+        CHECK(join.blocks[sibling_block].terminator.kind == SOL_MIR_TERM_GOTO);
+        SolMirSlice arguments
+            = join.blocks[sibling_block].terminator.as.go_to.arguments;
+        CHECK(arguments.count == 1);
+        if (arguments.count == 1) {
+            SolMirValueId argument = join.edge_values[arguments.offset];
+            join.edge_values[arguments.offset] = branch_value;
+            CHECK(!sol_mir_validate(&compilation.ir, &join, NULL));
+            join.edge_values[arguments.offset] = argument;
+        }
+        CHECK(sol_mir_validate(&compilation.ir, &join, NULL));
+    }
+    sol_mir_free(&join);
+
+    SolMir ordered;
+    sol_mir_init(&ordered);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "ordered"), &ordered,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    SolMirInstructionId binary = SOL_MIR_NONE;
+    for (size_t instruction = 0; instruction < ordered.instruction_count;
+        ++instruction) {
+        if (ordered.instructions[instruction].kind == SOL_MIR_INST_BINARY) {
+            binary = instruction;
+        }
+    }
+    CHECK(binary != SOL_MIR_NONE);
+    if (binary != SOL_MIR_NONE) {
+        SolMirValueId left = ordered.instructions[binary].as.binary.left;
+        ordered.instructions[binary].as.binary.left
+            = ordered.instructions[binary].result;
+        CHECK(!sol_mir_validate(&compilation.ir, &ordered, NULL));
+        ordered.instructions[binary].as.binary.left = left;
+        CHECK(sol_mir_validate(&compilation.ir, &ordered, NULL));
+    }
+    sol_mir_free(&ordered);
+
+    SolMir looping;
+    sol_mir_init(&looping);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "looping"), &looping,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(looping.loop_count == 1);
+    if (looping.loop_count == 1) {
+        SolMirBlockId condition = looping.loops[0].condition;
+        SolMirBlockId body_branch = SOL_MIR_NONE;
+        for (SolMirBlockId block = 0; block < looping.block_count; ++block) {
+            if (block != condition
+                && looping.blocks[block].terminator.kind == SOL_MIR_TERM_BRANCH) {
+                body_branch = block;
+            }
+        }
+        CHECK(condition < looping.block_count && body_branch != SOL_MIR_NONE);
+        if (condition < looping.block_count && body_branch != SOL_MIR_NONE) {
+            SolMirValueId condition_value
+                = looping.blocks[condition].terminator.as.branch.condition;
+            SolMirValueId body_value
+                = looping.blocks[body_branch].terminator.as.branch.condition;
+            looping.blocks[body_branch].terminator.as.branch.condition
+                = condition_value;
+            CHECK(sol_mir_validate(&compilation.ir, &looping, NULL));
+            looping.blocks[body_branch].terminator.as.branch.condition
+                = body_value;
+            looping.blocks[condition].terminator.as.branch.condition = body_value;
+            CHECK(!sol_mir_validate(&compilation.ir, &looping, NULL));
+            looping.blocks[condition].terminator.as.branch.condition
+                = condition_value;
+            CHECK(sol_mir_validate(&compilation.ir, &looping, NULL));
+        }
+    }
+    sol_mir_free(&looping);
+    free_compilation(&compilation);
+}
+
 static void test_loop_control_lowering(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -2968,6 +3120,7 @@ int main(void) {
     test_callable_contract_envelope();
     test_calls_and_remaining_local_control();
     test_validator_rejects_corruption();
+    test_cfg_ssa_dominance();
     test_loop_control_lowering();
     test_bounded_value_construction();
     test_compound_update_lowering();

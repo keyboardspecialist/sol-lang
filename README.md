@@ -660,9 +660,13 @@ evidence keeps its requirement, binding, and caller parameter rather than select
 a concrete method. Executable trait implementations activate and clean their exact
 receiver before ordinary parameters. All 14 executable E6 callables now lower
 deterministically; the five bodyless trait requirements and hosted capability members
-intentionally have no standalone MIR. P1b dominance/SSA and ownership validation,
-canonical rendering, a bounded MIR evaluator/trace, representation, runtime ABI, and
-a backend remain open.
+intentionally have no standalone MIR. P1b.1 now computes deterministic
+reverse-postorder immediate dominators from compact predecessor slices and validates
+every ordinary instruction, terminator, and edge-argument SSA use. Dominating
+instruction and block-parameter values may cross blocks, same-block use-before-definition
+remains invalid, and terminator-produced values remain scoped to their designated
+edges. Affine SSA ownership, canonical rendering, a bounded MIR evaluator/trace,
+representation, runtime ABI, and a backend remain open.
 
 ### Phase 0 — Executable language model
 

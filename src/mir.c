@@ -3159,10 +3159,11 @@ static bool mir_value_available(const SolMir *mir, SolMirValueId id,
     SolMirBlockId block, size_t before_instruction) {
     if (id >= mir->value_count) return false;
     const SolMirValue *value = &mir->values[id];
-    return value->block == block
-        && (value->kind == SOL_MIR_VALUE_BLOCK_PARAMETER
-            || (value->kind == SOL_MIR_VALUE_INSTRUCTION
-                && value->definition < before_instruction));
+    if (value->kind != SOL_MIR_VALUE_BLOCK_PARAMETER
+        && value->kind != SOL_MIR_VALUE_INSTRUCTION) return false;
+    if (value->block != block) return true;
+    return value->kind == SOL_MIR_VALUE_BLOCK_PARAMETER
+        || value->definition < before_instruction;
 }
 
 static SolMirInstructionId mir_temporary_initializer(const SolMir *mir,
@@ -4926,6 +4927,336 @@ static bool mir_validate_contract_envelope(const SolIr *ir, const SolMir *mir,
         }
     }
     return true;
+}
+
+static bool mir_block_successors(const SolMir *mir, SolMirBlockId block,
+    SolMirBlockId targets[3], size_t *count) {
+    if (block >= mir->block_count) return false;
+    const SolMirTerminator *term = &mir->blocks[block].terminator;
+    *count = 0;
+    switch (term->kind) {
+        case SOL_MIR_TERM_GOTO:
+            targets[(*count)++] = term->as.go_to.block;
+            break;
+        case SOL_MIR_TERM_BRANCH:
+            targets[(*count)++] = term->as.branch.true_edge.block;
+            targets[(*count)++] = term->as.branch.false_edge.block;
+            break;
+        case SOL_MIR_TERM_INVOKE:
+            if (term->as.invoke.normal_edge.block != SOL_MIR_NONE) {
+                targets[(*count)++] = term->as.invoke.normal_edge.block;
+            }
+            targets[(*count)++] = term->as.invoke.failure_edge.block;
+            break;
+        case SOL_MIR_TERM_CHECK_REFINED:
+            targets[(*count)++] = term->as.check_refined.normal_edge.block;
+            targets[(*count)++] = term->as.check_refined.failure_edge.block;
+            break;
+        case SOL_MIR_TERM_PROPAGATE:
+            targets[(*count)++] = term->as.propagate.value_edge.block;
+            targets[(*count)++] = term->as.propagate.residual_edge.block;
+            break;
+        case SOL_MIR_TERM_CHECK_CONTRACT:
+            targets[(*count)++] = term->as.check_contract.satisfied_edge.block;
+            targets[(*count)++] = term->as.check_contract.violation_edge.block;
+            targets[(*count)++] = term->as.check_contract.failure_edge.block;
+            break;
+        case SOL_MIR_TERM_BREAK:
+        case SOL_MIR_TERM_CONTINUE:
+            targets[(*count)++] = term->as.transfer.edge.block;
+            break;
+        case SOL_MIR_TERM_RETURN:
+        case SOL_MIR_TERM_PANIC:
+        case SOL_MIR_TERM_RESUME_FAILURE:
+        case SOL_MIR_TERM_UNREACHABLE:
+        case SOL_MIR_TERM_MATCH_FAILURE:
+        case SOL_MIR_TERM_CONTRACT_VIOLATION:
+            break;
+        default:
+            return false;
+    }
+    for (size_t index = 0; index < *count; ++index) {
+        if (targets[index] >= mir->block_count) return false;
+    }
+    return true;
+}
+
+static SolMirBlockId mir_intersect_idom(SolMirBlockId left,
+    SolMirBlockId right, const SolMirBlockId *idom,
+    const size_t *rpo_index) {
+    while (left != right) {
+        while (rpo_index[left] > rpo_index[right]) left = idom[left];
+        while (rpo_index[right] > rpo_index[left]) right = idom[right];
+    }
+    return left;
+}
+
+static SolMirBlockId *mir_compute_idom(const SolMir *mir) {
+    size_t count = mir->block_count;
+    if (count == 0 || count > SIZE_MAX / 3) return NULL;
+    size_t *predecessor_counts = calloc(count, sizeof(*predecessor_counts));
+    bool valid = predecessor_counts != NULL;
+    for (SolMirBlockId block = 0; valid && block < count; ++block) {
+        SolMirBlockId targets[3];
+        size_t target_count = 0;
+        valid = mir_block_successors(mir, block, targets, &target_count);
+        for (size_t index = 0; valid && index < target_count; ++index) {
+            ++predecessor_counts[targets[index]];
+        }
+    }
+    size_t *predecessor_offsets = calloc(count + 1,
+        sizeof(*predecessor_offsets));
+    valid = valid && predecessor_offsets != NULL;
+    for (size_t block = 0; valid && block < count; ++block) {
+        if (predecessor_offsets[block] > SIZE_MAX - predecessor_counts[block]) {
+            valid = false;
+        } else {
+            predecessor_offsets[block + 1]
+                = predecessor_offsets[block] + predecessor_counts[block];
+        }
+    }
+    size_t edge_count = valid ? predecessor_offsets[count] : 0;
+    if (valid && edge_count > SIZE_MAX / sizeof(SolMirBlockId)) valid = false;
+    SolMirBlockId *predecessors = !valid || edge_count == 0 ? NULL
+        : malloc(edge_count * sizeof(*predecessors));
+    size_t *predecessor_cursors = calloc(count, sizeof(*predecessor_cursors));
+    valid = valid && (edge_count == 0 || predecessors != NULL)
+        && predecessor_cursors != NULL;
+    for (SolMirBlockId block = 0; valid && block < count; ++block) {
+        SolMirBlockId targets[3];
+        size_t target_count = 0;
+        valid = mir_block_successors(mir, block, targets, &target_count);
+        for (size_t index = 0; valid && index < target_count; ++index) {
+            SolMirBlockId target = targets[index];
+            size_t slot = predecessor_offsets[target]
+                + predecessor_cursors[target]++;
+            predecessors[slot] = block;
+        }
+    }
+    unsigned char *seen = calloc(count, 1);
+    SolMirBlockId *stack = malloc(count * sizeof(*stack));
+    size_t *next_successor = calloc(count, sizeof(*next_successor));
+    SolMirBlockId *postorder = malloc(count * sizeof(*postorder));
+    valid = valid && seen != NULL && stack != NULL && next_successor != NULL
+        && postorder != NULL;
+    size_t depth = 0;
+    size_t postorder_count = 0;
+    if (valid) {
+        stack[depth++] = mir->entry;
+        seen[mir->entry] = 1;
+    }
+    while (valid && depth != 0) {
+        SolMirBlockId block = stack[depth - 1];
+        SolMirBlockId targets[3];
+        size_t target_count = 0;
+        valid = mir_block_successors(mir, block, targets, &target_count);
+        if (!valid) break;
+        if (next_successor[block] < target_count) {
+            SolMirBlockId target = targets[next_successor[block]++];
+            if (!seen[target]) {
+                seen[target] = 1;
+                stack[depth++] = target;
+            }
+        } else {
+            postorder[postorder_count++] = block;
+            --depth;
+        }
+    }
+    valid = valid && predecessor_counts[mir->entry] == 0
+        && postorder_count == count;
+    size_t *rpo_index = malloc(count * sizeof(*rpo_index));
+    SolMirBlockId *idom = malloc(count * sizeof(*idom));
+    valid = valid && rpo_index != NULL && idom != NULL;
+    for (size_t order = 0; valid && order < count; ++order) {
+        SolMirBlockId block = postorder[count - order - 1];
+        rpo_index[block] = order;
+        idom[block] = SOL_MIR_NONE;
+    }
+    if (valid) {
+        idom[mir->entry] = mir->entry;
+        bool changed = true;
+        size_t passes = 0;
+        size_t pass_limit = count > SIZE_MAX / count
+            ? SIZE_MAX : count * count + 1;
+        while (changed && passes++ < pass_limit) {
+            changed = false;
+            for (size_t order = 1; order < count; ++order) {
+                SolMirBlockId block = postorder[count - order - 1];
+                SolMirBlockId next = SOL_MIR_NONE;
+                size_t begin = predecessor_offsets[block];
+                size_t end = predecessor_offsets[block + 1];
+                for (size_t edge = begin; edge < end; ++edge) {
+                    SolMirBlockId predecessor = predecessors[edge];
+                    if (idom[predecessor] == SOL_MIR_NONE) continue;
+                    next = next == SOL_MIR_NONE ? predecessor
+                        : mir_intersect_idom(next, predecessor, idom, rpo_index);
+                }
+                if (next == SOL_MIR_NONE) continue;
+                if (idom[block] != next) {
+                    idom[block] = next;
+                    changed = true;
+                }
+            }
+        }
+        valid = !changed;
+        for (size_t block = 0; valid && block < count; ++block) {
+            valid = idom[block] != SOL_MIR_NONE;
+        }
+    }
+    free(predecessor_counts);
+    free(predecessor_offsets);
+    free(predecessors);
+    free(predecessor_cursors);
+    free(seen);
+    free(stack);
+    free(next_successor);
+    free(postorder);
+    free(rpo_index);
+    if (!valid) {
+        free(idom);
+        return NULL;
+    }
+    return idom;
+}
+
+static bool mir_ssa_use_available(const SolMir *mir,
+    const SolMirBlockId *idom, SolMirValueId value_id,
+    SolMirBlockId use_block, size_t before_instruction) {
+    if (value_id >= mir->value_count || use_block >= mir->block_count) {
+        return false;
+    }
+    const SolMirValue *value = &mir->values[value_id];
+    if (value->kind == SOL_MIR_VALUE_TERMINATOR
+        || value->block >= mir->block_count) return false;
+    if (value->block != use_block) {
+        SolMirBlockId current = use_block;
+        while (current != value->block && current != mir->entry) {
+            current = idom[current];
+        }
+        return current == value->block;
+    }
+    return value->kind == SOL_MIR_VALUE_BLOCK_PARAMETER
+        || (value->kind == SOL_MIR_VALUE_INSTRUCTION
+            && value->definition < before_instruction);
+}
+
+static bool mir_ssa_edge_uses_available(const SolMir *mir,
+    const SolMirBlockId *idom, SolMirBlockId source, SolMirSlice arguments) {
+    if (!mir_slice_valid(arguments, mir->edge_value_count)) return false;
+    size_t before = mir->blocks[source].instructions.offset
+        + mir->blocks[source].instructions.count;
+    for (size_t index = 0; index < arguments.count; ++index) {
+        SolMirValueId value = mir->edge_values[arguments.offset + index];
+        if (value >= mir->value_count) return false;
+        if (mir->values[value].kind == SOL_MIR_VALUE_TERMINATOR) continue;
+        if (!mir_ssa_use_available(mir, idom, value, source, before)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool mir_validate_ssa_dominance(const SolIr *ir, const SolMir *mir,
+    SolDiagnostics *diagnostics) {
+    SolMirBlockId *idom = mir_compute_idom(mir);
+    if (idom == NULL) {
+        return mir_error(diagnostics, ir->callables[mir->callable].span,
+            "MIR CFG dominance computation failed");
+    }
+    bool valid = true;
+    for (size_t id = 0; valid && id < mir->instruction_count; ++id) {
+        const SolMirInstruction *instruction = &mir->instructions[id];
+        SolMirValueId uses[2];
+        size_t use_count = 0;
+        switch (instruction->kind) {
+            case SOL_MIR_INST_STORE:
+                uses[use_count++] = instruction->as.store.value;
+                break;
+            case SOL_MIR_INST_UNARY:
+                uses[use_count++] = instruction->as.unary.operand;
+                break;
+            case SOL_MIR_INST_BINARY:
+                uses[use_count++] = instruction->as.binary.left;
+                uses[use_count++] = instruction->as.binary.right;
+                break;
+            case SOL_MIR_INST_COMPOUND_UPDATE:
+                uses[use_count++] = instruction->as.compound_update.right;
+                break;
+            case SOL_MIR_INST_TEMPORARY_INIT:
+                uses[use_count++] = instruction->as.temporary_init.value;
+                break;
+            case SOL_MIR_INST_EXPRESSION_RESULT:
+                uses[use_count++] = instruction->as.operand;
+                break;
+            default:
+                break;
+        }
+        for (size_t use = 0; valid && use < use_count; ++use) {
+            valid = mir_ssa_use_available(mir, idom, uses[use],
+                instruction->block, id);
+        }
+    }
+    for (SolMirBlockId block = 0; valid && block < mir->block_count; ++block) {
+        const SolMirBlock *source = &mir->blocks[block];
+        const SolMirTerminator *term = &source->terminator;
+        size_t before = source->instructions.offset + source->instructions.count;
+        SolMirSlice edges[3];
+        size_t edge_count = 0;
+        SolMirValueId direct = SOL_MIR_NONE;
+        switch (term->kind) {
+            case SOL_MIR_TERM_GOTO:
+                edges[edge_count++] = term->as.go_to.arguments;
+                break;
+            case SOL_MIR_TERM_BRANCH:
+                direct = term->as.branch.condition;
+                edges[edge_count++] = term->as.branch.true_edge.arguments;
+                edges[edge_count++] = term->as.branch.false_edge.arguments;
+                break;
+            case SOL_MIR_TERM_RETURN:
+            case SOL_MIR_TERM_PANIC:
+                direct = term->as.value;
+                break;
+            case SOL_MIR_TERM_INVOKE:
+                edges[edge_count++] = term->as.invoke.normal_edge.arguments;
+                edges[edge_count++] = term->as.invoke.failure_edge.arguments;
+                break;
+            case SOL_MIR_TERM_CHECK_REFINED:
+                edges[edge_count++]
+                    = term->as.check_refined.normal_edge.arguments;
+                edges[edge_count++]
+                    = term->as.check_refined.failure_edge.arguments;
+                break;
+            case SOL_MIR_TERM_PROPAGATE:
+                edges[edge_count++] = term->as.propagate.value_edge.arguments;
+                edges[edge_count++] = term->as.propagate.residual_edge.arguments;
+                break;
+            case SOL_MIR_TERM_CHECK_CONTRACT:
+                direct = term->as.check_contract.result;
+                edges[edge_count++]
+                    = term->as.check_contract.satisfied_edge.arguments;
+                edges[edge_count++]
+                    = term->as.check_contract.violation_edge.arguments;
+                edges[edge_count++]
+                    = term->as.check_contract.failure_edge.arguments;
+                break;
+            case SOL_MIR_TERM_BREAK:
+            case SOL_MIR_TERM_CONTINUE:
+                edges[edge_count++] = term->as.transfer.edge.arguments;
+                break;
+            default:
+                break;
+        }
+        if (direct != SOL_MIR_NONE) {
+            valid = mir_ssa_use_available(mir, idom, direct, block, before);
+        }
+        for (size_t edge = 0; valid && edge < edge_count; ++edge) {
+            valid = mir_ssa_edge_uses_available(mir, idom, block,
+                edges[edge]);
+        }
+    }
+    free(idom);
+    return valid || mir_error(diagnostics, ir->callables[mir->callable].span,
+        "MIR SSA use is not dominated by its definition");
 }
 
 bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
@@ -6802,7 +7133,8 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
     free(queue);
     if (!valid) return mir_error(diagnostics, callable->span,
         "MIR contains an unreachable block or entry predecessor");
-    return mir_validate_contract_envelope(ir, mir, diagnostics)
+    return mir_validate_ssa_dominance(ir, mir, diagnostics)
+        && mir_validate_contract_envelope(ir, mir, diagnostics)
         && mir_validate_arena_ownership(mir, diagnostics, callable->span)
         && mir_validate_storage(ir, mir, diagnostics)
         && mir_validate_paths(ir, mir, diagnostics)
