@@ -141,6 +141,263 @@ static bool mir_equal(const SolMir *left, const SolMir *right) {
             left->temporary_count, sizeof(*left->temporaries));
 }
 
+static char *render_mir(const SolIr *ir, const SolMir *mir, size_t *length) {
+    FILE *stream = tmpfile();
+    if (stream == NULL) return NULL;
+    if (!sol_mir_render(stream, ir, mir)) {
+        fclose(stream);
+        return NULL;
+    }
+    long end = ftell(stream);
+    if (end < 0 || (uintmax_t)end > SIZE_MAX - 1 || fseek(stream, 0, SEEK_SET)) {
+        fclose(stream);
+        return NULL;
+    }
+    char *text = malloc((size_t)end + 1);
+    if (text == NULL) {
+        fclose(stream);
+        return NULL;
+    }
+    size_t read = fread(text, 1, (size_t)end, stream);
+    fclose(stream);
+    if (read != (size_t)end) {
+        free(text);
+        return NULL;
+    }
+    text[read] = '\0';
+    *length = read;
+    return text;
+}
+
+static size_t rendered_instruction_kinds[SOL_MIR_INST_CAPTURE_SNAPSHOT + 1];
+static size_t rendered_terminator_kinds[SOL_MIR_TERM_CONTRACT_VIOLATION + 1];
+static size_t rendered_value_kinds[SOL_MIR_VALUE_TERMINATOR + 1];
+static size_t rendered_construct_kinds[SOL_MIR_CONSTRUCT_DISTINCT + 1];
+static size_t rendered_access_modes[SOL_ACCESS_EXCLUSIVE + 1];
+
+static SolMirLowerOutcome lower_and_render(const SolIr *ir,
+    SolIrCallableId callable_id, SolMir *mir, SolDiagnostics *diagnostics) {
+    SolMirLowerOutcome outcome
+        = sol_mir_lower_callable(ir, callable_id, mir, diagnostics);
+    if (outcome != SOL_MIR_LOWER_SUCCEEDED) return outcome;
+    size_t length = 0;
+    char *rendered = render_mir(ir, mir, &length);
+    CHECK(rendered != NULL && length != 0);
+    free(rendered);
+    for (size_t id = 0; id < mir->instruction_count; ++id) {
+        SolMirInstructionKind kind = mir->instructions[id].kind;
+        if ((size_t)kind <= SOL_MIR_INST_CAPTURE_SNAPSHOT) {
+            ++rendered_instruction_kinds[kind];
+        }
+        if (kind == SOL_MIR_INST_CONSTRUCT
+            && (size_t)mir->instructions[id].as.construct.kind
+                <= SOL_MIR_CONSTRUCT_DISTINCT) {
+            ++rendered_construct_kinds[mir->instructions[id].as.construct.kind];
+        }
+    }
+    for (size_t id = 0; id < mir->block_count; ++id) {
+        const SolMirTerminator *term = &mir->blocks[id].terminator;
+        if ((size_t)term->kind <= SOL_MIR_TERM_CONTRACT_VIOLATION) {
+            ++rendered_terminator_kinds[term->kind];
+        }
+        if (term->kind == SOL_MIR_TERM_INVOKE
+            && (term->as.invoke.kind == SOL_IR_CALL_METHOD
+                || term->as.invoke.kind == SOL_IR_CALL_CAPABILITY)
+            && (size_t)term->as.invoke.receiver.access
+                <= SOL_ACCESS_EXCLUSIVE) {
+            ++rendered_access_modes[term->as.invoke.receiver.access];
+        }
+    }
+    for (size_t id = 0; id < mir->value_count; ++id) {
+        if ((size_t)mir->values[id].kind <= SOL_MIR_VALUE_TERMINATOR) {
+            ++rendered_value_kinds[mir->values[id].kind];
+        }
+    }
+    for (size_t id = 0; id < mir->call_argument_count; ++id) {
+        SolAccessMode access = mir->call_arguments[id].access;
+        if ((size_t)access <= SOL_ACCESS_EXCLUSIVE) {
+            ++rendered_access_modes[access];
+        }
+    }
+    return outcome;
+}
+
+#define sol_mir_lower_callable(ir, callable_id, mir, diagnostics) \
+    lower_and_render((ir), (callable_id), (mir), (diagnostics))
+
+static void test_render_vocabulary_census(void) {
+    for (size_t kind = 0; kind <= SOL_MIR_INST_CAPTURE_SNAPSHOT; ++kind) {
+        CHECK(rendered_instruction_kinds[kind] != 0);
+    }
+    for (size_t kind = SOL_MIR_TERM_GOTO;
+        kind <= SOL_MIR_TERM_CONTRACT_VIOLATION; ++kind) {
+        CHECK(rendered_terminator_kinds[kind] != 0);
+    }
+    for (size_t kind = 0; kind <= SOL_MIR_VALUE_TERMINATOR; ++kind) {
+        CHECK(rendered_value_kinds[kind] != 0);
+    }
+    for (size_t kind = 0; kind <= SOL_MIR_CONSTRUCT_DISTINCT; ++kind) {
+        CHECK(rendered_construct_kinds[kind] != 0);
+    }
+    for (size_t access = 0; access <= SOL_ACCESS_EXCLUSIVE; ++access) {
+        CHECK(rendered_access_modes[access] != 0);
+    }
+}
+
+static void test_canonical_rendering(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_render\n"
+        "record Pair { left: Int64, right: Int64 }\n"
+        "type Positive = refined Int64 where self > 0 && (1, true).0 == 1\n"
+        "function target() -> Int64 { return 7 }\n"
+        "function caller() -> Int64 { return target() }\n"
+        "function make() -> Positive { return Positive(1) }\n"
+        "function rendered(flag: Bool) -> Text { "
+        "let pair = Pair { left = 1, right = 2 } "
+        "let negative = -1 let inverse = !flag "
+        "if flag { return \"escaped\" } else { () } "
+        "return \"plain\" }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolMir mir;
+    SolMir repeated;
+    sol_mir_init(&mir);
+    sol_mir_init(&repeated);
+    SolIrCallableId id = callable(&compilation.ir, "rendered");
+    SolMirLowerOutcome first_outcome = sol_mir_lower_callable(&compilation.ir,
+        id, &mir, &compilation.diagnostics);
+    SolMirLowerOutcome second_outcome = sol_mir_lower_callable(&compilation.ir,
+        id, &repeated, &compilation.diagnostics);
+    CHECK(first_outcome == SOL_MIR_LOWER_SUCCEEDED);
+    CHECK(second_outcome == SOL_MIR_LOWER_SUCCEEDED);
+    char escaped[] = "quote: \" slash: \\ line:\n high:\200";
+    char *saved_text = NULL;
+    for (size_t expression = 0;
+        expression < compilation.ir.expression_count; ++expression) {
+        SolIrExpression *item = &compilation.ir.expressions[expression];
+        if (item->kind == SOL_IR_EXPR_STRING
+            && strcmp(item->as.string, "escaped") == 0) {
+            saved_text = item->as.string;
+            item->as.string = escaped;
+            break;
+        }
+    }
+    CHECK(saved_text != NULL);
+    size_t first_length = 0;
+    size_t second_length = 0;
+    char *first = render_mir(&compilation.ir, &mir, &first_length);
+    char *second = render_mir(&compilation.ir, &repeated, &second_length);
+    CHECK(first != NULL && second != NULL);
+    if (first != NULL && second != NULL) {
+        CHECK(first_length == second_length);
+        CHECK(memcmp(first, second, first_length) == 0);
+        CHECK(first_length != 0 && first[first_length - 1] == '\n');
+        CHECK(strstr(first, "mir callable=c") != NULL);
+        CHECK(strstr(first, "contract_body=none") != NULL);
+        CHECK(strstr(first, "block b") != NULL);
+        CHECK(strstr(first, "value v") != NULL);
+        CHECK(strstr(first, "temporary t") != NULL);
+        CHECK(strstr(first, "kind=construct") != NULL);
+        CHECK(strstr(first, "source_expression expr") != NULL);
+        CHECK(strstr(first,
+            "quote: \\\" slash: \\\\ line:\\n high:\\x80") != NULL);
+    }
+    free(first);
+    free(second);
+
+    SolMir refined;
+    sol_mir_init(&refined);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "make"), &refined,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    size_t refined_length = 0;
+    char *refined_text = render_mir(
+        &compilation.ir, &refined, &refined_length);
+    CHECK(refined_text != NULL && refined_length != 0);
+    if (refined_text != NULL) {
+        CHECK(strstr(refined_text, "root=temporary(expr") != NULL);
+        CHECK(strstr(refined_text,
+            "kind=refinement_self") != NULL);
+        CHECK(strstr(refined_text, "kind=refinement_self local_use=none ty=")
+            != NULL);
+        CHECK(strstr(refined_text, " definition=d") != NULL);
+    }
+    free(refined_text);
+    sol_mir_free(&refined);
+
+    SolMir caller;
+    sol_mir_init(&caller);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "caller"), &caller,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    size_t caller_length = 0;
+    char *caller_text = render_mir(
+        &compilation.ir, &caller, &caller_length);
+    SolMirTerminator *invoke = NULL;
+    for (size_t block = 0; block < caller.block_count; ++block) {
+        if (caller.blocks[block].terminator.kind == SOL_MIR_TERM_INVOKE) {
+            invoke = &caller.blocks[block].terminator;
+            break;
+        }
+    }
+    CHECK(caller_text != NULL && invoke != NULL);
+    if (caller_text != NULL && invoke != NULL) {
+        SolIrExpression *source
+            = &compilation.ir.expressions[invoke->as.invoke.source_expression];
+        SolIrExpressionId callee = source->as.call.callee;
+        SolIrExpressionId receiver = source->as.call.receiver;
+        SolIrVariantId variant = source->as.call.variant;
+        SolIrDefinitionId definition = source->as.call.definition;
+        size_t receiver_formal = invoke->as.invoke.receiver.formal;
+        SolAccessMode receiver_access = invoke->as.invoke.receiver.access;
+        source->as.call.callee = 0;
+        source->as.call.receiver = 0;
+        source->as.call.variant = 0;
+        source->as.call.definition = 0;
+        invoke->as.invoke.receiver.formal = 7;
+        invoke->as.invoke.receiver.access = (SolAccessMode)99;
+        CHECK(sol_mir_validate(&compilation.ir, &caller, NULL));
+        size_t canonical_length = 0;
+        char *canonical = render_mir(
+            &compilation.ir, &caller, &canonical_length);
+        CHECK(canonical != NULL && canonical_length == caller_length);
+        if (canonical != NULL && canonical_length == caller_length) {
+            CHECK(memcmp(caller_text, canonical, caller_length) == 0);
+        }
+        free(canonical);
+        source->as.call.callee = callee;
+        source->as.call.receiver = receiver;
+        source->as.call.variant = variant;
+        source->as.call.definition = definition;
+        invoke->as.invoke.receiver.formal = receiver_formal;
+        invoke->as.invoke.receiver.access = receiver_access;
+    }
+    free(caller_text);
+    sol_mir_free(&caller);
+
+    FILE *invalid = tmpfile();
+    CHECK(invalid != NULL);
+    if (invalid != NULL && first_outcome == SOL_MIR_LOWER_SUCCEEDED) {
+        SolMirBlockId block_id = mir.blocks[mir.entry].id;
+        mir.blocks[mir.entry].id = mir.block_count;
+        CHECK(!sol_mir_render(invalid, &compilation.ir, &mir));
+        CHECK(ftell(invalid) == 0);
+        mir.blocks[mir.entry].id = block_id;
+    }
+    if (invalid != NULL) fclose(invalid);
+    if (saved_text != NULL) {
+        for (size_t expression = 0;
+            expression < compilation.ir.expression_count; ++expression) {
+            SolIrExpression *item = &compilation.ir.expressions[expression];
+            if (item->kind == SOL_IR_EXPR_STRING
+                && item->as.string == escaped) item->as.string = saved_text;
+        }
+    }
+    sol_mir_free(&mir);
+    sol_mir_free(&repeated);
+    free_compilation(&compilation);
+}
+
 static void test_initial_lowering_and_determinism(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -3258,6 +3515,7 @@ static void test_generic_evidence_and_implementation_checkpoint(void) {
 }
 
 int main(void) {
+    test_canonical_rendering();
     test_initial_lowering_and_determinism();
     test_transactional_unsupported();
     test_callable_contract_envelope();
@@ -3281,6 +3539,7 @@ int main(void) {
     test_handler_lowering();
     test_owned_temporary_cleanup();
     test_generic_evidence_and_implementation_checkpoint();
+    test_render_vocabulary_census();
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

@@ -669,9 +669,14 @@ edges. P1b.2 shares the owning IR's structural `Copy` fixed point and validates
 affine SSA availability path-sensitively. Consuming instruction and terminator uses
 make values unavailable, edge transport consumes each source at most once per edge
 and defines fresh target parameters, alternative edges remain independent, and
-may-unavailable joins converge across branches and loop backedges. Canonical
-rendering, a bounded MIR evaluator/trace, representation, runtime ABI, and a backend
-remain open.
+may-unavailable joins converge across branches and loop backedges. P1b.3 adds
+`sol_mir_render`, a validated, overflow-checked, versionless internal text form.
+It emits fixed ASCII spellings and escaping, explicit sentinel IDs, source-owned
+relations, and every semantic MIR block, value, instruction, place, edge, temporary,
+loop, call, construction, contract, and proof relation in deterministic arena or
+block order. Rendering is buffered before one output write and is intentionally not
+a stable serialization format. A bounded MIR evaluator/trace, representation,
+runtime ABI, and a backend remain open.
 
 ### Phase 0 — Executable language model
 

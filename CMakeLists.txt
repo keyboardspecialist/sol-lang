@@ -66,6 +66,7 @@ add_library(sol_compiler STATIC
     src/interpreter.c
     src/lexer.c
     src/mir.c
+    src/mir_render.c
     src/ownership.c
     src/package.c
     src/parser.c

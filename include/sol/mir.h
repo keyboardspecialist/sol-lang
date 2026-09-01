@@ -3,6 +3,8 @@
 
 #include "sol/ir.h"
 
+#include <stdio.h>
+
 /* Unstable callable-scoped CFG MIR checkpoint; not a serialized or target ABI. */
 typedef size_t SolMirBlockId;
 typedef size_t SolMirInstructionId;
@@ -352,5 +354,6 @@ bool sol_mir_validate(
     const SolMir *mir,
     SolDiagnostics *diagnostics
 );
+bool sol_mir_render(FILE *stream, const SolIr *ir, const SolMir *mir);
 
 #endif

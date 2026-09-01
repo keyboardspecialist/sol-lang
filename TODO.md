@@ -145,7 +145,7 @@ validated MIR can be rendered and evaluated differentially:
 | --- | ---: | --- | --- |
 | [x] | P1b.1 | Freeze structural SSA dominance | Compute deterministic reverse-postorder immediate dominators over compact predecessor slices; permit instruction and block-parameter values exactly in dominated blocks; retain strict same-block definition order and edge-scoped terminator results; reject sibling, join-bypass, loop-backward, and edge-argument leaks |
 | [x] | P1b.2 | Freeze affine SSA ownership | Classify every value use as copy, consume, borrow, or transport and validate non-Copy ownership across instructions, edges, joins, loops, calls, and cleanup |
-| [ ] | P1b.3 | Add canonical internal MIR rendering | Emit one bounded deterministic versionless text form covering every semantic block, value, place, edge, temporary, loop, and source relation |
+| [x] | P1b.3 | Add canonical internal MIR rendering | Emit one bounded deterministic versionless text form covering every semantic block, value, place, edge, temporary, loop, and source relation |
 | [ ] | P1b.4 | Add a bounded MIR evaluator and trace | Execute the frozen MIR vocabulary independently under explicit limits and compare results, failures, host behavior, and cleanup with the owning-IR interpreter |
 
 Items 28-39, 41-42, 44, 46, 50B+, and 52-61 are deferred until a
