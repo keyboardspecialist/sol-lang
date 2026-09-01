@@ -605,10 +605,11 @@ edges, invoke/refinement result transport and argument provenance, source/type/c
 relations, exact parameter activation, local initialization/moves, lexical cleanup
 order, balanced regions, loop source/parent identity, condition/body/exit edges,
 natural backedges, and cleanup at transfer boundaries. Loop obligations are retained
-as proof-only metadata and not executed. Authority-free infallible zero/one-payload
-records, enum variants, Option/Result cases, and non-refined distinct wrappers use
-semantic construction instructions and ordered operand metadata without choosing
-layout. Typed reusable temporary slots now stage multiple owned call/construction
+as proof-only metadata and not executed. Infallible records, tuples, enum variants,
+Option/Result cases, non-refined distinct wrappers, and derived capability wrappers
+use semantic construction instructions with ordered operands and exact capability and
+operation-root provenance without choosing layout. Typed reusable temporary slots now
+stage multiple owned call/construction
 operands, consume exact pending suffixes on invoke/construction, preserve outer
 values across loop transfers, and destroy abandoned operands in interpreter order.
 This enables multi-operand records, tuples, and enum payloads without requiring P1b
@@ -628,8 +629,10 @@ record/tuple paths now support projected copies, fully initialized replacement, 
 direct shared/exclusive operands with sibling-aware overlap and abstract normal-edge
 writeback. A separate layout-free path-state fixed point now tracks projected moves,
 sibling availability, exact/ancestor hole restoration, conservative joins and loop
-backedges, borrow availability, and whole-local cleanup of partial aggregates. It does
-not yet cover authority-bearing construction. Dynamic callback calls now stage the
+backedges, borrow availability, and whole-local cleanup of partial aggregates. Checked
+compound assignment stages an update-read before the RHS, retains the exact operator
+and target place, and commits replacement only after the abstract checked arithmetic
+succeeds. Dynamic callback calls now stage the
 callee before operands and use the same abstract normal/failure invoke edges, with
 exact structural signature, access, source-order, temporary-consumption, and cleanup
 validation. Concrete nongeneric method calls now select implementation callables from
@@ -655,10 +658,11 @@ parameter metadata. Invokes retain owning-IR type-argument, instantiated effect-
 and tail, and dispatch-evidence slices without monomorphization; forwarded trait
 evidence keeps its requirement, binding, and caller parameter rather than selecting
 a concrete method. Executable trait implementations activate and clean their exact
-receiver before ordinary parameters. Bodyless trait requirements and capability
-members still have no standalone MIR. Compound assignment, authority-bearing
-construction, every other remaining E6 callable, representation, runtime ABI, and a
-backend remain open.
+receiver before ordinary parameters. All 14 executable E6 callables now lower
+deterministically; the five bodyless trait requirements and hosted capability members
+intentionally have no standalone MIR. P1b dominance/SSA and ownership validation,
+canonical rendering, a bounded MIR evaluator/trace, representation, runtime ABI, and
+a backend remain open.
 
 ### Phase 0 — Executable language model
 

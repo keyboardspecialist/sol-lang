@@ -154,6 +154,9 @@ if(BUILD_TESTING)
     target_link_libraries(sol_ir_tests PRIVATE sol_compiler)
     add_executable(sol_mir_tests tests/mir_tests.c)
     target_link_libraries(sol_mir_tests PRIVATE sol_compiler)
+    target_compile_definitions(sol_mir_tests PRIVATE
+        SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
     add_executable(sol_interpreter_tests tests/interpreter_tests.c)
     target_link_libraries(sol_interpreter_tests PRIVATE sol_compiler)
     add_executable(sol_inspection_tests tests/inspection_tests.c)

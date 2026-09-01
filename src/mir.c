@@ -128,6 +128,120 @@ static bool mir_empty(const SolMir *mir) {
         && mir->temporary_count == 0 && mir->temporary_capacity == 0;
 }
 
+static void mir_canonicalize_terminator(SolMirTerminator *terminator) {
+    SolMirTerminator source = *terminator;
+    memset(terminator, 0, sizeof(*terminator));
+    terminator->kind = source.kind;
+    terminator->span = source.span;
+    switch (source.kind) {
+        case SOL_MIR_TERM_GOTO:
+            terminator->as.go_to.block = source.as.go_to.block;
+            terminator->as.go_to.arguments = source.as.go_to.arguments;
+            break;
+        case SOL_MIR_TERM_BRANCH:
+            terminator->as.branch.condition = source.as.branch.condition;
+            terminator->as.branch.true_edge = source.as.branch.true_edge;
+            terminator->as.branch.false_edge = source.as.branch.false_edge;
+            break;
+        case SOL_MIR_TERM_RETURN:
+        case SOL_MIR_TERM_PANIC:
+            terminator->as.value = source.as.value;
+            break;
+        case SOL_MIR_TERM_INVOKE:
+            terminator->as.invoke.source_expression
+                = source.as.invoke.source_expression;
+            terminator->as.invoke.kind = source.as.invoke.kind;
+            terminator->as.invoke.callable = source.as.invoke.callable;
+            terminator->as.invoke.type_arguments
+                = source.as.invoke.type_arguments;
+            terminator->as.invoke.effects = source.as.invoke.effects;
+            terminator->as.invoke.effect_parameter
+                = source.as.invoke.effect_parameter;
+            terminator->as.invoke.evidence = source.as.invoke.evidence;
+            terminator->as.invoke.callee = source.as.invoke.callee;
+            terminator->as.invoke.receiver.formal
+                = source.as.invoke.receiver.formal;
+            terminator->as.invoke.receiver.access
+                = source.as.invoke.receiver.access;
+            terminator->as.invoke.receiver.source_expression
+                = source.as.invoke.receiver.source_expression;
+            terminator->as.invoke.receiver.temporary
+                = source.as.invoke.receiver.temporary;
+            terminator->as.invoke.receiver.place
+                = source.as.invoke.receiver.place;
+            terminator->as.invoke.arguments = source.as.invoke.arguments;
+            terminator->as.invoke.result = source.as.invoke.result;
+            terminator->as.invoke.normal_edge = source.as.invoke.normal_edge;
+            terminator->as.invoke.failure_edge = source.as.invoke.failure_edge;
+            break;
+        case SOL_MIR_TERM_UNREACHABLE:
+            terminator->as.unreachable.statement
+                = source.as.unreachable.statement;
+            terminator->as.unreachable.obligation
+                = source.as.unreachable.obligation;
+            break;
+        case SOL_MIR_TERM_BREAK:
+        case SOL_MIR_TERM_CONTINUE:
+            terminator->as.transfer.statement = source.as.transfer.statement;
+            terminator->as.transfer.loop = source.as.transfer.loop;
+            terminator->as.transfer.edge = source.as.transfer.edge;
+            break;
+        case SOL_MIR_TERM_CHECK_REFINED:
+            terminator->as.check_refined.source_expression
+                = source.as.check_refined.source_expression;
+            terminator->as.check_refined.definition
+                = source.as.check_refined.definition;
+            terminator->as.check_refined.obligation
+                = source.as.check_refined.obligation;
+            terminator->as.check_refined.representation
+                = source.as.check_refined.representation;
+            terminator->as.check_refined.result
+                = source.as.check_refined.result;
+            terminator->as.check_refined.normal_edge
+                = source.as.check_refined.normal_edge;
+            terminator->as.check_refined.failure_edge
+                = source.as.check_refined.failure_edge;
+            break;
+        case SOL_MIR_TERM_MATCH_FAILURE:
+            terminator->as.match_failure = source.as.match_failure;
+            break;
+        case SOL_MIR_TERM_PROPAGATE:
+            terminator->as.propagate.source_expression
+                = source.as.propagate.source_expression;
+            terminator->as.propagate.kind = source.as.propagate.kind;
+            terminator->as.propagate.operand = source.as.propagate.operand;
+            terminator->as.propagate.value_result
+                = source.as.propagate.value_result;
+            terminator->as.propagate.residual_result
+                = source.as.propagate.residual_result;
+            terminator->as.propagate.value_edge
+                = source.as.propagate.value_edge;
+            terminator->as.propagate.residual_edge
+                = source.as.propagate.residual_edge;
+            break;
+        case SOL_MIR_TERM_CHECK_CONTRACT:
+            terminator->as.check_contract.obligation
+                = source.as.check_contract.obligation;
+            terminator->as.check_contract.phase
+                = source.as.check_contract.phase;
+            terminator->as.check_contract.outcome
+                = source.as.check_contract.outcome;
+            terminator->as.check_contract.result
+                = source.as.check_contract.result;
+            terminator->as.check_contract.satisfied_edge
+                = source.as.check_contract.satisfied_edge;
+            terminator->as.check_contract.violation_edge
+                = source.as.check_contract.violation_edge;
+            terminator->as.check_contract.failure_edge
+                = source.as.check_contract.failure_edge;
+            break;
+        case SOL_MIR_TERM_CONTRACT_VIOLATION:
+            terminator->as.contract_violation = source.as.contract_violation;
+            break;
+        default: break;
+    }
+}
+
 static SolMirBlockId mir_append_block(MirLowerer *lowerer, SolSpan span) {
     SolMir *mir = lowerer->mir;
     if (!mir_grow((void **)&mir->blocks, &mir->block_capacity,
@@ -136,14 +250,14 @@ static SolMirBlockId mir_append_block(MirLowerer *lowerer, SolSpan span) {
         return SOL_MIR_NONE;
     }
     SolMirBlockId id = mir->block_count++;
-    mir->blocks[id] = (SolMirBlock){
-        .id = id,
-        .order = SOL_MIR_NONE,
-        .parameters = {mir->parameter_value_count, 0},
-        .instructions = {mir->instruction_count, 0},
-        .terminator = {.kind = SOL_MIR_TERM_INVALID},
-        .span = span,
-    };
+    SolMirBlock *block = &mir->blocks[id];
+    memset(block, 0, sizeof(*block));
+    block->id = id;
+    block->order = SOL_MIR_NONE;
+    block->parameters.offset = mir->parameter_value_count;
+    block->instructions.offset = mir->instruction_count;
+    block->terminator.kind = SOL_MIR_TERM_INVALID;
+    block->span = span;
     return id;
 }
 
@@ -170,7 +284,14 @@ static SolMirValueId mir_append_value(MirLowerer *lowerer,
         return SOL_MIR_NONE;
     }
     SolMirValueId id = mir->value_count++;
-    mir->values[id] = value;
+    SolMirValue *stored = &mir->values[id];
+    memset(stored, 0, sizeof(*stored));
+    stored->kind = value.kind;
+    stored->type = value.type;
+    stored->block = value.block;
+    stored->definition = value.definition;
+    stored->source_expression = value.source_expression;
+    stored->span = value.span;
     return id;
 }
 
@@ -214,7 +335,108 @@ static SolMirInstructionId mir_append_instruction(MirLowerer *lowerer,
     SolMirInstructionId id = mir->instruction_count++;
     instruction.block = lowerer->current;
     instruction.result = SOL_MIR_NONE;
-    mir->instructions[id] = instruction;
+    SolMirInstruction *stored = &mir->instructions[id];
+    memset(stored, 0, sizeof(*stored));
+    stored->kind = instruction.kind;
+    stored->block = instruction.block;
+    stored->result = instruction.result;
+    stored->type = instruction.type;
+    stored->source_expression = instruction.source_expression;
+    stored->span = instruction.span;
+    switch (instruction.kind) {
+        case SOL_MIR_INST_CONST_INT64:
+            stored->as.integer = instruction.as.integer; break;
+        case SOL_MIR_INST_CONST_BOOL:
+            stored->as.boolean = instruction.as.boolean; break;
+        case SOL_MIR_INST_PARAMETER_LIVE:
+        case SOL_MIR_INST_STORAGE_LIVE:
+        case SOL_MIR_INST_DROP_IF_INITIALIZED:
+        case SOL_MIR_INST_STORAGE_DEAD:
+            stored->as.local = instruction.as.local; break;
+        case SOL_MIR_INST_LOAD_COPY:
+        case SOL_MIR_INST_LOAD_MOVE:
+        case SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED:
+            stored->as.place.local = instruction.as.place.local;
+            stored->as.place.source_place = instruction.as.place.source_place;
+            break;
+        case SOL_MIR_INST_LOAD_UPDATE:
+            stored->as.update_load.statement
+                = instruction.as.update_load.statement;
+            stored->as.update_load.place.local
+                = instruction.as.update_load.place.local;
+            stored->as.update_load.place.source_place
+                = instruction.as.update_load.place.source_place;
+            break;
+        case SOL_MIR_INST_STORE:
+            stored->as.store.place.local = instruction.as.store.place.local;
+            stored->as.store.place.source_place
+                = instruction.as.store.place.source_place;
+            stored->as.store.value = instruction.as.store.value;
+            break;
+        case SOL_MIR_INST_UNARY:
+            stored->as.unary.operator_kind = instruction.as.unary.operator_kind;
+            stored->as.unary.operand = instruction.as.unary.operand;
+            break;
+        case SOL_MIR_INST_BINARY:
+            stored->as.binary.operator_kind = instruction.as.binary.operator_kind;
+            stored->as.binary.left = instruction.as.binary.left;
+            stored->as.binary.right = instruction.as.binary.right;
+            break;
+        case SOL_MIR_INST_COMPOUND_UPDATE:
+            stored->as.compound_update.statement
+                = instruction.as.compound_update.statement;
+            stored->as.compound_update.operator_kind
+                = instruction.as.compound_update.operator_kind;
+            stored->as.compound_update.place.local
+                = instruction.as.compound_update.place.local;
+            stored->as.compound_update.place.source_place
+                = instruction.as.compound_update.place.source_place;
+            stored->as.compound_update.previous
+                = instruction.as.compound_update.previous;
+            stored->as.compound_update.right
+                = instruction.as.compound_update.right;
+            break;
+        case SOL_MIR_INST_REGION_ENTER:
+        case SOL_MIR_INST_REGION_EXIT:
+            stored->as.region = instruction.as.region; break;
+        case SOL_MIR_INST_TEMPORARY_INIT:
+            stored->as.temporary_init.temporary
+                = instruction.as.temporary_init.temporary;
+            stored->as.temporary_init.value = instruction.as.temporary_init.value;
+            break;
+        case SOL_MIR_INST_TEMPORARY_DROP:
+            stored->as.temporary_drop.temporary
+                = instruction.as.temporary_drop.temporary;
+            stored->as.temporary_drop.preserve_depth
+                = instruction.as.temporary_drop.preserve_depth;
+            break;
+        case SOL_MIR_INST_EXPRESSION_RESULT:
+            stored->as.operand = instruction.as.operand; break;
+        case SOL_MIR_INST_PATTERN_TEST:
+        case SOL_MIR_INST_PATTERN_VALUE:
+        case SOL_MIR_INST_MATCH_ARM:
+            stored->as.pattern.match_expression
+                = instruction.as.pattern.match_expression;
+            stored->as.pattern.arm = instruction.as.pattern.arm;
+            stored->as.pattern.arm_ordinal
+                = instruction.as.pattern.arm_ordinal;
+            stored->as.pattern.pattern = instruction.as.pattern.pattern;
+            stored->as.pattern.scrutinee = instruction.as.pattern.scrutinee;
+            break;
+        case SOL_MIR_INST_CONSTRUCT:
+            stored->as.construct.kind = instruction.as.construct.kind;
+            stored->as.construct.definition = instruction.as.construct.definition;
+            stored->as.construct.variant = instruction.as.construct.variant;
+            stored->as.construct.operands = instruction.as.construct.operands;
+            stored->as.construct.capability_roots
+                = instruction.as.construct.capability_roots;
+            stored->as.construct.operation_roots
+                = instruction.as.construct.operation_roots;
+            break;
+        case SOL_MIR_INST_CAPTURE_SNAPSHOT:
+            stored->as.snapshot = instruction.as.snapshot; break;
+        default: break;
+    }
     ++mir->blocks[lowerer->current].instructions.count;
     if (has_result) {
         SolMirValueId result = mir_append_value(lowerer, (SolMirValue){
@@ -264,7 +486,14 @@ static bool mir_append_call_argument(MirLowerer *lowerer,
         lowerer->failed = true;
         return false;
     }
-    mir->call_arguments[mir->call_argument_count++] = argument;
+    SolMirCallArgument *stored
+        = &mir->call_arguments[mir->call_argument_count++];
+    memset(stored, 0, sizeof(*stored));
+    stored->formal = argument.formal;
+    stored->access = argument.access;
+    stored->source_expression = argument.source_expression;
+    stored->temporary = argument.temporary;
+    stored->place = argument.place;
     return true;
 }
 
@@ -1092,23 +1321,20 @@ static LoweredValue mir_lower_construct(MirLowerer *lowerer,
     SolIrDefinitionId definition = SOL_IR_NONE;
     SolIrVariantId variant = SOL_IR_NONE;
     SolIrSlice operands = {0};
-    if (expression->capability_roots.count != 0
-        || expression->operation_roots.count != 0) {
-        mir_unsupported(lowerer, expression->span,
-            "P1a.3b MIR construction does not yet retain authority roots");
-        return mir_unreachable();
-    }
     if (expression->kind == SOL_IR_EXPR_RECORD) {
         definition = expression->as.record.definition;
         operands = expression->as.record.fields;
-        if (definition >= lowerer->ir->definition_count
-            || lowerer->ir->definitions[definition].kind
-                != SOL_IR_DEFINITION_RECORD) {
-            mir_unsupported(lowerer, expression->span,
-                "P1a.3b MIR does not lower capability record wrappers");
-            return mir_unreachable();
+        if (definition >= lowerer->ir->definition_count) {
+            return mir_failure(lowerer);
         }
-        kind = SOL_MIR_CONSTRUCT_RECORD;
+        SolIrDefinitionKind definition_kind
+            = lowerer->ir->definitions[definition].kind;
+        if (definition_kind != SOL_IR_DEFINITION_RECORD
+            && definition_kind != SOL_IR_DEFINITION_CAPABILITY) {
+            return mir_failure(lowerer);
+        }
+        kind = definition_kind == SOL_IR_DEFINITION_CAPABILITY
+            ? SOL_MIR_CONSTRUCT_CAPABILITY : SOL_MIR_CONSTRUCT_RECORD;
     } else if (expression->kind == SOL_IR_EXPR_TUPLE) {
         operands = expression->as.tuple.operands;
         kind = SOL_MIR_CONSTRUCT_TUPLE;
@@ -1213,6 +1439,8 @@ static LoweredValue mir_lower_construct(MirLowerer *lowerer,
                 .definition = definition,
                 .variant = variant,
                 .operands = construct_operands,
+                .capability_roots = expression->capability_roots,
+                .operation_roots = expression->operation_roots,
             },
         });
     lowerer->pending_temporary_count = operation_depth;
@@ -1835,11 +2063,8 @@ static LoweredValue mir_lower_block(MirLowerer *lowerer,
                 last.value = SOL_MIR_NONE;
                 break;
             case SOL_IR_STATEMENT_ASSIGNMENT: {
-                if (statement->operator_kind != SOL_TOKEN_EQUAL
-                    || statement->target >= lowerer->ir->expression_count) {
-                    mir_unsupported(lowerer, statement->span,
-                        "P1a MIR checkpoint supports only plain whole-local assignment");
-                    return mir_unreachable();
+                if (statement->target >= lowerer->ir->expression_count) {
+                    return mir_failure(lowerer);
                 }
                 const SolIrExpression *target
                     = &lowerer->ir->expressions[statement->target];
@@ -1853,9 +2078,56 @@ static LoweredValue mir_lower_block(MirLowerer *lowerer,
                         "P1a MIR supports only local-rooted assignment");
                     return mir_unreachable();
                 }
+                SolMirTemporaryId previous = SOL_MIR_NONE;
+                if (statement->operator_kind != SOL_TOKEN_EQUAL) {
+                    SolMirValueId old_value = mir_instruction_result(lowerer,
+                        (SolMirInstruction){
+                            .kind = SOL_MIR_INST_LOAD_UPDATE,
+                            .type = target->type,
+                            .source_expression = statement->target,
+                            .span = target->span,
+                            .as.update_load = {
+                                .statement = statement_id,
+                                .place = {
+                                    .local = place->local,
+                                    .source_place = target->as.place,
+                                },
+                            },
+                        });
+                    if (old_value == SOL_MIR_NONE
+                        || !mir_stage_temporary(lowerer, statement->target,
+                            old_value, &previous)) return mir_failure(lowerer);
+                }
                 LoweredValue value = mir_lower_expression(lowerer,
                     statement->expression, &scope);
                 if (!value.reachable) return value;
+                if (statement->operator_kind != SOL_TOKEN_EQUAL) {
+                    SolMirValueId updated = mir_instruction_result(lowerer,
+                        (SolMirInstruction){
+                            .kind = SOL_MIR_INST_COMPOUND_UPDATE,
+                            .type = target->type,
+                            .source_expression = statement->expression,
+                            .span = statement->span,
+                            .as.compound_update = {
+                                .statement = statement_id,
+                                .operator_kind = statement->operator_kind,
+                                .place = {
+                                    .local = place->local,
+                                    .source_place = target->as.place,
+                                },
+                                .previous = previous,
+                                .right = value.value,
+                            },
+                        });
+                    if (updated == SOL_MIR_NONE
+                        || lowerer->pending_temporary_count == 0
+                        || lowerer->pending_temporaries[
+                            lowerer->pending_temporary_count - 1] != previous) {
+                        return mir_failure(lowerer);
+                    }
+                    --lowerer->pending_temporary_count;
+                    value.value = updated;
+                }
                 if (mir_append_instruction(lowerer, (SolMirInstruction){
                         .kind = SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED,
                         .type = SOL_IR_NONE,
@@ -3179,6 +3451,8 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
                 } else if (instruction->kind == SOL_MIR_INST_LOAD_COPY
                     || instruction->kind == SOL_MIR_INST_LOAD_MOVE) {
                     local = instruction->as.place.local;
+                } else if (instruction->kind == SOL_MIR_INST_LOAD_UPDATE) {
+                    local = instruction->as.update_load.place.local;
                 } else if (instruction->kind >= SOL_MIR_INST_PARAMETER_LIVE
                     && instruction->kind <= SOL_MIR_INST_STORAGE_DEAD) {
                     local = instruction->as.local;
@@ -3217,6 +3491,7 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
                         state[local] = MIR_STORAGE_DEAD;
                         break;
                     case SOL_MIR_INST_LOAD_COPY:
+                    case SOL_MIR_INST_LOAD_UPDATE:
                         valid = state[local] == MIR_STORAGE_INITIALIZED;
                         break;
                     case SOL_MIR_INST_LOAD_MOVE:
@@ -3310,7 +3585,7 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
                         &incoming[target * ir->local_count], state,
                         ir->local_count * sizeof(*state));
                     changed = true;
-                } else {
+                } else if (ir->local_count != 0) {
                     valid = mir_merge_storage(
                         &incoming[target * ir->local_count], state,
                         ir->local_count, &changed);
@@ -3401,6 +3676,9 @@ static bool mir_validate_paths(const SolIr *ir, const SolMir *mir,
                         }
                         state[place] = 1;
                     }
+                } else if (instruction->kind == SOL_MIR_INST_LOAD_UPDATE) {
+                    valid = mir_path_available(ir, state,
+                        instruction->as.update_load.place.source_place);
                 } else if (instruction->kind
                     == SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED) {
                     SolIrPlaceId place = instruction->as.place.source_place;
@@ -4157,6 +4435,10 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
                             operands.offset + operand].temporary;
                 }
                 if (valid) depth -= operands.count;
+            } else if (instruction->kind == SOL_MIR_INST_COMPOUND_UPDATE) {
+                valid = depth != 0 && working[depth - 1]
+                    == instruction->as.compound_update.previous;
+                if (valid) --depth;
             } else if (instruction->kind == SOL_MIR_INST_PATTERN_TEST
                 || instruction->kind == SOL_MIR_INST_PATTERN_VALUE
                 || instruction->kind == SOL_MIR_INST_MATCH_ARM) {
@@ -4366,6 +4648,44 @@ static bool mir_validate_source_events(const SolIr *ir, const SolMir *mir,
     if (valid) {
         valid = mir_next_source_transfer(ir, statements, statement_count,
             &cursor) == SOL_IR_NONE;
+    }
+    for (size_t source_index = 0; valid && source_index < statement_count;
+        ++source_index) {
+        SolIrStatementId statement_id = statements[source_index];
+        const SolIrStatement *statement = &ir->statements[statement_id];
+        if (statement->kind != SOL_IR_STATEMENT_ASSIGNMENT
+            || statement->operator_kind == SOL_TOKEN_EQUAL) continue;
+        size_t reads = 0;
+        size_t updates = 0;
+        for (size_t instruction = 0; instruction < mir->instruction_count;
+            ++instruction) {
+            reads += mir->instructions[instruction].kind
+                    == SOL_MIR_INST_LOAD_UPDATE
+                && mir->instructions[instruction].as.update_load.statement
+                    == statement_id;
+            updates += mir->instructions[instruction].kind
+                    == SOL_MIR_INST_COMPOUND_UPDATE
+                && mir->instructions[instruction].as.compound_update.statement
+                    == statement_id;
+        }
+        bool rhs_never = mir_type_is(ir,
+            ir->expressions[statement->expression].type, SOL_IR_TYPE_NEVER);
+        valid = reads == 1 && updates == (rhs_never ? 0u : 1u);
+    }
+    for (size_t instruction = 0; valid && instruction < mir->instruction_count;
+        ++instruction) {
+        const SolMirInstruction *item = &mir->instructions[instruction];
+        SolIrStatementId statement = item->kind == SOL_MIR_INST_LOAD_UPDATE
+            ? item->as.update_load.statement
+            : item->kind == SOL_MIR_INST_COMPOUND_UPDATE
+                ? item->as.compound_update.statement : SOL_IR_NONE;
+        if (statement == SOL_IR_NONE) continue;
+        bool found = false;
+        for (size_t source_index = 0; source_index < statement_count;
+            ++source_index) {
+            found = found || statements[source_index] == statement;
+        }
+        valid = found;
     }
     for (SolIrExpressionId source = 0;
         valid && source < ir->expression_count; ++source) {
@@ -5676,8 +5996,10 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         bool result_kind = instruction->kind <= SOL_MIR_INST_CONST_UNIT
             || instruction->kind == SOL_MIR_INST_LOAD_COPY
             || instruction->kind == SOL_MIR_INST_LOAD_MOVE
+            || instruction->kind == SOL_MIR_INST_LOAD_UPDATE
             || instruction->kind == SOL_MIR_INST_UNARY
             || instruction->kind == SOL_MIR_INST_BINARY
+            || instruction->kind == SOL_MIR_INST_COMPOUND_UPDATE
             || instruction->kind == SOL_MIR_INST_EXPRESSION_RESULT
             || instruction->kind == SOL_MIR_INST_PATTERN_TEST
             || instruction->kind == SOL_MIR_INST_PATTERN_VALUE
@@ -5757,6 +6079,48 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 return mir_error(diagnostics, instruction->span,
                     "MIR local load is inconsistent with source ownership");
             }
+        } else if (instruction->kind == SOL_MIR_INST_LOAD_UPDATE) {
+            SolIrStatementId statement_id
+                = instruction->as.update_load.statement;
+            const SolIrStatement *statement = statement_id < ir->statement_count
+                ? &ir->statements[statement_id] : NULL;
+            SolIrTypeId place_type = SOL_IR_NONE;
+            bool place_valid = mir_place_valid(ir, callable,
+                instruction->as.update_load.place, false, &place_type);
+            bool terminating_rhs = statement != NULL
+                && statement->expression < ir->expression_count
+                && mir_type_is(ir, ir->expressions[statement->expression].type,
+                    SOL_IR_TYPE_NEVER);
+            SolMirInstructionId initializer = SOL_MIR_NONE;
+            size_t initializer_count = 0;
+            for (size_t candidate = 0; candidate < mir->instruction_count;
+                ++candidate) {
+                if (mir->instructions[candidate].kind
+                        == SOL_MIR_INST_TEMPORARY_INIT
+                    && mir->instructions[candidate].as.temporary_init.value
+                        == instruction->result) {
+                    initializer = candidate;
+                    ++initializer_count;
+                }
+            }
+            if (statement == NULL
+                || statement->kind != SOL_IR_STATEMENT_ASSIGNMENT
+                || statement->operator_kind == SOL_TOKEN_EQUAL
+                || statement->target != instruction->source_expression
+                || source == NULL || source->kind != SOL_IR_EXPR_PLACE
+                || source->as.place
+                    != instruction->as.update_load.place.source_place
+                || (source->local_use != SOL_IR_LOCAL_USE_UPDATE
+                    && !(terminating_rhs
+                        && source->local_use == SOL_IR_LOCAL_USE_NONE))
+                || !place_valid
+                || instruction->type != place_type
+                || initializer_count != 1
+                || !mir_expression_events_after(ir, mir,
+                    statement->expression, initializer)) {
+                return mir_error(diagnostics, instruction->span,
+                    "MIR update load is inconsistent with source assignment");
+            }
         } else if (instruction->kind == SOL_MIR_INST_STORE) {
             SolIrTypeId place_type = SOL_IR_NONE;
             if (!mir_place_valid(ir, callable, instruction->as.store.place,
@@ -5816,6 +6180,69 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                     != ir->expressions[source->as.binary.right].type) {
                 return mir_error(diagnostics, instruction->span,
                     "malformed MIR binary operand");
+            }
+        } else if (instruction->kind == SOL_MIR_INST_COMPOUND_UPDATE) {
+            SolIrStatementId statement_id
+                = instruction->as.compound_update.statement;
+            const SolIrStatement *statement = statement_id < ir->statement_count
+                ? &ir->statements[statement_id] : NULL;
+            SolMirTemporaryId previous
+                = instruction->as.compound_update.previous;
+            SolMirInstructionId initializer
+                = mir_temporary_initializer(mir, previous);
+            SolMirInstructionId update_load = SOL_MIR_NONE;
+            for (size_t candidate = 0; candidate < mir->instruction_count;
+                ++candidate) {
+                if (mir->instructions[candidate].kind == SOL_MIR_INST_LOAD_UPDATE
+                    && mir->instructions[candidate].as.update_load.statement
+                        == statement_id) update_load = candidate;
+            }
+            SolIrTypeId place_type = SOL_IR_NONE;
+            bool compound_operator = instruction->as.compound_update.operator_kind
+                    == SOL_TOKEN_PLUS_EQUAL
+                || instruction->as.compound_update.operator_kind
+                    == SOL_TOKEN_MINUS_EQUAL
+                || instruction->as.compound_update.operator_kind
+                    == SOL_TOKEN_STAR_EQUAL
+                || instruction->as.compound_update.operator_kind
+                    == SOL_TOKEN_SLASH_EQUAL
+                || instruction->as.compound_update.operator_kind
+                    == SOL_TOKEN_PERCENT_EQUAL;
+            if (statement == NULL
+                || statement->kind != SOL_IR_STATEMENT_ASSIGNMENT
+                || statement->operator_kind
+                    != instruction->as.compound_update.operator_kind
+                || !compound_operator
+                || statement->target >= ir->expression_count
+                || statement->expression != instruction->source_expression
+                || ir->expressions[statement->target].kind != SOL_IR_EXPR_PLACE
+                || ir->expressions[statement->target].as.place
+                    != instruction->as.compound_update.place.source_place
+                || !mir_place_valid(ir, callable,
+                    instruction->as.compound_update.place, false, &place_type)
+                || !mir_type_is(ir, place_type, SOL_IR_TYPE_INT64)
+                || instruction->type != place_type
+                || previous >= mir->temporary_count
+                || mir->temporaries[previous].source_expression
+                    != statement->target
+                || mir->temporaries[previous].type != place_type
+                || initializer == SOL_MIR_NONE
+                || update_load == SOL_MIR_NONE
+                || mir->instructions[initializer].as.temporary_init.value
+                    != mir->instructions[update_load].result
+                || !mir_expression_events_after(ir, mir,
+                    statement->expression, initializer)
+                || !mir_value_available(mir,
+                    instruction->as.compound_update.right,
+                    instruction->block, id)
+                || mir->values[instruction->as.compound_update.right].type
+                    != place_type
+                || mir->values[instruction->as.compound_update.right]
+                    .source_expression != statement->expression
+                || instruction->span.start != statement->span.start
+                || instruction->span.end != statement->span.end) {
+                return mir_error(diagnostics, instruction->span,
+                    "malformed MIR compound update");
             }
         } else if (instruction->kind == SOL_MIR_INST_TEMPORARY_INIT) {
             SolMirTemporaryId temporary
@@ -5981,16 +6408,26 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             bool shape = source != NULL
                 && instruction->span.start == source->span.start
                 && instruction->span.end == source->span.end
-                && source->capability_roots.count == 0
-                && source->operation_roots.count == 0
+                && mir_ir_slice_equal(
+                    instruction->as.construct.capability_roots,
+                    source->capability_roots)
+                && mir_ir_slice_equal(
+                    instruction->as.construct.operation_roots,
+                    source->operation_roots)
                 && mir_slice_valid(operands, mir->construct_operand_count);
             if (shape && source->kind == SOL_IR_EXPR_RECORD) {
-                expected_kind = SOL_MIR_CONSTRUCT_RECORD;
                 expected_definition = source->as.record.definition;
                 source_operands = source->as.record.fields;
                 shape = expected_definition < ir->definition_count
-                    && ir->definitions[expected_definition].kind
-                        == SOL_IR_DEFINITION_RECORD;
+                    && (ir->definitions[expected_definition].kind
+                            == SOL_IR_DEFINITION_RECORD
+                        || ir->definitions[expected_definition].kind
+                            == SOL_IR_DEFINITION_CAPABILITY);
+                if (shape) expected_kind
+                    = ir->definitions[expected_definition].kind
+                            == SOL_IR_DEFINITION_CAPABILITY
+                        ? SOL_MIR_CONSTRUCT_CAPABILITY
+                        : SOL_MIR_CONSTRUCT_RECORD;
             } else if (shape && source->kind == SOL_IR_EXPR_TUPLE) {
                 expected_kind = SOL_MIR_CONSTRUCT_TUPLE;
                 source_operands = source->as.tuple.operands;
@@ -6501,6 +6938,9 @@ SolMirLowerOutcome sol_mir_lower_callable(const SolIr *ir,
         }
     }
     free(lowerer.pending_temporaries);
+    for (size_t block = 0; block < lowered.block_count; ++block) {
+        mir_canonicalize_terminator(&lowered.blocks[block].terminator);
+    }
     if (lowerer.unsupported) {
         sol_mir_free(&lowered);
         return SOL_MIR_LOWER_UNSUPPORTED;

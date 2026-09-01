@@ -56,9 +56,12 @@ typedef enum {
     SOL_MIR_INST_STORAGE_DEAD,
     SOL_MIR_INST_LOAD_COPY,
     SOL_MIR_INST_LOAD_MOVE,
+    /* Reads an initialized assignment target before evaluating the RHS. */
+    SOL_MIR_INST_LOAD_UPDATE,
     SOL_MIR_INST_STORE,
     SOL_MIR_INST_UNARY,
     SOL_MIR_INST_BINARY,
+    SOL_MIR_INST_COMPOUND_UPDATE,
     SOL_MIR_INST_REGION_ENTER,
     SOL_MIR_INST_REGION_EXIT,
     SOL_MIR_INST_TEMPORARY_INIT,
@@ -78,6 +81,7 @@ typedef enum {
 
 typedef enum {
     SOL_MIR_CONSTRUCT_RECORD,
+    SOL_MIR_CONSTRUCT_CAPABILITY,
     SOL_MIR_CONSTRUCT_TUPLE,
     SOL_MIR_CONSTRUCT_ENUM,
     SOL_MIR_CONSTRUCT_OPTION_NONE,
@@ -100,6 +104,10 @@ typedef struct {
         SolIrLocalId local;
         SolMirPlace place;
         struct {
+            SolIrStatementId statement;
+            SolMirPlace place;
+        } update_load;
+        struct {
             SolTokenKind operator_kind;
             SolMirValueId operand;
         } unary;
@@ -108,6 +116,13 @@ typedef struct {
             SolMirValueId left;
             SolMirValueId right;
         } binary;
+        struct {
+            SolIrStatementId statement;
+            SolTokenKind operator_kind;
+            SolMirPlace place;
+            SolMirTemporaryId previous;
+            SolMirValueId right;
+        } compound_update;
         struct {
             SolMirPlace place;
             SolMirValueId value;
@@ -134,6 +149,9 @@ typedef struct {
             SolIrDefinitionId definition;
             SolIrVariantId variant;
             SolMirSlice operands;
+            /* Exact authority provenance remains owned by the source IR. */
+            SolIrSlice capability_roots;
+            SolIrSlice operation_roots;
         } construct;
         SolIrSnapshotId snapshot;
     } as;

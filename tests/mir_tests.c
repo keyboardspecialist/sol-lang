@@ -1,6 +1,7 @@
 #include "sol/mir.h"
 #include "sol/effects.h"
 #include "sol/lexer.h"
+#include "sol/package.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -1426,6 +1427,353 @@ static void test_bounded_value_construction(void) {
     free_compilation(&deferred);
 }
 
+static void test_compound_update_lowering(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_compound_update\n"
+        "record Pair { left: Int64, right: Int64 }\n"
+        "function replace(value: inout Int64) -> Int64 { value = 9 return 2 }\n"
+        "function increment(value: inout Int64) -> () { value += 1 }\n"
+        "function all(value: inout Int64) -> () { value += 1 value -= 2 "
+        "value *= 3 value /= 4 value %= 5 }\n"
+        "function projected() -> Int64 { var pair = Pair { left = 8, right = 2 } "
+        "pair.left += pair.right return pair.left }\n"
+        "function ordered(value: inout Int64) -> Int64 { "
+        "value += replace(value) return value }\n"
+        "function nested(left: inout Int64, right: inout Int64) -> () { "
+        "left += { right += 1 right } }\n"
+        "function exits(value: inout Int64) -> Int64 { "
+        "value += { return 7 } return 0 }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+
+    const char *names[] = {
+        "increment", "all", "projected", "ordered", "nested", "exits",
+    };
+    const size_t expected_reads[] = {1, 5, 1, 1, 2, 1};
+    const size_t expected_updates[] = {1, 5, 1, 1, 2, 0};
+    for (size_t name = 0; name < 6; ++name) {
+        SolMir mir;
+        SolMir repeated;
+        sol_mir_init(&mir);
+        sol_mir_init(&repeated);
+        SolIrCallableId id = callable(&compilation.ir, names[name]);
+        CHECK(sol_mir_lower_callable(&compilation.ir, id, &mir,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_lower_callable(&compilation.ir, id, &repeated,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        CHECK(mir_equal(&mir, &repeated));
+        size_t reads = 0;
+        size_t updates = 0;
+        SolMirInstructionId update = SOL_MIR_NONE;
+        for (size_t instruction = 0; instruction < mir.instruction_count;
+            ++instruction) {
+            reads += mir.instructions[instruction].kind
+                == SOL_MIR_INST_LOAD_UPDATE;
+            if (mir.instructions[instruction].kind
+                == SOL_MIR_INST_COMPOUND_UPDATE) {
+                update = instruction;
+                ++updates;
+            }
+        }
+        CHECK(reads == expected_reads[name]);
+        CHECK(updates == expected_updates[name]);
+        CHECK((update != SOL_MIR_NONE) == (expected_updates[name] != 0));
+        if (name == 2 && update != SOL_MIR_NONE) {
+            SolIrPlaceId place
+                = mir.instructions[update].as.compound_update.place.source_place;
+            CHECK(compilation.ir.places[place].projections.count == 1);
+        }
+        if (name == 3 && update != SOL_MIR_NONE) {
+            SolMirInstructionId initializer = SOL_MIR_NONE;
+            SolMirTemporaryId previous
+                = mir.instructions[update].as.compound_update.previous;
+            SolMirBlockId invoke = SOL_MIR_NONE;
+            for (size_t instruction = 0; instruction < mir.instruction_count;
+                ++instruction) {
+                if (mir.instructions[instruction].kind
+                        == SOL_MIR_INST_TEMPORARY_INIT
+                    && mir.instructions[instruction].as.temporary_init.temporary
+                        == previous) initializer = instruction;
+            }
+            for (size_t block = 0; block < mir.block_count; ++block) {
+                if (mir.blocks[block].terminator.kind == SOL_MIR_TERM_INVOKE) {
+                    invoke = block;
+                }
+            }
+            CHECK(initializer != SOL_MIR_NONE && invoke != SOL_MIR_NONE);
+            CHECK(mir.instructions[initializer].block == mir.entry);
+            CHECK(mir.instructions[initializer].block == invoke);
+            CHECK(mir.blocks[mir.instructions[update].block].order
+                > mir.blocks[invoke].order);
+            SolMirBlockId failure
+                = mir.blocks[invoke].terminator.as.invoke.failure_edge.block;
+            bool dropped_previous = false;
+            bool replaced_target = false;
+            SolMirSlice failure_instructions = mir.blocks[failure].instructions;
+            for (size_t index = 0; index < failure_instructions.count; ++index) {
+                const SolMirInstruction *item = &mir.instructions[
+                    failure_instructions.offset + index];
+                dropped_previous = dropped_previous
+                    || (item->kind == SOL_MIR_INST_TEMPORARY_DROP
+                        && item->as.temporary_drop.temporary == previous);
+                replaced_target = replaced_target
+                    || item->kind == SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED
+                    || item->kind == SOL_MIR_INST_STORE;
+            }
+            CHECK(dropped_previous && !replaced_target);
+        }
+        if (name == 5) {
+            SolMirInstructionId load = SOL_MIR_NONE;
+            SolMirInstructionId initializer = SOL_MIR_NONE;
+            SolMirInstructionId rhs = SOL_MIR_NONE;
+            for (size_t instruction = 0; instruction < mir.instruction_count;
+                ++instruction) {
+                const SolMirInstruction *item = &mir.instructions[instruction];
+                if (item->kind == SOL_MIR_INST_LOAD_UPDATE) load = instruction;
+                if (item->kind == SOL_MIR_INST_TEMPORARY_INIT) {
+                    initializer = instruction;
+                }
+                if (item->kind == SOL_MIR_INST_CONST_INT64
+                    && item->source_expression != SOL_IR_NONE) rhs = instruction;
+            }
+            CHECK(load != SOL_MIR_NONE && initializer == load + 1
+                && rhs == initializer + 1);
+            if (load != SOL_MIR_NONE && initializer == load + 1
+                && rhs == initializer + 1) {
+                SolMirInstruction saved_load = mir.instructions[load];
+                SolMirInstruction saved_initializer
+                    = mir.instructions[initializer];
+                SolMirInstruction saved_rhs = mir.instructions[rhs];
+                mir.instructions[load] = saved_rhs;
+                mir.instructions[initializer] = saved_load;
+                mir.instructions[rhs] = saved_initializer;
+                mir.values[saved_rhs.result].definition = load;
+                mir.values[saved_load.result].definition = initializer;
+                CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+                mir.instructions[load] = saved_load;
+                mir.instructions[initializer] = saved_initializer;
+                mir.instructions[rhs] = saved_rhs;
+                mir.values[saved_load.result].definition = load;
+                mir.values[saved_rhs.result].definition = rhs;
+                CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+            }
+        }
+        if (name == 0 && update != SOL_MIR_NONE) {
+            SolMirInstruction *item = &mir.instructions[update];
+            SolTokenKind operator_kind = item->as.compound_update.operator_kind;
+            item->as.compound_update.operator_kind = SOL_TOKEN_MINUS_EQUAL;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            item->as.compound_update.operator_kind = operator_kind;
+            SolMirTemporaryId previous = item->as.compound_update.previous;
+            item->as.compound_update.previous = SOL_MIR_NONE;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            item->as.compound_update.previous = previous;
+            SolMirValueId right = item->as.compound_update.right;
+            SolMirInstructionId initializer = SOL_MIR_NONE;
+            for (size_t instruction = 0; instruction < mir.instruction_count;
+                ++instruction) {
+                if (mir.instructions[instruction].kind
+                        == SOL_MIR_INST_TEMPORARY_INIT
+                    && mir.instructions[instruction].as.temporary_init.temporary
+                        == previous) initializer = instruction;
+            }
+            CHECK(initializer != SOL_MIR_NONE);
+            item->as.compound_update.right
+                = mir.instructions[initializer].as.temporary_init.value;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            item->as.compound_update.right = right;
+            SolIrStatementId statement = item->as.compound_update.statement;
+            item->as.compound_update.statement = SOL_IR_NONE;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            item->as.compound_update.statement = statement;
+            CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        }
+        sol_mir_free(&mir);
+        sol_mir_free(&repeated);
+    }
+    free_compilation(&compilation);
+}
+
+static void test_authority_bearing_construction(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_authority_construction\n"
+        "capability Clock { function now() -> Int64 effects { clock.read<Self> } }\n"
+        "capability Wrapped derives_from private_source: capability Clock { "
+        "function now() -> Int64 effects { clock.read<Self> } "
+        "{ return private_source.now() } }\n"
+        "function pair(clock: capability Clock) -> (capability Clock, Bool) "
+        "effects { pure } { return (clock, true) }\n"
+        "function wrap(clock: capability Clock) -> capability Wrapped "
+        "effects { pure } { return Wrapped { private_source = clock } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+
+    const char *names[] = {"pair", "wrap"};
+    const SolMirConstructKind kinds[] = {
+        SOL_MIR_CONSTRUCT_TUPLE, SOL_MIR_CONSTRUCT_CAPABILITY,
+    };
+    for (size_t name = 0; name < 2; ++name) {
+        SolMir mir;
+        SolMir repeated;
+        sol_mir_init(&mir);
+        sol_mir_init(&repeated);
+        SolIrCallableId id = callable(&compilation.ir, names[name]);
+        CHECK(sol_mir_lower_callable(&compilation.ir, id, &mir,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_lower_callable(&compilation.ir, id, &repeated,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        CHECK(mir_equal(&mir, &repeated));
+        SolMirInstructionId construct = SOL_MIR_NONE;
+        for (size_t instruction = 0; instruction < mir.instruction_count;
+            ++instruction) {
+            if (mir.instructions[instruction].kind == SOL_MIR_INST_CONSTRUCT) {
+                construct = instruction;
+            }
+        }
+        CHECK(construct != SOL_MIR_NONE);
+        if (construct != SOL_MIR_NONE) {
+            SolMirInstruction *item = &mir.instructions[construct];
+            const SolIrExpression *source
+                = &compilation.ir.expressions[item->source_expression];
+            CHECK(item->as.construct.kind == kinds[name]);
+            CHECK(item->as.construct.capability_roots.offset
+                == source->capability_roots.offset);
+            CHECK(item->as.construct.capability_roots.count
+                == source->capability_roots.count);
+            CHECK(item->as.construct.capability_roots.count == 1);
+            SolIrSlice roots = item->as.construct.capability_roots;
+            item->as.construct.capability_roots.count = 0;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            item->as.construct.capability_roots = roots;
+            item->as.construct.operation_roots.count = 1;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            item->as.construct.operation_roots = source->operation_roots;
+            CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        }
+        sol_mir_free(&mir);
+        sol_mir_free(&repeated);
+    }
+    free_compilation(&compilation);
+}
+
+static void test_e6_executable_callable_census(void) {
+    SolPackage package;
+    SolDiagnostics diagnostics;
+    SolHirModule hir;
+    SolTypeTable types;
+    SolEffectTable effects;
+    SolContractTable contracts;
+    SolIr ir;
+    char error[256];
+    sol_package_init(&package);
+    sol_diagnostics_init(&diagnostics);
+    sol_hir_module_init(&hir);
+    sol_type_table_init(&types);
+    sol_effect_table_init(&effects);
+    sol_contract_table_init(&contracts);
+    sol_ir_init(&ir);
+    CHECK(sol_package_load_directory(&package,
+        SOL_TEST_SOURCE_DIR "/tests/conformance/e6", &diagnostics,
+        error, sizeof(error)));
+    SolHirFileScope *scopes = package.file_count == 0 ? NULL
+        : malloc(package.file_count * sizeof(*scopes));
+    CHECK(package.file_count == 0 || scopes != NULL);
+    for (size_t index = 0; index < package.file_count; ++index) {
+        scopes[index] = (SolHirFileScope){
+            .module_name = package.files[index].module_name,
+            .import_start = package.files[index].import_start,
+            .import_count = package.files[index].import_count,
+            .item_start = package.files[index].item_start,
+            .item_count = package.files[index].item_count,
+        };
+    }
+    bool lowered = scopes != NULL
+        && sol_hir_lower_scoped(&package.source, &package.syntax, scopes,
+            package.file_count, &hir, &diagnostics)
+        && sol_type_check(&package.source, &package.syntax, &hir, &types,
+            &diagnostics)
+        && sol_effect_check(&package.source, &package.syntax, &hir, &types,
+            &effects, &diagnostics)
+        && sol_contract_lower(&package.source, &package.syntax, &hir, &types,
+            &effects, &contracts, &diagnostics)
+        && sol_ir_lower_scoped(&package.source, &package.syntax, &hir, &types,
+            &effects, &contracts, package.files, package.file_count, &ir,
+            &diagnostics);
+    CHECK(lowered);
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    size_t executable = 0;
+    size_t non_runtime = 0;
+    size_t requirements = 0;
+    size_t hosted_members = 0;
+    size_t hosted_write = 0;
+    size_t hosted_count = 0;
+    size_t hosted_get = 0;
+    size_t hosted_read = 0;
+    if (lowered) {
+        for (SolIrCallableId id = 0; id < ir.callable_count; ++id) {
+            SolMir mir;
+            SolMir repeated;
+            SolDiagnostics mir_diagnostics;
+            sol_mir_init(&mir);
+            sol_mir_init(&repeated);
+            sol_diagnostics_init(&mir_diagnostics);
+            SolMirLowerOutcome outcome = sol_mir_lower_callable(&ir, id, &mir,
+                &mir_diagnostics);
+            if (ir.callables[id].body == SOL_IR_NONE) {
+                ++non_runtime;
+                bool requirement = ir.callables[id].kind
+                        == SOL_IR_CALLABLE_TRAIT_REQUIREMENT
+                    && strcmp(ir.callables[id].name, "score") == 0;
+                bool hosted = ir.callables[id].kind
+                        == SOL_IR_CALLABLE_CAPABILITY
+                    && (strcmp(ir.callables[id].name, "write") == 0
+                        || strcmp(ir.callables[id].name, "count") == 0
+                        || strcmp(ir.callables[id].name, "get") == 0
+                        || strcmp(ir.callables[id].name, "read") == 0);
+                requirements += requirement;
+                hosted_members += hosted;
+                hosted_write += hosted
+                    && strcmp(ir.callables[id].name, "write") == 0;
+                hosted_count += hosted
+                    && strcmp(ir.callables[id].name, "count") == 0;
+                hosted_get += hosted
+                    && strcmp(ir.callables[id].name, "get") == 0;
+                hosted_read += hosted
+                    && strcmp(ir.callables[id].name, "read") == 0;
+                CHECK(requirement || hosted);
+                CHECK(outcome == SOL_MIR_LOWER_UNSUPPORTED);
+                CHECK(mir.callable == SOL_IR_NONE && mir.blocks == NULL);
+            } else {
+                ++executable;
+                CHECK(outcome == SOL_MIR_LOWER_SUCCEEDED);
+                CHECK(sol_mir_lower_callable(&ir, id, &repeated,
+                    &mir_diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+                CHECK(sol_mir_validate(&ir, &mir, NULL));
+                CHECK(mir_equal(&mir, &repeated));
+            }
+            sol_diagnostics_free(&mir_diagnostics);
+            sol_mir_free(&mir);
+            sol_mir_free(&repeated);
+        }
+    }
+    CHECK(executable == 14);
+    CHECK(non_runtime == 5);
+    CHECK(requirements == 1);
+    CHECK(hosted_members == 4);
+    CHECK(hosted_write == 1 && hosted_count == 1);
+    CHECK(hosted_get == 1 && hosted_read == 1);
+    free(scopes);
+    sol_ir_free(&ir);
+    sol_contract_table_free(&contracts);
+    sol_effect_table_free(&effects);
+    sol_type_table_free(&types);
+    sol_hir_module_free(&hir);
+    sol_package_free(&package);
+    sol_diagnostics_free(&diagnostics);
+}
+
 static void test_refined_failure_cleanup(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -2622,6 +2970,9 @@ int main(void) {
     test_validator_rejects_corruption();
     test_loop_control_lowering();
     test_bounded_value_construction();
+    test_compound_update_lowering();
+    test_authority_bearing_construction();
+    test_e6_executable_callable_census();
     test_refined_failure_cleanup();
     test_recursive_match_lowering();
     test_propagation_lowering();
