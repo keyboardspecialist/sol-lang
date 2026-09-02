@@ -675,8 +675,18 @@ It emits fixed ASCII spellings and escaping, explicit sentinel IDs, source-owned
 relations, and every semantic MIR block, value, instruction, place, edge, temporary,
 loop, call, construction, contract, and proof relation in deterministic arena or
 block order. Rendering is buffered before one output write and is intentionally not
-a stable serialization format. A bounded MIR evaluator/trace, representation,
-runtime ABI, and a backend remain open.
+a stable serialization format. P1b.4 adds `sol_mir_evaluate`, an independent bounded
+CFG evaluator over an explicit entry MIR and trusted immutable callee provider. It
+executes the frozen instruction and terminator vocabulary with MIR-local step, depth,
+value, text, host, and trace limits; emits deterministic structured call, block,
+instruction, edge, host, cleanup, return, and failure events; and reuses only the
+unstable runtime-value model and raw host hooks, not owning-IR control evaluation.
+Source-owned contract and refinement obligations use a separate bounded pure
+predicate evaluator. Preflight rejects unavailable bodyful capability closures and
+runtime-produced callable closures before effects. Differential tests compare final
+values or failure codes/spans, host behavior, and exact owned-local cleanup against
+the reference interpreter. P1b is complete; representation, runtime ABI, and a
+backend remain open.
 
 ### Phase 0 — Executable language model
 

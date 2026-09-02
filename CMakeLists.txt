@@ -66,6 +66,7 @@ add_library(sol_compiler STATIC
     src/interpreter.c
     src/lexer.c
     src/mir.c
+    src/mir_eval.c
     src/mir_render.c
     src/ownership.c
     src/package.c
@@ -155,6 +156,8 @@ if(BUILD_TESTING)
     target_link_libraries(sol_ir_tests PRIVATE sol_compiler)
     add_executable(sol_mir_tests tests/mir_tests.c)
     target_link_libraries(sol_mir_tests PRIVATE sol_compiler)
+    add_executable(sol_mir_eval_tests tests/mir_eval_tests.c)
+    target_link_libraries(sol_mir_eval_tests PRIVATE sol_compiler)
     target_compile_definitions(sol_mir_tests PRIVATE
         SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
@@ -187,6 +190,7 @@ if(BUILD_TESTING)
         target_compile_options(sol_package_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_ir_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_mir_tests PRIVATE /std:c17 /W4)
+        target_compile_options(sol_mir_eval_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_interpreter_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_inspection_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_test_declaration_tests PRIVATE /std:c17 /W4)
@@ -204,6 +208,7 @@ if(BUILD_TESTING)
         target_compile_options(sol_package_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_ir_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_mir_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
+        target_compile_options(sol_mir_eval_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_interpreter_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_inspection_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_test_declaration_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
@@ -211,7 +216,7 @@ if(BUILD_TESTING)
             target_compile_options(sol_cli_io_helper PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         endif()
     else()
-        set_target_properties(sol_frontend_tests sol_compilation_tests sol_formatter_tests sol_sema_tests sol_typecheck_tests sol_effectcheck_tests sol_contract_tests sol_package_tests sol_ir_tests sol_mir_tests sol_interpreter_tests sol_inspection_tests sol_test_declaration_tests PROPERTIES
+        set_target_properties(sol_frontend_tests sol_compilation_tests sol_formatter_tests sol_sema_tests sol_typecheck_tests sol_effectcheck_tests sol_contract_tests sol_package_tests sol_ir_tests sol_mir_tests sol_mir_eval_tests sol_interpreter_tests sol_inspection_tests sol_test_declaration_tests PROPERTIES
             C_STANDARD 17
             C_STANDARD_REQUIRED ON
             C_EXTENSIONS OFF
@@ -239,6 +244,8 @@ if(BUILD_TESTING)
         target_link_options(sol_ir_tests PRIVATE -fsanitize=address,undefined)
         target_compile_options(sol_mir_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(sol_mir_tests PRIVATE -fsanitize=address,undefined)
+        target_compile_options(sol_mir_eval_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(sol_mir_eval_tests PRIVATE -fsanitize=address,undefined)
         target_compile_options(sol_interpreter_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(sol_interpreter_tests PRIVATE -fsanitize=address,undefined)
         target_compile_options(sol_inspection_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -257,6 +264,7 @@ if(BUILD_TESTING)
     add_test(NAME package COMMAND sol_package_tests)
     add_test(NAME ir COMMAND sol_ir_tests)
     add_test(NAME mir COMMAND sol_mir_tests)
+    add_test(NAME mir_eval COMMAND sol_mir_eval_tests)
     add_test(NAME interpreter COMMAND sol_interpreter_tests)
     add_test(NAME inspection COMMAND sol_inspection_tests)
     add_test(NAME test_declarations COMMAND sol_test_declaration_tests)
