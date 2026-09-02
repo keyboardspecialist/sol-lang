@@ -695,10 +695,11 @@ does not claim prerequisite owning-IR validation or nested public MIR
 lowering/validation work. Forwarded evidence propagates only through compatible
 concrete incoming call contexts; trait-bounded generic roots are independent and
 always reject without an explicit root-context API. Every ordinary or predicate
-callback site currently requires its exact callee expression to be a direct
-static definition or bound operation. Current source/P1 lowering does not yet
-produce such a lowerable first-class static callback form, so validated dynamic
-callbacks and source conditional/aliased callable forms reject. This is a trusted
+callback site requires its exact callee expression to be a direct static
+definition or bound operation. Current P1 lowering cannot materialize an ordinary
+first-class static callback form, so ordinary body callbacks and dynamic,
+conditional, or aliased producers reject. P2.2 still plans static callable-value
+references retained by P2.1, including pure predicate references. This is a trusted
 mutable compiler-internal owner, not a hostile arbitrary-pointer format:
 validation checks canonical null-empty headers and detectable top-level/nested
 allocation overlap, while teardown requires the original builder-owned allocation
@@ -706,8 +707,23 @@ bases. The E6 entry closure is exactly 8 templates, 4 imports, 1 specialization
 demand, and 12 invoke sites;
 entry plus all four tests is 14, 4, 1, and 18. This owner borrows immutable owning
 IR and deliberately performs no monomorphization, substitution, representation,
-layout, ABI, symbol selection, linkage, or backend emission. P2.2 instance
-planning, representation, runtime ABI, and a backend remain open.
+layout, ABI, symbol selection, linkage, or backend emission. P2.2 adds the separate
+unstable `SolMirPlan` owner borrowing this validated program. It structurally interns
+closed concrete types and effect rows, canonical callable instances and resolved
+evidence dictionaries, typed imports, provenance-bearing demand edges, and complete
+flat type overlays without cloning or mutating any MIR CFG arena. Identical recursive
+keys become cycle edges; expanding generic recursion, unresolved evidence, malformed
+owners, four explicit cardinality limits, bounded substitution depth, and the
+narrow planning-work probe meter fail transactionally. That work meter covers
+structural interner/equality probes, recursive substitutions, and instance-key
+probes; other loops are bounded by the explicit dimensions and
+validated source domains. Every owned plan arena records its allocation capacity,
+and effect atom strings carry validated lengths.
+Contextless generic, receiver, or effect-polymorphic fixture roots reject because
+the API intentionally has no explicit root-context input. The E6 entry plan is
+exactly 8 instances and 4 typed imports; entry plus tests is 14 and 4. CFG
+materialization, representation, runtime ABI, symbols/linkage, and a backend remain
+open.
 
 ### Phase 0 — Executable language model
 
