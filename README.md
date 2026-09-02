@@ -685,8 +685,29 @@ Source-owned contract and refinement obligations use a separate bounded pure
 predicate evaluator. Preflight rejects unavailable bodyful capability closures and
 runtime-produced callable closures before effects. Differential tests compare final
 values or failure codes/spans, host behavior, and exact owned-local cleanup against
-the reference interpreter. P1b is complete; representation, runtime ABI, and a
-backend remain open.
+the reference interpreter. P1b is complete. P2.1 adds the separate unstable
+`SolMirProgram` symbolic owner: deterministic entry/test/fixture roots retain one
+validated MIR template per reachable lowerable bodyful callable, approved safe
+bodyless capability imports, concrete trait specialization demands, and
+path-free source relations under local callable, reference, and discovery-work
+limits. The discovery meter begins after canonical request deduplication and
+does not claim prerequisite owning-IR validation or nested public MIR
+lowering/validation work. Forwarded evidence propagates only through compatible
+concrete incoming call contexts; trait-bounded generic roots are independent and
+always reject without an explicit root-context API. Every ordinary or predicate
+callback site currently requires its exact callee expression to be a direct
+static definition or bound operation. Current source/P1 lowering does not yet
+produce such a lowerable first-class static callback form, so validated dynamic
+callbacks and source conditional/aliased callable forms reject. This is a trusted
+mutable compiler-internal owner, not a hostile arbitrary-pointer format:
+validation checks canonical null-empty headers and detectable top-level/nested
+allocation overlap, while teardown requires the original builder-owned allocation
+bases. The E6 entry closure is exactly 8 templates, 4 imports, 1 specialization
+demand, and 12 invoke sites;
+entry plus all four tests is 14, 4, 1, and 18. This owner borrows immutable owning
+IR and deliberately performs no monomorphization, substitution, representation,
+layout, ABI, symbol selection, linkage, or backend emission. P2.2 instance
+planning, representation, runtime ABI, and a backend remain open.
 
 ### Phase 0 — Executable language model
 

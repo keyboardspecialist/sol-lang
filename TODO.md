@@ -111,8 +111,8 @@ raw-IR, MIR-lowering, MIR-evaluator, and raw-interpreter tests retain direct int
 access for malformed IR/MIR mutation, phase-corruption assertions, differential
 evaluation, and trusted host-callback coverage.
 
-The production track is underway. P1 is complete for the frozen E6 profile; P2 is
-the next open milestone:
+The production track is underway. P1 and P2.1 are complete for the frozen E6
+profile; P2.2 is the next open checkpoint:
 
 | Done | Order | Milestone | Dependency and numbered-backlog scope |
 | --- | ---: | --- | --- |
@@ -167,7 +167,7 @@ external dependencies, public IR, concurrency, or broader handlers.
 
 | Done | Order | Checkpoint | Exit criteria |
 | --- | ---: | --- | --- |
-| [ ] | P2.1 | Establish a symbolic production-program MIR owner | Seed one deterministic owner from selected entry, test, or internal-fixture roots; cache each bodyful callable template once; record approved bodyless capability members as import demands and evidence-dispatched trait requirements as typed specialization demands; discover direct function/provider references; reject references that are neither bodyful, approved imports, nor resolvable specialization demands; and enforce callable/edge/work budgets |
+| [x] | P2.1 | Establish a symbolic production-program MIR owner | Seed one deterministic owner from selected entry, test, or internal-fixture roots; cache each bodyful callable template once; record approved bodyless capability members as import demands and evidence-dispatched trait requirements as typed specialization demands; discover direct function/provider references; reject references that are neither bodyful, approved imports, nor resolvable specialization demands; and enforce callable/edge/work budgets |
 | [ ] | P2.2 | Plan canonical monomorphic instances | Intern instances by callable, concrete receiver/type arguments, instantiated effects/tail, and dispatch evidence; process the demand graph deterministically; deduplicate recursive identical instances; reject expanding generic recursion or budget exhaustion; and produce complete substitutions for signatures, locals, places, temporaries, results, snapshots, and obligations |
 | [ ] | P2.3 | Materialize specialized callable CFGs and dispatch | Clone and substitute every demanded MIR instance; resolve `Self`, type/effect parameters, concrete and forwarded evidence, method requirements, callback signatures, and implementation receivers; iterate specialization and callable discovery to a deterministic fixed point; reject every remaining bodyless trait requirement or unavailable body; eliminate generic parameters, effect tails, and forwarded evidence; then revalidate SSA, ownership, cleanup, and source provenance |
 | [ ] | P2.4 | Define canonical concrete representations | Assign each reachable concrete type one validated recipe covering primitives, tuples, records, enums, `Option`, `Result`, distinct/refined wrappers, exact function values, bound operations, and capabilities; use explicit tags and source-order fields with explicit Copy/drop/zero-sized classifications and no niche optimization |
