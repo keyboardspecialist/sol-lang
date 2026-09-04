@@ -722,7 +722,7 @@ and effect atom strings carry validated lengths.
 Contextless generic, receiver, or effect-polymorphic fixture roots reject because
 the API intentionally has no explicit root-context input. The E6 entry plan is
 exactly 8 instances, 4 typed imports, 12 invokes, and 13 demands; entry plus tests
-is 14, 4, 18, and 23. CFG materialization now includes P2.3a through P2.3b2. The separate unstable
+is 14, 4, 18, and 23. CFG materialization now completes P2.3, including P2.3b3. The separate unstable
 `SolMirMaterialization` owner borrows a validated `SolMirPlan`, which must outlive it
 along with the plan's borrowed program and owning IR. It owns one image per plan
 instance in plan-instance order. Plans assign explicit canonical IDs to one body
@@ -733,24 +733,44 @@ concrete types, signatures, locals, places/projections, values, temporaries,
 instructions, operands, closed effect rows, imports, complete blocks and terminators,
 edges and their arguments, block parameters, and loops. One canonical binding exists
 for every root, invoke, callback, predicate, handler, function-value, bound-operation,
-and predicate-function-value plan demand. Invokes name only a binding and closed
+and predicate-function-value plan demand, and one explicit concrete semantic-site
+record consumes each binding. Signatures own exact receiver and parameter access modes,
+and activated receiver/parameter locals must match them in order. Invokes name only a binding and closed
 concrete effect row; successful normal edges own ordered exclusive writebacks, with
 the receiver first and arguments in formal order. Handler enter/exit instructions name
-explicit nested-capable frames containing exact source/provider bindings and concrete
-authority/provider places. Copy classification is recomputed using the owning-IR
-fixed-point rule from substituted ownership components, including generic and recursive
-record/enum fields and distinct/refined representations.
+explicit nested-capable frames containing exact source/provider bindings, concrete
+operation keys, and concrete authority/provider places. The builder records nominal
+categories and substituted ownership components from authenticated owning IR;
+independent concrete validation then recomputes the exact Copy fixed point solely from
+those materialized type records, including recursive records/enums and
+distinct/refined representations. A symbolic generic move that
+specializes to a concrete Copy type is normalized to an executable copy, while the
+authentication-only topology retains its source opcode.
 
 Each image also contains an independently allocated exact symbolic MIR clone. That
 symbolic topology is authentication-only: executable dispatch does not use borrowed
 plan imports, generic/effect/evidence slices, symbolic callable targets, or symbolic
-CFG IDs. Validation reconstructs every concrete record from the immutable canonical
-plan, checks image-local namespaces and owned-slice/range separation, and proves every
-plan demand, instance, and import is represented without a second evidence-resolution
-pass. Builds are transactional and bound instances, cloned and concrete CFG items,
-concrete records/bindings, owned bytes, and work; rendering validates and buffers
-before one write. P2.3 and P2.3b3 remain open. P2.3b3 independently validates concrete SSA, affine ownership, cleanup,
-contracts/refinements, handler balance, and full E6 dataflow. No representation/layout,
+CFG IDs. Validation first reconstructs every concrete record from the immutable
+canonical plan for topology and provenance authentication, then runs independent
+bounded algorithms over only materialized records. Those algorithms compute concrete
+CFG predecessors, reverse postorder, and immediate dominators; validate same-block
+order, edge-scoped results, affine transport from concrete Copy flags, local/place and
+partial-move fixed points, temporary/region/handler stacks, contract and refinement
+envelopes, loop records, invoke signatures/writebacks, exact semantic-site consumption
+and callable-producer target/operation identity, and orphan-free whole-graph closure.
+Contract/refinement terminators own their complete context-linked semantic-site sets;
+helper results may have any declared type while the final obligation remains exactly
+`Bool`. Validation records a deterministic conservative cardinality-derived upper bound.
+It explicitly multiplies the storage/path pass ceiling by instruction, argument, merge,
+place, and projection scan bounds, in addition to global, SSA/affine, closure, contract,
+handler, and superlinear dominator terms. An exact separate validation-work limit rejects
+exhaustion transactionally. Source
+IDs remain provenance associations and are not type or Copy truth. The frozen E6
+materialization closure is exactly 8 images, 4 imports, and 12 invokes for entry, and
+14, 4, and 18 for entry plus all tests; every bodyful E6 callable is represented.
+Builds are transactional and bound instances, cloned and concrete CFG items, concrete
+records/bindings, owned bytes, and work; rendering validates and buffers before one
+write. P2.4 representation recipes are the next boundary. No representation/layout,
 runtime ABI, symbol/linkage, or backend choice is made here.
 
 ### Phase 0 — Executable language model

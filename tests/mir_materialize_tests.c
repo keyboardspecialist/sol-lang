@@ -3,12 +3,20 @@
 #include "sol/effects.h"
 #include "sol/lexer.h"
 #include "sol/ownership.h"
+#include "sol/package.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 static int failures;
+
+bool sol_mir_materialization_validate_concrete(
+    const SolMirMaterialization *owner, SolDiagnostics *diagnostics);
+bool sol_mir_materialization_test_path_frontier(void);
+bool sol_mir_materialization_test_callable_site_target_equality(void);
+bool sol_mir_materialization_validation_work(
+    const SolMirMaterialization *owner, size_t *work);
 
 #define CHECK(condition) do { \
     if (!(condition)) { \
@@ -154,6 +162,41 @@ static void test_generic_recursion_lifecycle_limits_and_render(void) {
     CHECK(first.literal_byte_count == strlen("owned literal") + 1);
     CHECK(strcmp(first.literal_bytes, "owned literal") == 0);
     CHECK(sol_mir_materialization_validate(&first, NULL));
+    bool contract_edge_corrupted = false;
+    for (size_t i = 0; i < first.block_count; ++i) {
+        SolMirMaterializedTerminator *term = &first.blocks[i].terminator;
+        if (!contract_edge_corrupted
+            && term->kind == SOL_MIR_TERM_CHECK_CONTRACT) {
+            size_t saved = term->violation_edge;
+            term->violation_edge = term->satisfied_edge;
+            CHECK(!sol_mir_materialization_validate_concrete(&first, NULL));
+            term->violation_edge = saved;
+            contract_edge_corrupted = true;
+        }
+    }
+    CHECK(contract_edge_corrupted);
+    bool snapshot_type_corrupted = false;
+    for (size_t i = 0; i < first.instruction_count; ++i) {
+        SolMirMaterializedInstruction *instruction = &first.instructions[i];
+        if (instruction->kind != SOL_MIR_INST_CAPTURE_SNAPSHOT) continue;
+        size_t saved = instruction->type;
+        instruction->type = (saved + 1) % first.type_count;
+        CHECK(!sol_mir_materialization_validate_concrete(&first, NULL));
+        instruction->type = saved; snapshot_type_corrupted = true; break;
+    }
+    CHECK(snapshot_type_corrupted);
+    CHECK(sol_mir_materialization_validate_concrete(&first, NULL));
+    size_t validation_limit = first.limits.max_validation_work;
+    first.limits.max_validation_work = first.usage.validation_work - 1;
+    CHECK(!sol_mir_materialization_validate_concrete(&first, NULL));
+    CHECK(!sol_mir_materialization_validate(&first, NULL));
+    first.limits.max_validation_work = validation_limit;
+    size_t concrete_records = first.usage.concrete_records;
+    first.usage.concrete_records = SIZE_MAX;
+    size_t overflow_work = 0;
+    CHECK(!sol_mir_materialization_validation_work(&first, &overflow_work));
+    CHECK(!sol_mir_materialization_validate_concrete(&first, NULL));
+    first.usage.concrete_records = concrete_records;
     SolMirTerminatorKind concrete_kind = first.blocks[0].terminator.kind;
     first.blocks[0].terminator.kind = SOL_MIR_TERM_INVALID;
     CHECK(!sol_mir_materialization_validate(&first, NULL));
@@ -245,7 +288,7 @@ static void test_generic_recursion_lifecycle_limits_and_render(void) {
     SolMirMaterializeLimits exact = {first.usage.instances,
         first.usage.cfg_items, first.usage.bindings,
         first.usage.concrete_records, first.usage.owned_bytes,
-        first.usage.materialization_work};
+        first.usage.materialization_work, first.usage.validation_work};
     SolMirMaterialization limited;
     sol_mir_materialization_init(&limited);
     SolMirMaterializeBuildRequest limited_request = {&plan, &exact};
@@ -265,6 +308,7 @@ static void test_generic_recursion_lifecycle_limits_and_render(void) {
     LIMIT_FAIL(max_concrete_records);
     LIMIT_FAIL(max_owned_bytes);
     LIMIT_FAIL(max_materialization_work);
+    LIMIT_FAIL(max_validation_work);
 #undef LIMIT_FAIL
 
     SolMirMaterializedTypeId saved_type = plan.typed_uses[0].type;
@@ -398,6 +442,51 @@ static void test_evidence_and_import_bindings(void) {
     }
     CHECK(saw_import && saw_method);
     CHECK(sol_mir_materialization_validate(&materialization, NULL));
+    bool bad_edge = false, bad_instance = false, bad_import = false;
+    for (size_t i = 0; i < materialization.block_count && !bad_edge; ++i) {
+        SolMirMaterializedTerminator *term = &materialization.blocks[i].terminator;
+        size_t *edge = NULL;
+        if (term->kind == SOL_MIR_TERM_GOTO) edge = &term->edge;
+        else if (term->kind == SOL_MIR_TERM_INVOKE) edge = &term->failure_edge;
+        else if (term->kind == SOL_MIR_TERM_BRANCH) edge = &term->true_edge;
+        if (edge == NULL) continue;
+        size_t saved = *edge; *edge = SIZE_MAX;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        *edge = saved; bad_edge = true;
+    }
+    for (size_t i = 0; i < materialization.binding_count; ++i) {
+        SolMirMaterializedBinding *binding = &materialization.bindings[i];
+        if (!bad_instance
+            && binding->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE) {
+            size_t saved = binding->instance; binding->instance = SIZE_MAX;
+            CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+            binding->instance = saved; bad_instance = true;
+        }
+        if (!bad_import
+            && binding->target_kind == SOL_MIR_MATERIALIZED_TARGET_IMPORT) {
+            size_t saved = binding->import; binding->import = SIZE_MAX;
+            CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+            binding->import = saved; bad_import = true;
+        }
+    }
+    CHECK(bad_edge && bad_instance && bad_import);
+    if (materialization.access_count != 0) {
+        SolAccessMode saved = materialization.accesses[0];
+        materialization.accesses[0] = (SolAccessMode)99;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        materialization.accesses[0] = saved;
+    }
+    bool receiver_access = false;
+    for (size_t i = 0; i < materialization.local_count; ++i) {
+        SolMirMaterializedLocal *local = &materialization.locals[i];
+        if (local->kind != SOL_MIR_MATERIALIZED_LOCAL_RECEIVER) continue;
+        SolAccessMode saved = local->access;
+        local->access = saved == SOL_ACCESS_SHARED
+            ? SOL_ACCESS_EXCLUSIVE : SOL_ACCESS_SHARED;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        local->access = saved; receiver_access = true; break;
+    }
+    CHECK(receiver_access);
     if (materialization.binding_count != 0) {
         SolMirPlanInstanceId saved = materialization.bindings[0].instance;
         materialization.bindings[0].instance = SOL_MIR_PLAN_NONE;
@@ -453,6 +542,49 @@ static void test_handlers_are_materialized(void) {
     CHECK(materialization.handlers[0].authority < materialization.place_count);
     CHECK(materialization.handlers[0].provider < materialization.place_count);
     CHECK(sol_mir_materialization_validate(&materialization, NULL));
+    CHECK(sol_mir_materialization_validate_concrete(&materialization, NULL));
+    SolMirPlanContextId saved_handler_context = materialization.handlers[0].context;
+    materialization.handlers[0].context = materialization.context_count;
+    CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+    materialization.handlers[0].context = saved_handler_context;
+    size_t saved_source_effect = materialization.handlers[0].source_effect;
+    materialization.handlers[0].source_effect = SOL_IR_NONE;
+    CHECK(sol_mir_materialization_validate_concrete(&materialization, NULL));
+    materialization.handlers[0].source_effect = saved_source_effect;
+    SolIrCallableId saved_symbolic = materialization.bindings[
+        materialization.handlers[0].source_binding].symbolic_callable;
+    materialization.bindings[materialization.handlers[0].source_binding]
+        .symbolic_callable = SOL_IR_NONE;
+    CHECK(sol_mir_materialization_validate_concrete(&materialization, NULL));
+    materialization.bindings[materialization.handlers[0].source_binding]
+        .symbolic_callable = saved_symbolic;
+    SolMirMaterializedPlaceId operation_root
+        = materialization.handlers[0].operation.root;
+    materialization.handlers[0].operation.root = materialization.place_count;
+    CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+    materialization.handlers[0].operation.root = operation_root;
+    SolMirMaterializedEffectRowId operation_effects
+        = materialization.handlers[0].operation.effects;
+    materialization.handlers[0].operation.effects = materialization.effect_row_count;
+    CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+    materialization.handlers[0].operation.effects = operation_effects;
+    SolMirMaterializedTargetKind operation_target
+        = materialization.handlers[0].operation.target_kind;
+    materialization.handlers[0].operation.target_kind
+        = operation_target == SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+            ? SOL_MIR_MATERIALIZED_TARGET_IMPORT
+            : SOL_MIR_MATERIALIZED_TARGET_INSTANCE;
+    CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+    materialization.handlers[0].operation.target_kind = operation_target;
+    const SolMirMaterializedBinding *handler_source = &materialization.bindings[
+        materialization.handlers[0].source_binding];
+    if (handler_source->target_kind == SOL_MIR_MATERIALIZED_TARGET_IMPORT) {
+        size_t target = handler_source->import;
+        size_t saved = materialization.imports[target].effects;
+        materialization.imports[target].effects = materialization.effect_row_count;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        materialization.imports[target].effects = saved;
+    }
     SolMirMaterializedBindingId saved_provider
         = materialization.handlers[0].provider_binding;
     materialization.handlers[0].provider_binding
@@ -805,6 +937,31 @@ static void test_recursive_nominal_planning_and_copy_cycle(void) {
     CHECK(node_cycle && generic_copy_cycle && generic_noncopy_cycle);
     CHECK(sol_mir_plan_validate(&plan, NULL));
     CHECK(sol_mir_materialization_validate(&materialization, NULL));
+    bool capability_copy = false, category = false, fixed_point = false;
+    for (size_t id = 0; id < materialization.type_count; ++id) {
+        SolMirMaterializedType *type = &materialization.types[id];
+        if (!capability_copy && type->nominal_category
+                == SOL_MIR_MATERIALIZED_NOMINAL_CAPABILITY) {
+            type->is_copy = true;
+            CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+            type->is_copy = false; capability_copy = true;
+        }
+        if (!category && type->kind == SOL_IR_TYPE_NOMINAL && type->is_copy
+            && type->nominal_category != SOL_MIR_MATERIALIZED_NOMINAL_CAPABILITY) {
+            SolMirMaterializedNominalCategory saved = type->nominal_category;
+            type->nominal_category = SOL_MIR_MATERIALIZED_NOMINAL_CAPABILITY;
+            CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+            type->nominal_category = saved; category = true;
+        }
+        if (!fixed_point && type->kind == SOL_IR_TYPE_NOMINAL && !type->is_copy
+            && type->nominal_category != SOL_MIR_MATERIALIZED_NOMINAL_CAPABILITY) {
+            type->is_copy = true;
+            CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+            type->is_copy = false; fixed_point = true;
+        }
+    }
+    CHECK(capability_copy && category && fixed_point);
+    CHECK(sol_mir_materialization_validate_concrete(&materialization, NULL));
     sol_mir_materialization_free(&materialization);
     sol_mir_plan_free(&plan);
     sol_mir_program_free(&program);
@@ -854,6 +1011,53 @@ static void test_exclusive_writeback_order(void) {
         found = true;
     }
     CHECK(found && sol_mir_materialization_validate(&materialization, NULL));
+    bool coordinated_access = false;
+    for (size_t image = 0; image < materialization.image_count; ++image) {
+        SolMirMaterializedImage *target = &materialization.images[image];
+        if (target->parameter_accesses.count != 2
+            || materialization.accesses[target->parameter_accesses.offset]
+                != SOL_ACCESS_EXCLUSIVE) continue;
+        for (size_t b = 0; b < materialization.block_count; ++b) {
+            SolMirMaterializedTerminator *term = &materialization.blocks[b].terminator;
+            if (term->kind != SOL_MIR_TERM_INVOKE
+                || materialization.bindings[term->binding].target_kind
+                    != SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+                || materialization.bindings[term->binding].instance != image) continue;
+            SolAccessMode *signature
+                = &materialization.accesses[target->parameter_accesses.offset];
+            SolMirMaterializedCallArgument *argument
+                = &materialization.call_arguments[term->arguments.offset];
+            SolAccessMode saved_signature = *signature, saved_argument = argument->access;
+            *signature = SOL_ACCESS_SHARED; argument->access = SOL_ACCESS_SHARED;
+            CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+            *signature = saved_signature; argument->access = saved_argument;
+            coordinated_access = true; break;
+        }
+    }
+    CHECK(coordinated_access);
+    if (found) {
+        for (size_t i = 0; i < materialization.block_count; ++i) {
+            SolMirMaterializedTerminator *term = &materialization.blocks[i].terminator;
+            if (term->kind != SOL_MIR_TERM_INVOKE || term->writebacks.count != 2) continue;
+            size_t saved = materialization.writebacks[term->writebacks.offset].formal;
+            materialization.writebacks[term->writebacks.offset].formal = 1;
+            CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+            materialization.writebacks[term->writebacks.offset].formal = saved;
+            SolIrCallKind call_kind = term->call_kind;
+            term->call_kind = SOL_IR_CALL_CALLBACK;
+            CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+            term->call_kind = call_kind;
+            size_t effects = term->effects;
+            term->effects = materialization.effect_row_count;
+            CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+            term->effects = effects;
+            size_t failure_edge = term->failure_edge;
+            term->failure_edge = SOL_MIR_MATERIALIZED_NONE;
+            CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+            term->failure_edge = failure_edge;
+            break;
+        }
+    }
     sol_mir_materialization_free(&materialization);
     sol_mir_plan_free(&plan);
     sol_mir_program_free(&program);
@@ -861,13 +1065,579 @@ static void test_exclusive_writeback_order(void) {
     free_compilation(&compilation);
 }
 
+static void test_copy_specialization_normalizes_move(void) {
+    Compilation compilation;
+    CHECK(compile_text(&compilation,
+        "module copy_specialization\n"
+        "function identity<T>(value: T) -> T { return value }\n"
+        "function root() -> Text { return identity(\"copy text\") }\n"));
+    SolDiagnostics diagnostics;
+    sol_diagnostics_init(&diagnostics);
+    SolMirProgram program; SolMirPlan plan; SolMirMaterialization materialization;
+    sol_mir_program_init(&program); sol_mir_plan_init(&plan);
+    sol_mir_materialization_init(&materialization);
+    SolMirMaterializeBuildOutcome outcome;
+    CHECK(build_all(&compilation.ir,
+        callable(&compilation.ir, "root", SOL_IR_CALLABLE_FUNCTION), NULL, 0,
+        &program, &plan, &materialization, NULL, &diagnostics, &outcome));
+    CHECK(outcome == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED);
+    bool normalized = false;
+    for (size_t image = 0; image < materialization.image_count; ++image) {
+        SolMirMaterializedImage *item = &materialization.images[image];
+        for (size_t i = 0; i < item->instructions.count; ++i) {
+            size_t id = item->instructions.offset + i;
+            SolMirMaterializedInstruction *instruction
+                = &materialization.instructions[id];
+            size_t source = id - item->instructions.offset;
+            if (instruction->kind != SOL_MIR_INST_LOAD_COPY
+                || item->topology.instructions[source].kind != SOL_MIR_INST_LOAD_MOVE
+                || !materialization.types[instruction->type].is_copy) continue;
+            instruction->kind = SOL_MIR_INST_LOAD_MOVE;
+            CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+            CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+            instruction->kind = SOL_MIR_INST_LOAD_COPY;
+            normalized = true;
+        }
+    }
+    CHECK(normalized);
+    CHECK(sol_mir_materialization_validate_concrete(&materialization, NULL));
+    CHECK(sol_mir_materialization_validate(&materialization, NULL));
+    sol_mir_materialization_free(&materialization); sol_mir_plan_free(&plan);
+    sol_mir_program_free(&program); sol_diagnostics_free(&diagnostics);
+    free_compilation(&compilation);
+}
+
+static void test_partial_path_restore_and_loop_metadata(void) {
+    Compilation compilation;
+    bool compiled = compile_text(&compilation,
+        "module path_restore\n"
+        "capability Token {}\n"
+        "record Inner { b: capability Token, number: Int64 }\n"
+        "record Outer { a: Inner, sibling: Int64 }\n"
+        "function root(token: capability Token, flag: Bool) -> Int64 { "
+        "var x = Outer { a = Inner { b = token, number = 1 }, sibling = 2 } "
+        "let moved = x.a.b let sibling = x.sibling "
+        "var count = 0 "
+        "while count < sibling decreases { sibling - count } { "
+        "count += 1 if flag { continue } else {} } return count }\n");
+    if (!compiled) sol_diagnostics_render_human(stderr, &compilation.source,
+        &compilation.diagnostics);
+    CHECK(compiled);
+    CHECK(sol_mir_materialization_test_path_frontier());
+    SolDiagnostics diagnostics; sol_diagnostics_init(&diagnostics);
+    SolMirProgram program; SolMirPlan plan; SolMirMaterialization materialization;
+    sol_mir_program_init(&program); sol_mir_plan_init(&plan);
+    sol_mir_materialization_init(&materialization);
+    SolMirMaterializeBuildOutcome outcome;
+    bool built = build_all(&compilation.ir,
+        callable(&compilation.ir, "root", SOL_IR_CALLABLE_FUNCTION), NULL, 0,
+        &program, &plan, &materialization, NULL, &diagnostics, &outcome);
+    if (!built || outcome != SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &diagnostics);
+    }
+    CHECK(built && outcome == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED);
+    CHECK(materialization.loop_count == 1
+        && sol_mir_materialization_validate_concrete(&materialization, NULL));
+    if (materialization.loop_count != 0) {
+        size_t saved = materialization.loops[0].header;
+        materialization.loops[0].header = materialization.loops[0].exit;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        materialization.loops[0].header = saved;
+    }
+    bool transfer_loop = false;
+    for (size_t b = 0; b < materialization.block_count; ++b) {
+        SolMirMaterializedTerminator *term = &materialization.blocks[b].terminator;
+        if (term->kind != SOL_MIR_TERM_CONTINUE) continue;
+        size_t saved = term->loop;
+        term->loop = SOL_MIR_MATERIALIZED_NONE;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        term->loop = saved; transfer_loop = true; break;
+    }
+    CHECK(transfer_loop);
+    bool changed_edge = false;
+    for (size_t b = 0; b < materialization.block_count; ++b) {
+        SolMirMaterializedTerminator *term = &materialization.blocks[b].terminator;
+        if (term->kind != SOL_MIR_TERM_BRANCH) continue;
+        size_t saved = term->false_edge;
+        term->false_edge = term->true_edge;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        term->false_edge = saved; changed_edge = true; break;
+    }
+    CHECK(changed_edge && sol_mir_materialization_validate(&materialization, NULL));
+    sol_mir_materialization_free(&materialization); sol_mir_plan_free(&plan);
+    sol_mir_program_free(&program); sol_diagnostics_free(&diagnostics);
+    free_compilation(&compilation);
+}
+
+static void test_refinement_predicate_site_and_temp_suffix(void) {
+    Compilation compilation;
+    CHECK(compile_text(&compilation,
+        "module refinement_site\n"
+        "function positive(value: Int64) -> Bool { return value > 0 }\n"
+        "type Positive = refined Int64 where positive(self)\n"
+        "function root() -> Positive { return Positive(1) }\n"));
+    SolDiagnostics diagnostics; sol_diagnostics_init(&diagnostics);
+    SolMirProgram program; SolMirPlan plan; SolMirMaterialization materialization;
+    sol_mir_program_init(&program); sol_mir_plan_init(&plan);
+    sol_mir_materialization_init(&materialization);
+    SolMirMaterializeBuildOutcome outcome;
+    CHECK(build_all(&compilation.ir,
+        callable(&compilation.ir, "root", SOL_IR_CALLABLE_FUNCTION), NULL, 0,
+        &program, &plan, &materialization, NULL, &diagnostics, &outcome));
+    CHECK(outcome == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED);
+    bool predicate = false, missing_predicate = false, temporary = false;
+    for (size_t i = 0; i < materialization.binding_count; ++i) {
+        if (materialization.bindings[i].kind != SOL_MIR_PLAN_DEMAND_PREDICATE) continue;
+        size_t site = materialization.bindings[i].site;
+        CHECK(materialization.semantic_sites[site].source_obligation != SOL_IR_NONE);
+        SolMirPlanContextId saved = materialization.semantic_sites[site].context;
+        materialization.semantic_sites[site].context = materialization.context_count;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        materialization.semantic_sites[site].context = saved;
+        SolMirPlanContextId saved_binding_context
+            = materialization.bindings[i].context;
+        materialization.semantic_sites[site].context
+            = materialization.context_count;
+        materialization.bindings[i].context = materialization.context_count;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        materialization.semantic_sites[site].context = saved;
+        materialization.bindings[i].context = saved_binding_context;
+        SolMirMaterializedBindingId saved_binding
+            = materialization.semantic_sites[site].binding;
+        materialization.semantic_sites[site].binding = materialization.binding_count;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        materialization.semantic_sites[site].binding = saved_binding;
+        size_t saved_block = materialization.semantic_sites[site].block;
+        materialization.semantic_sites[site].block = SOL_MIR_MATERIALIZED_NONE;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        materialization.semantic_sites[site].block = saved_block;
+        predicate = true; missing_predicate = true; break;
+    }
+    for (size_t i = 0; i < materialization.instruction_count; ++i) {
+        SolMirMaterializedInstruction *instruction = &materialization.instructions[i];
+        if (instruction->kind != SOL_MIR_INST_TEMPORARY_DROP) continue;
+        size_t saved = instruction->preserve_depth;
+        instruction->preserve_depth = materialization.temporary_count;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        instruction->preserve_depth = saved; temporary = true; break;
+    }
+    CHECK(predicate && missing_predicate);
+    CHECK(temporary || materialization.temporary_count != 0);
+    CHECK(sol_mir_materialization_validate(&materialization, NULL));
+    sol_mir_materialization_free(&materialization); sol_mir_plan_free(&plan);
+    sol_mir_program_free(&program); sol_diagnostics_free(&diagnostics);
+    free_compilation(&compilation);
+}
+
+static void test_non_cfg_predicate_function_site(void) {
+    Compilation compilation;
+    CHECK(compile_text(&compilation,
+        "module predicate_value_site\n"
+        "function predicate() -> Bool effects { pure } { return true }\n"
+        "function accepts(callback: function() -> Bool effects { pure }) "
+        "-> Bool effects { pure } { return true }\n"
+        "function root() -> Int64 effects { pure } "
+        "requires { accepts(predicate) } { return 1 }\n"));
+    SolDiagnostics diagnostics; sol_diagnostics_init(&diagnostics);
+    SolMirProgram program; SolMirPlan plan; SolMirMaterialization materialization;
+    sol_mir_program_init(&program); sol_mir_plan_init(&plan);
+    sol_mir_materialization_init(&materialization);
+    SolMirMaterializeBuildOutcome outcome;
+    CHECK(build_all(&compilation.ir,
+        callable(&compilation.ir, "root", SOL_IR_CALLABLE_FUNCTION), NULL, 0,
+        &program, &plan, &materialization, NULL, &diagnostics, &outcome));
+    CHECK(outcome == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED);
+    bool predicate = false, function = false;
+    for (size_t i = 0; i < materialization.semantic_site_count; ++i) {
+        SolMirMaterializedSemanticSite *site = &materialization.semantic_sites[i];
+        if (site->kind != SOL_MIR_PLAN_DEMAND_PREDICATE
+            && site->kind != SOL_MIR_PLAN_DEMAND_PREDICATE_FUNCTION_VALUE) continue;
+        CHECK(site->producer_kind == SOL_MIR_MATERIALIZED_PRODUCER_PREDICATE
+            && site->source_obligation != SOL_IR_NONE
+            && site->context < materialization.context_count
+            && materialization.contexts[site->context].kind
+                == SOL_MIR_PLAN_CONTEXT_CONTRACT);
+        predicate |= site->kind == SOL_MIR_PLAN_DEMAND_PREDICATE;
+        function |= site->kind == SOL_MIR_PLAN_DEMAND_PREDICATE_FUNCTION_VALUE;
+        size_t saved = site->block;
+        const SolMirMaterializedImage *image = &materialization.images[site->parent];
+        site->block = image->blocks.offset
+            + ((saved - image->blocks.offset + 1) % image->blocks.count);
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        site->block = saved;
+    }
+    CHECK(predicate && function);
+    CHECK(sol_mir_materialization_validate_concrete(&materialization, NULL));
+    sol_mir_materialization_free(&materialization); sol_mir_plan_free(&plan);
+    sol_mir_program_free(&program); sol_diagnostics_free(&diagnostics);
+    free_compilation(&compilation);
+}
+
+static void test_multiple_predicate_dependencies(void) {
+    Compilation compilation;
+    CHECK(compile_text(&compilation,
+        "module predicate_dependencies\n"
+        "function magnitude(value: Int64) -> Int64 effects { pure } "
+        "{ return value }\n"
+        "function low(value: Int64) -> Bool effects { pure } { return value < 100 }\n"
+        "function accepts(callback: function(Int64) -> Bool effects { pure }) "
+        "-> Bool effects { pure } { return true }\n"
+        "type Small = refined Int64 where magnitude(self) > 0 && low(self)\n"
+        "function root(value: Int64) -> Int64 effects { pure } "
+        "requires { magnitude(value) > 0 && low(value) && accepts(low) } "
+        "{ let small = Small(value) return value }\n"));
+    SolDiagnostics diagnostics; sol_diagnostics_init(&diagnostics);
+    SolMirProgram program; SolMirPlan plan; SolMirMaterialization materialization;
+    sol_mir_program_init(&program); sol_mir_plan_init(&plan);
+    sol_mir_materialization_init(&materialization);
+    SolMirMaterializeBuildOutcome outcome;
+    bool built = build_all(&compilation.ir,
+        callable(&compilation.ir, "root", SOL_IR_CALLABLE_FUNCTION), NULL, 0,
+        &program, &plan, &materialization, NULL, &diagnostics, &outcome);
+    if (!built || outcome != SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED)
+        sol_diagnostics_render_human(stderr, &compilation.source, &diagnostics);
+    CHECK(built && outcome == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED);
+    size_t int_helpers = 0, contract_helpers = 0, refinement_helpers = 0;
+    size_t callable_values = 0;
+    SolMirMaterializedSemanticSiteId contract_site = SOL_MIR_MATERIALIZED_NONE;
+    SolMirMaterializedSemanticSiteId refinement_site = SOL_MIR_MATERIALIZED_NONE;
+    for (size_t i = 0; i < materialization.semantic_site_count; ++i) {
+        const SolMirMaterializedSemanticSite *site = &materialization.semantic_sites[i];
+        if (site->context >= materialization.context_count) continue;
+        const SolMirPlanContext *context = &materialization.contexts[site->context];
+        if (site->kind == SOL_MIR_PLAN_DEMAND_PREDICATE) {
+            const SolMirMaterializedBinding *binding
+                = &materialization.bindings[site->binding];
+            SolMirMaterializedTypeId result = binding->target_kind
+                    == SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+                ? materialization.images[binding->instance].result
+                : materialization.imports[binding->import].result;
+            int_helpers += materialization.types[result].kind == SOL_IR_TYPE_INT64;
+            if (context->kind == SOL_MIR_PLAN_CONTEXT_CONTRACT) {
+                ++contract_helpers; contract_site = i;
+            } else if (context->kind == SOL_MIR_PLAN_CONTEXT_REFINEMENT) {
+                ++refinement_helpers; refinement_site = i;
+            }
+            CHECK(site->producer_kind == SOL_MIR_MATERIALIZED_PRODUCER_PREDICATE);
+        } else if (site->kind == SOL_MIR_PLAN_DEMAND_PREDICATE_FUNCTION_VALUE) {
+            ++callable_values;
+        }
+    }
+    CHECK(int_helpers == 2 && contract_helpers == 3 && refinement_helpers == 2
+        && callable_values == 1);
+    CHECK(sol_mir_materialization_validate_concrete(&materialization, NULL));
+    if (contract_site != SOL_MIR_MATERIALIZED_NONE
+        && refinement_site != SOL_MIR_MATERIALIZED_NONE) {
+        SolMirMaterializedSemanticSite *left
+            = &materialization.semantic_sites[contract_site];
+        SolMirMaterializedSemanticSite *right
+            = &materialization.semantic_sites[refinement_site];
+        SolMirPlanContextId saved = left->context;
+        left->context = right->context;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        left->context = saved;
+        SolObligationId obligation = right->source_obligation;
+        right->source_obligation = SOL_IR_NONE;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        right->source_obligation = obligation;
+        size_t block = left->block; left->block = right->block;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        left->block = block;
+    }
+    CHECK(sol_mir_materialization_validate_concrete(&materialization, NULL));
+    SolMirProgram repeat_program; SolMirPlan repeat_plan;
+    SolMirMaterialization repeat;
+    sol_mir_program_init(&repeat_program); sol_mir_plan_init(&repeat_plan);
+    sol_mir_materialization_init(&repeat);
+    CHECK(build_all(&compilation.ir,
+        callable(&compilation.ir, "root", SOL_IR_CALLABLE_FUNCTION), NULL, 0,
+        &repeat_program, &repeat_plan, &repeat, NULL, &diagnostics, &outcome));
+    size_t first_length = 0, repeat_length = 0;
+    char *first_text = render(&materialization, &first_length);
+    char *repeat_text = render(&repeat, &repeat_length);
+    CHECK(first_text != NULL && repeat_text != NULL && first_length == repeat_length
+        && memcmp(first_text, repeat_text, first_length) == 0);
+    free(first_text); free(repeat_text);
+    sol_mir_materialization_free(&repeat); sol_mir_plan_free(&repeat_plan);
+    sol_mir_program_free(&repeat_program);
+    sol_mir_materialization_free(&materialization); sol_mir_plan_free(&plan);
+    sol_mir_program_free(&program); sol_diagnostics_free(&diagnostics);
+    free_compilation(&compilation);
+}
+
+static bool compile_e6(Compilation *compilation, SolPackage *package) {
+    memset(compilation, 0, sizeof(*compilation));
+    sol_package_init(package);
+    sol_diagnostics_init(&compilation->diagnostics);
+    sol_hir_module_init(&compilation->hir);
+    sol_type_table_init(&compilation->types);
+    sol_effect_table_init(&compilation->effects);
+    sol_contract_table_init(&compilation->contracts);
+    sol_ir_init(&compilation->ir);
+    char error[256];
+    if (!sol_package_load_directory(package,
+            SOL_TEST_SOURCE_DIR "/tests/conformance/e6",
+            &compilation->diagnostics, error, sizeof(error))) return false;
+    SolHirFileScope *scopes = package->file_count == 0 ? NULL
+        : malloc(package->file_count * sizeof(*scopes));
+    if (package->file_count != 0 && scopes == NULL) return false;
+    for (size_t i = 0; i < package->file_count; ++i) {
+        scopes[i] = (SolHirFileScope){package->files[i].module_name,
+            package->files[i].import_start, package->files[i].import_count,
+            package->files[i].item_start, package->files[i].item_count};
+    }
+    bool valid = sol_hir_lower_scoped(&package->source, &package->syntax, scopes,
+            package->file_count, &compilation->hir, &compilation->diagnostics)
+        && sol_type_check(&package->source, &package->syntax, &compilation->hir,
+            &compilation->types, &compilation->diagnostics)
+        && sol_effect_check(&package->source, &package->syntax, &compilation->hir,
+            &compilation->types, &compilation->effects,
+            &compilation->diagnostics)
+        && sol_contract_lower(&package->source, &package->syntax,
+            &compilation->hir, &compilation->types, &compilation->effects,
+            &compilation->contracts, &compilation->diagnostics)
+        && sol_ir_lower_scoped(&package->source, &package->syntax,
+            &compilation->hir, &compilation->types, &compilation->effects,
+            &compilation->contracts, package->files, package->file_count,
+            &compilation->ir, &compilation->diagnostics);
+    free(scopes);
+    return valid;
+}
+
+static void free_e6(Compilation *compilation, SolPackage *package) {
+    sol_ir_free(&compilation->ir);
+    sol_contract_table_free(&compilation->contracts);
+    sol_effect_table_free(&compilation->effects);
+    sol_type_table_free(&compilation->types);
+    sol_hir_module_free(&compilation->hir);
+    sol_diagnostics_free(&compilation->diagnostics);
+    sol_package_free(package);
+}
+
+static bool build_roots(const SolIr *ir, const SolMirProgramRoot *roots,
+    size_t root_count, const SolIrCallableId *imports, size_t import_count,
+    SolMirProgram *program, SolMirPlan *plan,
+    SolMirMaterialization *materialization, SolDiagnostics *diagnostics) {
+    SolMirProgramBuildRequest program_request
+        = {ir, roots, root_count, imports, import_count, NULL};
+    SolMirPlanBuildRequest plan_request = {program, NULL};
+    SolMirMaterializeBuildRequest materialize_request = {plan, NULL};
+    return sol_mir_program_build(&program_request, program, diagnostics)
+            == SOL_MIR_PROGRAM_BUILD_SUCCEEDED
+        && sol_mir_plan_build(&plan_request, plan, diagnostics)
+            == SOL_MIR_PLAN_BUILD_SUCCEEDED
+        && sol_mir_materialize_build(&materialize_request, materialization,
+            diagnostics) == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED;
+}
+
+static size_t concrete_invokes(const SolMirMaterialization *owner) {
+    size_t count = 0;
+    for (size_t i = 0; i < owner->block_count; ++i) {
+        count += owner->blocks[i].terminator.kind == SOL_MIR_TERM_INVOKE;
+    }
+    return count;
+}
+
+static void test_e6_concrete_closure_and_determinism(void) {
+    Compilation compilation;
+    SolPackage package;
+    CHECK(compile_e6(&compilation, &package));
+    const SolIr *ir = &compilation.ir;
+    SolIrCallableId imports[4];
+    const char *names[] = {"write", "get", "count", "read"};
+    for (size_t i = 0; i < 4; ++i) {
+        imports[i] = callable(ir, names[i], SOL_IR_CALLABLE_CAPABILITY);
+        CHECK(imports[i] != SOL_IR_NONE);
+    }
+    SolMirProgramRoot roots[5];
+    roots[0] = (SolMirProgramRoot){callable(ir, "launch",
+        SOL_IR_CALLABLE_FUNCTION), SOL_MIR_PROGRAM_ROOT_ENTRY};
+    size_t root_count = 1;
+    for (SolIrCallableId id = 0; id < ir->callable_count; ++id) {
+        if (ir->callables[id].kind == SOL_IR_CALLABLE_TEST) {
+            roots[root_count++] = (SolMirProgramRoot){id,
+                SOL_MIR_PROGRAM_ROOT_TEST};
+        }
+    }
+    CHECK(root_count == 5);
+    SolDiagnostics diagnostics;
+    sol_diagnostics_init(&diagnostics);
+    SolMirProgram entry_program, all_program, repeat_program;
+    SolMirPlan entry_plan, all_plan, repeat_plan;
+    SolMirMaterialization entry, all, repeat;
+    sol_mir_program_init(&entry_program); sol_mir_program_init(&all_program);
+    sol_mir_program_init(&repeat_program); sol_mir_plan_init(&entry_plan);
+    sol_mir_plan_init(&all_plan); sol_mir_plan_init(&repeat_plan);
+    sol_mir_materialization_init(&entry); sol_mir_materialization_init(&all);
+    sol_mir_materialization_init(&repeat);
+    CHECK(build_roots(ir, roots, 1, imports, 4, &entry_program, &entry_plan,
+        &entry, &diagnostics));
+    CHECK(entry.image_count == 8 && entry.import_count == 4
+        && concrete_invokes(&entry) == 12);
+    CHECK(entry.binding_count == entry_plan.demand_count
+        && sol_mir_materialization_validate(&entry, NULL));
+    CHECK(build_roots(ir, roots, root_count, imports, 4, &all_program, &all_plan,
+        &all, &diagnostics));
+    CHECK(all.image_count == 14 && all.import_count == 4
+        && concrete_invokes(&all) == 18);
+    CHECK(all.binding_count == all_plan.demand_count
+        && sol_mir_materialization_validate(&all, NULL));
+    size_t storage_cardinality = 0;
+    for (size_t i = 0; i < all.image_count; ++i) {
+        const SolMirMaterializedImage *image = &all.images[i];
+        size_t projections = 0;
+        for (size_t p = 0; p < image->places.count; ++p)
+            projections += all.places[image->places.offset + p].projections.count;
+        size_t facts = image->locals.count + image->places.count + 1;
+        size_t path = image->places.count * (projections + 1) + 1;
+        size_t scan = image->blocks.count
+            + image->instructions.count * path
+            + image->call_arguments.count * path
+            + 3 * image->blocks.count * facts;
+        storage_cardinality += (image->blocks.count * facts + 1) * scan;
+    }
+    size_t recomputed_work = 0;
+    CHECK(sol_mir_materialization_validation_work(&all, &recomputed_work)
+        && recomputed_work == all.usage.validation_work
+        && recomputed_work >= storage_cardinality);
+    size_t instruction_kinds[SOL_MIR_INST_CAPTURE_SNAPSHOT + 1] = {0};
+    size_t terminator_kinds[SOL_MIR_TERM_CONTRACT_VIOLATION + 1] = {0};
+    size_t demand_kinds[SOL_MIR_PLAN_DEMAND_PREDICATE_FUNCTION_VALUE + 1] = {0};
+    for (size_t i = 0; i < all.instruction_count; ++i)
+        ++instruction_kinds[all.instructions[i].kind];
+    for (size_t i = 0; i < all.block_count; ++i)
+        ++terminator_kinds[all.blocks[i].terminator.kind];
+    for (size_t i = 0; i < all.binding_count; ++i)
+        ++demand_kinds[all.bindings[i].kind];
+    const size_t expected_instructions[] = {22, 5, 7, 2, 12, 15, 111, 111,
+        26, 0, 1, 16, 0, 16, 1, 1, 1, 50, 5, 4, 3, 3, 3, 1, 0, 0, 28, 1};
+    const size_t expected_terminators[] = {0, 11, 12, 17, 1, 18, 22, 0, 0,
+        0, 1, 1, 2, 3, 3};
+    const size_t expected_demands[] = {5, 18, 0, 0, 0, 0, 0, 0, 0};
+    CHECK(all.instruction_count == 445 && all.block_count == 91
+        && all.binding_count == 23);
+    CHECK(memcmp(instruction_kinds, expected_instructions,
+        sizeof(expected_instructions)) == 0);
+    CHECK(memcmp(terminator_kinds, expected_terminators,
+        sizeof(expected_terminators)) == 0);
+    CHECK(memcmp(demand_kinds, expected_demands, sizeof(expected_demands)) == 0);
+    bool corrupted_temp_suffix = false;
+    for (size_t i = 0; i < all.instruction_count; ++i) {
+        SolMirMaterializedInstruction *instruction = &all.instructions[i];
+        if (instruction->kind != SOL_MIR_INST_TEMPORARY_DROP) continue;
+        size_t saved = instruction->preserve_depth;
+        instruction->preserve_depth = all.temporary_count;
+        CHECK(!sol_mir_materialization_validate_concrete(&all, NULL));
+        instruction->preserve_depth = saved;
+        corrupted_temp_suffix = true; break;
+    }
+    CHECK(corrupted_temp_suffix);
+    bool corrupted_propagate = false, corrupted_panic = false;
+    for (size_t image = 0; image < all.image_count; ++image) {
+        const SolMirMaterializedImage *item = &all.images[image];
+        for (size_t b = 0; b < item->blocks.count; ++b) {
+            SolMirMaterializedTerminator *term
+                = &all.blocks[item->blocks.offset + b].terminator;
+            if (!corrupted_propagate && term->kind == SOL_MIR_TERM_PROPAGATE) {
+                SolIrPropagationKind saved = term->propagation_kind;
+                term->propagation_kind = (SolIrPropagationKind)99;
+                CHECK(!sol_mir_materialization_validate_concrete(&all, NULL));
+                term->propagation_kind = saved; corrupted_propagate = true;
+            }
+            if (!corrupted_panic && term->kind == SOL_MIR_TERM_PANIC) {
+                size_t replacement = SOL_MIR_MATERIALIZED_NONE;
+                for (size_t v = 0; v < item->values.count; ++v) {
+                    size_t id = item->values.offset + v;
+                    if (all.types[all.values[id].type].kind != SOL_IR_TYPE_TEXT) {
+                        replacement = id; break;
+                    }
+                }
+                if (replacement != SOL_MIR_MATERIALIZED_NONE) {
+                    size_t saved = term->value;
+                    term->value = replacement;
+                    CHECK(!sol_mir_materialization_validate_concrete(&all, NULL));
+                    term->value = saved; corrupted_panic = true;
+                }
+            }
+        }
+    }
+    CHECK(corrupted_propagate && corrupted_panic);
+    for (SolIrCallableId id = 0; id < ir->callable_count; ++id) {
+        if (ir->callables[id].body == SOL_IR_NONE) continue;
+        bool represented = false;
+        for (size_t image = 0; image < all.image_count; ++image) {
+            represented |= all.images[image].source_callable == id;
+        }
+        CHECK(represented);
+    }
+    CHECK(build_roots(ir, roots, root_count, imports, 4, &repeat_program,
+        &repeat_plan, &repeat, &diagnostics));
+    size_t all_length = 0, repeat_length = 0;
+    char *all_text = render(&all, &all_length);
+    char *repeat_text = render(&repeat, &repeat_length);
+    CHECK(all_text != NULL && repeat_text != NULL && all_length == repeat_length
+        && memcmp(all_text, repeat_text, all_length) == 0);
+    free(all_text); free(repeat_text);
+
+    bool corrupted = false;
+    for (size_t i = 0; i < all.block_count && !corrupted; ++i) {
+        SolMirMaterializedBlock *block = &all.blocks[i];
+        if (block->instructions.count < 2) continue;
+        SolMirMaterializedInstruction *second
+            = &all.instructions[block->instructions.offset + 1];
+        if (second->kind != SOL_MIR_INST_BINARY) continue;
+        size_t saved = second->left;
+        second->left = second->result;
+        CHECK(!sol_mir_materialization_validate(&all, NULL));
+        second->left = saved;
+        corrupted = true;
+    }
+    CHECK(corrupted && sol_mir_materialization_validate(&all, NULL));
+    if (all.binding_count != 0) {
+        size_t saved = all.bindings[0].source_demand;
+        all.bindings[0].source_demand = all.binding_count;
+        CHECK(!sol_mir_materialization_validate(&all, NULL));
+        all.bindings[0].source_demand = saved;
+    }
+    if (all.semantic_site_count != 0) {
+        size_t saved = all.semantic_sites[0].binding;
+        all.semantic_sites[0].binding = all.binding_count;
+        CHECK(!sol_mir_materialization_validate_concrete(&all, NULL));
+        all.semantic_sites[0].binding = saved;
+    }
+    size_t saved_validation_work = all.usage.validation_work;
+    ++all.usage.validation_work;
+    CHECK(!sol_mir_materialization_validate_concrete(&all, NULL));
+    all.usage.validation_work = saved_validation_work;
+    if (all.image_count > 1 && all.images[1].blocks.count != 0) {
+        size_t saved = all.images[1].entry;
+        all.images[1].entry = all.images[0].entry;
+        CHECK(!sol_mir_materialization_validate(&all, NULL));
+        all.images[1].entry = saved;
+    }
+    CHECK(sol_mir_materialization_validate(&all, NULL));
+    sol_mir_materialization_free(&repeat); sol_mir_materialization_free(&all);
+    sol_mir_materialization_free(&entry); sol_mir_plan_free(&repeat_plan);
+    sol_mir_plan_free(&all_plan); sol_mir_plan_free(&entry_plan);
+    sol_mir_program_free(&repeat_program); sol_mir_program_free(&all_program);
+    sol_mir_program_free(&entry_program); sol_diagnostics_free(&diagnostics);
+    free_e6(&compilation, &package);
+}
+
 int main(void) {
+    CHECK(sol_mir_materialization_test_callable_site_target_equality());
     test_generic_recursion_lifecycle_limits_and_render();
     test_evidence_and_import_bindings();
     test_handlers_are_materialized();
     test_refinement_contexts_copy_and_concrete_records();
     test_recursive_nominal_planning_and_copy_cycle();
     test_exclusive_writeback_order();
+    test_copy_specialization_normalizes_move();
+    test_partial_path_restore_and_loop_metadata();
+    test_refinement_predicate_site_and_temp_suffix();
+    test_non_cfg_predicate_function_site();
+    test_multiple_predicate_dependencies();
+    test_e6_concrete_closure_and_determinism();
     if (failures != 0) {
         fprintf(stderr, "%d MIR materialization test(s) failed\n", failures);
         return 1;

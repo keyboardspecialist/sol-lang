@@ -1912,10 +1912,19 @@ static bool scan_instance(Builder *builder, SolMirPlanInstanceId instance_id) {
     for (size_t obligation = 0; obligation < builder->ir->obligation_count;
         ++obligation) {
         const SolIrObligation *item = &builder->ir->obligations[obligation];
-        if (item->owner_kind == SOL_CONTRACT_OWNER_ITEM
-            && item->owner == callable->owner
-            && !scan_predicate_obligation(&environment, item,
-                &environment)) return false;
+        if (item->owner_kind != SOL_CONTRACT_OWNER_ITEM
+            || item->owner != callable->owner) continue;
+        if (item->predicate >= builder->ir->expression_count) return false;
+        Environment predicate = environment;
+        SolMirPlanContext contract = {SOL_MIR_PLAN_CONTEXT_CONTRACT,
+            instance_id, SOL_MIR_NONE, callable->owner, item->id, {0}};
+        if (!source_for(builder, instance->callable, item->predicate,
+                builder->ir->expressions[item->predicate].span,
+                &contract.source)
+            || !add_context(builder, contract, &predicate.context)
+            || !scan_predicate_obligation(&environment, item, &predicate)) {
+            return false;
+        }
     }
     for (size_t block = 0; block < mir->block_count; ++block) {
         const SolMirTerminator *term = &mir->blocks[block].terminator;
@@ -2981,6 +2990,9 @@ static bool slices_valid(const SolMirPlan *plan, SolDiagnostics *diagnostics) {
             || (context->kind == SOL_MIR_PLAN_CONTEXT_BODY
                 && (context->source_block != SOL_MIR_NONE
                     || context->obligation != SOL_IR_NONE))
+            || (context->kind == SOL_MIR_PLAN_CONTEXT_CONTRACT
+                && (context->source_block != SOL_MIR_NONE
+                    || context->obligation == SOL_IR_NONE))
             || (context->kind == SOL_MIR_PLAN_CONTEXT_REFINEMENT
                 && (context->source_block == SOL_MIR_NONE
                     || context->obligation == SOL_IR_NONE))) return false;

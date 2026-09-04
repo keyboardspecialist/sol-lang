@@ -68,6 +68,7 @@ add_library(sol_compiler STATIC
     src/mir.c
     src/mir_eval.c
     src/mir_materialize.c
+    src/mir_materialize_validate.c
     src/mir_plan.c
     src/mir_program.c
     src/mir_render.c
@@ -174,6 +175,9 @@ if(BUILD_TESTING)
     )
     add_executable(sol_mir_materialize_tests tests/mir_materialize_tests.c)
     target_link_libraries(sol_mir_materialize_tests PRIVATE sol_compiler)
+    target_compile_definitions(sol_mir_materialize_tests PRIVATE
+        SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
     target_compile_definitions(sol_mir_tests PRIVATE
         SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )

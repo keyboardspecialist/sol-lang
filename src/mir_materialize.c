@@ -13,6 +13,11 @@ typedef struct {
 
 typedef struct { uintptr_t start, end; } Range;
 
+bool sol_mir_materialization_validate_concrete(
+    const SolMirMaterialization *owner, SolDiagnostics *diagnostics);
+bool sol_mir_materialization_validation_work(
+    const SolMirMaterialization *owner, size_t *work);
+
 static bool fail(Builder *b, SolMirMaterializeBuildOutcome outcome,
     const char *message) {
     b->outcome = outcome;
@@ -49,7 +54,7 @@ void sol_mir_materialization_free(SolMirMaterialization *owner) {
     FREE(instructions); FREE(temporaries); FREE(construct_operands);
     FREE(call_arguments); FREE(blocks); FREE(edges); FREE(edge_values);
     FREE(parameter_values); FREE(loops); FREE(bindings); FREE(imports);
-    FREE(handlers); FREE(writebacks); FREE(effect_rows); FREE(effect_atoms);
+    FREE(handlers); FREE(writebacks); FREE(semantic_sites); FREE(effect_rows); FREE(effect_atoms);
     FREE(effect_row_atoms); FREE(effect_names); FREE(literal_bytes);
 #undef FREE
     sol_mir_materialization_init(owner);
@@ -57,19 +62,19 @@ void sol_mir_materialization_free(SolMirMaterialization *owner) {
 
 SolMirMaterializeLimits sol_mir_materialize_default_limits(void) {
     return (SolMirMaterializeLimits){4096, 8000000, 2000000, 12000000,
-        768u * 1024u * 1024u, 32000000};
+        768u * 1024u * 1024u, 32000000, 1000000000};
 }
 
 static bool limits_zero(SolMirMaterializeLimits x) {
     return x.max_instances == 0 && x.max_cfg_items == 0 && x.max_bindings == 0
         && x.max_concrete_records == 0 && x.max_owned_bytes == 0
-        && x.max_materialization_work == 0;
+        && x.max_materialization_work == 0 && x.max_validation_work == 0;
 }
 
 static bool limits_complete(SolMirMaterializeLimits x) {
     return x.max_instances != 0 && x.max_cfg_items != 0 && x.max_bindings != 0
         && x.max_concrete_records != 0 && x.max_owned_bytes != 0
-        && x.max_materialization_work != 0;
+        && x.max_materialization_work != 0 && x.max_validation_work != 0;
 }
 
 static bool add_limited(size_t *value, size_t amount, size_t limit) {
@@ -229,25 +234,24 @@ static bool instruction_place(const SolMirInstruction *instruction,
     }
 }
 
-static bool copy_candidate(const SolMirPlan *plan, size_t id) {
-    const SolMirPlanType *type = &plan->types[id];
+static bool copy_candidate(const SolMirMaterializedType *type) {
     if (type->kind == SOL_IR_TYPE_INT64 || type->kind == SOL_IR_TYPE_BOOL
         || type->kind == SOL_IR_TYPE_TEXT || type->kind == SOL_IR_TYPE_UNIT
         || type->kind == SOL_IR_TYPE_NEVER || type->kind == SOL_IR_TYPE_OPTION
         || type->kind == SOL_IR_TYPE_RESULT || type->kind == SOL_IR_TYPE_TUPLE) {
         return true;
     }
-    if (type->kind != SOL_IR_TYPE_NOMINAL
-        || type->definition >= plan->program->ir->definition_count) return false;
-    SolIrDefinitionKind kind = plan->program->ir->definitions[type->definition].kind;
-    return kind == SOL_IR_DEFINITION_RECORD || kind == SOL_IR_DEFINITION_ENUM
-        || kind == SOL_IR_DEFINITION_DISTINCT || kind == SOL_IR_DEFINITION_REFINED;
+    return type->kind == SOL_IR_TYPE_NOMINAL
+        && (type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_RECORD
+            || type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_ENUM
+            || type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_DISTINCT
+            || type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_REFINED);
 }
 
 static bool classify_copy(Builder *b) {
     for (size_t i = 0; i < b->out->type_count; ++i) {
         if (!charge(b, 1)) return false;
-        b->out->types[i].is_copy = copy_candidate(b->out->plan, i);
+        b->out->types[i].is_copy = copy_candidate(&b->out->types[i]);
     }
     bool changed;
     do {
@@ -569,8 +573,28 @@ static bool translate_instruction(SolMirMaterialization *out,
             target->source_operation_roots = source->as.construct.operation_roots;
             break;
         case SOL_MIR_INST_CAPTURE_SNAPSHOT:
-            target->source_snapshot = source->as.snapshot; break;
+            target->source_snapshot = source->as.snapshot;
+            {
+                const SolMirPlanTypedUse *snapshot = NULL;
+                for (size_t u = 0; u < instance->typed_uses.count; ++u) {
+                    const SolMirPlanTypedUse *candidate = &out->plan->typed_uses[
+                        instance->typed_uses.offset + u];
+                    if (candidate->kind == SOL_MIR_PLAN_USE_SNAPSHOT
+                        && candidate->source == source->as.snapshot) {
+                        if (snapshot != NULL) return false;
+                        snapshot = candidate;
+                    }
+                }
+                if (snapshot == NULL) return false;
+                target->type = snapshot->type;
+            }
+            break;
         default: break;
+    }
+    if (source->kind == SOL_MIR_INST_LOAD_MOVE
+        && target->place != SOL_MIR_MATERIALIZED_NONE
+        && out->types[out->places[target->place].final_type].is_copy) {
+        target->kind = SOL_MIR_INST_LOAD_COPY;
     }
     return true;
 }
@@ -598,7 +622,8 @@ static void init_term(SolMirMaterializedTerminator *term) {
         = term->representation = term->operand = term->edge = term->true_edge
         = term->false_edge = term->normal_edge = term->failure_edge
         = term->value_edge = term->residual_edge = term->satisfied_edge
-        = term->violation_edge = term->loop = SOL_MIR_MATERIALIZED_NONE;
+        = term->violation_edge = term->loop = term->callable_site
+        = SOL_MIR_MATERIALIZED_NONE;
     term->receiver.type = term->receiver.temporary = term->receiver.place
         = SOL_MIR_MATERIALIZED_NONE;
     term->receiver.source_expression = SOL_IR_NONE;
@@ -813,7 +838,7 @@ static bool build_scratch(Builder *b) {
     size_t records[] = {plan->type_count, plan->context_count,
         plan->typed_use_count, locals, places, projections, values, instructions,
         temporaries, operands, arguments, blocks, edges, edge_values, parameters,
-        loops, plan->demand_count, plan->import_count, handlers, writebacks,
+        loops, plan->demand_count, plan->demand_count, plan->import_count, handlers, writebacks,
         plan->effect_row_count, plan->effect_atom_count,
         plan->effect_row_atom_count};
     for (size_t i = 0; i < sizeof(records) / sizeof(records[0]); ++i) {
@@ -858,6 +883,7 @@ static bool build_scratch(Builder *b) {
     ALLOC(parameter_values, parameters, parameter_value_capacity, *out->parameter_values);
     ALLOC(loops, loops, loop_capacity, *out->loops);
     ALLOC(bindings, plan->demand_count, binding_capacity, *out->bindings);
+    ALLOC(semantic_sites, plan->demand_count, semantic_site_capacity, *out->semantic_sites);
     ALLOC(imports, plan->import_count, import_capacity, *out->imports);
     ALLOC(handlers, handlers, handler_capacity, *out->handlers);
     ALLOC(writebacks, writebacks, writeback_capacity, *out->writebacks);
@@ -889,7 +915,26 @@ static bool build_scratch(Builder *b) {
     size_t type_at = 0, access_at = 0;
     for (size_t i = 0; i < plan->type_count; ++i) {
         const SolMirPlanType *source = &plan->types[i];
+        SolMirMaterializedNominalCategory category
+            = SOL_MIR_MATERIALIZED_NOMINAL_NONE;
+        if (source->kind == SOL_IR_TYPE_NOMINAL
+            && source->definition < plan->program->ir->definition_count) {
+            switch (plan->program->ir->definitions[source->definition].kind) {
+                case SOL_IR_DEFINITION_RECORD:
+                    category = SOL_MIR_MATERIALIZED_NOMINAL_RECORD; break;
+                case SOL_IR_DEFINITION_ENUM:
+                    category = SOL_MIR_MATERIALIZED_NOMINAL_ENUM; break;
+                case SOL_IR_DEFINITION_DISTINCT:
+                    category = SOL_MIR_MATERIALIZED_NOMINAL_DISTINCT; break;
+                case SOL_IR_DEFINITION_REFINED:
+                    category = SOL_MIR_MATERIALIZED_NOMINAL_REFINED; break;
+                case SOL_IR_DEFINITION_CAPABILITY:
+                    category = SOL_MIR_MATERIALIZED_NOMINAL_CAPABILITY; break;
+                default: break;
+            }
+        }
         out->types[i] = (SolMirMaterializedType){source->kind, source->definition,
+            category,
             {type_at, source->argument_count},
             {type_at + source->argument_count, source->parameter_count},
             {access_at, source->parameter_count}, source->result, source->effects,
@@ -912,6 +957,7 @@ static bool build_scratch(Builder *b) {
         const SolMirPlanImport *source = &plan->imports[i];
         SolMirMaterializedImport *target = &out->imports[i];
         *target = (SolMirMaterializedImport){source->callable, source->receiver,
+            source->receiver == SOL_MIR_PLAN_NONE ? SOL_ACCESS_OWNED : SOL_ACCESS_SHARED,
             {type_at, source->parameter_types.count},
             {access_at, source->parameter_accesses.count}, source->result,
             source->effects, i};
@@ -931,28 +977,30 @@ static bool build_scratch(Builder *b) {
         for (size_t demand = 0; demand < plan->demand_count; ++demand) {
             const SolMirPlanDemand *source = &plan->demands[demand];
             if (source->parent != parent) continue;
-            out->bindings[binding_at++] = (SolMirMaterializedBinding){demand,
+            out->bindings[binding_at] = (SolMirMaterializedBinding){demand,
                 source->kind, source->parent, source->context, source->source,
                 source->symbolic_target, source->dispatch_trait,
                 source->dispatch_requirement,
                 source->instance != SOL_MIR_PLAN_NONE
                     ? SOL_MIR_MATERIALIZED_TARGET_INSTANCE
                     : SOL_MIR_MATERIALIZED_TARGET_IMPORT,
-                source->instance, source->import};
+                source->instance, source->import, binding_at};
+            ++binding_at;
             ++out->images[parent].bindings.count;
         }
     }
     for (size_t demand = 0; demand < plan->demand_count; ++demand) {
         const SolMirPlanDemand *source = &plan->demands[demand];
         if (source->parent != SOL_MIR_PLAN_NONE) continue;
-        out->bindings[binding_at++] = (SolMirMaterializedBinding){demand,
+        out->bindings[binding_at] = (SolMirMaterializedBinding){demand,
             source->kind, source->parent, source->context, source->source,
             source->symbolic_target, source->dispatch_trait,
             source->dispatch_requirement,
             source->instance != SOL_MIR_PLAN_NONE
                 ? SOL_MIR_MATERIALIZED_TARGET_INSTANCE
                 : SOL_MIR_MATERIALIZED_TARGET_IMPORT,
-            source->instance, source->import};
+            source->instance, source->import, binding_at};
+        ++binding_at;
     }
     if (binding_at != plan->demand_count) return false;
     out->binding_count = out->binding_capacity;
@@ -963,6 +1011,8 @@ static bool build_scratch(Builder *b) {
         SolMirMaterializedImage *image = &out->images[id];
         image->instance = id; image->source_callable = instance->callable;
         image->receiver = instance->receiver; image->result = instance->result;
+        image->receiver_access
+            = plan->program->ir->callables[instance->callable].receiver_access;
         image->effects = instance->effects; image->contexts = instance->contexts;
         image->type_arguments = (SolMirPlanSlice){type_at, instance->type_arguments.count};
         if (instance->type_arguments.count != 0) memcpy(out->type_ids + type_at,
@@ -1138,7 +1188,22 @@ static bool build_scratch(Builder *b) {
                     authority->as.place}), place_for(out, image, (SolMirPlace){
                     plan->program->ir->places[provider->as.place].local,
                     provider->as.place}), expression->as.handler.source, effect,
-                expression->as.handler.root, instruction->span};
+                expression->as.handler.root, {0}, instruction->span};
+            SolMirMaterializedTypeId operation_receiver, operation_result;
+            SolMirPlanSlice operation_parameters, operation_accesses;
+            binding_signature(out, &out->bindings[source_binding],
+                &operation_receiver, &operation_parameters, &operation_accesses,
+                &operation_result);
+            const SolMirMaterializedBinding *operation_binding
+                = &out->bindings[source_binding];
+            handler->operation = (SolMirMaterializedOperationKey){
+                operation_binding->target_kind, operation_binding->instance,
+                operation_binding->import, operation_receiver, handler->authority,
+                operation_binding->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+                    ? out->plan->instances[operation_binding->instance].effects
+                    : out->imports[operation_binding->import].effects};
+            (void)operation_parameters; (void)operation_accesses;
+            (void)operation_result;
             if (out->bindings[provider_binding].symbolic_callable
                     != expression->as.handler.provider_callable
                 || !handler_signatures_match(out, handler)) return false;
@@ -1181,6 +1246,195 @@ static bool build_scratch(Builder *b) {
         }
         if (!clone_mir(b, mir, &image->topology)) return false;
     }
+    for (size_t id = 0; id < out->binding_count; ++id) {
+        const SolMirMaterializedBinding *binding = &out->bindings[id];
+        SolMirMaterializedSemanticSite *site = &out->semantic_sites[id];
+        *site = (SolMirMaterializedSemanticSite){binding->kind, id,
+            binding->parent, binding->context, binding->source,
+            SOL_IR_NONE, SOL_IR_NONE,
+            SOL_MIR_MATERIALIZED_PRODUCER_ROOT,
+            SOL_MIR_MATERIALIZED_NONE, SOL_MIR_MATERIALIZED_NONE,
+            SOL_MIR_MATERIALIZED_NONE, {0}};
+        if (binding->kind == SOL_MIR_PLAN_DEMAND_ROOT) {
+            if (binding->target_kind != SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+                || binding->instance >= out->image_count) return false;
+            site->block = out->images[binding->instance].entry;
+            continue;
+        }
+        if (binding->parent >= out->image_count) return false;
+        const SolMirMaterializedImage *image = &out->images[binding->parent];
+        if (binding->context < out->context_count
+            && (out->contexts[binding->context].kind
+                    == SOL_MIR_PLAN_CONTEXT_REFINEMENT
+                || out->contexts[binding->context].kind
+                    == SOL_MIR_PLAN_CONTEXT_CONTRACT)) {
+            site->source_definition = out->contexts[binding->context].definition;
+            site->source_obligation = out->contexts[binding->context].obligation;
+        }
+        if (binding->kind == SOL_MIR_PLAN_DEMAND_INVOKE
+            || binding->kind == SOL_MIR_PLAN_DEMAND_CALLBACK) {
+            for (size_t block = 0; block < image->blocks.count; ++block) {
+                size_t block_id = image->blocks.offset + block;
+                if (out->blocks[block_id].terminator.kind == SOL_MIR_TERM_INVOKE
+                    && out->blocks[block_id].terminator.binding == id) {
+                    if (site->block != SOL_MIR_MATERIALIZED_NONE) return false;
+                    site->block = block_id;
+                    site->producer_kind = SOL_MIR_MATERIALIZED_PRODUCER_TERMINATOR;
+                }
+            }
+            if (site->block == SOL_MIR_MATERIALIZED_NONE
+                && (binding->kind != SOL_MIR_PLAN_DEMAND_CALLBACK
+                    || site->source_obligation == SOL_IR_NONE)) return false;
+            if (site->block == SOL_MIR_MATERIALIZED_NONE) {
+                for (size_t block = 0; block < image->blocks.count; ++block) {
+                    size_t block_id = image->blocks.offset + block;
+                    const SolMirMaterializedTerminator *term
+                        = &out->blocks[block_id].terminator;
+                    bool matches = term->kind == SOL_MIR_TERM_CHECK_CONTRACT
+                        ? term->source_obligation == site->source_obligation
+                        : term->kind == SOL_MIR_TERM_CHECK_REFINED
+                            && binding->context < out->context_count
+                            && out->contexts[binding->context].kind
+                                == SOL_MIR_PLAN_CONTEXT_REFINEMENT
+                            && term->source_expression
+                                == out->contexts[binding->context].source.expression;
+                    if (matches) {
+                        if (site->block != SOL_MIR_MATERIALIZED_NONE) return false;
+                        site->block = block_id;
+                        site->producer_kind
+                            = SOL_MIR_MATERIALIZED_PRODUCER_PREDICATE;
+                    }
+                }
+                if (site->block == SOL_MIR_MATERIALIZED_NONE) return false;
+            }
+        } else if (binding->kind == SOL_MIR_PLAN_DEMAND_HANDLER_SOURCE
+            || binding->kind == SOL_MIR_PLAN_DEMAND_HANDLER_PROVIDER) {
+            for (size_t h = 0; h < image->handlers.count; ++h) {
+                size_t handler_id = image->handlers.offset + h;
+                const SolMirMaterializedHandler *handler = &out->handlers[handler_id];
+                if ((binding->kind == SOL_MIR_PLAN_DEMAND_HANDLER_SOURCE
+                        && handler->source_binding == id)
+                    || (binding->kind == SOL_MIR_PLAN_DEMAND_HANDLER_PROVIDER
+                        && handler->provider_binding == id)) {
+                    if (site->handler != SOL_MIR_MATERIALIZED_NONE) return false;
+                    site->handler = handler_id;
+                    site->producer_kind = SOL_MIR_MATERIALIZED_PRODUCER_HANDLER;
+                }
+            }
+            if (site->handler == SOL_MIR_MATERIALIZED_NONE) return false;
+        } else {
+            if (site->source_obligation != SOL_IR_NONE) {
+                for (size_t block = 0; block < image->blocks.count; ++block) {
+                    size_t block_id = image->blocks.offset + block;
+                    const SolMirMaterializedTerminator *term
+                        = &out->blocks[block_id].terminator;
+                    bool matches = term->kind == SOL_MIR_TERM_CHECK_CONTRACT
+                        ? term->source_obligation == site->source_obligation
+                        : term->kind == SOL_MIR_TERM_CHECK_REFINED
+                            && binding->context < out->context_count
+                            && out->contexts[binding->context].kind
+                                == SOL_MIR_PLAN_CONTEXT_REFINEMENT
+                            && term->source_expression
+                                == out->contexts[binding->context].source.expression;
+                    if (matches) {
+                        if (site->block != SOL_MIR_MATERIALIZED_NONE) return false;
+                        site->block = block_id;
+                        site->producer_kind
+                            = SOL_MIR_MATERIALIZED_PRODUCER_PREDICATE;
+                    }
+                }
+            }
+            for (size_t n = 0; site->source_obligation == SOL_IR_NONE
+                && binding->kind != SOL_MIR_PLAN_DEMAND_FUNCTION_VALUE
+                && binding->kind != SOL_MIR_PLAN_DEMAND_BOUND_OPERATION
+                && n < image->instructions.count; ++n) {
+                size_t instruction_id = image->instructions.offset + n;
+                const SolMirMaterializedInstruction *instruction
+                    = &out->instructions[instruction_id];
+                if (instruction->source_expression == binding->source.expression) {
+                    if (site->block == SOL_MIR_MATERIALIZED_NONE) {
+                        site->instruction = instruction_id;
+                        site->block = instruction->block;
+                        site->producer_kind
+                            = SOL_MIR_MATERIALIZED_PRODUCER_INSTRUCTION;
+                    }
+                }
+            }
+            if (site->block == SOL_MIR_MATERIALIZED_NONE) {
+                for (size_t block = 0; block < image->blocks.count; ++block) {
+                    size_t block_id = image->blocks.offset + block;
+                    const SolMirMaterializedTerminator *term
+                        = &out->blocks[block_id].terminator;
+                    bool matches = binding->kind == SOL_MIR_PLAN_DEMAND_FUNCTION_VALUE
+                        && term->kind == SOL_MIR_TERM_INVOKE
+                        && term->call_kind == SOL_IR_CALL_CALLBACK
+                        && term->callee < out->temporary_count
+                        && out->temporaries[term->callee].source_expression
+                            == binding->source.expression;
+                    if (!matches && binding->kind
+                            == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION
+                        && term->kind == SOL_MIR_TERM_INVOKE
+                        && term->call_kind == SOL_IR_CALL_CAPABILITY
+                        && term->source_expression
+                            < plan->program->ir->expression_count) {
+                        const SolIrExpression *call = &plan->program->ir->expressions[
+                            term->source_expression];
+                        matches = call->kind == SOL_IR_EXPR_CALL
+                            && call->as.call.callee == binding->source.expression;
+                    }
+                    if (matches) {
+                        if (site->block != SOL_MIR_MATERIALIZED_NONE) return false;
+                        site->block = block_id;
+                        site->producer_kind
+                            = SOL_MIR_MATERIALIZED_PRODUCER_TERMINATOR;
+                    }
+                }
+            }
+            if (site->block == SOL_MIR_MATERIALIZED_NONE) return false;
+        }
+    }
+    for (size_t block = 0; block < out->block_count; ++block) {
+        SolMirMaterializedTerminator *term = &out->blocks[block].terminator;
+        if (term->kind != SOL_MIR_TERM_CHECK_REFINED
+            && term->kind != SOL_MIR_TERM_CHECK_CONTRACT) continue;
+        size_t image_id = 0;
+        while (image_id < out->image_count
+            && !(block >= out->images[image_id].blocks.offset
+                && block - out->images[image_id].blocks.offset
+                    < out->images[image_id].blocks.count)) ++image_id;
+        if (image_id == out->image_count) return false;
+        size_t found = 0;
+        for (size_t site_id = 0; site_id < out->binding_count; ++site_id) {
+            const SolMirMaterializedSemanticSite *site = &out->semantic_sites[site_id];
+            if (site->parent != image_id
+                || (site->kind != SOL_MIR_PLAN_DEMAND_PREDICATE
+                    && site->kind != SOL_MIR_PLAN_DEMAND_CALLBACK)
+                || (term->kind == SOL_MIR_TERM_CHECK_REFINED
+                    ? site->context >= out->context_count
+                        || out->contexts[site->context].kind
+                            != SOL_MIR_PLAN_CONTEXT_REFINEMENT
+                        || out->contexts[site->context].source.expression
+                            != term->source_expression
+                    : site->source_obligation != term->source_obligation)) continue;
+            ++found;
+        }
+        term->predicate_inline = found == 0;
+    }
+    for (size_t site_id = 0; site_id < out->binding_count; ++site_id) {
+        SolMirMaterializedSemanticSite *site = &out->semantic_sites[site_id];
+        if (site->producer_kind != SOL_MIR_MATERIALIZED_PRODUCER_TERMINATOR
+            || (site->kind != SOL_MIR_PLAN_DEMAND_FUNCTION_VALUE
+                && site->kind != SOL_MIR_PLAN_DEMAND_BOUND_OPERATION)) continue;
+        SolMirMaterializedTerminator *term = &out->blocks[site->block].terminator;
+        if (term->callable_site != SOL_MIR_MATERIALIZED_NONE) return false;
+        term->callable_site = site_id;
+        if (site->kind == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION) {
+            const SolMirMaterializedBinding *binding = &out->bindings[site->binding];
+            site->operation = (SolMirMaterializedOperationKey){binding->target_kind,
+                binding->instance, binding->import, term->receiver.type,
+                term->receiver.place, term->effects};
+        }
+    }
     out->type_id_count = out->type_id_capacity; out->access_count = out->access_capacity;
     out->overlay_count = out->overlay_capacity; out->local_count = out->local_capacity;
     out->place_count = out->place_capacity; out->projection_count = out->projection_capacity;
@@ -1192,11 +1446,18 @@ static bool build_scratch(Builder *b) {
     out->edge_value_count = out->edge_value_capacity;
     out->parameter_value_count = out->parameter_value_capacity;
     out->loop_count = out->loop_capacity; out->handler_count = out->handler_capacity;
+    out->semantic_site_count = out->semantic_site_capacity;
     out->writeback_count = out->writeback_capacity;
     out->literal_byte_count = out->literal_byte_capacity;
     out->usage.instances = out->image_count; out->usage.cfg_items = cfg;
     out->usage.bindings = bindings; out->usage.concrete_records = concrete;
     if (!charge(b, concrete)) return false;
+    if (!sol_mir_materialization_validation_work(out,
+            &out->usage.validation_work)
+        || out->usage.validation_work > out->limits.max_validation_work) {
+        return fail(b, SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
+            "materialized MIR validation work limit exceeded");
+    }
     return true;
 }
 
@@ -1282,7 +1543,8 @@ static bool arrays_equal(const SolMirMaterialization *a,
     SAME(construct_operands, construct_operand_count); SAME(call_arguments, call_argument_count);
     SAME(blocks, block_count); SAME(edges, edge_count); SAME(edge_values, edge_value_count);
     SAME(parameter_values, parameter_value_count); SAME(loops, loop_count);
-    SAME(bindings, binding_count); SAME(imports, import_count); SAME(handlers, handler_count);
+    SAME(bindings, binding_count); SAME(semantic_sites, semantic_site_count);
+    SAME(imports, import_count); SAME(handlers, handler_count);
     SAME(writebacks, writeback_count); SAME(effect_rows, effect_row_count);
     SAME(effect_atoms, effect_atom_count); SAME(effect_row_atoms, effect_row_atom_count);
     SAME(effect_names, effect_name_count); SAME(literal_bytes, literal_byte_count);
@@ -1308,6 +1570,7 @@ bool sol_mir_materialization_validate(const SolMirMaterialization *owner,
         || owner->usage.concrete_records > owner->limits.max_concrete_records
         || owner->usage.owned_bytes > owner->limits.max_owned_bytes
         || owner->usage.materialization_work > owner->limits.max_materialization_work
+        || owner->usage.validation_work > owner->limits.max_validation_work
         || !sol_mir_plan_validate(owner->plan, diagnostics)) return validation_error(
             diagnostics, "materialized MIR header or borrowed provenance plan is invalid");
 #define CANON(field, count, capacity) if (!canonical(owner->count, owner->capacity, owner->field)) goto malformed
@@ -1322,6 +1585,7 @@ bool sol_mir_materialization_validate(const SolMirMaterialization *owner,
     CANON(edges, edge_count, edge_capacity); CANON(edge_values, edge_value_count, edge_value_capacity);
     CANON(parameter_values, parameter_value_count, parameter_value_capacity); CANON(loops, loop_count, loop_capacity);
     CANON(bindings, binding_count, binding_capacity); CANON(imports, import_count, import_capacity);
+    CANON(semantic_sites, semantic_site_count, semantic_site_capacity);
     CANON(handlers, handler_count, handler_capacity); CANON(writebacks, writeback_count, writeback_capacity);
     CANON(effect_rows, effect_row_count, effect_row_capacity); CANON(effect_atoms, effect_atom_count, effect_atom_capacity);
     CANON(effect_row_atoms, effect_row_atom_count, effect_row_atom_capacity);
@@ -1453,6 +1717,7 @@ bool sol_mir_materialization_validate(const SolMirMaterialization *owner,
     RANGE(construct_operands, construct_operand_capacity); RANGE(call_arguments, call_argument_capacity);
     RANGE(blocks, block_capacity); RANGE(edges, edge_capacity); RANGE(edge_values, edge_value_capacity);
     RANGE(parameter_values, parameter_value_capacity); RANGE(loops, loop_capacity); RANGE(bindings, binding_capacity);
+    RANGE(semantic_sites, semantic_site_capacity);
     RANGE(imports, import_capacity); RANGE(handlers, handler_capacity); RANGE(writebacks, writeback_capacity);
     RANGE(effect_rows, effect_row_capacity); RANGE(effect_atoms, effect_atom_capacity);
     RANGE(effect_row_atoms, effect_row_atom_capacity); RANGE(effect_names, effect_name_capacity);
@@ -1477,6 +1742,9 @@ bool sol_mir_materialization_validate(const SolMirMaterialization *owner,
     bool equal = arrays_equal(owner, &expected);
     sol_mir_materialization_free(&expected);
     if (!equal) goto malformed;
+    if (!sol_mir_materialization_validate_concrete(owner, diagnostics)) {
+        return false;
+    }
     return true;
 range_malformed:
     free(ranges);
@@ -1514,10 +1782,11 @@ bool sol_mir_materialization_render(FILE *stream,
     const SolMirMaterialization *owner) {
     if (stream == NULL || !sol_mir_materialization_validate(owner, NULL)) return false;
     Buffer out = {0};
-    format(&out, "materialized_mir images=%zu types=%zu imports=%zu bindings=%zu handlers=%zu blocks=%zu edges=%zu writebacks=%zu\n",
+    format(&out, "materialized_mir images=%zu types=%zu imports=%zu bindings=%zu sites=%zu handlers=%zu blocks=%zu edges=%zu writebacks=%zu validation_work=%zu\n",
         owner->image_count, owner->type_count, owner->import_count,
-        owner->binding_count, owner->handler_count, owner->block_count,
-        owner->edge_count, owner->writeback_count);
+        owner->binding_count, owner->semantic_site_count, owner->handler_count,
+        owner->block_count, owner->edge_count, owner->writeback_count,
+        owner->usage.validation_work);
     for (size_t i = 0; i < owner->type_count; ++i) {
         const SolMirMaterializedType *type = &owner->types[i];
         format(&out, "type t%zu kind=%d definition=%zu copy=%d effects=e%zu\n",
@@ -1556,8 +1825,9 @@ bool sol_mir_materialization_render(FILE *stream,
     }
     for (size_t i = 0; i < owner->import_count; ++i) {
         const SolMirMaterializedImport *item = &owner->imports[i];
-        format(&out, "import m%zu callable=c%zu receiver=%zu result=t%zu effects=e%zu params=[",
-            i, item->source_callable, item->receiver, item->result, item->effects);
+        format(&out, "import m%zu callable=c%zu receiver=%zu receiver_access=%d result=t%zu effects=e%zu params=[",
+            i, item->source_callable, item->receiver, (int)item->receiver_access,
+            item->result, item->effects);
         for (size_t j = 0; j < item->parameter_types.count; ++j) {
             format(&out, "%st%zu/%d", j == 0 ? "" : ",",
                 owner->type_ids[item->parameter_types.offset + j],
@@ -1577,10 +1847,25 @@ bool sol_mir_materialization_render(FILE *stream,
             item->symbolic_callable, item->dispatch_trait,
             item->dispatch_requirement);
     }
+    for (size_t i = 0; i < owner->semantic_site_count; ++i) {
+        const SolMirMaterializedSemanticSite *item = &owner->semantic_sites[i];
+        format(&out, "semantic_site s%zu kind=%d binding=d%zu parent=%zu context=%zu definition=%zu obligation=%zu block=%zu instruction=%zu handler=%zu",
+            i, (int)item->kind, item->binding, item->parent, item->context,
+            item->source_definition, item->source_obligation, item->block,
+            item->instruction, item->handler);
+        if (item->kind == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION) {
+            format(&out, " operation={target=%d/%zu/%zu receiver=%zu root=%zu effects=%zu}",
+                (int)item->operation.target_kind, item->operation.instance,
+                item->operation.import, item->operation.receiver,
+                item->operation.root, item->operation.effects);
+        }
+        format(&out, " source=c%zu:x%zu\n", item->source.callable,
+            item->source.expression);
+    }
     for (size_t i = 0; i < owner->image_count; ++i) {
         const SolMirMaterializedImage *image = &owner->images[i];
-        format(&out, "image i%zu callable=c%zu receiver=%zu result=t%zu effects=e%zu entry=b%zu blocks=%zu handlers=%zu provenance=authentication-only\n",
-            i, image->source_callable, image->receiver, image->result,
+        format(&out, "image i%zu callable=c%zu receiver=%zu receiver_access=%d result=t%zu effects=e%zu entry=b%zu blocks=%zu handlers=%zu provenance=authentication-only\n",
+            i, image->source_callable, image->receiver, (int)image->receiver_access, image->result,
             image->effects, image->entry, image->blocks.count,
             image->handlers.count);
         for (size_t j = 0; j < image->locals.count; ++j) {
@@ -1668,7 +1953,7 @@ bool sol_mir_materialization_render(FILE *stream,
             format(&out, "] instructions=[%zu,%zu] started=%d span=%zu..%zu\n",
                 block->instructions.offset, block->instructions.count,
                 block->started, block->span.start, block->span.end);
-            format(&out, "    terminator kind=%d binding=%zu effects=%zu call_kind=%d callee=%zu receiver={formal=%zu access=%d source=%zu type=%zu temporary=%zu place=%zu} arguments=[%zu,%zu] result=%zu value=%zu condition=%zu value_result=%zu residual_result=%zu representation=%zu operand=%zu edge=%zu true=%zu false=%zu normal=%zu failure=%zu value_edge=%zu residual_edge=%zu satisfied=%zu violation=%zu loop=%zu writebacks=[%zu,%zu] statement=%zu definition=%zu obligation=%zu ordinal=%zu propagation=%d phase=%d outcome=%d source=x%zu span=%zu..%zu\n",
+            format(&out, "    terminator kind=%d binding=%zu effects=%zu call_kind=%d callee=%zu receiver={formal=%zu access=%d source=%zu type=%zu temporary=%zu place=%zu} arguments=[%zu,%zu] result=%zu value=%zu condition=%zu value_result=%zu residual_result=%zu representation=%zu operand=%zu edge=%zu true=%zu false=%zu normal=%zu failure=%zu value_edge=%zu residual_edge=%zu satisfied=%zu violation=%zu loop=%zu predicate_inline=%d writebacks=[%zu,%zu] statement=%zu definition=%zu obligation=%zu ordinal=%zu propagation=%d phase=%d outcome=%d source=x%zu span=%zu..%zu\n",
                 (int)term->kind, term->binding, term->effects,
                 (int)term->call_kind, term->callee, term->receiver.formal,
                 (int)term->receiver.access, term->receiver.source_expression,
@@ -1680,6 +1965,7 @@ bool sol_mir_materialization_render(FILE *stream,
                 term->true_edge, term->false_edge, term->normal_edge,
                 term->failure_edge, term->value_edge, term->residual_edge,
                 term->satisfied_edge, term->violation_edge, term->loop,
+                term->predicate_inline,
                 term->writebacks.offset, term->writebacks.count,
                 term->source_statement, term->source_definition,
                 term->source_obligation, term->obligation_ordinal,

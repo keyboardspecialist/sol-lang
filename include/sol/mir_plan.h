@@ -99,6 +99,7 @@ typedef struct {
 
 typedef enum {
     SOL_MIR_PLAN_CONTEXT_BODY,
+    SOL_MIR_PLAN_CONTEXT_CONTRACT,
     SOL_MIR_PLAN_CONTEXT_REFINEMENT,
 } SolMirPlanContextKind;
 

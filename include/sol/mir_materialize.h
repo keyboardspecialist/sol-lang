@@ -17,6 +17,7 @@ typedef size_t SolMirMaterializedLoopId;
 typedef size_t SolMirMaterializedBindingId;
 typedef size_t SolMirMaterializedHandlerId;
 typedef size_t SolMirMaterializedImportId;
+typedef size_t SolMirMaterializedSemanticSiteId;
 
 #define SOL_MIR_MATERIALIZED_NONE SIZE_MAX
 
@@ -29,9 +30,19 @@ typedef struct {
     SolAccessMode access;
 } SolMirMaterializedTypeOverlay;
 
+typedef enum {
+    SOL_MIR_MATERIALIZED_NOMINAL_NONE,
+    SOL_MIR_MATERIALIZED_NOMINAL_RECORD,
+    SOL_MIR_MATERIALIZED_NOMINAL_ENUM,
+    SOL_MIR_MATERIALIZED_NOMINAL_DISTINCT,
+    SOL_MIR_MATERIALIZED_NOMINAL_REFINED,
+    SOL_MIR_MATERIALIZED_NOMINAL_CAPABILITY,
+} SolMirMaterializedNominalCategory;
+
 typedef struct {
     SolIrTypeKind kind;
     SolIrDefinitionId definition; /* Source provenance, not a layout choice. */
+    SolMirMaterializedNominalCategory nominal_category;
     SolMirPlanSlice arguments;
     SolMirPlanSlice parameters;
     SolMirPlanSlice parameter_accesses;
@@ -172,6 +183,8 @@ typedef struct {
     SolMirMaterializedEdgeId satisfied_edge;
     SolMirMaterializedEdgeId violation_edge;
     SolMirMaterializedLoopId loop;
+    SolMirMaterializedSemanticSiteId callable_site;
+    bool predicate_inline;
     SolMirPlanSlice writebacks;
     SolIrStatementId source_statement;
     SolIrDefinitionId source_definition;
@@ -220,6 +233,15 @@ typedef enum {
 } SolMirMaterializedTargetKind;
 
 typedef struct {
+    SolMirMaterializedTargetKind target_kind;
+    SolMirPlanInstanceId instance;
+    SolMirMaterializedImportId import;
+    SolMirMaterializedTypeId receiver;
+    SolMirMaterializedPlaceId root;
+    SolMirMaterializedEffectRowId effects;
+} SolMirMaterializedOperationKey;
+
+typedef struct {
     size_t source_demand;
     SolMirPlanDemandKind kind;
     SolMirPlanInstanceId parent;
@@ -231,11 +253,36 @@ typedef struct {
     SolMirMaterializedTargetKind target_kind;
     SolMirPlanInstanceId instance;
     SolMirMaterializedImportId import;
+    SolMirMaterializedSemanticSiteId site;
 } SolMirMaterializedBinding;
+
+typedef enum {
+    SOL_MIR_MATERIALIZED_PRODUCER_ROOT,
+    SOL_MIR_MATERIALIZED_PRODUCER_INSTRUCTION,
+    SOL_MIR_MATERIALIZED_PRODUCER_TERMINATOR,
+    SOL_MIR_MATERIALIZED_PRODUCER_PREDICATE,
+    SOL_MIR_MATERIALIZED_PRODUCER_HANDLER,
+} SolMirMaterializedProducerKind;
+
+typedef struct {
+    SolMirPlanDemandKind kind;
+    SolMirMaterializedBindingId binding;
+    SolMirPlanInstanceId parent;
+    SolMirPlanContextId context;
+    SolMirProgramSource source;
+    SolIrDefinitionId source_definition;
+    SolObligationId source_obligation;
+    SolMirMaterializedProducerKind producer_kind;
+    SolMirMaterializedBlockId block;
+    SolMirMaterializedInstructionId instruction;
+    SolMirMaterializedHandlerId handler;
+    SolMirMaterializedOperationKey operation;
+} SolMirMaterializedSemanticSite;
 
 typedef struct {
     SolIrCallableId source_callable;
     SolMirMaterializedTypeId receiver;
+    SolAccessMode receiver_access;
     SolMirPlanSlice parameter_types;
     SolMirPlanSlice parameter_accesses;
     SolMirMaterializedTypeId result;
@@ -262,6 +309,7 @@ typedef struct {
     SolIrCallableId handled_operation;
     size_t source_effect;
     SolIrLocalId source_root;
+    SolMirMaterializedOperationKey operation;
     SolSpan span;
 } SolMirMaterializedHandler;
 
@@ -269,6 +317,7 @@ typedef struct {
     SolMirPlanInstanceId instance;
     SolIrCallableId source_callable;
     SolMirMaterializedTypeId receiver;
+    SolAccessMode receiver_access;
     SolMirPlanSlice type_arguments;
     SolMirPlanSlice parameter_types;
     SolMirPlanSlice parameter_accesses;
@@ -301,6 +350,7 @@ typedef struct {
     size_t max_concrete_records;
     size_t max_owned_bytes;
     size_t max_materialization_work;
+    size_t max_validation_work;
 } SolMirMaterializeLimits;
 
 typedef struct {
@@ -310,6 +360,7 @@ typedef struct {
     size_t concrete_records;
     size_t owned_bytes;
     size_t materialization_work;
+    size_t validation_work;
 } SolMirMaterializeUsage;
 
 /* Unstable trusted mutable compiler-internal owner. The validated plan and its
@@ -377,6 +428,9 @@ typedef struct {
     SolMirMaterializedBinding *bindings;
     size_t binding_count;
     size_t binding_capacity;
+    SolMirMaterializedSemanticSite *semantic_sites;
+    size_t semantic_site_count;
+    size_t semantic_site_capacity;
     SolMirMaterializedImport *imports;
     size_t import_count;
     size_t import_capacity;
