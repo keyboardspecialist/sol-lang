@@ -3,14 +3,20 @@
 
 #include "sol/mir_plan.h"
 
-/* Specialization-record references index arenas owned by SolMirMaterialization.
-   These records are checked overlays over topology, not a complete CFG. */
+/* Executable references index arenas owned by SolMirMaterialization. */
 typedef size_t SolMirMaterializedTypeId;
+typedef size_t SolMirMaterializedEffectRowId;
 typedef size_t SolMirMaterializedLocalId;
 typedef size_t SolMirMaterializedPlaceId;
 typedef size_t SolMirMaterializedValueId;
 typedef size_t SolMirMaterializedInstructionId;
 typedef size_t SolMirMaterializedTemporaryId;
+typedef size_t SolMirMaterializedBlockId;
+typedef size_t SolMirMaterializedEdgeId;
+typedef size_t SolMirMaterializedLoopId;
+typedef size_t SolMirMaterializedBindingId;
+typedef size_t SolMirMaterializedHandlerId;
+typedef size_t SolMirMaterializedImportId;
 
 #define SOL_MIR_MATERIALIZED_NONE SIZE_MAX
 
@@ -30,7 +36,7 @@ typedef struct {
     SolMirPlanSlice parameters;
     SolMirPlanSlice parameter_accesses;
     SolMirMaterializedTypeId result;
-    SolMirPlanEffectRowId effects;
+    SolMirMaterializedEffectRowId effects;
     SolMirPlanSlice ownership_components;
     bool is_copy;
 } SolMirMaterializedType;
@@ -70,25 +76,24 @@ typedef struct {
 typedef struct {
     SolMirValueKind kind;
     SolMirMaterializedTypeId type;
-    SolMirBlockId block;
+    SolMirMaterializedBlockId block;
     size_t source_definition;
     SolMirMaterializedInstructionId instruction;
     SolIrExpressionId source_expression;
     SolSpan span;
 } SolMirMaterializedValue;
 
-/* Checked specialization metadata for one symbolic instruction. Blocks,
-   terminators, edges, and deferred payload execution remain in topology. Fields
-   not selected by kind are canonical NONE/zero. */
+/* Fields not selected by kind are canonical NONE/zero. */
 typedef struct {
     SolMirInstructionKind kind;
-    SolMirBlockId block;
+    SolMirMaterializedBlockId block;
     SolMirMaterializedValueId result;
     SolMirMaterializedTypeId type;
     SolIrExpressionId source_expression;
     SolSpan span;
     int64_t integer;
     bool boolean;
+    SolMirPlanSlice text;
     SolMirMaterializedLocalId local;
     SolMirMaterializedPlaceId place;
     SolMirMaterializedValueId left;
@@ -104,6 +109,7 @@ typedef struct {
     SolIrPatternId source_pattern;
     SolMirMaterializedTemporaryId pattern_scrutinee;
     SolIrSnapshotId source_snapshot;
+    SolMirMaterializedHandlerId handler;
     SolMirConstructKind construct_kind;
     SolIrDefinitionId construct_definition;
     SolIrVariantId construct_variant;
@@ -134,21 +140,130 @@ typedef struct {
     SolMirMaterializedPlaceId place;
 } SolMirMaterializedCallArgument;
 
+typedef struct {
+    SolMirMaterializedBlockId block;
+    SolMirPlanSlice arguments;
+} SolMirMaterializedEdge;
+
+typedef struct {
+    SolMirTerminatorKind kind;
+    SolSpan span;
+    SolIrExpressionId source_expression;
+    SolIrCallKind call_kind;
+    SolMirMaterializedBindingId binding;
+    SolMirMaterializedEffectRowId effects;
+    SolMirMaterializedTemporaryId callee;
+    SolMirMaterializedCallArgument receiver;
+    SolMirPlanSlice arguments;
+    SolMirMaterializedValueId result;
+    SolMirMaterializedValueId value;
+    SolMirMaterializedValueId condition;
+    SolMirMaterializedValueId value_result;
+    SolMirMaterializedValueId residual_result;
+    SolMirMaterializedTemporaryId representation;
+    SolMirMaterializedTemporaryId operand;
+    SolMirMaterializedEdgeId edge;
+    SolMirMaterializedEdgeId true_edge;
+    SolMirMaterializedEdgeId false_edge;
+    SolMirMaterializedEdgeId normal_edge;
+    SolMirMaterializedEdgeId failure_edge;
+    SolMirMaterializedEdgeId value_edge;
+    SolMirMaterializedEdgeId residual_edge;
+    SolMirMaterializedEdgeId satisfied_edge;
+    SolMirMaterializedEdgeId violation_edge;
+    SolMirMaterializedLoopId loop;
+    SolMirPlanSlice writebacks;
+    SolIrStatementId source_statement;
+    SolIrDefinitionId source_definition;
+    SolObligationId source_obligation;
+    size_t obligation_ordinal;
+    SolIrPropagationKind propagation_kind;
+    SolContractClauseKind contract_phase;
+    SolContractOutcomeKind contract_outcome;
+} SolMirMaterializedTerminator;
+
+typedef struct {
+    SolMirMaterializedBlockId id;
+    size_t order;
+    SolMirPlanSlice parameters;
+    SolMirPlanSlice instructions;
+    SolMirMaterializedTerminator terminator;
+    SolSpan span;
+    bool started;
+    SolMirBlockId source_block;
+} SolMirMaterializedBlock;
+
+typedef struct {
+    SolIrStatementId source_statement;
+    SolMirMaterializedLoopId parent;
+    SolMirMaterializedBlockId preheader;
+    SolMirMaterializedBlockId header;
+    SolMirMaterializedBlockId condition;
+    SolMirMaterializedBlockId body;
+    SolMirMaterializedBlockId backedge;
+    SolMirMaterializedBlockId exit;
+    SolIrSlice source_obligations;
+    SolSpan span;
+    SolMirLoopId source_loop;
+} SolMirMaterializedLoop;
+
+typedef struct {
+    bool receiver;
+    size_t formal;
+    SolMirMaterializedPlaceId place;
+    SolMirMaterializedTypeId type;
+} SolMirMaterializedWriteback;
+
 typedef enum {
     SOL_MIR_MATERIALIZED_TARGET_INSTANCE,
     SOL_MIR_MATERIALIZED_TARGET_IMPORT,
 } SolMirMaterializedTargetKind;
 
 typedef struct {
-    SolMirBlockId block;
+    size_t source_demand;
+    SolMirPlanDemandKind kind;
+    SolMirPlanInstanceId parent;
+    SolMirPlanContextId context;
     SolMirProgramSource source;
     SolIrCallableId symbolic_callable; /* Provenance only; never executable. */
     SolIrDefinitionId dispatch_trait;  /* Provenance only. */
     SolIrCallableId dispatch_requirement; /* Provenance only. */
     SolMirMaterializedTargetKind target_kind;
     SolMirPlanInstanceId instance;
-    SolMirPlanImportId import;
-} SolMirMaterializedInvokeBinding;
+    SolMirMaterializedImportId import;
+} SolMirMaterializedBinding;
+
+typedef struct {
+    SolIrCallableId source_callable;
+    SolMirMaterializedTypeId receiver;
+    SolMirPlanSlice parameter_types;
+    SolMirPlanSlice parameter_accesses;
+    SolMirMaterializedTypeId result;
+    SolMirMaterializedEffectRowId effects;
+    SolMirPlanImportId source_import;
+} SolMirMaterializedImport;
+
+typedef struct { SolMirPlanSlice atoms; } SolMirMaterializedEffectRow;
+
+typedef struct {
+    SolMirPlanSlice name;
+    SolMirPlanEffectAuthority authority;
+    size_t ordinal;
+} SolMirMaterializedEffectAtom;
+
+typedef struct {
+    SolMirPlanInstanceId parent;
+    SolMirPlanContextId context;
+    SolIrExpressionId source_expression;
+    SolMirMaterializedBindingId source_binding;
+    SolMirMaterializedBindingId provider_binding;
+    SolMirMaterializedPlaceId authority;
+    SolMirMaterializedPlaceId provider;
+    SolIrCallableId handled_operation;
+    size_t source_effect;
+    SolIrLocalId source_root;
+    SolSpan span;
+} SolMirMaterializedHandler;
 
 typedef struct {
     SolMirPlanInstanceId instance;
@@ -158,7 +273,7 @@ typedef struct {
     SolMirPlanSlice parameter_types;
     SolMirPlanSlice parameter_accesses;
     SolMirMaterializedTypeId result;
-    SolMirPlanEffectRowId effects;
+    SolMirMaterializedEffectRowId effects;
     SolMirPlanSlice overlays;
     SolMirPlanSlice contexts;
     SolMirPlanSlice locals;
@@ -168,11 +283,14 @@ typedef struct {
     SolMirPlanSlice temporaries;
     SolMirPlanSlice construct_operands;
     SolMirPlanSlice call_arguments;
-    SolMirPlanSlice invokes;
-    /* Exact deep-owned, structurally executable symbolic CFG and authenticated
-       source provenance. P2.3b1 metadata specializes its types/locals/places and
-       selected payload references; P2.3b2 will replace blocks, terminators,
-       edges, deferred payloads, handler/dispatch, and writeback operations. */
+    SolMirPlanSlice blocks;
+    SolMirPlanSlice loops;
+    SolMirPlanSlice handlers;
+    SolMirPlanSlice bindings;
+    SolMirMaterializedBlockId entry;
+    SolMirMaterializedBlockId contract_body;
+    SolMirMaterializedBlockId contract_epilogue;
+    /* Exact deep-owned symbolic CFG used only to authenticate provenance. */
     SolMir topology;
 } SolMirMaterializedImage;
 
@@ -195,11 +313,8 @@ typedef struct {
 } SolMirMaterializeUsage;
 
 /* Unstable trusted mutable compiler-internal owner. The validated plan and its
-   program/IR must outlive this owner. P2.3b1 concrete records specialize type,
-   local, place, value, temporary, and selected instruction/operand metadata.
-   SolMirMaterializedImage.topology remains the structurally executable symbolic
-   source for blocks, terminators, edges, loops, and deferred payloads until
-   P2.3b2. Restore test pointer mutations before free. */
+   program/IR must outlive this owner for provenance validation only. Concrete
+   arenas are the complete executable CFG. Restore pointer mutations before free. */
 typedef struct {
     const SolMirPlan *plan;
     SolMirMaterializedImage *images;
@@ -244,9 +359,48 @@ typedef struct {
     SolMirMaterializedCallArgument *call_arguments;
     size_t call_argument_count;
     size_t call_argument_capacity;
-    SolMirMaterializedInvokeBinding *invoke_bindings;
-    size_t invoke_binding_count;
-    size_t invoke_binding_capacity;
+    SolMirMaterializedBlock *blocks;
+    size_t block_count;
+    size_t block_capacity;
+    SolMirMaterializedEdge *edges;
+    size_t edge_count;
+    size_t edge_capacity;
+    SolMirMaterializedValueId *edge_values;
+    size_t edge_value_count;
+    size_t edge_value_capacity;
+    SolMirMaterializedValueId *parameter_values;
+    size_t parameter_value_count;
+    size_t parameter_value_capacity;
+    SolMirMaterializedLoop *loops;
+    size_t loop_count;
+    size_t loop_capacity;
+    SolMirMaterializedBinding *bindings;
+    size_t binding_count;
+    size_t binding_capacity;
+    SolMirMaterializedImport *imports;
+    size_t import_count;
+    size_t import_capacity;
+    SolMirMaterializedHandler *handlers;
+    size_t handler_count;
+    size_t handler_capacity;
+    SolMirMaterializedWriteback *writebacks;
+    size_t writeback_count;
+    size_t writeback_capacity;
+    SolMirMaterializedEffectRow *effect_rows;
+    size_t effect_row_count;
+    size_t effect_row_capacity;
+    SolMirMaterializedEffectAtom *effect_atoms;
+    size_t effect_atom_count;
+    size_t effect_atom_capacity;
+    size_t *effect_row_atoms;
+    size_t effect_row_atom_count;
+    size_t effect_row_atom_capacity;
+    char *effect_names;
+    size_t effect_name_count;
+    size_t effect_name_capacity;
+    char *literal_bytes;
+    size_t literal_byte_count;
+    size_t literal_byte_capacity;
     SolMirMaterializeLimits limits;
     SolMirMaterializeUsage usage;
 } SolMirMaterialization;

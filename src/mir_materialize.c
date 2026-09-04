@@ -6,17 +6,31 @@
 #include <string.h>
 
 typedef struct {
-    SolMirMaterialization *output;
+    SolMirMaterialization *out;
     SolDiagnostics *diagnostics;
     SolMirMaterializeBuildOutcome outcome;
-} Materializer;
+} Builder;
+
+typedef struct { uintptr_t start, end; } Range;
+
+static bool fail(Builder *b, SolMirMaterializeBuildOutcome outcome,
+    const char *message) {
+    b->outcome = outcome;
+    if (b->diagnostics != NULL) sol_diagnostics_add(b->diagnostics,
+        "SOL-MIR-MATERIALIZE-001", SOL_SEVERITY_ERROR, (SolSpan){0}, message);
+    return false;
+}
+
+static bool validation_error(SolDiagnostics *diagnostics, const char *message) {
+    if (diagnostics != NULL) sol_diagnostics_add(diagnostics,
+        "SOL-MIR-MATERIALIZE-002", SOL_SEVERITY_ERROR, (SolSpan){0}, message);
+    return false;
+}
 
 static bool owner_empty(const SolMirMaterialization *owner) {
     if (owner == NULL) return false;
     const unsigned char *bytes = (const unsigned char *)owner;
-    for (size_t index = 0; index < sizeof(*owner); ++index) {
-        if (bytes[index] != 0) return false;
-    }
+    for (size_t i = 0; i < sizeof(*owner); ++i) if (bytes[i] != 0) return false;
     return true;
 }
 
@@ -26,133 +40,99 @@ void sol_mir_materialization_init(SolMirMaterialization *owner) {
 
 void sol_mir_materialization_free(SolMirMaterialization *owner) {
     if (owner == NULL) return;
-    for (size_t index = 0; owner->images != NULL
-        && index < owner->image_capacity; ++index) {
-        sol_mir_free(&owner->images[index].topology);
+    for (size_t i = 0; owner->images != NULL && i < owner->image_capacity; ++i) {
+        sol_mir_free(&owner->images[i].topology);
     }
-    free(owner->images);
-    free(owner->types);
-    free(owner->type_ids);
-    free(owner->accesses);
-    free(owner->overlays);
-    free(owner->contexts);
-    free(owner->locals);
-    free(owner->places);
-    free(owner->projections);
-    free(owner->values);
-    free(owner->instructions);
-    free(owner->temporaries);
-    free(owner->construct_operands);
-    free(owner->call_arguments);
-    free(owner->invoke_bindings);
+#define FREE(field) free(owner->field)
+    FREE(images); FREE(types); FREE(type_ids); FREE(accesses); FREE(overlays);
+    FREE(contexts); FREE(locals); FREE(places); FREE(projections); FREE(values);
+    FREE(instructions); FREE(temporaries); FREE(construct_operands);
+    FREE(call_arguments); FREE(blocks); FREE(edges); FREE(edge_values);
+    FREE(parameter_values); FREE(loops); FREE(bindings); FREE(imports);
+    FREE(handlers); FREE(writebacks); FREE(effect_rows); FREE(effect_atoms);
+    FREE(effect_row_atoms); FREE(effect_names); FREE(literal_bytes);
+#undef FREE
     sol_mir_materialization_init(owner);
 }
 
 SolMirMaterializeLimits sol_mir_materialize_default_limits(void) {
-    return (SolMirMaterializeLimits){4096, 4000000, 1000000, 8000000,
-        512u * 1024u * 1024u, 16000000};
+    return (SolMirMaterializeLimits){4096, 8000000, 2000000, 12000000,
+        768u * 1024u * 1024u, 32000000};
 }
 
-static bool limits_zero(SolMirMaterializeLimits limits) {
-    return limits.max_instances == 0 && limits.max_cfg_items == 0
-        && limits.max_bindings == 0 && limits.max_owned_bytes == 0
-        && limits.max_concrete_records == 0
-        && limits.max_materialization_work == 0;
+static bool limits_zero(SolMirMaterializeLimits x) {
+    return x.max_instances == 0 && x.max_cfg_items == 0 && x.max_bindings == 0
+        && x.max_concrete_records == 0 && x.max_owned_bytes == 0
+        && x.max_materialization_work == 0;
 }
 
-static bool limits_complete(SolMirMaterializeLimits limits) {
-    return limits.max_instances != 0 && limits.max_cfg_items != 0
-        && limits.max_bindings != 0 && limits.max_owned_bytes != 0
-        && limits.max_concrete_records != 0
-        && limits.max_materialization_work != 0;
-}
-
-static bool report(Materializer *builder, SolMirMaterializeBuildOutcome outcome,
-    const char *message) {
-    builder->outcome = outcome;
-    if (builder->diagnostics != NULL) sol_diagnostics_add(builder->diagnostics,
-        "SOL-MIR-MATERIALIZE-001", SOL_SEVERITY_ERROR, (SolSpan){0}, message);
-    return false;
+static bool limits_complete(SolMirMaterializeLimits x) {
+    return x.max_instances != 0 && x.max_cfg_items != 0 && x.max_bindings != 0
+        && x.max_concrete_records != 0 && x.max_owned_bytes != 0
+        && x.max_materialization_work != 0;
 }
 
 static bool add_limited(size_t *value, size_t amount, size_t limit) {
-    if (amount > limit - *value) return false;
+    if (*value > limit || amount > limit - *value) return false;
     *value += amount;
     return true;
 }
 
-static bool charge(Materializer *builder, size_t work) {
-    if (!add_limited(&builder->output->usage.materialization_work, work,
-            builder->output->limits.max_materialization_work)) {
-        return report(builder, SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
-            "MIR materialization work limit exceeded");
-    }
-    return true;
+static bool charge(Builder *b, size_t amount) {
+    return add_limited(&b->out->usage.materialization_work, amount,
+        b->out->limits.max_materialization_work) || fail(b,
+        SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
+        "MIR materialization work limit exceeded");
 }
 
-static void *allocate_owned(Materializer *builder, size_t count, size_t size) {
+static void *allocate(Builder *b, size_t count, size_t size) {
     if (count == 0) return NULL;
-    if (size == 0 || count > SIZE_MAX / size) {
-        report(builder, SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
-            "MIR materialization owned-byte calculation overflowed");
-        return NULL;
-    }
-    size_t bytes = count * size;
-    if (!add_limited(&builder->output->usage.owned_bytes, bytes,
-            builder->output->limits.max_owned_bytes)) {
-        report(builder, SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
+    if (size == 0 || count > SIZE_MAX / size
+        || !add_limited(&b->out->usage.owned_bytes, count * size,
+            b->out->limits.max_owned_bytes)) {
+        fail(b, SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
             "MIR materialization owned-byte limit exceeded");
         return NULL;
     }
-    void *memory = calloc(count, size);
-    if (memory == NULL) {
-        builder->output->usage.owned_bytes -= bytes;
-        report(builder, SOL_MIR_MATERIALIZE_BUILD_ALLOCATION_FAILED,
+    void *result = calloc(count, size);
+    if (result == NULL) {
+        b->out->usage.owned_bytes -= count * size;
+        fail(b, SOL_MIR_MATERIALIZE_BUILD_ALLOCATION_FAILED,
             "MIR materialization allocation failed");
     }
-    return memory;
+    return result;
 }
 
-static bool clone_array(Materializer *builder, void **target, const void *source,
+static bool clone_array(Builder *b, void **target, const void *source,
     size_t count, size_t size) {
-    if (!charge(builder, count)) return false;
-    *target = allocate_owned(builder, count, size);
+    if (!charge(b, count)) return false;
+    *target = allocate(b, count, size);
     if (count != 0 && *target == NULL) return false;
     if (count != 0) memcpy(*target, source, count * size);
     return true;
 }
 
-static size_t mir_item_count(const SolMir *mir) {
+static size_t mir_items(const SolMir *mir) {
     size_t counts[] = {mir->block_count, mir->instruction_count, mir->value_count,
-        mir->parameter_value_count, mir->edge_value_count,
-        mir->call_argument_count, mir->loop_count,
-        mir->construct_operand_count, mir->temporary_count};
-    size_t total = 0;
-    for (size_t index = 0; index < sizeof(counts) / sizeof(counts[0]); ++index) {
-        if (counts[index] > SIZE_MAX - total) return SIZE_MAX;
-        total += counts[index];
+        mir->parameter_value_count, mir->edge_value_count, mir->call_argument_count,
+        mir->loop_count, mir->construct_operand_count, mir->temporary_count};
+    size_t result = 0;
+    for (size_t i = 0; i < sizeof(counts) / sizeof(counts[0]); ++i) {
+        if (counts[i] > SIZE_MAX - result) return SIZE_MAX;
+        result += counts[i];
     }
-    return total;
+    return result;
 }
 
-static bool clone_mir(Materializer *builder, const SolMir *source,
-    SolMir *target) {
-    size_t items = mir_item_count(source);
-    if (items == SIZE_MAX || !add_limited(&builder->output->usage.cfg_items,
-            items, builder->output->limits.max_cfg_items)) {
-        return report(builder, SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
-            "cloned MIR CFG item limit exceeded");
-    }
+static bool clone_mir(Builder *b, const SolMir *source, SolMir *target) {
     *target = *source;
     target->blocks = NULL; target->instructions = NULL; target->values = NULL;
     target->parameter_values = NULL; target->edge_values = NULL;
     target->call_arguments = NULL; target->loops = NULL;
     target->construct_operands = NULL; target->temporaries = NULL;
-#define CLONE(field, count, capacity) do { \
-    target->capacity = source->count; \
-    if (!clone_array(builder, (void **)&target->field, source->field, \
-            source->count, sizeof(*source->field))) return false; \
-} while (0)
+#define CLONE(field, count, capacity) do { target->capacity = source->count; \
+    if (!clone_array(b, (void **)&target->field, source->field, source->count, \
+        sizeof(*source->field))) return false; } while (0)
     CLONE(blocks, block_count, block_capacity);
     CLONE(instructions, instruction_count, instruction_capacity);
     CLONE(values, value_count, value_capacity);
@@ -160,8 +140,7 @@ static bool clone_mir(Materializer *builder, const SolMir *source,
     CLONE(edge_values, edge_value_count, edge_value_capacity);
     CLONE(call_arguments, call_argument_count, call_argument_capacity);
     CLONE(loops, loop_count, loop_capacity);
-    CLONE(construct_operands, construct_operand_count,
-        construct_operand_capacity);
+    CLONE(construct_operands, construct_operand_count, construct_operand_capacity);
     CLONE(temporaries, temporary_count, temporary_capacity);
 #undef CLONE
     return true;
@@ -169,9 +148,9 @@ static bool clone_mir(Materializer *builder, const SolMir *source,
 
 static const SolMirProgramTemplate *find_template(const SolMirPlan *plan,
     SolIrCallableId callable) {
-    for (size_t index = 0; index < plan->program->template_count; ++index) {
-        if (plan->program->templates[index].callable == callable) {
-            return &plan->program->templates[index];
+    for (size_t i = 0; i < plan->program->template_count; ++i) {
+        if (plan->program->templates[i].callable == callable) {
+            return &plan->program->templates[i];
         }
     }
     return NULL;
@@ -184,11 +163,8 @@ static bool source_equal(SolMirProgramSource a, SolMirProgramSource b) {
 
 static bool source_for_term(const SolMirPlan *plan, SolIrCallableId callable,
     const SolMirTerminator *term, SolMirProgramSource *source) {
-    source->callable = callable;
-    source->expression = term->as.invoke.source_expression;
-    source->file = 0;
-    source->start = term->span.start;
-    source->end = term->span.end;
+    *source = (SolMirProgramSource){callable, term->as.invoke.source_expression,
+        0, term->span.start, term->span.end};
     for (size_t file = 0; file < plan->program->ir->file_count; ++file) {
         const SolIrSourceFile *item = &plan->program->ir->files[file];
         if (term->span.start >= item->aggregate_start
@@ -205,132 +181,48 @@ static bool source_for_term(const SolMirPlan *plan, SolIrCallableId callable,
 static const SolMirPlanTypedUse *find_use(const SolMirPlan *plan,
     const SolMirPlanInstance *instance, SolMirPlanTypedUseKind kind,
     size_t source, size_t ordinal, SolMirPlanContextId context) {
-    const SolMirPlanTypedUse *found = NULL;
-    for (size_t index = 0; index < instance->typed_uses.count; ++index) {
-        const SolMirPlanTypedUse *use
-            = &plan->typed_uses[instance->typed_uses.offset + index];
-        if (use->context == context && use->kind == kind && use->source == source
-            && use->ordinal == ordinal) {
-            if (found != NULL) return NULL;
-            found = use;
+    const SolMirPlanTypedUse *result = NULL;
+    for (size_t i = 0; i < instance->typed_uses.count; ++i) {
+        const SolMirPlanTypedUse *use = &plan->typed_uses[
+            instance->typed_uses.offset + i];
+        if (use->kind == kind && use->source == source && use->ordinal == ordinal
+            && use->context == context) {
+            if (result != NULL) return NULL;
+            result = use;
         }
     }
-    return found;
+    return result;
 }
 
-static SolMirMaterializedTypeId argument_type(const SolMirPlan *plan,
-    const SolMirPlanInstance *parent, const SolMirCallArgument *argument) {
-    const SolMirPlanTypedUse *use;
-    SolMirPlanContextId body = parent->contexts.offset;
-    if (argument->access == SOL_ACCESS_OWNED) {
-        use = find_use(plan, parent, SOL_MIR_PLAN_USE_MIR_TEMPORARY,
-            argument->temporary, 0, body);
-    } else if (argument->place != SOL_IR_NONE) {
-        use = find_use(plan, parent, SOL_MIR_PLAN_USE_PLACE_FINAL,
-            argument->place, 0, body);
-    } else {
-        return SOL_MIR_MATERIALIZED_NONE;
+static SolMirMaterializedLocalId local_for(const SolMirMaterialization *out,
+    const SolMirMaterializedImage *image, SolIrLocalId source) {
+    for (size_t i = 0; i < image->locals.count; ++i) {
+        size_t id = image->locals.offset + i;
+        if (out->locals[id].source_local == source) return id;
     }
-    return use == NULL ? SOL_MIR_MATERIALIZED_NONE : use->type;
+    return SOL_MIR_MATERIALIZED_NONE;
 }
 
-static bool verify_signature(Materializer *builder,
-    const SolMirPlanInstance *parent, const SolMir *mir,
-    const SolMirTerminator *term, const SolMirPlanDemand *demand) {
-    const SolMirPlan *plan = builder->output->plan;
-    SolMirPlanSlice parameters;
-    SolMirPlanSlice accesses;
-    SolMirMaterializedTypeId receiver;
-    SolMirMaterializedTypeId result;
-    if (demand->instance != SOL_MIR_PLAN_NONE) {
-        const SolMirPlanInstance *target = &plan->instances[demand->instance];
-        parameters = target->parameter_types;
-        accesses = target->parameter_accesses;
-        receiver = target->receiver;
-        result = target->result;
-    } else {
-        const SolMirPlanImport *target = &plan->imports[demand->import];
-        parameters = target->parameter_types;
-        accesses = target->parameter_accesses;
-        receiver = target->receiver;
-        result = target->result;
+static SolMirMaterializedPlaceId place_for(const SolMirMaterialization *out,
+    const SolMirMaterializedImage *image, SolMirPlace source) {
+    SolMirMaterializedLocalId local = local_for(out, image, source.local);
+    for (size_t i = 0; i < image->places.count; ++i) {
+        size_t id = image->places.offset + i;
+        if (out->places[id].local == local
+            && out->places[id].source_place == source.source_place) return id;
     }
-    if (parameters.count != term->as.invoke.arguments.count
-        || accesses.count != parameters.count) return false;
-    for (size_t index = 0; index < parameters.count; ++index) {
-        const SolMirCallArgument *argument = &mir->call_arguments[
-            term->as.invoke.arguments.offset + index];
-        if (argument->formal != index
-            || argument->access != plan->instance_accesses[accesses.offset + index]
-            || argument_type(plan, parent, argument)
-                != plan->instance_type_ids[parameters.offset + index]) return false;
-    }
-    if (receiver == SOL_MIR_PLAN_NONE) {
-        if (term->as.invoke.receiver.source_expression != SOL_IR_NONE) return false;
-    } else if (argument_type(plan, parent, &term->as.invoke.receiver) != receiver) {
-        return false;
-    }
-    if (term->as.invoke.result == SOL_MIR_NONE) {
-        return result < plan->type_count
-            && plan->types[result].kind == SOL_IR_TYPE_NEVER
-            && term->as.invoke.normal_edge.block == SOL_MIR_NONE;
-    }
-    const SolMirPlanTypedUse *result_use = find_use(plan, parent,
-        SOL_MIR_PLAN_USE_MIR_VALUE, term->as.invoke.result, 0,
-        parent->contexts.offset);
-    return result_use != NULL && result_use->type == result;
-}
-
-static bool append_binding(Materializer *builder, SolMirPlanInstanceId parent_id,
-    const SolMirPlanInstance *parent, const SolMir *mir, size_t block) {
-    const SolMirTerminator *term = &mir->blocks[block].terminator;
-    SolMirProgramSource source;
-    if (!source_for_term(builder->output->plan, parent->callable, term, &source)) {
-        return report(builder, SOL_MIR_MATERIALIZE_BUILD_INVALID_PLAN,
-            "materialized invoke has no exact source provenance");
-    }
-    const SolMirPlanDemand *found = NULL;
-    for (size_t index = 0; index < builder->output->plan->demand_count; ++index) {
-        const SolMirPlanDemand *demand = &builder->output->plan->demands[index];
-        if (demand->parent == parent_id
-            && demand->context == parent->contexts.offset
-            && (demand->kind == SOL_MIR_PLAN_DEMAND_INVOKE
-                || demand->kind == SOL_MIR_PLAN_DEMAND_CALLBACK)
-            && source_equal(demand->source, source)) {
-            if (found != NULL) return report(builder,
-                SOL_MIR_MATERIALIZE_BUILD_UNSUPPORTED_OR_UNRESOLVED,
-                "materialized invoke has ambiguous canonical plan demands");
-            found = demand;
-        }
-    }
-    if (found == NULL || !verify_signature(builder, parent, mir, term, found)) {
-        return report(builder, SOL_MIR_MATERIALIZE_BUILD_UNSUPPORTED_OR_UNRESOLVED,
-            "materialized invoke demand or concrete signature does not match");
-    }
-    SolMirMaterializedInvokeBinding *binding
-        = &builder->output->invoke_bindings[builder->output->invoke_binding_count++];
-    *binding = (SolMirMaterializedInvokeBinding){block, source,
-        found->symbolic_target, found->dispatch_trait,
-        found->dispatch_requirement,
-        found->instance != SOL_MIR_PLAN_NONE
-            ? SOL_MIR_MATERIALIZED_TARGET_INSTANCE
-            : SOL_MIR_MATERIALIZED_TARGET_IMPORT,
-        found->instance, found->import};
-    ++builder->output->usage.bindings;
-    return charge(builder, 1);
+    return SOL_MIR_MATERIALIZED_NONE;
 }
 
 static bool instruction_place(const SolMirInstruction *instruction,
     SolMirPlace *place) {
     switch (instruction->kind) {
-        case SOL_MIR_INST_LOAD_COPY:
-        case SOL_MIR_INST_LOAD_MOVE:
+        case SOL_MIR_INST_LOAD_COPY: case SOL_MIR_INST_LOAD_MOVE:
         case SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED:
             *place = instruction->as.place; return true;
         case SOL_MIR_INST_LOAD_UPDATE:
             *place = instruction->as.update_load.place; return true;
-        case SOL_MIR_INST_STORE:
-            *place = instruction->as.store.place; return true;
+        case SOL_MIR_INST_STORE: *place = instruction->as.store.place; return true;
         case SOL_MIR_INST_COMPOUND_UPDATE:
             *place = instruction->as.compound_update.place; return true;
         default: return false;
@@ -347,33 +239,28 @@ static bool copy_candidate(const SolMirPlan *plan, size_t id) {
     }
     if (type->kind != SOL_IR_TYPE_NOMINAL
         || type->definition >= plan->program->ir->definition_count) return false;
-    SolIrDefinitionKind kind
-        = plan->program->ir->definitions[type->definition].kind;
+    SolIrDefinitionKind kind = plan->program->ir->definitions[type->definition].kind;
     return kind == SOL_IR_DEFINITION_RECORD || kind == SOL_IR_DEFINITION_ENUM
         || kind == SOL_IR_DEFINITION_DISTINCT || kind == SOL_IR_DEFINITION_REFINED;
 }
 
-static bool classify_copy(Materializer *builder) {
-    SolMirMaterialization *output = builder->output;
-    for (size_t id = 0; id < output->type_count; ++id) {
-        if (!charge(builder, 1)) return false;
-        output->types[id].is_copy = copy_candidate(output->plan, id);
+static bool classify_copy(Builder *b) {
+    for (size_t i = 0; i < b->out->type_count; ++i) {
+        if (!charge(b, 1)) return false;
+        b->out->types[i].is_copy = copy_candidate(b->out->plan, i);
     }
     bool changed;
     do {
         changed = false;
-        for (size_t id = 0; id < output->type_count; ++id) {
-            if (!charge(builder, 1)) return false;
-            SolMirMaterializedType *type = &output->types[id];
+        for (size_t i = 0; i < b->out->type_count; ++i) {
+            if (!charge(b, 1)) return false;
+            SolMirMaterializedType *type = &b->out->types[i];
             if (!type->is_copy) continue;
-            for (size_t item = 0; item < type->ownership_components.count; ++item) {
-                if (!charge(builder, 1)) return false;
-                size_t child = output->type_ids[
-                    type->ownership_components.offset + item];
-                if (!output->types[child].is_copy) {
-                    type->is_copy = false;
-                    changed = true;
-                    break;
+            for (size_t j = 0; j < type->ownership_components.count; ++j) {
+                if (!charge(b, 1)) return false;
+                if (!b->out->types[b->out->type_ids[
+                        type->ownership_components.offset + j]].is_copy) {
+                    type->is_copy = false; changed = true; break;
                 }
             }
         }
@@ -381,347 +268,628 @@ static bool classify_copy(Materializer *builder) {
     return true;
 }
 
-static SolMirMaterializedLocalId local_for(const SolMirMaterialization *output,
-    const SolMirMaterializedImage *image, SolIrLocalId source) {
-    for (size_t item = 0; item < image->locals.count; ++item) {
-        size_t id = image->locals.offset + item;
-        if (output->locals[id].source_local == source) return id;
+static size_t term_edge_count(const SolMirTerminator *term) {
+    switch (term->kind) {
+        case SOL_MIR_TERM_GOTO: case SOL_MIR_TERM_BREAK:
+        case SOL_MIR_TERM_CONTINUE: return 1;
+        case SOL_MIR_TERM_BRANCH: case SOL_MIR_TERM_CHECK_REFINED:
+        case SOL_MIR_TERM_PROPAGATE: return 2;
+        case SOL_MIR_TERM_INVOKE:
+            return (term->as.invoke.normal_edge.block != SOL_MIR_NONE)
+                + (term->as.invoke.failure_edge.block != SOL_MIR_NONE);
+        case SOL_MIR_TERM_CHECK_CONTRACT: return 3;
+        default: return 0;
+    }
+}
+
+static size_t term_edge_values(const SolMirTerminator *term) {
+    size_t result = 0;
+#define ADD(edge) do { if ((edge).block != SOL_MIR_NONE) result += (edge).arguments.count; } while (0)
+    switch (term->kind) {
+        case SOL_MIR_TERM_GOTO: ADD(term->as.go_to); break;
+        case SOL_MIR_TERM_BRANCH:
+            ADD(term->as.branch.true_edge); ADD(term->as.branch.false_edge); break;
+        case SOL_MIR_TERM_INVOKE:
+            ADD(term->as.invoke.normal_edge); ADD(term->as.invoke.failure_edge); break;
+        case SOL_MIR_TERM_BREAK: case SOL_MIR_TERM_CONTINUE:
+            ADD(term->as.transfer.edge); break;
+        case SOL_MIR_TERM_CHECK_REFINED:
+            ADD(term->as.check_refined.normal_edge);
+            ADD(term->as.check_refined.failure_edge); break;
+        case SOL_MIR_TERM_PROPAGATE:
+            ADD(term->as.propagate.value_edge);
+            ADD(term->as.propagate.residual_edge); break;
+        case SOL_MIR_TERM_CHECK_CONTRACT:
+            ADD(term->as.check_contract.satisfied_edge);
+            ADD(term->as.check_contract.violation_edge);
+            ADD(term->as.check_contract.failure_edge); break;
+        default: break;
+    }
+#undef ADD
+    return result;
+}
+
+static const SolMirPlanDemand *find_demand(const SolMirPlan *plan,
+    SolMirPlanInstanceId parent, SolMirPlanContextId context,
+    SolMirProgramSource source, SolMirPlanDemandKind first,
+    SolMirPlanDemandKind second, size_t *id) {
+    const SolMirPlanDemand *result = NULL;
+    for (size_t i = 0; i < plan->demand_count; ++i) {
+        const SolMirPlanDemand *item = &plan->demands[i];
+        if (item->parent == parent && item->context == context
+            && (item->kind == first || item->kind == second)
+            && source_equal(item->source, source)) {
+            if (result != NULL) return NULL;
+            result = item; *id = i;
+        }
+    }
+    return result;
+}
+
+static SolMirMaterializedBindingId binding_for_demand(
+    const SolMirMaterialization *out, size_t demand) {
+    for (size_t id = 0; id < out->binding_count; ++id) {
+        if (out->bindings[id].source_demand == demand) return id;
     }
     return SOL_MIR_MATERIALIZED_NONE;
 }
 
-static SolMirMaterializedPlaceId place_for(const SolMirMaterialization *output,
-    const SolMirMaterializedImage *image, SolMirPlace source) {
-    SolMirMaterializedLocalId local = local_for(output, image, source.local);
-    for (size_t item = 0; item < image->places.count; ++item) {
-        size_t id = image->places.offset + item;
-        if (output->places[id].source_place == source.source_place
-            && output->places[id].local == local) return id;
+static SolMirMaterializedTypeId argument_type(const SolMirPlan *plan,
+    const SolMirPlanInstance *parent, const SolMirCallArgument *argument) {
+    const SolMirPlanTypedUse *use = NULL;
+    if (argument->access == SOL_ACCESS_OWNED) use = find_use(plan, parent,
+        SOL_MIR_PLAN_USE_MIR_TEMPORARY, argument->temporary, 0,
+        parent->contexts.offset);
+    else if (argument->place != SOL_IR_NONE) use = find_use(plan, parent,
+        SOL_MIR_PLAN_USE_PLACE_FINAL, argument->place, 0,
+        parent->contexts.offset);
+    return use == NULL ? SOL_MIR_MATERIALIZED_NONE : use->type;
+}
+
+static bool verify_signature(const SolMirMaterialization *out,
+    const SolMirPlanInstance *parent, const SolMir *mir,
+    const SolMirTerminator *term, const SolMirPlanDemand *demand) {
+    SolMirPlanSlice parameters, accesses;
+    SolMirMaterializedTypeId receiver, result;
+    if (demand->instance != SOL_MIR_PLAN_NONE) {
+        const SolMirPlanInstance *target = &out->plan->instances[demand->instance];
+        parameters = target->parameter_types; accesses = target->parameter_accesses;
+        receiver = target->receiver; result = target->result;
+    } else {
+        const SolMirPlanImport *target = &out->plan->imports[demand->import];
+        parameters = target->parameter_types; accesses = target->parameter_accesses;
+        receiver = target->receiver; result = target->result;
+    }
+    if (parameters.count != term->as.invoke.arguments.count
+        || accesses.count != parameters.count) return false;
+    for (size_t i = 0; i < parameters.count; ++i) {
+        const SolMirCallArgument *argument = &mir->call_arguments[
+            term->as.invoke.arguments.offset + i];
+        if (argument->formal != i
+            || argument->access != out->plan->instance_accesses[accesses.offset + i]
+            || argument_type(out->plan, parent, argument)
+                != out->plan->instance_type_ids[parameters.offset + i]) return false;
+    }
+    if ((receiver == SOL_MIR_MATERIALIZED_NONE)
+            != (term->as.invoke.receiver.source_expression == SOL_IR_NONE)
+        || (receiver != SOL_MIR_MATERIALIZED_NONE
+            && argument_type(out->plan, parent, &term->as.invoke.receiver)
+                != receiver)) return false;
+    if (term->as.invoke.result == SOL_MIR_NONE) {
+        return out->types[result].kind == SOL_IR_TYPE_NEVER
+            && term->as.invoke.normal_edge.block == SOL_MIR_NONE;
+    }
+    const SolMirPlanTypedUse *use = find_use(out->plan, parent,
+        SOL_MIR_PLAN_USE_MIR_VALUE, term->as.invoke.result, 0,
+        parent->contexts.offset);
+    return use != NULL && use->type == result;
+}
+
+static void binding_signature(const SolMirMaterialization *out,
+    const SolMirMaterializedBinding *binding, SolMirMaterializedTypeId *receiver,
+    SolMirPlanSlice *parameters, SolMirPlanSlice *accesses,
+    SolMirMaterializedTypeId *result) {
+    if (binding->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE) {
+        const SolMirPlanInstance *target = &out->plan->instances[binding->instance];
+        *receiver = target->receiver; *parameters = target->parameter_types;
+        *accesses = target->parameter_accesses; *result = target->result;
+    } else {
+        const SolMirPlanImport *target = &out->plan->imports[binding->import];
+        *receiver = target->receiver; *parameters = target->parameter_types;
+        *accesses = target->parameter_accesses; *result = target->result;
+    }
+}
+
+static bool handler_signatures_match(const SolMirMaterialization *out,
+    const SolMirMaterializedHandler *handler) {
+    const SolMirMaterializedBinding *source = &out->bindings[
+        handler->source_binding];
+    const SolMirMaterializedBinding *provider = &out->bindings[
+        handler->provider_binding];
+    SolMirMaterializedTypeId source_receiver, provider_receiver;
+    SolMirMaterializedTypeId source_result, provider_result;
+    SolMirPlanSlice source_parameters, provider_parameters;
+    SolMirPlanSlice source_accesses, provider_accesses;
+    binding_signature(out, source, &source_receiver, &source_parameters,
+        &source_accesses, &source_result);
+    binding_signature(out, provider, &provider_receiver, &provider_parameters,
+        &provider_accesses, &provider_result);
+    if (source->kind != SOL_MIR_PLAN_DEMAND_HANDLER_SOURCE
+        || provider->kind != SOL_MIR_PLAN_DEMAND_HANDLER_PROVIDER
+        || source->parent != handler->parent || provider->parent != handler->parent
+        || source->context != handler->context || provider->context != handler->context
+        || source->symbolic_callable != handler->handled_operation
+        || source_receiver != out->places[handler->authority].final_type
+        || provider_receiver != out->places[handler->provider].final_type
+        || source_result != provider_result
+        || source_parameters.count != provider_parameters.count
+        || source_accesses.count != provider_accesses.count) return false;
+    for (size_t i = 0; i < source_parameters.count; ++i) {
+        if (out->plan->instance_type_ids[source_parameters.offset + i]
+                != out->plan->instance_type_ids[provider_parameters.offset + i]
+            || out->plan->instance_accesses[source_accesses.offset + i]
+                != out->plan->instance_accesses[provider_accesses.offset + i]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static bool translate_argument(const SolMirMaterialization *out,
+    const SolMirMaterializedImage *image, const SolMirPlanInstance *instance,
+    const SolMirCallArgument *source, SolMirMaterializedCallArgument *target) {
+    *target = (SolMirMaterializedCallArgument){source->formal, source->access,
+        source->source_expression, SOL_MIR_MATERIALIZED_NONE,
+        SOL_MIR_MATERIALIZED_NONE, SOL_MIR_MATERIALIZED_NONE};
+    if (source->source_expression == SOL_IR_NONE) return true;
+    if (source->access == SOL_ACCESS_OWNED) {
+        const SolMirPlanTypedUse *type = find_use(out->plan, instance,
+            SOL_MIR_PLAN_USE_MIR_TEMPORARY, source->temporary, 0,
+            instance->contexts.offset);
+        if (type == NULL || source->temporary >= image->temporaries.count) return false;
+        target->type = type->type;
+        target->temporary = image->temporaries.offset + source->temporary;
+    } else {
+        if (source->place >= out->plan->program->ir->place_count) return false;
+        const SolMirPlanTypedUse *type = find_use(out->plan, instance,
+            SOL_MIR_PLAN_USE_PLACE_FINAL, source->place, 0,
+            instance->contexts.offset);
+        const SolIrPlace *place = &out->plan->program->ir->places[source->place];
+        if (type == NULL) return false;
+        target->type = type->type;
+        target->place = place_for(out, image,
+            (SolMirPlace){place->local, source->place});
+        if (target->place == SOL_MIR_MATERIALIZED_NONE) return false;
+    }
+    return true;
+}
+
+static SolMirMaterializedHandlerId handler_for(const SolMirMaterialization *out,
+    const SolMirMaterializedImage *image, SolIrExpressionId expression) {
+    for (size_t i = 0; i < image->handlers.count; ++i) {
+        size_t id = image->handlers.offset + i;
+        if (out->handlers[id].source_expression == expression) return id;
     }
     return SOL_MIR_MATERIALIZED_NONE;
 }
 
-static bool translate_instruction(const SolMirMaterialization *output,
+static bool translate_instruction(SolMirMaterialization *out,
     const SolMirMaterializedImage *image, const SolMirPlanInstance *instance,
     const SolMirInstruction *source, size_t source_id,
     SolMirMaterializedInstruction *target) {
-    const SolMirPlan *plan = output->plan;
-    SolMirPlanContextId body = instance->contexts.offset;
     memset(target, 0, sizeof(*target));
     target->kind = source->kind;
-    target->block = source->block;
-    target->result = source->result == SOL_MIR_NONE
-        ? SOL_MIR_MATERIALIZED_NONE : image->values.offset + source->result;
-    target->type = SOL_MIR_MATERIALIZED_NONE;
-    if (source->type != SOL_IR_NONE) {
-        const SolMirPlanTypedUse *type = find_use(plan, instance,
-            SOL_MIR_PLAN_USE_MIR_INSTRUCTION, source_id, 0, body);
-        if (type == NULL) return false;
-        target->type = type->type;
-    }
-    target->source_expression = source->source_expression;
-    target->span = source->span;
-    target->local = target->place = target->left = target->right
+    target->block = image->blocks.offset + source->block;
+    target->result = source->result == SOL_MIR_NONE ? SOL_MIR_MATERIALIZED_NONE
+        : image->values.offset + source->result;
+    target->type = target->local = target->place = target->left = target->right
         = target->temporary = target->previous = target->pattern_scrutinee
-        = SOL_MIR_MATERIALIZED_NONE;
+        = target->handler = SOL_MIR_MATERIALIZED_NONE;
     target->source_statement = target->match_expression = target->source_arm
         = target->source_pattern = target->source_snapshot = SOL_IR_NONE;
     target->construct_definition = target->construct_variant = SOL_IR_NONE;
+    target->source_expression = source->source_expression;
+    target->span = source->span;
+    if (source->type != SOL_IR_NONE) {
+        const SolMirPlanTypedUse *type = find_use(out->plan, instance,
+            SOL_MIR_PLAN_USE_MIR_INSTRUCTION, source_id, 0,
+            instance->contexts.offset);
+        if (type == NULL) return false;
+        target->type = type->type;
+    }
     SolMirPlace mir_place;
     if (instruction_place(source, &mir_place)) {
-        target->place = place_for(output, image, mir_place);
+        target->place = place_for(out, image, mir_place);
         if (target->place == SOL_MIR_MATERIALIZED_NONE) return false;
     }
     switch (source->kind) {
-        case SOL_MIR_INST_CONST_INT64:
-            target->integer = source->as.integer;
+        case SOL_MIR_INST_CONST_INT64: target->integer = source->as.integer; break;
+        case SOL_MIR_INST_CONST_BOOL: target->boolean = source->as.boolean; break;
+        case SOL_MIR_INST_CONST_TEXT: {
+            const char *text = out->plan->program->ir->expressions[
+                source->source_expression].as.string;
+            size_t length = strlen(text);
+            target->text = (SolMirPlanSlice){out->literal_byte_count, length};
+            memcpy(out->literal_bytes + out->literal_byte_count, text, length + 1);
+            out->literal_byte_count += length + 1;
             break;
-        case SOL_MIR_INST_CONST_BOOL:
-            target->boolean = source->as.boolean;
-            break;
-        case SOL_MIR_INST_PARAMETER_LIVE:
-        case SOL_MIR_INST_STORAGE_LIVE:
-        case SOL_MIR_INST_DROP_IF_INITIALIZED:
-        case SOL_MIR_INST_STORAGE_DEAD:
-            target->local = local_for(output, image, source->as.local);
-            if (target->local == SOL_MIR_MATERIALIZED_NONE) return false;
-            break;
+        }
+        case SOL_MIR_INST_PARAMETER_LIVE: case SOL_MIR_INST_STORAGE_LIVE:
+        case SOL_MIR_INST_DROP_IF_INITIALIZED: case SOL_MIR_INST_STORAGE_DEAD:
+            target->local = local_for(out, image, source->as.local); break;
         case SOL_MIR_INST_LOAD_UPDATE:
-            target->source_statement = source->as.update_load.statement;
-            break;
+            target->source_statement = source->as.update_load.statement; break;
         case SOL_MIR_INST_STORE:
-            target->left = image->values.offset + source->as.store.value;
-            break;
+            target->left = image->values.offset + source->as.store.value; break;
         case SOL_MIR_INST_UNARY:
             target->operator_kind = source->as.unary.operator_kind;
-            target->left = image->values.offset + source->as.unary.operand;
-            break;
+            target->left = image->values.offset + source->as.unary.operand; break;
         case SOL_MIR_INST_BINARY:
             target->operator_kind = source->as.binary.operator_kind;
             target->left = image->values.offset + source->as.binary.left;
-            target->right = image->values.offset + source->as.binary.right;
-            break;
+            target->right = image->values.offset + source->as.binary.right; break;
         case SOL_MIR_INST_COMPOUND_UPDATE:
             target->operator_kind = source->as.compound_update.operator_kind;
             target->previous = image->temporaries.offset
                 + source->as.compound_update.previous;
             target->right = image->values.offset + source->as.compound_update.right;
-            target->source_statement = source->as.compound_update.statement;
-            break;
-        case SOL_MIR_INST_REGION_ENTER:
-        case SOL_MIR_INST_REGION_EXIT:
-            target->source_statement = source->as.region;
-            break;
+            target->source_statement = source->as.compound_update.statement; break;
+        case SOL_MIR_INST_REGION_ENTER: case SOL_MIR_INST_REGION_EXIT:
+            target->source_statement = source->as.region; break;
         case SOL_MIR_INST_TEMPORARY_INIT:
             target->temporary = image->temporaries.offset
                 + source->as.temporary_init.temporary;
-            target->left = image->values.offset + source->as.temporary_init.value;
-            break;
+            target->left = image->values.offset + source->as.temporary_init.value; break;
         case SOL_MIR_INST_TEMPORARY_DROP:
             target->temporary = image->temporaries.offset
                 + source->as.temporary_drop.temporary;
-            target->preserve_depth = source->as.temporary_drop.preserve_depth;
-            break;
+            target->preserve_depth = source->as.temporary_drop.preserve_depth; break;
         case SOL_MIR_INST_EXPRESSION_RESULT:
-            target->left = image->values.offset + source->as.operand;
-            break;
-        case SOL_MIR_INST_PATTERN_TEST:
-        case SOL_MIR_INST_PATTERN_VALUE:
+            target->left = image->values.offset + source->as.operand; break;
+        case SOL_MIR_INST_PATTERN_TEST: case SOL_MIR_INST_PATTERN_VALUE:
         case SOL_MIR_INST_MATCH_ARM:
             target->match_expression = source->as.pattern.match_expression;
             target->source_arm = source->as.pattern.arm;
             target->arm_ordinal = source->as.pattern.arm_ordinal;
             target->source_pattern = source->as.pattern.pattern;
             target->pattern_scrutinee = image->temporaries.offset
-                + source->as.pattern.scrutinee;
+                + source->as.pattern.scrutinee; break;
+        case SOL_MIR_INST_HANDLER_ENTER: case SOL_MIR_INST_HANDLER_EXIT:
+            target->handler = handler_for(out, image, source->source_expression);
+            if (target->handler == SOL_MIR_MATERIALIZED_NONE) return false;
             break;
         case SOL_MIR_INST_CONSTRUCT:
             target->construct_kind = source->as.construct.kind;
             target->construct_definition = source->as.construct.definition;
             target->construct_variant = source->as.construct.variant;
             target->construct_operands = (SolMirPlanSlice){
-                image->construct_operands.offset
-                    + source->as.construct.operands.offset,
+                image->construct_operands.offset + source->as.construct.operands.offset,
                 source->as.construct.operands.count};
             target->source_capability_roots = source->as.construct.capability_roots;
             target->source_operation_roots = source->as.construct.operation_roots;
             break;
         case SOL_MIR_INST_CAPTURE_SNAPSHOT:
-            target->source_snapshot = source->as.snapshot;
-            break;
-        default:
-            break;
+            target->source_snapshot = source->as.snapshot; break;
+        default: break;
     }
     return true;
 }
 
-static bool instruction_equal(const SolMirMaterializedInstruction *a,
-    const SolMirMaterializedInstruction *b) {
-#define SAME(field) (a->field == b->field)
-    return SAME(kind) && SAME(block) && SAME(result) && SAME(type)
-        && SAME(source_expression) && SAME(span.start) && SAME(span.end)
-        && SAME(integer) && SAME(boolean) && SAME(local) && SAME(place)
-        && SAME(left) && SAME(right) && SAME(temporary) && SAME(previous)
-        && SAME(preserve_depth) && SAME(operator_kind) && SAME(source_statement)
-        && SAME(match_expression) && SAME(source_arm) && SAME(arm_ordinal)
-        && SAME(source_pattern) && SAME(pattern_scrutinee)
-        && SAME(source_snapshot) && SAME(construct_kind)
-        && SAME(construct_definition) && SAME(construct_variant)
-        && SAME(construct_operands.offset) && SAME(construct_operands.count)
-        && SAME(source_capability_roots.offset)
-        && SAME(source_capability_roots.count)
-        && SAME(source_operation_roots.offset)
-        && SAME(source_operation_roots.count);
-#undef SAME
+static SolMirMaterializedEdgeId append_edge(SolMirMaterialization *out,
+    const SolMirMaterializedImage *image, const SolMir *mir, SolMirEdge source) {
+    if (source.block == SOL_MIR_NONE) return SOL_MIR_MATERIALIZED_NONE;
+    size_t id = out->edge_count++;
+    SolMirMaterializedEdge *edge = &out->edges[id];
+    edge->block = image->blocks.offset + source.block;
+    edge->arguments = (SolMirPlanSlice){out->edge_value_count, source.arguments.count};
+    for (size_t i = 0; i < source.arguments.count; ++i) {
+        out->edge_values[out->edge_value_count++] = image->values.offset
+            + mir->edge_values[source.arguments.offset + i];
+    }
+    return id;
 }
 
-static bool build_scratch(Materializer *builder) {
-    SolMirMaterialization *output = builder->output;
-    const SolMirPlan *plan = output->plan;
-    for (size_t index = 0; index < plan->demand_count; ++index) {
-        if (plan->demands[index].kind == SOL_MIR_PLAN_DEMAND_HANDLER_SOURCE
-            || plan->demands[index].kind
-                == SOL_MIR_PLAN_DEMAND_HANDLER_PROVIDER) {
-            return report(builder,
-                SOL_MIR_MATERIALIZE_BUILD_UNSUPPORTED_OR_UNRESOLVED,
-                "handler source/provider binding is deferred to P2.3b2");
+static void init_term(SolMirMaterializedTerminator *term) {
+    memset(term, 0, sizeof(*term));
+    term->source_expression = term->source_statement = term->source_definition
+        = term->source_obligation = SOL_IR_NONE;
+    term->binding = term->effects = term->callee = term->result = term->value
+        = term->condition = term->value_result = term->residual_result
+        = term->representation = term->operand = term->edge = term->true_edge
+        = term->false_edge = term->normal_edge = term->failure_edge
+        = term->value_edge = term->residual_edge = term->satisfied_edge
+        = term->violation_edge = term->loop = SOL_MIR_MATERIALIZED_NONE;
+    term->receiver.type = term->receiver.temporary = term->receiver.place
+        = SOL_MIR_MATERIALIZED_NONE;
+    term->receiver.source_expression = SOL_IR_NONE;
+}
+
+static bool translate_terminator(Builder *b, SolMirPlanInstanceId parent_id,
+    const SolMirPlanInstance *instance, const SolMirMaterializedImage *image,
+    const SolMir *mir, const SolMirTerminator *source,
+    SolMirMaterializedTerminator *target) {
+    init_term(target); target->kind = source->kind; target->span = source->span;
+#define VALUE(v) ((v) == SOL_MIR_NONE ? SOL_MIR_MATERIALIZED_NONE : image->values.offset + (v))
+#define TEMP(v) ((v) == SOL_MIR_NONE ? SOL_MIR_MATERIALIZED_NONE : image->temporaries.offset + (v))
+    switch (source->kind) {
+        case SOL_MIR_TERM_GOTO:
+            target->edge = append_edge(b->out, image, mir, source->as.go_to); break;
+        case SOL_MIR_TERM_BRANCH:
+            target->condition = VALUE(source->as.branch.condition);
+            target->true_edge = append_edge(b->out, image, mir,
+                source->as.branch.true_edge);
+            target->false_edge = append_edge(b->out, image, mir,
+                source->as.branch.false_edge); break;
+        case SOL_MIR_TERM_RETURN: case SOL_MIR_TERM_PANIC:
+        case SOL_MIR_TERM_RESUME_FAILURE:
+            target->value = VALUE(source->as.value); break;
+        case SOL_MIR_TERM_INVOKE: {
+            SolMirProgramSource provenance;
+            size_t binding_id = 0;
+            if (!source_for_term(b->out->plan, instance->callable, source,
+                    &provenance)) return false;
+            const SolMirPlanDemand *demand = find_demand(b->out->plan, parent_id,
+                instance->contexts.offset, provenance, SOL_MIR_PLAN_DEMAND_INVOKE,
+                SOL_MIR_PLAN_DEMAND_CALLBACK, &binding_id);
+            if (demand == NULL || !verify_signature(b->out, instance, mir, source,
+                    demand)) return false;
+            binding_id = binding_for_demand(b->out, binding_id);
+            if (binding_id == SOL_MIR_MATERIALIZED_NONE) return false;
+            target->source_expression = source->as.invoke.source_expression;
+            target->call_kind = source->as.invoke.kind;
+            target->binding = binding_id;
+            target->effects = demand->instance != SOL_MIR_PLAN_NONE
+                ? b->out->plan->instances[demand->instance].effects
+                : b->out->plan->imports[demand->import].effects;
+            target->callee = TEMP(source->as.invoke.callee);
+            if (!translate_argument(b->out, image, instance,
+                    &source->as.invoke.receiver, &target->receiver)) return false;
+            target->arguments = (SolMirPlanSlice){image->call_arguments.offset
+                + source->as.invoke.arguments.offset,
+                source->as.invoke.arguments.count};
+            target->result = VALUE(source->as.invoke.result);
+            target->normal_edge = append_edge(b->out, image, mir,
+                source->as.invoke.normal_edge);
+            target->failure_edge = append_edge(b->out, image, mir,
+                source->as.invoke.failure_edge);
+            target->writebacks.offset = b->out->writeback_count;
+            if (target->normal_edge != SOL_MIR_MATERIALIZED_NONE
+                && target->receiver.access == SOL_ACCESS_EXCLUSIVE) {
+                b->out->writebacks[b->out->writeback_count++]
+                    = (SolMirMaterializedWriteback){true, 0,
+                        target->receiver.place, target->receiver.type};
+            }
+            if (target->normal_edge != SOL_MIR_MATERIALIZED_NONE) {
+                for (size_t i = 0; i < target->arguments.count; ++i) {
+                    const SolMirMaterializedCallArgument *argument
+                        = &b->out->call_arguments[target->arguments.offset + i];
+                    if (argument->access == SOL_ACCESS_EXCLUSIVE) {
+                        b->out->writebacks[b->out->writeback_count++]
+                            = (SolMirMaterializedWriteback){false,
+                                argument->formal, argument->place, argument->type};
+                    }
+                }
+            }
+            target->writebacks.count = b->out->writeback_count
+                - target->writebacks.offset;
+            break;
         }
+        case SOL_MIR_TERM_UNREACHABLE:
+            target->source_statement = source->as.unreachable.statement;
+            target->obligation_ordinal = source->as.unreachable.obligation; break;
+        case SOL_MIR_TERM_BREAK: case SOL_MIR_TERM_CONTINUE:
+            target->source_statement = source->as.transfer.statement;
+            target->loop = image->loops.offset + source->as.transfer.loop;
+            target->edge = append_edge(b->out, image, mir,
+                source->as.transfer.edge); break;
+        case SOL_MIR_TERM_CHECK_REFINED:
+            target->source_expression = source->as.check_refined.source_expression;
+            target->source_definition = source->as.check_refined.definition;
+            target->source_obligation = source->as.check_refined.obligation;
+            target->representation = TEMP(source->as.check_refined.representation);
+            target->result = VALUE(source->as.check_refined.result);
+            target->normal_edge = append_edge(b->out, image, mir,
+                source->as.check_refined.normal_edge);
+            target->failure_edge = append_edge(b->out, image, mir,
+                source->as.check_refined.failure_edge); break;
+        case SOL_MIR_TERM_MATCH_FAILURE:
+            target->source_expression = source->as.match_failure; break;
+        case SOL_MIR_TERM_PROPAGATE:
+            target->source_expression = source->as.propagate.source_expression;
+            target->propagation_kind = source->as.propagate.kind;
+            target->operand = TEMP(source->as.propagate.operand);
+            target->value_result = VALUE(source->as.propagate.value_result);
+            target->residual_result = VALUE(source->as.propagate.residual_result);
+            target->value_edge = append_edge(b->out, image, mir,
+                source->as.propagate.value_edge);
+            target->residual_edge = append_edge(b->out, image, mir,
+                source->as.propagate.residual_edge); break;
+        case SOL_MIR_TERM_CHECK_CONTRACT:
+            target->source_obligation = source->as.check_contract.obligation;
+            target->contract_phase = source->as.check_contract.phase;
+            target->contract_outcome = source->as.check_contract.outcome;
+            target->result = VALUE(source->as.check_contract.result);
+            target->satisfied_edge = append_edge(b->out, image, mir,
+                source->as.check_contract.satisfied_edge);
+            target->violation_edge = append_edge(b->out, image, mir,
+                source->as.check_contract.violation_edge);
+            target->failure_edge = append_edge(b->out, image, mir,
+                source->as.check_contract.failure_edge); break;
+        case SOL_MIR_TERM_CONTRACT_VIOLATION:
+            target->source_obligation = source->as.contract_violation; break;
+        case SOL_MIR_TERM_INVALID: return false;
     }
-    if (plan->instance_count > output->limits.max_instances) {
-        return report(builder, SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
-            "materialized instance limit exceeded");
+#undef VALUE
+#undef TEMP
+    return true;
+}
+
+static bool add_count(size_t *total, size_t amount) {
+    if (amount > SIZE_MAX - *total) return false;
+    *total += amount; return true;
+}
+
+static bool build_scratch(Builder *b) {
+    SolMirMaterialization *out = b->out;
+    const SolMirPlan *plan = out->plan;
+    if (plan->instance_count > out->limits.max_instances) return fail(b,
+        SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
+        "materialized instance limit exceeded");
+    size_t types = plan->type_component_count, accesses = plan->type_parameter_access_count;
+    size_t locals = 0, places = 0, projections = 0, values = 0, instructions = 0;
+    size_t temporaries = 0, operands = 0, arguments = 0, blocks = 0, loops = 0;
+    size_t edges = 0, edge_values = 0, parameters = 0, handlers = 0, writebacks = 0;
+    size_t symbolic_cfg = 0, effect_names = 0, literal_bytes = 0;
+    for (size_t i = 0; i < plan->effect_atom_count; ++i) {
+        if (!add_count(&effect_names, plan->effect_atoms[i].length + 1)) return false;
     }
-    size_t overlay_total = plan->typed_use_count;
-    size_t invokes = 0;
-    size_t signature_types = plan->type_component_count;
-    size_t signature_accesses = plan->type_parameter_access_count;
-    size_t local_total = 0, place_total = 0, projection_total = 0;
-    size_t value_total = 0, instruction_total = 0, temporary_total = 0;
-    size_t operand_total = 0, call_argument_total = 0;
     for (size_t id = 0; id < plan->instance_count; ++id) {
         const SolMirPlanInstance *instance = &plan->instances[id];
-        const SolMirProgramTemplate *template = find_template(plan,
-            instance->callable);
-        if (template == NULL) return report(builder,
-            SOL_MIR_MATERIALIZE_BUILD_UNSUPPORTED_OR_UNRESOLVED,
+        const SolMirProgramTemplate *tpl = find_template(plan, instance->callable);
+        if (tpl == NULL) return fail(b, SOL_MIR_MATERIALIZE_BUILD_UNSUPPORTED_OR_UNRESOLVED,
             "materialized instance has no MIR template");
-        SolMirPlanContextId body = instance->contexts.offset;
-        for (size_t use = 0; use < instance->typed_uses.count; ++use) {
-            const SolMirPlanTypedUse *typed = &plan->typed_uses[
-                instance->typed_uses.offset + use];
-            if (typed->context != body) continue;
-            if (typed->kind == SOL_MIR_PLAN_USE_LOCAL) {
-                if (local_total == SIZE_MAX) return report(builder,
-                    SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
-                    "materialized local count overflowed");
-                ++local_total;
-            }
-            if (typed->kind == SOL_MIR_PLAN_USE_PLACE_ROOT) {
-                if (place_total == SIZE_MAX
-                    || plan->program->ir->places[typed->source].projections.count
-                        > SIZE_MAX - projection_total) return report(builder,
-                    SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
-                    "materialized place/projection count overflowed");
-                ++place_total;
-                projection_total += plan->program->ir->places[typed->source]
-                    .projections.count;
-            }
-        }
-        for (size_t block = 0; block < template->mir.block_count; ++block) {
-            if (template->mir.blocks[block].terminator.kind
-                    == SOL_MIR_TERM_INVOKE) {
-                if (invokes == SIZE_MAX) return report(builder,
-                    SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
-                    "materialized invoke count overflowed");
-                ++invokes;
+        size_t items = mir_items(&tpl->mir);
+        if (items == SIZE_MAX || !add_count(&symbolic_cfg, items)) return false;
+        if (!add_count(&types, instance->type_arguments.count)
+            || !add_count(&types, instance->parameter_types.count)
+            || !add_count(&accesses, instance->parameter_accesses.count)
+            || !add_count(&values, tpl->mir.value_count)
+            || !add_count(&instructions, tpl->mir.instruction_count)
+            || !add_count(&temporaries, tpl->mir.temporary_count)
+            || !add_count(&operands, tpl->mir.construct_operand_count)
+            || !add_count(&arguments, tpl->mir.call_argument_count)
+            || !add_count(&blocks, tpl->mir.block_count)
+            || !add_count(&loops, tpl->mir.loop_count)
+            || !add_count(&parameters, tpl->mir.parameter_value_count)) return false;
+        for (size_t u = 0; u < instance->typed_uses.count; ++u) {
+            const SolMirPlanTypedUse *use = &plan->typed_uses[instance->typed_uses.offset + u];
+            if (use->context != instance->contexts.offset) continue;
+            if (use->kind == SOL_MIR_PLAN_USE_LOCAL) ++locals;
+            if (use->kind == SOL_MIR_PLAN_USE_PLACE_ROOT) {
+                ++places;
+                if (!add_count(&projections,
+                        plan->program->ir->places[use->source].projections.count)) return false;
             }
         }
-        for (size_t instruction = 0; instruction < template->mir.instruction_count;
-            ++instruction) {
+        for (size_t n = 0; n < tpl->mir.instruction_count; ++n) {
             SolMirPlace place;
-            if (!instruction_place(&template->mir.instructions[instruction], &place)
-                || place.source_place != SOL_IR_NONE) continue;
-            bool earlier = false;
-            for (size_t previous = 0; previous < instruction; ++previous) {
-                SolMirPlace candidate;
-                earlier = earlier || (instruction_place(
-                    &template->mir.instructions[previous], &candidate)
-                    && candidate.source_place == SOL_IR_NONE
-                    && candidate.local == place.local);
+            const SolMirInstruction *instruction = &tpl->mir.instructions[n];
+            if (instruction->kind == SOL_MIR_INST_CONST_TEXT) {
+                const char *text = plan->program->ir->expressions[
+                    instruction->source_expression].as.string;
+                if (!add_count(&literal_bytes, strlen(text) + 1)) return false;
             }
-            if (!earlier) {
-                if (place_total == SIZE_MAX) return report(builder,
-                    SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
-                    "materialized place count overflowed");
-                ++place_total;
+            if (instruction->kind == SOL_MIR_INST_HANDLER_ENTER) ++handlers;
+            if (!instruction_place(instruction, &place) || place.source_place != SOL_IR_NONE) continue;
+            bool seen = false;
+            for (size_t p = 0; p < n; ++p) {
+                SolMirPlace previous;
+                if (instruction_place(&tpl->mir.instructions[p], &previous)
+                    && previous.source_place == SOL_IR_NONE
+                    && previous.local == place.local) seen = true;
+            }
+            if (!seen) ++places;
+        }
+        for (size_t k = 0; k < tpl->mir.block_count; ++k) {
+            const SolMirTerminator *term = &tpl->mir.blocks[k].terminator;
+            if (!add_count(&edges, term_edge_count(term))
+                || !add_count(&edge_values, term_edge_values(term))) return false;
+            if (term->kind == SOL_MIR_TERM_INVOKE
+                && term->as.invoke.normal_edge.block != SOL_MIR_NONE) {
+                writebacks += term->as.invoke.receiver.access == SOL_ACCESS_EXCLUSIVE;
+                for (size_t a = 0; a < term->as.invoke.arguments.count; ++a) {
+                    writebacks += tpl->mir.call_arguments[
+                        term->as.invoke.arguments.offset + a].access
+                        == SOL_ACCESS_EXCLUSIVE;
+                }
             }
         }
-#define ADD_TOTAL(total, count) do { if ((count) > SIZE_MAX - (total)) \
-            return report(builder, SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED, \
-                "materialized concrete array count overflowed"); \
-        (total) += (count); } while (0)
-        ADD_TOTAL(value_total, template->mir.value_count);
-        ADD_TOTAL(instruction_total, template->mir.instruction_count);
-        ADD_TOTAL(temporary_total, template->mir.temporary_count);
-        ADD_TOTAL(operand_total, template->mir.construct_operand_count);
-        ADD_TOTAL(call_argument_total, template->mir.call_argument_count);
-#undef ADD_TOTAL
-        if (instance->type_arguments.count > SIZE_MAX - signature_types
-            || instance->parameter_types.count > SIZE_MAX - signature_types
-                - instance->type_arguments.count
-            || instance->parameter_accesses.count
-                > SIZE_MAX - signature_accesses) {
-            return report(builder, SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
-                "materialized signature count overflowed");
-        }
-        signature_types += instance->type_arguments.count
-            + instance->parameter_types.count;
-        signature_accesses += instance->parameter_accesses.count;
     }
-    if (overlay_total > output->limits.max_bindings
-        || invokes > output->limits.max_bindings - overlay_total) {
-        return report(builder, SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
-            "materialized overlay/binding limit exceeded");
+    for (size_t i = 0; i < plan->import_count; ++i) {
+        if (!add_count(&types, plan->imports[i].parameter_types.count)
+            || !add_count(&accesses, plan->imports[i].parameter_accesses.count)) return false;
     }
-    if (plan->context_count > SIZE_MAX - plan->type_count) return report(builder,
-        SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
-        "materialized concrete record count overflowed");
-    size_t concrete_records = plan->type_count + plan->context_count;
-#define ADD_RECORDS(count) do { if ((count) > SIZE_MAX - concrete_records) \
-        return report(builder, SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED, \
-            "materialized concrete record count overflowed"); \
-        concrete_records += (count); } while (0)
-    ADD_RECORDS(overlay_total); ADD_RECORDS(local_total); ADD_RECORDS(place_total);
-    ADD_RECORDS(projection_total); ADD_RECORDS(value_total);
-    ADD_RECORDS(instruction_total); ADD_RECORDS(temporary_total);
-    ADD_RECORDS(operand_total);
-    ADD_RECORDS(call_argument_total);
-#undef ADD_RECORDS
-    if (concrete_records > output->limits.max_concrete_records) return report(builder,
+    size_t concrete = 0, cfg = 0, bindings = 0;
+    size_t records[] = {plan->type_count, plan->context_count,
+        plan->typed_use_count, locals, places, projections, values, instructions,
+        temporaries, operands, arguments, blocks, edges, edge_values, parameters,
+        loops, plan->demand_count, plan->import_count, handlers, writebacks,
+        plan->effect_row_count, plan->effect_atom_count,
+        plan->effect_row_atom_count};
+    for (size_t i = 0; i < sizeof(records) / sizeof(records[0]); ++i) {
+        if (!add_count(&concrete, records[i])) return fail(b,
+            SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
+            "materialized concrete record count overflowed");
+    }
+    size_t cfg_counts[] = {symbolic_cfg, blocks, edges, edge_values, parameters, loops};
+    for (size_t i = 0; i < sizeof(cfg_counts) / sizeof(cfg_counts[0]); ++i) {
+        if (!add_count(&cfg, cfg_counts[i])) return fail(b,
+            SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
+            "materialized CFG item count overflowed");
+    }
+    if (!add_count(&bindings, plan->typed_use_count)
+        || !add_count(&bindings, plan->demand_count)
+        || !add_count(&bindings, handlers)) return fail(b,
+            SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
+            "materialized binding count overflowed");
+    if (cfg > out->limits.max_cfg_items || bindings > out->limits.max_bindings
+        || concrete > out->limits.max_concrete_records) return fail(b,
         SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED,
         "materialized concrete record limit exceeded");
-    output->images = allocate_owned(builder, plan->instance_count,
-        sizeof(*output->images));
-    output->types = allocate_owned(builder, plan->type_count, sizeof(*output->types));
-    output->type_ids = allocate_owned(builder, signature_types,
-        sizeof(*output->type_ids));
-    output->accesses = allocate_owned(builder, signature_accesses,
-        sizeof(*output->accesses));
-    output->overlays = allocate_owned(builder, overlay_total,
-        sizeof(*output->overlays));
-    output->contexts = allocate_owned(builder, plan->context_count,
-        sizeof(*output->contexts));
-    output->locals = allocate_owned(builder, local_total, sizeof(*output->locals));
-    output->places = allocate_owned(builder, place_total, sizeof(*output->places));
-    output->projections = allocate_owned(builder, projection_total,
-        sizeof(*output->projections));
-    output->values = allocate_owned(builder, value_total, sizeof(*output->values));
-    output->instructions = allocate_owned(builder, instruction_total,
-        sizeof(*output->instructions));
-    output->temporaries = allocate_owned(builder, temporary_total,
-        sizeof(*output->temporaries));
-    output->construct_operands = allocate_owned(builder, operand_total,
-        sizeof(*output->construct_operands));
-    output->call_arguments = allocate_owned(builder, call_argument_total,
-        sizeof(*output->call_arguments));
-    output->invoke_bindings = allocate_owned(builder, invokes,
-        sizeof(*output->invoke_bindings));
-    if ((plan->instance_count != 0 && output->images == NULL)
-        || (signature_types != 0 && output->type_ids == NULL)
-        || (signature_accesses != 0 && output->accesses == NULL)
-        || (plan->type_count != 0 && output->types == NULL)
-        || (overlay_total != 0 && output->overlays == NULL)
-        || (plan->context_count != 0 && output->contexts == NULL)
-        || (local_total != 0 && output->locals == NULL)
-        || (place_total != 0 && output->places == NULL)
-        || (projection_total != 0 && output->projections == NULL)
-        || (value_total != 0 && output->values == NULL)
-        || (instruction_total != 0 && output->instructions == NULL)
-        || (temporary_total != 0 && output->temporaries == NULL)
-        || (operand_total != 0 && output->construct_operands == NULL)
-        || (call_argument_total != 0 && output->call_arguments == NULL)
-        || (invokes != 0 && output->invoke_bindings == NULL)) return false;
-    output->image_count = output->image_capacity = plan->instance_count;
-    output->type_count = output->type_capacity = plan->type_count;
-    output->type_id_count = output->type_id_capacity = signature_types;
-    output->access_count = output->access_capacity = signature_accesses;
-    output->overlay_capacity = overlay_total;
-    output->context_count = output->context_capacity = plan->context_count;
-    output->local_capacity = local_total;
-    output->place_capacity = place_total;
-    output->projection_capacity = projection_total;
-    output->value_capacity = value_total;
-    output->instruction_capacity = instruction_total;
-    output->temporary_capacity = temporary_total;
-    output->construct_operand_capacity = operand_total;
-    output->call_argument_capacity = call_argument_total;
-    output->invoke_binding_capacity = invokes;
-    size_t type_at = 0;
-    size_t access_at = 0;
-    for (size_t id = 0; id < plan->type_count; ++id) {
-        const SolMirPlanType *source = &plan->types[id];
-        SolMirMaterializedType *target = &output->types[id];
-        *target = (SolMirMaterializedType){source->kind, source->definition,
+#define ALLOC(field, count, capacity, type) do { out->field = allocate(b, (count), sizeof(type)); \
+    out->capacity = (count); if ((count) != 0 && out->field == NULL) return false; } while (0)
+    ALLOC(images, plan->instance_count, image_capacity, *out->images);
+    ALLOC(types, plan->type_count, type_capacity, *out->types);
+    ALLOC(type_ids, types, type_id_capacity, *out->type_ids);
+    ALLOC(accesses, accesses, access_capacity, *out->accesses);
+    ALLOC(overlays, plan->typed_use_count, overlay_capacity, *out->overlays);
+    ALLOC(contexts, plan->context_count, context_capacity, *out->contexts);
+    ALLOC(locals, locals, local_capacity, *out->locals);
+    ALLOC(places, places, place_capacity, *out->places);
+    ALLOC(projections, projections, projection_capacity, *out->projections);
+    ALLOC(values, values, value_capacity, *out->values);
+    ALLOC(instructions, instructions, instruction_capacity, *out->instructions);
+    ALLOC(temporaries, temporaries, temporary_capacity, *out->temporaries);
+    ALLOC(construct_operands, operands, construct_operand_capacity, *out->construct_operands);
+    ALLOC(call_arguments, arguments, call_argument_capacity, *out->call_arguments);
+    ALLOC(blocks, blocks, block_capacity, *out->blocks);
+    ALLOC(edges, edges, edge_capacity, *out->edges);
+    ALLOC(edge_values, edge_values, edge_value_capacity, *out->edge_values);
+    ALLOC(parameter_values, parameters, parameter_value_capacity, *out->parameter_values);
+    ALLOC(loops, loops, loop_capacity, *out->loops);
+    ALLOC(bindings, plan->demand_count, binding_capacity, *out->bindings);
+    ALLOC(imports, plan->import_count, import_capacity, *out->imports);
+    ALLOC(handlers, handlers, handler_capacity, *out->handlers);
+    ALLOC(writebacks, writebacks, writeback_capacity, *out->writebacks);
+    ALLOC(effect_rows, plan->effect_row_count, effect_row_capacity, *out->effect_rows);
+    ALLOC(effect_atoms, plan->effect_atom_count, effect_atom_capacity, *out->effect_atoms);
+    ALLOC(effect_row_atoms, plan->effect_row_atom_count, effect_row_atom_capacity, *out->effect_row_atoms);
+    ALLOC(effect_names, effect_names, effect_name_capacity, *out->effect_names);
+    ALLOC(literal_bytes, literal_bytes, literal_byte_capacity, *out->literal_bytes);
+#undef ALLOC
+    out->image_count = out->image_capacity; out->type_count = out->type_capacity;
+    out->context_count = out->context_capacity; out->effect_row_count = out->effect_row_capacity;
+    out->effect_atom_count = out->effect_atom_capacity;
+    out->effect_row_atom_count = out->effect_row_atom_capacity;
+    out->effect_name_count = out->effect_name_capacity;
+    size_t name_at = 0;
+    for (size_t i = 0; i < plan->effect_atom_count; ++i) {
+        const SolMirPlanEffectAtom *source = &plan->effect_atoms[i];
+        out->effect_atoms[i] = (SolMirMaterializedEffectAtom){
+            {name_at, source->length}, source->authority, source->ordinal};
+        memcpy(out->effect_names + name_at, source->name, source->length + 1);
+        name_at += source->length + 1;
+    }
+    for (size_t i = 0; i < plan->effect_row_count; ++i) {
+        out->effect_rows[i].atoms = (SolMirPlanSlice){plan->effect_rows[i].atom_offset,
+            plan->effect_rows[i].atom_count};
+    }
+    if (plan->effect_row_atom_count != 0) memcpy(out->effect_row_atoms,
+        plan->effect_row_atoms, plan->effect_row_atom_count * sizeof(*out->effect_row_atoms));
+    size_t type_at = 0, access_at = 0;
+    for (size_t i = 0; i < plan->type_count; ++i) {
+        const SolMirPlanType *source = &plan->types[i];
+        out->types[i] = (SolMirMaterializedType){source->kind, source->definition,
             {type_at, source->argument_count},
             {type_at + source->argument_count, source->parameter_count},
             {access_at, source->parameter_count}, source->result, source->effects,
@@ -729,249 +897,306 @@ static bool build_scratch(Materializer *builder) {
                 source->ownership_component_count}, false};
         size_t count = source->argument_count + source->parameter_count
             + source->ownership_component_count;
-        if (count != 0) memcpy(output->type_ids + type_at,
+        if (count != 0) memcpy(out->type_ids + type_at,
             plan->type_components + source->argument_offset,
-            count * sizeof(*output->type_ids));
-        if (source->parameter_count != 0) memcpy(output->accesses + access_at,
+            count * sizeof(*out->type_ids));
+        if (source->parameter_count != 0) memcpy(out->accesses + access_at,
             plan->type_parameter_accesses + source->parameter_access_offset,
-            source->parameter_count * sizeof(*output->accesses));
-        type_at += count;
-        access_at += source->parameter_count;
+            source->parameter_count * sizeof(*out->accesses));
+        type_at += count; access_at += source->parameter_count;
     }
-    if (plan->context_count != 0) memcpy(output->contexts, plan->contexts,
-        plan->context_count * sizeof(*output->contexts));
-    if (!classify_copy(builder)) return false;
+    if (plan->context_count != 0) memcpy(out->contexts, plan->contexts,
+        plan->context_count * sizeof(*out->contexts));
+    if (!classify_copy(b)) return false;
+    for (size_t i = 0; i < plan->import_count; ++i) {
+        const SolMirPlanImport *source = &plan->imports[i];
+        SolMirMaterializedImport *target = &out->imports[i];
+        *target = (SolMirMaterializedImport){source->callable, source->receiver,
+            {type_at, source->parameter_types.count},
+            {access_at, source->parameter_accesses.count}, source->result,
+            source->effects, i};
+        if (source->parameter_types.count != 0) memcpy(out->type_ids + type_at,
+            plan->instance_type_ids + source->parameter_types.offset,
+            source->parameter_types.count * sizeof(*out->type_ids));
+        if (source->parameter_accesses.count != 0) memcpy(out->accesses + access_at,
+            plan->instance_accesses + source->parameter_accesses.offset,
+            source->parameter_accesses.count * sizeof(*out->accesses));
+        type_at += source->parameter_types.count;
+        access_at += source->parameter_accesses.count;
+    }
+    out->import_count = out->import_capacity;
+    size_t binding_at = 0;
+    for (size_t parent = 0; parent < plan->instance_count; ++parent) {
+        out->images[parent].bindings = (SolMirPlanSlice){binding_at, 0};
+        for (size_t demand = 0; demand < plan->demand_count; ++demand) {
+            const SolMirPlanDemand *source = &plan->demands[demand];
+            if (source->parent != parent) continue;
+            out->bindings[binding_at++] = (SolMirMaterializedBinding){demand,
+                source->kind, source->parent, source->context, source->source,
+                source->symbolic_target, source->dispatch_trait,
+                source->dispatch_requirement,
+                source->instance != SOL_MIR_PLAN_NONE
+                    ? SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+                    : SOL_MIR_MATERIALIZED_TARGET_IMPORT,
+                source->instance, source->import};
+            ++out->images[parent].bindings.count;
+        }
+    }
+    for (size_t demand = 0; demand < plan->demand_count; ++demand) {
+        const SolMirPlanDemand *source = &plan->demands[demand];
+        if (source->parent != SOL_MIR_PLAN_NONE) continue;
+        out->bindings[binding_at++] = (SolMirMaterializedBinding){demand,
+            source->kind, source->parent, source->context, source->source,
+            source->symbolic_target, source->dispatch_trait,
+            source->dispatch_requirement,
+            source->instance != SOL_MIR_PLAN_NONE
+                ? SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+                : SOL_MIR_MATERIALIZED_TARGET_IMPORT,
+            source->instance, source->import};
+    }
+    if (binding_at != plan->demand_count) return false;
+    out->binding_count = out->binding_capacity;
     for (size_t id = 0; id < plan->instance_count; ++id) {
         const SolMirPlanInstance *instance = &plan->instances[id];
-        const SolMirProgramTemplate *template = find_template(plan,
-            instance->callable);
-        SolMirMaterializedImage *image = &output->images[id];
-        image->instance = id;
-        image->source_callable = instance->callable;
-        image->receiver = instance->receiver;
-        image->result = instance->result;
-        image->effects = instance->effects;
-        image->contexts = instance->contexts;
-        image->type_arguments = (SolMirPlanSlice){type_at,
-            instance->type_arguments.count};
-        if (instance->type_arguments.count != 0) memcpy(output->type_ids + type_at,
+        const SolMirProgramTemplate *tpl = find_template(plan, instance->callable);
+        const SolMir *mir = &tpl->mir;
+        SolMirMaterializedImage *image = &out->images[id];
+        image->instance = id; image->source_callable = instance->callable;
+        image->receiver = instance->receiver; image->result = instance->result;
+        image->effects = instance->effects; image->contexts = instance->contexts;
+        image->type_arguments = (SolMirPlanSlice){type_at, instance->type_arguments.count};
+        if (instance->type_arguments.count != 0) memcpy(out->type_ids + type_at,
             plan->instance_type_ids + instance->type_arguments.offset,
-            instance->type_arguments.count * sizeof(*output->type_ids));
+            instance->type_arguments.count * sizeof(*out->type_ids));
         type_at += instance->type_arguments.count;
-        image->parameter_types = (SolMirPlanSlice){type_at,
-            instance->parameter_types.count};
-        if (instance->parameter_types.count != 0) memcpy(output->type_ids + type_at,
+        image->parameter_types = (SolMirPlanSlice){type_at, instance->parameter_types.count};
+        if (instance->parameter_types.count != 0) memcpy(out->type_ids + type_at,
             plan->instance_type_ids + instance->parameter_types.offset,
-            instance->parameter_types.count * sizeof(*output->type_ids));
+            instance->parameter_types.count * sizeof(*out->type_ids));
         type_at += instance->parameter_types.count;
         image->parameter_accesses = (SolMirPlanSlice){access_at,
             instance->parameter_accesses.count};
-        if (instance->parameter_accesses.count != 0) memcpy(output->accesses + access_at,
+        if (instance->parameter_accesses.count != 0) memcpy(out->accesses + access_at,
             plan->instance_accesses + instance->parameter_accesses.offset,
-            instance->parameter_accesses.count * sizeof(*output->accesses));
+            instance->parameter_accesses.count * sizeof(*out->accesses));
         access_at += instance->parameter_accesses.count;
-        image->overlays.offset = output->overlay_count;
-        for (size_t use = 0; use < instance->typed_uses.count; ++use) {
-            const SolMirPlanTypedUse *source
-                = &plan->typed_uses[instance->typed_uses.offset + use];
-            output->overlays[output->overlay_count++]
-                = (SolMirMaterializedTypeOverlay){source->kind, source->source,
-                    source->ordinal, source->context, source->type, source->access};
+        image->overlays.offset = out->overlay_count;
+        for (size_t u = 0; u < instance->typed_uses.count; ++u) {
+            const SolMirPlanTypedUse *source = &plan->typed_uses[instance->typed_uses.offset + u];
+            out->overlays[out->overlay_count++] = (SolMirMaterializedTypeOverlay){
+                source->kind, source->source, source->ordinal, source->context,
+                source->type, source->access};
         }
-        image->overlays.count = output->overlay_count - image->overlays.offset;
-        SolMirPlanContextId body = instance->contexts.offset;
-        image->locals.offset = output->local_count;
-        const SolIrCallable *callable = &plan->program->ir->callables[
-            instance->callable];
-        for (size_t use = 0; use < instance->typed_uses.count; ++use) {
-            const SolMirPlanTypedUse *typed = &plan->typed_uses[
-                instance->typed_uses.offset + use];
-            if (typed->context != body || typed->kind != SOL_MIR_PLAN_USE_LOCAL) {
-                continue;
-            }
+        image->overlays.count = out->overlay_count - image->overlays.offset;
+        image->locals.offset = out->local_count;
+        const SolIrCallable *callable = &plan->program->ir->callables[instance->callable];
+        for (size_t u = 0; u < instance->typed_uses.count; ++u) {
+            const SolMirPlanTypedUse *use = &plan->typed_uses[instance->typed_uses.offset + u];
+            if (use->context != instance->contexts.offset
+                || use->kind != SOL_MIR_PLAN_USE_LOCAL) continue;
             SolMirMaterializedLocalKind kind = SOL_MIR_MATERIALIZED_LOCAL_BODY;
             size_t ordinal = SOL_MIR_MATERIALIZED_NONE;
-            if (typed->source == callable->receiver) {
-                kind = SOL_MIR_MATERIALIZED_LOCAL_RECEIVER;
-                ordinal = 0;
+            if (use->source == callable->receiver) {
+                kind = SOL_MIR_MATERIALIZED_LOCAL_RECEIVER; ordinal = 0;
             }
-            for (size_t parameter = 0; parameter < callable->parameters.count;
-                ++parameter) {
-                if (plan->program->ir->roots[callable->parameters.offset + parameter]
-                        == typed->source) {
-                    kind = SOL_MIR_MATERIALIZED_LOCAL_PARAMETER;
-                    ordinal = parameter;
-                }
+            for (size_t p = 0; p < callable->parameters.count; ++p) {
+                if (plan->program->ir->roots[callable->parameters.offset + p]
+                    == use->source) { kind = SOL_MIR_MATERIALIZED_LOCAL_PARAMETER; ordinal = p; }
             }
-            output->locals[output->local_count++] = (SolMirMaterializedLocal){id,
-                typed->source, typed->type, typed->access, kind, ordinal};
+            out->locals[out->local_count++] = (SolMirMaterializedLocal){id,
+                use->source, use->type, use->access, kind, ordinal};
         }
-        image->locals.count = output->local_count - image->locals.offset;
-        image->places.offset = output->place_count;
-        for (size_t use = 0; use < instance->typed_uses.count; ++use) {
-            const SolMirPlanTypedUse *typed = &plan->typed_uses[
-                instance->typed_uses.offset + use];
-            if (typed->context != body
-                || typed->kind != SOL_MIR_PLAN_USE_PLACE_ROOT) continue;
-            const SolIrPlace *source_place = &plan->program->ir->places[typed->source];
-            SolMirMaterializedLocalId local = local_for(output, image,
-                source_place->local);
+        image->locals.count = out->local_count - image->locals.offset;
+        image->places.offset = out->place_count;
+        for (size_t u = 0; u < instance->typed_uses.count; ++u) {
+            const SolMirPlanTypedUse *use = &plan->typed_uses[instance->typed_uses.offset + u];
+            if (use->context != instance->contexts.offset
+                || use->kind != SOL_MIR_PLAN_USE_PLACE_ROOT) continue;
+            const SolIrPlace *source = &plan->program->ir->places[use->source];
             const SolMirPlanTypedUse *final = find_use(plan, instance,
-                SOL_MIR_PLAN_USE_PLACE_FINAL, typed->source, 0, body);
-            if (local == SOL_MIR_MATERIALIZED_NONE || final == NULL) return report(builder,
-                SOL_MIR_MATERIALIZE_BUILD_INVALID_PLAN,
-                "source place has no concrete local or final type");
-            SolMirMaterializedPlace *place = &output->places[output->place_count++];
-            *place = (SolMirMaterializedPlace){id, typed->source, local, typed->type,
-                {output->projection_count, source_place->projections.count},
-                final->type};
-            for (size_t projection = 0; projection < source_place->projections.count;
-                ++projection) {
-                size_t source_id = source_place->projections.offset + projection;
-                const SolIrProjection *source
-                    = &plan->program->ir->projections[source_id];
-                const SolMirPlanTypedUse *projection_type = find_use(plan, instance,
-                    SOL_MIR_PLAN_USE_PLACE_PROJECTION, typed->source, projection,
-                    body);
-                if (projection_type == NULL) return report(builder,
-                    SOL_MIR_MATERIALIZE_BUILD_INVALID_PLAN,
-                    "source projection has no concrete type");
-                output->projections[output->projection_count++]
-                    = (SolMirMaterializedProjection){source->kind,
-                        projection_type->type, source->field, source->ordinal,
-                        source_id};
+                SOL_MIR_PLAN_USE_PLACE_FINAL, use->source, 0, instance->contexts.offset);
+            SolMirMaterializedPlace *place = &out->places[out->place_count++];
+            if (final == NULL) return false;
+            *place = (SolMirMaterializedPlace){id, use->source,
+                local_for(out, image, source->local), use->type,
+                {out->projection_count, source->projections.count}, final->type};
+            for (size_t p = 0; p < source->projections.count; ++p) {
+                size_t source_id = source->projections.offset + p;
+                const SolIrProjection *projection = &plan->program->ir->projections[source_id];
+                const SolMirPlanTypedUse *type = find_use(plan, instance,
+                    SOL_MIR_PLAN_USE_PLACE_PROJECTION, use->source, p,
+                    instance->contexts.offset);
+                if (type == NULL) return false;
+                out->projections[out->projection_count++] = (SolMirMaterializedProjection){
+                    projection->kind, type->type, projection->field,
+                    projection->ordinal, source_id};
             }
         }
-        for (size_t instruction = 0; instruction < template->mir.instruction_count;
-            ++instruction) {
+        for (size_t n = 0; n < mir->instruction_count; ++n) {
             SolMirPlace source;
-            if (!instruction_place(&template->mir.instructions[instruction], &source)
+            if (!instruction_place(&mir->instructions[n], &source)
                 || source.source_place != SOL_IR_NONE
-                || place_for(output, image, source) != SOL_MIR_MATERIALIZED_NONE) {
-                continue;
-            }
-            SolMirMaterializedLocalId local = local_for(output, image, source.local);
-            const SolMirPlanTypedUse *local_type = find_use(plan, instance,
-                SOL_MIR_PLAN_USE_LOCAL, source.local, 0, body);
-            if (local == SOL_MIR_MATERIALIZED_NONE || local_type == NULL) return report(
-                builder, SOL_MIR_MATERIALIZE_BUILD_INVALID_PLAN,
-                "synthetic place has no concrete local");
-            output->places[output->place_count++] = (SolMirMaterializedPlace){id,
-                SOL_IR_NONE, local, local_type->type,
-                {output->projection_count, 0}, local_type->type};
-        }
-        image->places.count = output->place_count - image->places.offset;
-        image->values = (SolMirPlanSlice){output->value_count,
-            template->mir.value_count};
-        image->instructions = (SolMirPlanSlice){output->instruction_count,
-            template->mir.instruction_count};
-        image->temporaries = (SolMirPlanSlice){output->temporary_count,
-            template->mir.temporary_count};
-        image->construct_operands = (SolMirPlanSlice){output->construct_operand_count,
-            template->mir.construct_operand_count};
-        image->call_arguments = (SolMirPlanSlice){output->call_argument_count,
-            template->mir.call_argument_count};
-        for (size_t value = 0; value < template->mir.value_count; ++value) {
-            const SolMirValue *source = &template->mir.values[value];
+                || place_for(out, image, source) != SOL_MIR_MATERIALIZED_NONE) continue;
             const SolMirPlanTypedUse *type = find_use(plan, instance,
-                SOL_MIR_PLAN_USE_MIR_VALUE, value, 0, body);
-            if (type == NULL) return report(builder,
-                SOL_MIR_MATERIALIZE_BUILD_INVALID_PLAN,
-                "MIR value has no concrete type");
-            output->values[output->value_count++] = (SolMirMaterializedValue){
-                source->kind, type->type, source->block, source->definition,
+                SOL_MIR_PLAN_USE_LOCAL, source.local, 0, instance->contexts.offset);
+            if (type == NULL) return false;
+            SolMirMaterializedLocalId local = local_for(out, image, source.local);
+            out->places[out->place_count++] = (SolMirMaterializedPlace){id,
+                SOL_IR_NONE, local, type->type, {out->projection_count, 0}, type->type};
+        }
+        image->places.count = out->place_count - image->places.offset;
+        image->blocks = (SolMirPlanSlice){out->block_count, mir->block_count};
+        image->loops = (SolMirPlanSlice){out->loop_count, mir->loop_count};
+        image->entry = image->blocks.offset + mir->entry;
+        image->contract_body = mir->contract_body == SOL_MIR_NONE
+            ? SOL_MIR_MATERIALIZED_NONE : image->blocks.offset + mir->contract_body;
+        image->contract_epilogue = mir->contract_epilogue == SOL_MIR_NONE
+            ? SOL_MIR_MATERIALIZED_NONE : image->blocks.offset + mir->contract_epilogue;
+        image->values = (SolMirPlanSlice){out->value_count, mir->value_count};
+        image->instructions = (SolMirPlanSlice){out->instruction_count, mir->instruction_count};
+        image->temporaries = (SolMirPlanSlice){out->temporary_count, mir->temporary_count};
+        image->construct_operands = (SolMirPlanSlice){out->construct_operand_count,
+            mir->construct_operand_count};
+        image->call_arguments = (SolMirPlanSlice){out->call_argument_count,
+            mir->call_argument_count};
+        for (size_t v = 0; v < mir->value_count; ++v) {
+            const SolMirValue *source = &mir->values[v];
+            const SolMirPlanTypedUse *type = find_use(plan, instance,
+                SOL_MIR_PLAN_USE_MIR_VALUE, v, 0, instance->contexts.offset);
+            if (type == NULL) return false;
+            out->values[out->value_count++] = (SolMirMaterializedValue){source->kind,
+                type->type, image->blocks.offset + source->block, source->definition,
                 source->kind == SOL_MIR_VALUE_INSTRUCTION
                     ? image->instructions.offset + source->definition
                     : SOL_MIR_MATERIALIZED_NONE,
                 source->source_expression, source->span};
         }
-        for (size_t temporary = 0; temporary < template->mir.temporary_count;
-            ++temporary) {
-            const SolMirTemporary *source = &template->mir.temporaries[temporary];
+        for (size_t t = 0; t < mir->temporary_count; ++t) {
             const SolMirPlanTypedUse *type = find_use(plan, instance,
-                SOL_MIR_PLAN_USE_MIR_TEMPORARY, temporary, 0, body);
-            if (type == NULL) return report(builder,
-                SOL_MIR_MATERIALIZE_BUILD_INVALID_PLAN,
-                "MIR temporary has no concrete type");
-            output->temporaries[output->temporary_count++]
-                = (SolMirMaterializedTemporary){type->type,
-                    source->source_expression, source->span};
+                SOL_MIR_PLAN_USE_MIR_TEMPORARY, t, 0, instance->contexts.offset);
+            if (type == NULL) return false;
+            out->temporaries[out->temporary_count++] = (SolMirMaterializedTemporary){
+                type->type, mir->temporaries[t].source_expression, mir->temporaries[t].span};
         }
-        for (size_t operand = 0; operand < template->mir.construct_operand_count;
-            ++operand) {
-            const SolMirConstructOperand *source
-                = &template->mir.construct_operands[operand];
+        for (size_t o = 0; o < mir->construct_operand_count; ++o) {
+            const SolMirConstructOperand *source = &mir->construct_operands[o];
             const SolMirPlanTypedUse *type = find_use(plan, instance,
-                SOL_MIR_PLAN_USE_CONSTRUCT_OPERAND, operand, source->formal, body);
-            if (type == NULL || source->temporary >= template->mir.temporary_count) {
-                return report(
-                builder, SOL_MIR_MATERIALIZE_BUILD_INVALID_PLAN,
-                "construct operand has no concrete type or temporary");
-            }
-            SolMirMaterializedTemporaryId temporary
-                = image->temporaries.offset + source->temporary;
-            output->construct_operands[output->construct_operand_count++]
+                SOL_MIR_PLAN_USE_CONSTRUCT_OPERAND, o, source->formal,
+                instance->contexts.offset);
+            if (type == NULL) return false;
+            out->construct_operands[out->construct_operand_count++]
                 = (SolMirMaterializedConstructOperand){source->formal,
-                    source->source_expression, type->type, temporary};
+                    source->source_expression, type->type,
+                    image->temporaries.offset + source->temporary};
         }
-        for (size_t instruction = 0; instruction < template->mir.instruction_count;
-            ++instruction) {
-            const SolMirInstruction *source = &template->mir.instructions[instruction];
-            SolMirMaterializedInstruction target;
-            if (!translate_instruction(output, image, instance, source,
-                    instruction, &target)) return report(builder,
-                SOL_MIR_MATERIALIZE_BUILD_INVALID_PLAN,
-                "MIR instruction specialization failed");
-            output->instructions[output->instruction_count++] = target;
+        for (size_t a = 0; a < mir->call_argument_count; ++a) {
+            if (!translate_argument(out, image, instance, &mir->call_arguments[a],
+                    &out->call_arguments[out->call_argument_count++])) return false;
         }
-        for (size_t argument = 0; argument < template->mir.call_argument_count;
-            ++argument) {
-            const SolMirCallArgument *source
-                = &template->mir.call_arguments[argument];
-            SolMirMaterializedCallArgument target = {source->formal,
-                source->access, source->source_expression,
-                SOL_MIR_MATERIALIZED_NONE, SOL_MIR_MATERIALIZED_NONE,
-                SOL_MIR_MATERIALIZED_NONE};
-            if (source->access == SOL_ACCESS_OWNED) {
-                const SolMirPlanTypedUse *type = find_use(plan, instance,
-                    SOL_MIR_PLAN_USE_MIR_TEMPORARY, source->temporary, 0, body);
-                if (type == NULL) return report(builder,
-                    SOL_MIR_MATERIALIZE_BUILD_INVALID_PLAN,
-                    "owned call argument has no concrete temporary type");
-                target.type = type->type;
-                target.temporary = image->temporaries.offset + source->temporary;
-            } else {
-                const SolMirPlanTypedUse *type = find_use(plan, instance,
-                    SOL_MIR_PLAN_USE_PLACE_FINAL, source->place, 0, body);
-                if (type == NULL || source->place >= plan->program->ir->place_count) {
-                    return report(builder, SOL_MIR_MATERIALIZE_BUILD_INVALID_PLAN,
-                        "borrowed call argument has no concrete place type");
+        image->handlers.offset = out->handler_count;
+        for (size_t n = 0; n < mir->instruction_count; ++n) {
+            const SolMirInstruction *instruction = &mir->instructions[n];
+            if (instruction->kind != SOL_MIR_INST_HANDLER_ENTER) continue;
+            SolIrExpressionId expression_id = instruction->source_expression;
+            const SolIrExpression *expression = &plan->program->ir->expressions[expression_id];
+            SolMirProgramSource provenance = {instance->callable, expression_id, 0,
+                instruction->span.start, instruction->span.end};
+            bool found_file = false;
+            for (size_t f = 0; f < plan->program->ir->file_count; ++f) {
+                const SolIrSourceFile *file = &plan->program->ir->files[f];
+                if (instruction->span.start >= file->aggregate_start
+                    && instruction->span.end <= file->aggregate_end) {
+                    provenance.file = f; provenance.start -= file->aggregate_start;
+                    provenance.end -= file->aggregate_start; found_file = true; break;
                 }
-                const SolIrPlace *place = &plan->program->ir->places[source->place];
-                target.type = type->type;
-                target.place = place_for(output, image,
-                    (SolMirPlace){place->local, source->place});
-                if (target.place == SOL_MIR_MATERIALIZED_NONE) return report(builder,
-                    SOL_MIR_MATERIALIZE_BUILD_INVALID_PLAN,
-                    "borrowed call argument place was not materialized");
             }
-            output->call_arguments[output->call_argument_count++] = target;
+            size_t source_demand = 0, provider_demand = 0;
+            if (!found_file || find_demand(plan, id, instance->contexts.offset,
+                    provenance, SOL_MIR_PLAN_DEMAND_HANDLER_SOURCE,
+                    SOL_MIR_PLAN_DEMAND_HANDLER_SOURCE, &source_demand) == NULL
+                || find_demand(plan, id, instance->contexts.offset, provenance,
+                    SOL_MIR_PLAN_DEMAND_HANDLER_PROVIDER,
+                    SOL_MIR_PLAN_DEMAND_HANDLER_PROVIDER, &provider_demand) == NULL) return false;
+            size_t source_binding = binding_for_demand(out, source_demand);
+            size_t provider_binding = binding_for_demand(out, provider_demand);
+            if (source_binding == SOL_MIR_MATERIALIZED_NONE
+                || provider_binding == SOL_MIR_MATERIALIZED_NONE) return false;
+            const SolIrExpression *authority = &plan->program->ir->expressions[
+                expression->as.handler.authority];
+            const SolIrExpression *provider = &plan->program->ir->expressions[
+                expression->as.handler.provider];
+            size_t effect = SOL_IR_NONE;
+            for (size_t e = 0; e < plan->program->ir->effect_count; ++e) {
+                if (strcmp(plan->program->ir->effects[e].name,
+                        expression->as.handler.effect_name) == 0) { effect = e; break; }
+            }
+            SolMirMaterializedHandler *handler = &out->handlers[out->handler_count++];
+            *handler = (SolMirMaterializedHandler){id,
+                instance->contexts.offset, expression_id, source_binding,
+                provider_binding, place_for(out, image, (SolMirPlace){
+                    plan->program->ir->places[authority->as.place].local,
+                    authority->as.place}), place_for(out, image, (SolMirPlace){
+                    plan->program->ir->places[provider->as.place].local,
+                    provider->as.place}), expression->as.handler.source, effect,
+                expression->as.handler.root, instruction->span};
+            if (out->bindings[provider_binding].symbolic_callable
+                    != expression->as.handler.provider_callable
+                || !handler_signatures_match(out, handler)) return false;
         }
-        image->invokes.offset = output->invoke_binding_count;
-        if (!clone_mir(builder, &template->mir, &image->topology)) return false;
-        for (size_t block = 0; block < image->topology.block_count; ++block) {
-            if (image->topology.blocks[block].terminator.kind == SOL_MIR_TERM_INVOKE
-                && !append_binding(builder, id, instance,
-                    &image->topology, block)) return false;
+        image->handlers.count = out->handler_count - image->handlers.offset;
+        for (size_t n = 0; n < mir->instruction_count; ++n) {
+            if (!translate_instruction(out, image, instance, &mir->instructions[n], n,
+                    &out->instructions[out->instruction_count++])) return false;
         }
-        image->invokes.count = output->invoke_binding_count
-            - image->invokes.offset;
-        if (!charge(builder, 1 + image->overlays.count)) return false;
+        for (size_t l = 0; l < mir->loop_count; ++l) {
+            const SolMirLoop *source = &mir->loops[l];
+#define BLOCK(v) (image->blocks.offset + (v))
+            out->loops[out->loop_count++] = (SolMirMaterializedLoop){
+                source->statement, source->parent == SOL_MIR_NONE
+                    ? SOL_MIR_MATERIALIZED_NONE : image->loops.offset + source->parent,
+                BLOCK(source->preheader), BLOCK(source->header), BLOCK(source->condition),
+                BLOCK(source->body), BLOCK(source->backedge), BLOCK(source->exit),
+                source->obligations, source->span, l};
+#undef BLOCK
+        }
+        for (size_t p = 0; p < mir->parameter_value_count; ++p) {
+            out->parameter_values[out->parameter_value_count++] = image->values.offset
+                + mir->parameter_values[p];
+        }
+        for (size_t k = 0; k < mir->block_count; ++k) {
+            const SolMirBlock *source = &mir->blocks[k];
+            SolMirMaterializedBlock *block = &out->blocks[out->block_count++];
+            block->id = image->blocks.offset + source->id; block->order = source->order;
+            block->parameters = (SolMirPlanSlice){out->parameter_value_count
+                - mir->parameter_value_count + source->parameters.offset,
+                source->parameters.count};
+            block->instructions = (SolMirPlanSlice){image->instructions.offset
+                + source->instructions.offset, source->instructions.count};
+            block->span = source->span; block->started = source->started;
+            block->source_block = k;
+            if (!translate_terminator(b, id, instance, image, mir,
+                    &source->terminator, &block->terminator)) return fail(b,
+                SOL_MIR_MATERIALIZE_BUILD_UNSUPPORTED_OR_UNRESOLVED,
+                "concrete terminator dispatch or signature is unresolved");
+        }
+        if (!clone_mir(b, mir, &image->topology)) return false;
     }
-    output->usage.instances = output->image_count;
-    output->usage.bindings += output->overlay_count;
-    output->usage.concrete_records = concrete_records;
-    if (!charge(builder, concrete_records)) return false;
+    out->type_id_count = out->type_id_capacity; out->access_count = out->access_capacity;
+    out->overlay_count = out->overlay_capacity; out->local_count = out->local_capacity;
+    out->place_count = out->place_capacity; out->projection_count = out->projection_capacity;
+    out->value_count = out->value_capacity; out->instruction_count = out->instruction_capacity;
+    out->temporary_count = out->temporary_capacity;
+    out->construct_operand_count = out->construct_operand_capacity;
+    out->call_argument_count = out->call_argument_capacity;
+    out->block_count = out->block_capacity; out->edge_count = out->edge_capacity;
+    out->edge_value_count = out->edge_value_capacity;
+    out->parameter_value_count = out->parameter_value_capacity;
+    out->loop_count = out->loop_capacity; out->handler_count = out->handler_capacity;
+    out->writeback_count = out->writeback_capacity;
+    out->literal_byte_count = out->literal_byte_capacity;
+    out->usage.instances = out->image_count; out->usage.cfg_items = cfg;
+    out->usage.bindings = bindings; out->usage.concrete_records = concrete;
+    if (!charge(b, concrete)) return false;
     return true;
 }
 
@@ -988,8 +1213,7 @@ SolMirMaterializeBuildOutcome sol_mir_materialize_build(
         return SOL_MIR_MATERIALIZE_BUILD_INVALID_ARGUMENT;
     }
     if (!sol_mir_plan_validate(request->plan, diagnostics)) {
-        return diagnostics->allocation_failed
-            ? SOL_MIR_MATERIALIZE_BUILD_ALLOCATION_FAILED
+        return diagnostics->allocation_failed ? SOL_MIR_MATERIALIZE_BUILD_ALLOCATION_FAILED
             : SOL_MIR_MATERIALIZE_BUILD_INVALID_PLAN;
     }
     SolMirMaterialization scratch;
@@ -997,13 +1221,11 @@ SolMirMaterializeBuildOutcome sol_mir_materialize_build(
     scratch.plan = request->plan;
     scratch.limits = request->limits == NULL || limits_zero(*request->limits)
         ? sol_mir_materialize_default_limits() : *request->limits;
-    Materializer builder = {&scratch, diagnostics,
-        SOL_MIR_MATERIALIZE_BUILD_INTERNAL_FAILED};
+    Builder builder = {&scratch, diagnostics, SOL_MIR_MATERIALIZE_BUILD_INTERNAL_FAILED};
     if (build_scratch(&builder)) {
         builder.outcome = SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED;
         if (sol_mir_materialization_validate(&scratch, diagnostics)) {
-            *output = scratch;
-            return builder.outcome;
+            *output = scratch; return builder.outcome;
         }
         builder.outcome = diagnostics->allocation_failed
             ? SOL_MIR_MATERIALIZE_BUILD_ALLOCATION_FAILED
@@ -1013,874 +1235,264 @@ SolMirMaterializeBuildOutcome sol_mir_materialize_build(
     return builder.outcome;
 }
 
-typedef struct { uintptr_t start; uintptr_t end; } OwnedRange;
-
-static bool validation_error(SolDiagnostics *diagnostics, const char *message) {
-    if (diagnostics != NULL) sol_diagnostics_add(diagnostics,
-        "SOL-MIR-MATERIALIZE-002", SOL_SEVERITY_ERROR, (SolSpan){0}, message);
-    return false;
-}
-
 static bool canonical(size_t count, size_t capacity, const void *pointer) {
     return count == capacity && ((count == 0) == (pointer == NULL));
 }
 
-static bool add_range(OwnedRange *ranges, size_t *range_count,
-    const void *pointer, size_t count, size_t size) {
-    if (count == 0) return true;
-    if (pointer == NULL || size == 0 || count > SIZE_MAX / size) return false;
+static bool add_range(Range *ranges, size_t *count, const void *pointer,
+    size_t items, size_t size) {
+    if (items == 0) return pointer == NULL;
+    if (pointer == NULL || size == 0 || items > SIZE_MAX / size) return false;
     uintptr_t start = (uintptr_t)pointer;
-    size_t bytes = count * size;
+    size_t bytes = items * size;
     if (bytes > UINTPTR_MAX - start) return false;
-    uintptr_t end = start + bytes;
-    for (size_t index = 0; index < *range_count; ++index) {
-        if (start < ranges[index].end && ranges[index].start < end) return false;
+    Range next = {start, start + bytes};
+    for (size_t i = 0; i < *count; ++i) {
+        if (next.start < ranges[i].end && ranges[i].start < next.end) return false;
     }
-    ranges[(*range_count)++] = (OwnedRange){start, end};
-    return true;
+    ranges[(*count)++] = next; return true;
 }
 
-static bool bytes_equal(const void *a, const void *b, size_t count, size_t size) {
-    return count == 0 || memcmp(a, b, count * size) == 0;
-}
-
-static bool topology_authentic(const SolMir *mir, const SolMir *source) {
-    return mir->callable == source->callable
-        && mir->generic_parameters.offset == source->generic_parameters.offset
-        && mir->generic_parameters.count == source->generic_parameters.count
-        && mir->effect_parameters.offset == source->effect_parameters.offset
-        && mir->effect_parameters.count == source->effect_parameters.count
-        && mir->entry == source->entry && mir->contract_body == source->contract_body
-        && mir->contract_epilogue == source->contract_epilogue
-#define SAME(field, count, capacity) && mir->count == source->count \
-        && mir->capacity == mir->count \
-        && (mir->count == 0 || mir->field != source->field) \
-        && bytes_equal(mir->field, source->field, mir->count, sizeof(*mir->field))
-        SAME(blocks, block_count, block_capacity)
-        SAME(instructions, instruction_count, instruction_capacity)
-        SAME(values, value_count, value_capacity)
-        SAME(parameter_values, parameter_value_count, parameter_value_capacity)
-        SAME(edge_values, edge_value_count, edge_value_capacity)
-        SAME(call_arguments, call_argument_count, call_argument_capacity)
-        SAME(loops, loop_count, loop_capacity)
-        SAME(construct_operands, construct_operand_count,
-            construct_operand_capacity)
-        SAME(temporaries, temporary_count, temporary_capacity)
+static bool topology_equal(const SolMir *a, const SolMir *b) {
+    if (a->callable != b->callable || a->generic_parameters.offset != b->generic_parameters.offset
+        || a->generic_parameters.count != b->generic_parameters.count
+        || a->effect_parameters.offset != b->effect_parameters.offset
+        || a->effect_parameters.count != b->effect_parameters.count
+        || a->entry != b->entry || a->contract_body != b->contract_body
+        || a->contract_epilogue != b->contract_epilogue) return false;
+#define SAME(field, count, capacity) if (a->count != b->count || a->capacity != a->count \
+    || (a->count != 0 && memcmp(a->field, b->field, a->count * sizeof(*a->field)) != 0)) return false
+    SAME(blocks, block_count, block_capacity); SAME(instructions, instruction_count, instruction_capacity);
+    SAME(values, value_count, value_capacity); SAME(parameter_values, parameter_value_count, parameter_value_capacity);
+    SAME(edge_values, edge_value_count, edge_value_capacity); SAME(call_arguments, call_argument_count, call_argument_capacity);
+    SAME(loops, loop_count, loop_capacity); SAME(construct_operands, construct_operand_count, construct_operand_capacity);
+    SAME(temporaries, temporary_count, temporary_capacity);
 #undef SAME
-        ;
-}
-
-static bool slice_ok(SolMirPlanSlice slice, size_t count) {
-    return slice.offset <= count && slice.count <= count - slice.offset;
-}
-
-static bool add_product(size_t *total, size_t count, size_t size) {
-    if (size == 0 || count > SIZE_MAX / size) return false;
-    size_t bytes = count * size;
-    if (bytes > SIZE_MAX - *total) return false;
-    *total += bytes;
     return true;
+}
+
+static bool arrays_equal(const SolMirMaterialization *a,
+    const SolMirMaterialization *b) {
+#define SAME(field, count) if (a->count != b->count || (a->count != 0 \
+    && memcmp(a->field, b->field, a->count * sizeof(*a->field)) != 0)) return false
+    SAME(types, type_count); SAME(type_ids, type_id_count); SAME(accesses, access_count);
+    SAME(overlays, overlay_count); SAME(contexts, context_count); SAME(locals, local_count);
+    SAME(places, place_count); SAME(projections, projection_count); SAME(values, value_count);
+    SAME(instructions, instruction_count); SAME(temporaries, temporary_count);
+    SAME(construct_operands, construct_operand_count); SAME(call_arguments, call_argument_count);
+    SAME(blocks, block_count); SAME(edges, edge_count); SAME(edge_values, edge_value_count);
+    SAME(parameter_values, parameter_value_count); SAME(loops, loop_count);
+    SAME(bindings, binding_count); SAME(imports, import_count); SAME(handlers, handler_count);
+    SAME(writebacks, writeback_count); SAME(effect_rows, effect_row_count);
+    SAME(effect_atoms, effect_atom_count); SAME(effect_row_atoms, effect_row_atom_count);
+    SAME(effect_names, effect_name_count); SAME(literal_bytes, literal_byte_count);
+#undef SAME
+    if (a->image_count != b->image_count) return false;
+    for (size_t i = 0; i < a->image_count; ++i) {
+        SolMir left = a->images[i].topology, right = b->images[i].topology;
+        SolMirMaterializedImage ai = a->images[i], bi = b->images[i];
+        memset(&ai.topology, 0, sizeof(ai.topology));
+        memset(&bi.topology, 0, sizeof(bi.topology));
+        if (memcmp(&ai, &bi, sizeof(ai)) != 0 || !topology_equal(&left, &right)) return false;
+    }
+    return memcmp(&a->usage, &b->usage, sizeof(a->usage)) == 0;
 }
 
 bool sol_mir_materialization_validate(const SolMirMaterialization *owner,
     SolDiagnostics *diagnostics) {
     if (owner == NULL || owner->plan == NULL || !limits_complete(owner->limits)
-        || owner->image_count != owner->plan->instance_count
         || owner->usage.instances != owner->image_count
+        || owner->usage.instances > owner->limits.max_instances
         || owner->usage.cfg_items > owner->limits.max_cfg_items
         || owner->usage.bindings > owner->limits.max_bindings
         || owner->usage.concrete_records > owner->limits.max_concrete_records
         || owner->usage.owned_bytes > owner->limits.max_owned_bytes
-        || owner->usage.materialization_work
-            > owner->limits.max_materialization_work
-        || !canonical(owner->image_count, owner->image_capacity, owner->images)
-        || !canonical(owner->type_count, owner->type_capacity, owner->types)
-        || !canonical(owner->type_id_count, owner->type_id_capacity, owner->type_ids)
-        || !canonical(owner->access_count, owner->access_capacity, owner->accesses)
-        || !canonical(owner->overlay_count, owner->overlay_capacity, owner->overlays)
-        || !canonical(owner->context_count, owner->context_capacity, owner->contexts)
-        || !canonical(owner->local_count, owner->local_capacity, owner->locals)
-        || !canonical(owner->place_count, owner->place_capacity, owner->places)
-        || !canonical(owner->projection_count, owner->projection_capacity,
-            owner->projections)
-        || !canonical(owner->value_count, owner->value_capacity, owner->values)
-        || !canonical(owner->instruction_count, owner->instruction_capacity,
-            owner->instructions)
-        || !canonical(owner->temporary_count, owner->temporary_capacity,
-            owner->temporaries)
-        || !canonical(owner->construct_operand_count,
-            owner->construct_operand_capacity, owner->construct_operands)
-        || !canonical(owner->call_argument_count, owner->call_argument_capacity,
-            owner->call_arguments)
-        || !canonical(owner->invoke_binding_count,
-            owner->invoke_binding_capacity, owner->invoke_bindings)
-        || !sol_mir_plan_validate(owner->plan, diagnostics)) {
-        return validation_error(diagnostics,
-            "materialized MIR owner header or borrowed plan is invalid");
+        || owner->usage.materialization_work > owner->limits.max_materialization_work
+        || !sol_mir_plan_validate(owner->plan, diagnostics)) return validation_error(
+            diagnostics, "materialized MIR header or borrowed provenance plan is invalid");
+#define CANON(field, count, capacity) if (!canonical(owner->count, owner->capacity, owner->field)) goto malformed
+    CANON(images, image_count, image_capacity); CANON(types, type_count, type_capacity);
+    CANON(type_ids, type_id_count, type_id_capacity); CANON(accesses, access_count, access_capacity);
+    CANON(overlays, overlay_count, overlay_capacity); CANON(contexts, context_count, context_capacity);
+    CANON(locals, local_count, local_capacity); CANON(places, place_count, place_capacity);
+    CANON(projections, projection_count, projection_capacity); CANON(values, value_count, value_capacity);
+    CANON(instructions, instruction_count, instruction_capacity); CANON(temporaries, temporary_count, temporary_capacity);
+    CANON(construct_operands, construct_operand_count, construct_operand_capacity);
+    CANON(call_arguments, call_argument_count, call_argument_capacity); CANON(blocks, block_count, block_capacity);
+    CANON(edges, edge_count, edge_capacity); CANON(edge_values, edge_value_count, edge_value_capacity);
+    CANON(parameter_values, parameter_value_count, parameter_value_capacity); CANON(loops, loop_count, loop_capacity);
+    CANON(bindings, binding_count, binding_capacity); CANON(imports, import_count, import_capacity);
+    CANON(handlers, handler_count, handler_capacity); CANON(writebacks, writeback_count, writeback_capacity);
+    CANON(effect_rows, effect_row_count, effect_row_capacity); CANON(effect_atoms, effect_atom_count, effect_atom_capacity);
+    CANON(effect_row_atoms, effect_row_atom_count, effect_row_atom_capacity);
+    CANON(effect_names, effect_name_count, effect_name_capacity);
+    CANON(literal_bytes, literal_byte_count, literal_byte_capacity);
+#undef CANON
+    if (owner->image_count > (SIZE_MAX - 100) / 9) goto malformed;
+    size_t max_ranges = 100 + owner->image_count * 9;
+    if (owner->plan->program->template_count > (SIZE_MAX - max_ranges) / 9) {
+        goto malformed;
     }
-    size_t max_ranges = 15;
-    size_t templates = owner->plan->program->template_count;
-    if (owner->image_count > (SIZE_MAX - max_ranges) / 9) {
-        return validation_error(diagnostics, "materialized MIR range count overflowed");
+    max_ranges += owner->plan->program->template_count * 9;
+    if (owner->plan->effect_atom_count > SIZE_MAX - max_ranges) goto malformed;
+    max_ranges += owner->plan->effect_atom_count;
+    size_t string_ranges[] = {2, owner->plan->program->ir->definition_count,
+        owner->plan->program->ir->callable_count,
+        owner->plan->program->ir->local_count,
+        owner->plan->program->ir->field_count,
+        owner->plan->program->ir->variant_count,
+        owner->plan->program->ir->expression_count,
+        owner->plan->program->ir->statement_count,
+        owner->plan->program->ir->effect_count,
+        owner->plan->program->ir->generic_parameter_count,
+        owner->plan->program->ir->effect_parameter_count,
+        owner->plan->program->ir->file_count};
+    for (size_t i = 0; i < sizeof(string_ranges) / sizeof(string_ranges[0]); ++i) {
+        if (string_ranges[i] > SIZE_MAX - max_ranges) goto malformed;
+        max_ranges += string_ranges[i];
     }
-    max_ranges += owner->image_count * 9;
-    if (templates > (SIZE_MAX - max_ranges) / 9) {
-        return validation_error(diagnostics, "materialized MIR range count overflowed");
-    }
-    max_ranges += templates * 9;
-    if (max_ranges > SIZE_MAX - 20
-        || owner->plan->effect_atom_count > SIZE_MAX - max_ranges - 20) {
-        return validation_error(diagnostics, "materialized MIR range count overflowed");
-    }
-    max_ranges += 20 + owner->plan->effect_atom_count;
-    const SolIr *ir = owner->plan->program->ir;
-#define ADD_RANGE_COUNT(count) do { \
-    if ((count) > SIZE_MAX - max_ranges) return validation_error(diagnostics, \
-        "materialized MIR range count overflowed"); \
-    max_ranges += (count); \
-} while (0)
-    ADD_RANGE_COUNT(32);
-    ADD_RANGE_COUNT(ir->definition_count);
-    ADD_RANGE_COUNT(ir->callable_count);
-    ADD_RANGE_COUNT(ir->local_count);
-    ADD_RANGE_COUNT(ir->field_count);
-    ADD_RANGE_COUNT(ir->variant_count);
-    ADD_RANGE_COUNT(ir->expression_count);
-    ADD_RANGE_COUNT(ir->statement_count);
-    ADD_RANGE_COUNT(ir->effect_count);
-    ADD_RANGE_COUNT(ir->generic_parameter_count);
-    ADD_RANGE_COUNT(ir->effect_parameter_count);
-    ADD_RANGE_COUNT(ir->file_count);
-#undef ADD_RANGE_COUNT
-    OwnedRange *ranges = calloc(max_ranges, sizeof(*ranges));
+    Range *ranges = calloc(max_ranges, sizeof(*ranges));
     if (ranges == NULL) return validation_error(diagnostics,
         "allocation failed while validating materialized MIR ranges");
     size_t range_count = 0;
-#define RANGE(pointer, count, type) if (!add_range(ranges, &range_count, \
-        (pointer), (count), sizeof(type))) goto malformed
     const SolMirPlan *plan = owner->plan;
-    RANGE(plan->types, plan->type_capacity, *plan->types);
-    RANGE(plan->type_components, plan->type_component_capacity,
-        *plan->type_components);
-    RANGE(plan->type_parameter_accesses, plan->type_parameter_access_capacity,
-        *plan->type_parameter_accesses);
-    RANGE(plan->effect_atoms, plan->effect_atom_capacity, *plan->effect_atoms);
-    RANGE(plan->effect_rows, plan->effect_row_capacity, *plan->effect_rows);
-    RANGE(plan->effect_row_atoms, plan->effect_row_atom_capacity,
-        *plan->effect_row_atoms);
-    RANGE(plan->instances, plan->instance_capacity, *plan->instances);
-    RANGE(plan->instance_type_ids, plan->instance_type_id_capacity,
-        *plan->instance_type_ids);
-    RANGE(plan->instance_accesses, plan->instance_access_capacity,
-        *plan->instance_accesses);
-    RANGE(plan->dictionary_entries, plan->dictionary_entry_capacity,
-        *plan->dictionary_entries);
-    RANGE(plan->imports, plan->import_capacity, *plan->imports);
-    RANGE(plan->typed_uses, plan->typed_use_capacity, *plan->typed_uses);
-    RANGE(plan->contexts, plan->context_capacity, *plan->contexts);
-    RANGE(plan->demands, plan->demand_capacity, *plan->demands);
-    for (size_t id = 0; id < plan->effect_atom_count; ++id) {
-        if (plan->effect_atoms[id].length == SIZE_MAX) goto malformed;
-        RANGE(plan->effect_atoms[id].name, plan->effect_atoms[id].length + 1,
-            char);
-    }
     const SolMirProgram *program = plan->program;
-    RANGE(program->roots, program->root_count, *program->roots);
-    RANGE(program->approved_imports, program->approved_import_count,
-        *program->approved_imports);
-    RANGE(program->templates, program->template_count, *program->templates);
-    RANGE(program->imports, program->import_count, *program->imports);
-    RANGE(program->specializations, program->specialization_count,
-        *program->specializations);
-    RANGE(program->references, program->reference_count, *program->references);
-#define IR_RANGE(field, count) RANGE(ir->field, ir->count, *ir->field)
-    RANGE(ir->source_path, strlen(ir->source_path) + 1, char);
-    RANGE(ir->source_bytes, ir->source_length + 1, char);
-    IR_RANGE(types, type_count);
-    IR_RANGE(type_ids, type_id_count);
-    IR_RANGE(accesses, access_count);
-    IR_RANGE(definitions, definition_count);
-    IR_RANGE(callables, callable_count);
-    IR_RANGE(members, member_count);
-    IR_RANGE(evidence, evidence_count);
-    IR_RANGE(locals, local_count);
-    IR_RANGE(fields, field_count);
-    IR_RANGE(variants, variant_count);
-    IR_RANGE(expressions, expression_count);
-    IR_RANGE(places, place_count);
-    IR_RANGE(projections, projection_count);
-    IR_RANGE(statements, statement_count);
-    IR_RANGE(statement_ids, statement_id_count);
-    IR_RANGE(arms, arm_count);
-    IR_RANGE(arm_ids, arm_id_count);
-    IR_RANGE(patterns, pattern_count);
-    IR_RANGE(pattern_children, pattern_child_count);
-    IR_RANGE(operands, operand_count);
-    IR_RANGE(roots, root_count);
-    IR_RANGE(cleanup_locals, cleanup_local_count);
-    IR_RANGE(effects, effect_count);
-    IR_RANGE(generic_parameters, generic_parameter_count);
-    IR_RANGE(effect_parameters, effect_parameter_count);
-    IR_RANGE(obligations, obligation_count);
-    IR_RANGE(snapshots, snapshot_count);
-    IR_RANGE(loop_obligations, loop_obligation_count);
-    IR_RANGE(unreachable_obligations, unreachable_obligation_count);
-    IR_RANGE(files, file_count);
-#undef IR_RANGE
-#define STRING_RANGE(pointer) do { \
-    const char *string_range_value = (pointer); \
-    if (string_range_value != NULL) \
-        RANGE(string_range_value, strlen(string_range_value) + 1, char); \
-} while (0)
-    for (size_t id = 0; id < ir->definition_count; ++id) {
-        STRING_RANGE(ir->definitions[id].name);
+    const SolIr *ir = program->ir;
+#define BORROW(pointer, count, type) if (!add_range(ranges, &range_count, pointer, count, sizeof(type))) goto range_malformed
+    BORROW(plan->types, plan->type_capacity, *plan->types);
+    BORROW(plan->type_components, plan->type_component_capacity, *plan->type_components);
+    BORROW(plan->type_parameter_accesses, plan->type_parameter_access_capacity, *plan->type_parameter_accesses);
+    BORROW(plan->effect_atoms, plan->effect_atom_capacity, *plan->effect_atoms);
+    BORROW(plan->effect_rows, plan->effect_row_capacity, *plan->effect_rows);
+    BORROW(plan->effect_row_atoms, plan->effect_row_atom_capacity, *plan->effect_row_atoms);
+    BORROW(plan->instances, plan->instance_capacity, *plan->instances);
+    BORROW(plan->instance_type_ids, plan->instance_type_id_capacity, *plan->instance_type_ids);
+    BORROW(plan->instance_accesses, plan->instance_access_capacity, *plan->instance_accesses);
+    BORROW(plan->dictionary_entries, plan->dictionary_entry_capacity, *plan->dictionary_entries);
+    BORROW(plan->imports, plan->import_capacity, *plan->imports);
+    BORROW(plan->typed_uses, plan->typed_use_capacity, *plan->typed_uses);
+    BORROW(plan->contexts, plan->context_capacity, *plan->contexts);
+    BORROW(plan->demands, plan->demand_capacity, *plan->demands);
+    for (size_t i = 0; i < plan->effect_atom_count; ++i) {
+        BORROW(plan->effect_atoms[i].name, plan->effect_atoms[i].length + 1, char);
     }
-    for (size_t id = 0; id < ir->callable_count; ++id) {
-        STRING_RANGE(ir->callables[id].name);
-    }
-    for (size_t id = 0; id < ir->local_count; ++id) {
-        STRING_RANGE(ir->locals[id].name);
-    }
-    for (size_t id = 0; id < ir->field_count; ++id) {
-        STRING_RANGE(ir->fields[id].name);
-    }
-    for (size_t id = 0; id < ir->variant_count; ++id) {
-        STRING_RANGE(ir->variants[id].name);
-    }
-    for (size_t id = 0; id < ir->expression_count; ++id) {
-        const SolIrExpression *expression = &ir->expressions[id];
-        if (expression->kind == SOL_IR_EXPR_STRING) {
-            STRING_RANGE(expression->as.string);
-        } else if (expression->kind == SOL_IR_EXPR_HANDLE) {
-            STRING_RANGE(expression->as.handler.effect_name);
+    BORROW(program->roots, program->root_count, *program->roots);
+    BORROW(program->approved_imports, program->approved_import_count, *program->approved_imports);
+    BORROW(program->templates, program->template_count, *program->templates);
+    BORROW(program->imports, program->import_count, *program->imports);
+    BORROW(program->specializations, program->specialization_count, *program->specializations);
+    BORROW(program->references, program->reference_count, *program->references);
+    BORROW(ir->types, ir->type_count, *ir->types);
+    BORROW(ir->type_ids, ir->type_id_count, *ir->type_ids);
+    BORROW(ir->accesses, ir->access_count, *ir->accesses);
+    BORROW(ir->definitions, ir->definition_count, *ir->definitions);
+    BORROW(ir->callables, ir->callable_count, *ir->callables);
+    BORROW(ir->members, ir->member_count, *ir->members);
+    BORROW(ir->evidence, ir->evidence_count, *ir->evidence);
+    BORROW(ir->locals, ir->local_count, *ir->locals);
+    BORROW(ir->fields, ir->field_count, *ir->fields);
+    BORROW(ir->variants, ir->variant_count, *ir->variants);
+    BORROW(ir->expressions, ir->expression_count, *ir->expressions);
+    BORROW(ir->places, ir->place_count, *ir->places);
+    BORROW(ir->projections, ir->projection_count, *ir->projections);
+    BORROW(ir->statements, ir->statement_count, *ir->statements);
+    BORROW(ir->statement_ids, ir->statement_id_count, *ir->statement_ids);
+    BORROW(ir->arms, ir->arm_count, *ir->arms);
+    BORROW(ir->arm_ids, ir->arm_id_count, *ir->arm_ids);
+    BORROW(ir->patterns, ir->pattern_count, *ir->patterns);
+    BORROW(ir->pattern_children, ir->pattern_child_count, *ir->pattern_children);
+    BORROW(ir->operands, ir->operand_count, *ir->operands);
+    BORROW(ir->roots, ir->root_count, *ir->roots);
+    BORROW(ir->cleanup_locals, ir->cleanup_local_count, *ir->cleanup_locals);
+    BORROW(ir->effects, ir->effect_count, *ir->effects);
+    BORROW(ir->generic_parameters, ir->generic_parameter_count, *ir->generic_parameters);
+    BORROW(ir->effect_parameters, ir->effect_parameter_count, *ir->effect_parameters);
+    BORROW(ir->obligations, ir->obligation_count, *ir->obligations);
+    BORROW(ir->snapshots, ir->snapshot_count, *ir->snapshots);
+    BORROW(ir->loop_obligations, ir->loop_obligation_count, *ir->loop_obligations);
+    BORROW(ir->unreachable_obligations, ir->unreachable_obligation_count, *ir->unreachable_obligations);
+    BORROW(ir->files, ir->file_count, *ir->files);
+    BORROW(ir->source_path, strlen(ir->source_path) + 1, char);
+    BORROW(ir->source_bytes, ir->source_length + 1, char);
+#define STRING(pointer) do { const char *text = (pointer); if (text != NULL) \
+    BORROW(text, strlen(text) + 1, char); } while (0)
+    for (size_t i = 0; i < ir->definition_count; ++i) STRING(ir->definitions[i].name);
+    for (size_t i = 0; i < ir->callable_count; ++i) STRING(ir->callables[i].name);
+    for (size_t i = 0; i < ir->local_count; ++i) STRING(ir->locals[i].name);
+    for (size_t i = 0; i < ir->field_count; ++i) STRING(ir->fields[i].name);
+    for (size_t i = 0; i < ir->variant_count; ++i) STRING(ir->variants[i].name);
+    for (size_t i = 0; i < ir->expression_count; ++i) {
+        if (ir->expressions[i].kind == SOL_IR_EXPR_STRING) {
+            STRING(ir->expressions[i].as.string);
+        } else if (ir->expressions[i].kind == SOL_IR_EXPR_HANDLE) {
+            STRING(ir->expressions[i].as.handler.effect_name);
         }
     }
-    for (size_t id = 0; id < ir->statement_count; ++id) {
-        STRING_RANGE(ir->statements[id].region_label);
+    for (size_t i = 0; i < ir->statement_count; ++i) STRING(ir->statements[i].region_label);
+    for (size_t i = 0; i < ir->effect_count; ++i) STRING(ir->effects[i].name);
+    for (size_t i = 0; i < ir->generic_parameter_count; ++i) STRING(ir->generic_parameters[i].name);
+    for (size_t i = 0; i < ir->effect_parameter_count; ++i) STRING(ir->effect_parameters[i].name);
+    for (size_t i = 0; i < ir->file_count; ++i) STRING(ir->files[i].path);
+#undef STRING
+    for (size_t i = 0; i < program->template_count; ++i) {
+        const SolMir *mir = &program->templates[i].mir;
+#define SOURCE_RANGE(field, capacity) BORROW(mir->field, mir->capacity, *mir->field)
+        SOURCE_RANGE(blocks, block_capacity); SOURCE_RANGE(instructions, instruction_capacity);
+        SOURCE_RANGE(values, value_capacity); SOURCE_RANGE(parameter_values, parameter_value_capacity);
+        SOURCE_RANGE(edge_values, edge_value_capacity); SOURCE_RANGE(call_arguments, call_argument_capacity);
+        SOURCE_RANGE(loops, loop_capacity); SOURCE_RANGE(construct_operands, construct_operand_capacity);
+        SOURCE_RANGE(temporaries, temporary_capacity);
+#undef SOURCE_RANGE
     }
-    for (size_t id = 0; id < ir->effect_count; ++id) {
-        STRING_RANGE(ir->effects[id].name);
-    }
-    for (size_t id = 0; id < ir->generic_parameter_count; ++id) {
-        STRING_RANGE(ir->generic_parameters[id].name);
-    }
-    for (size_t id = 0; id < ir->effect_parameter_count; ++id) {
-        STRING_RANGE(ir->effect_parameters[id].name);
-    }
-    for (size_t id = 0; id < ir->file_count; ++id) {
-        STRING_RANGE(ir->files[id].path);
-    }
-#undef STRING_RANGE
-    for (size_t id = 0; id < templates; ++id) {
-        const SolMir *borrowed = &owner->plan->program->templates[id].mir;
-#define BORROWED_RANGE(field, capacity) RANGE(borrowed->field, \
-            borrowed->capacity, *borrowed->field)
-        BORROWED_RANGE(blocks, block_capacity);
-        BORROWED_RANGE(instructions, instruction_capacity);
-        BORROWED_RANGE(values, value_capacity);
-        BORROWED_RANGE(parameter_values, parameter_value_capacity);
-        BORROWED_RANGE(edge_values, edge_value_capacity);
-        BORROWED_RANGE(call_arguments, call_argument_capacity);
-        BORROWED_RANGE(loops, loop_capacity);
-        BORROWED_RANGE(construct_operands, construct_operand_capacity);
-        BORROWED_RANGE(temporaries, temporary_capacity);
-#undef BORROWED_RANGE
-    }
-    RANGE(owner->images, owner->image_capacity, *owner->images);
-    RANGE(owner->types, owner->type_capacity, *owner->types);
-    RANGE(owner->type_ids, owner->type_id_capacity, *owner->type_ids);
-    RANGE(owner->accesses, owner->access_capacity, *owner->accesses);
-    RANGE(owner->overlays, owner->overlay_capacity, *owner->overlays);
-    RANGE(owner->contexts, owner->context_capacity, *owner->contexts);
-    RANGE(owner->locals, owner->local_capacity, *owner->locals);
-    RANGE(owner->places, owner->place_capacity, *owner->places);
-    RANGE(owner->projections, owner->projection_capacity, *owner->projections);
-    RANGE(owner->values, owner->value_capacity, *owner->values);
-    RANGE(owner->instructions, owner->instruction_capacity, *owner->instructions);
-    RANGE(owner->temporaries, owner->temporary_capacity, *owner->temporaries);
-    RANGE(owner->construct_operands, owner->construct_operand_capacity,
-        *owner->construct_operands);
-    RANGE(owner->call_arguments, owner->call_argument_capacity,
-        *owner->call_arguments);
-    RANGE(owner->invoke_bindings, owner->invoke_binding_capacity,
-        *owner->invoke_bindings);
-    size_t expected_types = 0, expected_accesses = 0, expected_overlays = 0;
-    size_t expected_invokes = 0, expected_cfg = 0, expected_bindings = 0;
-    size_t expected_locals = 0, expected_places = 0, expected_projections = 0;
-    size_t expected_values = 0, expected_instructions = 0;
-    size_t expected_temporaries = 0, expected_operands = 0;
-    size_t expected_call_arguments = 0;
-    size_t expected_bytes = 0;
-    if (!add_product(&expected_bytes, owner->image_capacity,
-            sizeof(*owner->images))
-        || !add_product(&expected_bytes, owner->type_capacity,
-            sizeof(*owner->types))
-        || !add_product(&expected_bytes, owner->type_id_capacity,
-            sizeof(*owner->type_ids))
-        || !add_product(&expected_bytes, owner->access_capacity,
-            sizeof(*owner->accesses))
-        || !add_product(&expected_bytes, owner->overlay_capacity,
-            sizeof(*owner->overlays))
-        || !add_product(&expected_bytes, owner->context_capacity,
-            sizeof(*owner->contexts))
-        || !add_product(&expected_bytes, owner->local_capacity,
-            sizeof(*owner->locals))
-        || !add_product(&expected_bytes, owner->place_capacity,
-            sizeof(*owner->places))
-        || !add_product(&expected_bytes, owner->projection_capacity,
-            sizeof(*owner->projections))
-        || !add_product(&expected_bytes, owner->value_capacity,
-            sizeof(*owner->values))
-        || !add_product(&expected_bytes, owner->instruction_capacity,
-            sizeof(*owner->instructions))
-        || !add_product(&expected_bytes, owner->temporary_capacity,
-            sizeof(*owner->temporaries))
-        || !add_product(&expected_bytes, owner->construct_operand_capacity,
-            sizeof(*owner->construct_operands))
-        || !add_product(&expected_bytes, owner->call_argument_capacity,
-            sizeof(*owner->call_arguments))
-        || !add_product(&expected_bytes, owner->invoke_binding_capacity,
-            sizeof(*owner->invoke_bindings))) goto malformed;
-    if (owner->type_count != plan->type_count
-        || owner->context_count != plan->context_count) goto malformed;
-    for (size_t id = 0; id < owner->type_count; ++id) {
-        const SolMirPlanType *source = &plan->types[id];
-        const SolMirMaterializedType *type = &owner->types[id];
-        if (type->kind != source->kind || type->definition != source->definition
-            || type->arguments.offset != expected_types
-            || type->arguments.count != source->argument_count
-            || type->parameters.offset != expected_types + source->argument_count
-            || type->parameters.count != source->parameter_count
-            || type->parameter_accesses.offset != expected_accesses
-            || type->parameter_accesses.count != source->parameter_count
-            || type->result != source->result || type->effects != source->effects
-            || type->ownership_components.offset != expected_types
-                + source->argument_count + source->parameter_count
-            || type->ownership_components.count
-                != source->ownership_component_count) goto malformed;
-        size_t count = source->argument_count + source->parameter_count
-            + source->ownership_component_count;
-        if (!bytes_equal(owner->type_ids + expected_types,
-                plan->type_components + source->argument_offset, count,
-                sizeof(*owner->type_ids))
-            || !bytes_equal(owner->accesses + expected_accesses,
-                plan->type_parameter_accesses + source->parameter_access_offset,
-                source->parameter_count, sizeof(*owner->accesses))) goto malformed;
-        expected_types += count;
-        expected_accesses += source->parameter_count;
-    }
-    if (!bytes_equal(owner->contexts, plan->contexts, plan->context_count,
-            sizeof(*owner->contexts))) goto malformed;
-    bool *copies = calloc(owner->type_count, sizeof(*copies));
-    if (owner->type_count != 0 && copies == NULL) goto malformed;
-    size_t copy_work = owner->type_count;
-    for (size_t id = 0; id < owner->type_count; ++id) {
-        copies[id] = copy_candidate(plan, id);
-    }
-    bool copy_changed;
-    do {
-        copy_changed = false;
-        for (size_t id = 0; id < owner->type_count; ++id) {
-            if (copy_work == SIZE_MAX) { free(copies); goto malformed; }
-            ++copy_work;
-            if (!copies[id]) continue;
-            const SolMirMaterializedType *type = &owner->types[id];
-            for (size_t item = 0; item < type->ownership_components.count; ++item) {
-                if (copy_work == SIZE_MAX) { free(copies); goto malformed; }
-                ++copy_work;
-                size_t child = owner->type_ids[type->ownership_components.offset + item];
-                if (child >= owner->type_count) { free(copies); goto malformed; }
-                if (!copies[child]) {
-                    copies[id] = false;
-                    copy_changed = true;
-                    break;
-                }
-            }
-        }
-    } while (copy_changed);
-    for (size_t id = 0; id < owner->type_count; ++id) {
-        if (owner->types[id].is_copy != copies[id]) { free(copies); goto malformed; }
-    }
-    free(copies);
-    for (size_t id = 0; id < owner->image_count; ++id) {
-        const SolMirMaterializedImage *image = &owner->images[id];
-        const SolMirPlanInstance *instance = &owner->plan->instances[id];
-        const SolMirProgramTemplate *template = find_template(owner->plan,
-            instance->callable);
-        if (image->instance != id || image->source_callable != instance->callable
-            || image->receiver != instance->receiver || image->result != instance->result
-            || image->effects != instance->effects || template == NULL
-            || image->contexts.offset != instance->contexts.offset
-            || image->contexts.count != instance->contexts.count
-            || image->type_arguments.offset != expected_types
-            || image->type_arguments.count != instance->type_arguments.count
-            || !slice_ok(image->type_arguments, owner->type_id_count)) goto malformed;
-        for (size_t item = 0; item < image->type_arguments.count; ++item) {
-            if (owner->type_ids[image->type_arguments.offset + item]
-                != owner->plan->instance_type_ids[
-                    instance->type_arguments.offset + item]) goto malformed;
-        }
-        expected_types += image->type_arguments.count;
-        if (image->parameter_types.offset != expected_types
-            || image->parameter_types.count != instance->parameter_types.count
-            || !slice_ok(image->parameter_types, owner->type_id_count)) goto malformed;
-        for (size_t item = 0; item < image->parameter_types.count; ++item) {
-            if (owner->type_ids[image->parameter_types.offset + item]
-                != owner->plan->instance_type_ids[
-                    instance->parameter_types.offset + item]) goto malformed;
-        }
-        expected_types += image->parameter_types.count;
-        if (image->parameter_accesses.offset != expected_accesses
-            || image->parameter_accesses.count
-                != instance->parameter_accesses.count
-            || !slice_ok(image->parameter_accesses, owner->access_count)) goto malformed;
-        for (size_t item = 0; item < image->parameter_accesses.count; ++item) {
-            if (owner->accesses[image->parameter_accesses.offset + item]
-                != owner->plan->instance_accesses[
-                    instance->parameter_accesses.offset + item]) goto malformed;
-        }
-        expected_accesses += image->parameter_accesses.count;
-        if (image->overlays.offset != expected_overlays
-            || !slice_ok(image->overlays, owner->overlay_count)) goto malformed;
-        size_t use_at = 0;
-        for (size_t use = 0; use < instance->typed_uses.count; ++use) {
-            const SolMirPlanTypedUse *source = &owner->plan->typed_uses[
-                instance->typed_uses.offset + use];
-            if (use_at >= image->overlays.count) goto malformed;
-            const SolMirMaterializedTypeOverlay *overlay
-                = &owner->overlays[image->overlays.offset + use_at++];
-            if (overlay->kind != source->kind || overlay->source != source->source
-                || overlay->ordinal != source->ordinal || overlay->type != source->type
-                || overlay->context != source->context
-                || overlay->access != source->access
-                || overlay->type >= owner->plan->type_count) goto malformed;
-        }
-        if (use_at != image->overlays.count) goto malformed;
-        expected_overlays += image->overlays.count;
-        if (!topology_authentic(&image->topology, &template->mir)
-            || !sol_mir_validate(owner->plan->program->ir,
-                &image->topology, diagnostics)) goto malformed;
-#define MIR_RANGE(field, capacity) RANGE(image->topology.field, \
-            image->topology.capacity, *image->topology.field)
-        MIR_RANGE(blocks, block_capacity);
-        MIR_RANGE(instructions, instruction_capacity);
-        MIR_RANGE(values, value_capacity);
-        MIR_RANGE(parameter_values, parameter_value_capacity);
-        MIR_RANGE(edge_values, edge_value_capacity);
-        MIR_RANGE(call_arguments, call_argument_capacity);
-        MIR_RANGE(loops, loop_capacity);
-        MIR_RANGE(construct_operands, construct_operand_capacity);
+#undef BORROW
+#define RANGE(field, count) if (!add_range(ranges, &range_count, owner->field, owner->count, sizeof(*owner->field))) goto range_malformed
+    RANGE(images, image_capacity); RANGE(types, type_capacity); RANGE(type_ids, type_id_capacity);
+    RANGE(accesses, access_capacity); RANGE(overlays, overlay_capacity); RANGE(contexts, context_capacity);
+    RANGE(locals, local_capacity); RANGE(places, place_capacity); RANGE(projections, projection_capacity);
+    RANGE(values, value_capacity); RANGE(instructions, instruction_capacity); RANGE(temporaries, temporary_capacity);
+    RANGE(construct_operands, construct_operand_capacity); RANGE(call_arguments, call_argument_capacity);
+    RANGE(blocks, block_capacity); RANGE(edges, edge_capacity); RANGE(edge_values, edge_value_capacity);
+    RANGE(parameter_values, parameter_value_capacity); RANGE(loops, loop_capacity); RANGE(bindings, binding_capacity);
+    RANGE(imports, import_capacity); RANGE(handlers, handler_capacity); RANGE(writebacks, writeback_capacity);
+    RANGE(effect_rows, effect_row_capacity); RANGE(effect_atoms, effect_atom_capacity);
+    RANGE(effect_row_atoms, effect_row_atom_capacity); RANGE(effect_names, effect_name_capacity);
+    RANGE(literal_bytes, literal_byte_capacity);
+    for (size_t i = 0; i < owner->image_count; ++i) {
+        const SolMir *mir = &owner->images[i].topology;
+#define MIR_RANGE(field, capacity) if (!add_range(ranges, &range_count, mir->field, mir->capacity, sizeof(*mir->field))) goto range_malformed
+        MIR_RANGE(blocks, block_capacity); MIR_RANGE(instructions, instruction_capacity);
+        MIR_RANGE(values, value_capacity); MIR_RANGE(parameter_values, parameter_value_capacity);
+        MIR_RANGE(edge_values, edge_value_capacity); MIR_RANGE(call_arguments, call_argument_capacity);
+        MIR_RANGE(loops, loop_capacity); MIR_RANGE(construct_operands, construct_operand_capacity);
         MIR_RANGE(temporaries, temporary_capacity);
 #undef MIR_RANGE
-        if (!add_product(&expected_bytes, image->topology.block_capacity,
-                sizeof(*image->topology.blocks))
-            || !add_product(&expected_bytes,
-                image->topology.instruction_capacity,
-                sizeof(*image->topology.instructions))
-            || !add_product(&expected_bytes, image->topology.value_capacity,
-                sizeof(*image->topology.values))
-            || !add_product(&expected_bytes,
-                image->topology.parameter_value_capacity,
-                sizeof(*image->topology.parameter_values))
-            || !add_product(&expected_bytes,
-                image->topology.edge_value_capacity,
-                sizeof(*image->topology.edge_values))
-            || !add_product(&expected_bytes,
-                image->topology.call_argument_capacity,
-                sizeof(*image->topology.call_arguments))
-            || !add_product(&expected_bytes, image->topology.loop_capacity,
-                sizeof(*image->topology.loops))
-            || !add_product(&expected_bytes,
-                image->topology.construct_operand_capacity,
-                sizeof(*image->topology.construct_operands))
-            || !add_product(&expected_bytes,
-                image->topology.temporary_capacity,
-                sizeof(*image->topology.temporaries))) goto malformed;
-        size_t items = mir_item_count(&image->topology);
-        if (items == SIZE_MAX || items > SIZE_MAX - expected_cfg) goto malformed;
-        expected_cfg += items;
-        if (image->locals.offset != expected_locals
-            || image->places.offset != expected_places
-            || image->values.offset != expected_values
-            || image->values.count != template->mir.value_count
-            || image->instructions.offset != expected_instructions
-            || image->instructions.count != template->mir.instruction_count
-            || image->temporaries.offset != expected_temporaries
-            || image->temporaries.count != template->mir.temporary_count
-            || image->construct_operands.offset != expected_operands
-            || image->construct_operands.count
-                != template->mir.construct_operand_count
-            || image->call_arguments.offset != expected_call_arguments
-            || image->call_arguments.count != template->mir.call_argument_count
-            || !slice_ok(image->locals, owner->local_count)
-            || !slice_ok(image->places, owner->place_count)
-            || !slice_ok(image->values, owner->value_count)
-            || !slice_ok(image->instructions, owner->instruction_count)
-            || !slice_ok(image->temporaries, owner->temporary_count)
-            || !slice_ok(image->construct_operands,
-                owner->construct_operand_count)
-            || !slice_ok(image->call_arguments,
-                owner->call_argument_count)) goto malformed;
-        SolMirPlanContextId body = instance->contexts.offset;
-        size_t local_at = 0;
-        for (size_t use = 0; use < instance->typed_uses.count; ++use) {
-            const SolMirPlanTypedUse *typed = &plan->typed_uses[
-                instance->typed_uses.offset + use];
-            if (typed->context != body || typed->kind != SOL_MIR_PLAN_USE_LOCAL) {
-                continue;
-            }
-            if (local_at >= image->locals.count) goto malformed;
-            const SolMirMaterializedLocal *local
-                = &owner->locals[image->locals.offset + local_at++];
-            SolMirMaterializedLocalKind expected_kind
-                = SOL_MIR_MATERIALIZED_LOCAL_BODY;
-            size_t expected_ordinal = SOL_MIR_MATERIALIZED_NONE;
-            const SolIrCallable *callable = &ir->callables[instance->callable];
-            if (typed->source == callable->receiver) {
-                expected_kind = SOL_MIR_MATERIALIZED_LOCAL_RECEIVER;
-                expected_ordinal = 0;
-            }
-            for (size_t parameter = 0; parameter < callable->parameters.count;
-                ++parameter) {
-                if (ir->roots[callable->parameters.offset + parameter]
-                        == typed->source) {
-                    expected_kind = SOL_MIR_MATERIALIZED_LOCAL_PARAMETER;
-                    expected_ordinal = parameter;
-                }
-            }
-            if (local->instance != id || local->source_local != typed->source
-                || local->type != typed->type || local->access != typed->access
-                || local->kind != expected_kind
-                || local->ordinal != expected_ordinal
-                || local->type >= owner->type_count) goto malformed;
-        }
-        if (local_at != image->locals.count) goto malformed;
-        expected_locals += image->locals.count;
-        size_t place_at = 0;
-        for (size_t use = 0; use < instance->typed_uses.count; ++use) {
-            const SolMirPlanTypedUse *typed = &plan->typed_uses[
-                instance->typed_uses.offset + use];
-            if (typed->context != body
-                || typed->kind != SOL_MIR_PLAN_USE_PLACE_ROOT) continue;
-            if (place_at >= image->places.count
-                || owner->places[image->places.offset + place_at].source_place
-                    != typed->source) goto malformed;
-            ++place_at;
-        }
-        for (size_t instruction = 0; instruction < template->mir.instruction_count;
-            ++instruction) {
-            SolMirPlace source;
-            if (!instruction_place(&template->mir.instructions[instruction], &source)
-                || source.source_place != SOL_IR_NONE) continue;
-            bool earlier = false;
-            for (size_t previous = 0; previous < instruction; ++previous) {
-                SolMirPlace candidate;
-                earlier = earlier || (instruction_place(
-                    &template->mir.instructions[previous], &candidate)
-                    && candidate.source_place == SOL_IR_NONE
-                    && candidate.local == source.local);
-            }
-            if (earlier) continue;
-            if (place_at >= image->places.count) goto malformed;
-            const SolMirMaterializedPlace *place
-                = &owner->places[image->places.offset + place_at++];
-            if (place->source_place != SOL_IR_NONE
-                || place->local < image->locals.offset
-                || place->local >= image->locals.offset + image->locals.count
-                || owner->locals[place->local].source_local != source.local) {
-                goto malformed;
-            }
-        }
-        if (place_at != image->places.count) goto malformed;
-        for (size_t place_item = 0; place_item < image->places.count; ++place_item) {
-            const SolMirMaterializedPlace *place
-                = &owner->places[image->places.offset + place_item];
-            if (place->instance != id || place->local < image->locals.offset
-                || place->local >= image->locals.offset + image->locals.count
-                || place->root_type >= owner->type_count
-                || place->final_type >= owner->type_count
-                || place->projections.offset != expected_projections
-                || !slice_ok(place->projections, owner->projection_count)) goto malformed;
-            if (place->source_place == SOL_IR_NONE) {
-                if (place->projections.count != 0
-                    || place->root_type != owner->locals[place->local].type
-                    || place->final_type != place->root_type) goto malformed;
-            } else {
-                if (place->source_place >= ir->place_count) goto malformed;
-                const SolIrPlace *source = &ir->places[place->source_place];
-                if (source->local != owner->locals[place->local].source_local
-                    || source->projections.count != place->projections.count) {
-                    goto malformed;
-                }
-                const SolMirPlanTypedUse *root = find_use(plan, instance,
-                    SOL_MIR_PLAN_USE_PLACE_ROOT, place->source_place, 0, body);
-                const SolMirPlanTypedUse *final = find_use(plan, instance,
-                    SOL_MIR_PLAN_USE_PLACE_FINAL, place->source_place, 0, body);
-                if (root == NULL || final == NULL || root->type != place->root_type
-                    || final->type != place->final_type) goto malformed;
-                for (size_t projection = 0; projection < place->projections.count;
-                    ++projection) {
-                    const SolMirMaterializedProjection *concrete
-                        = &owner->projections[place->projections.offset + projection];
-                    size_t source_id = source->projections.offset + projection;
-                    const SolIrProjection *symbolic = &ir->projections[source_id];
-                    const SolMirPlanTypedUse *type = find_use(plan, instance,
-                        SOL_MIR_PLAN_USE_PLACE_PROJECTION, place->source_place,
-                        projection, body);
-                    if (type == NULL || concrete->kind != symbolic->kind
-                        || concrete->type != type->type
-                        || concrete->source_field != symbolic->field
-                        || concrete->tuple_ordinal != symbolic->ordinal
-                        || concrete->source_projection != source_id) goto malformed;
-                }
-            }
-            expected_projections += place->projections.count;
-        }
-        expected_places += image->places.count;
-        for (size_t value = 0; value < image->values.count; ++value) {
-            const SolMirValue *source = &template->mir.values[value];
-            const SolMirMaterializedValue *concrete
-                = &owner->values[image->values.offset + value];
-            const SolMirPlanTypedUse *type = find_use(plan, instance,
-                SOL_MIR_PLAN_USE_MIR_VALUE, value, 0, body);
-            if (type == NULL || concrete->kind != source->kind
-                || concrete->type != type->type || concrete->type >= owner->type_count
-                || concrete->block != source->block
-                || concrete->source_expression != source->source_expression
-                || concrete->span.start != source->span.start
-                || concrete->span.end != source->span.end
-                || concrete->source_definition != source->definition
-                || concrete->instruction != (source->kind
-                        == SOL_MIR_VALUE_INSTRUCTION
-                    ? image->instructions.offset + source->definition
-                    : SOL_MIR_MATERIALIZED_NONE)) goto malformed;
-        }
-        expected_values += image->values.count;
-        for (size_t temporary = 0; temporary < image->temporaries.count; ++temporary) {
-            const SolMirTemporary *source = &template->mir.temporaries[temporary];
-            const SolMirMaterializedTemporary *concrete
-                = &owner->temporaries[image->temporaries.offset + temporary];
-            const SolMirPlanTypedUse *type = find_use(plan, instance,
-                SOL_MIR_PLAN_USE_MIR_TEMPORARY, temporary, 0, body);
-            if (type == NULL || concrete->type != type->type
-                || concrete->type >= owner->type_count
-                || concrete->source_expression != source->source_expression
-                || concrete->span.start != source->span.start
-                || concrete->span.end != source->span.end) goto malformed;
-        }
-        expected_temporaries += image->temporaries.count;
-        for (size_t operand = 0; operand < image->construct_operands.count; ++operand) {
-            const SolMirConstructOperand *source
-                = &template->mir.construct_operands[operand];
-            const SolMirMaterializedConstructOperand *concrete
-                = &owner->construct_operands[image->construct_operands.offset + operand];
-            const SolMirPlanTypedUse *type = find_use(plan, instance,
-                SOL_MIR_PLAN_USE_CONSTRUCT_OPERAND, operand, source->formal, body);
-            SolMirMaterializedTemporaryId expected_temporary
-                = source->temporary < template->mir.temporary_count
-                ? image->temporaries.offset + source->temporary
-                : SOL_MIR_MATERIALIZED_NONE;
-            if (type == NULL || concrete->formal != source->formal
-                || concrete->source_expression != source->source_expression
-                || concrete->type != type->type || concrete->type >= owner->type_count
-                || concrete->temporary != expected_temporary) goto malformed;
-        }
-        expected_operands += image->construct_operands.count;
-        for (size_t argument = 0; argument < image->call_arguments.count;
-            ++argument) {
-            const SolMirCallArgument *source = &template->mir.call_arguments[argument];
-            const SolMirMaterializedCallArgument *concrete
-                = &owner->call_arguments[image->call_arguments.offset + argument];
-            if (concrete->formal != source->formal
-                || concrete->access != source->access
-                || concrete->source_expression != source->source_expression
-                || concrete->type >= owner->type_count) goto malformed;
-            if (source->access == SOL_ACCESS_OWNED) {
-                const SolMirPlanTypedUse *type = find_use(plan, instance,
-                    SOL_MIR_PLAN_USE_MIR_TEMPORARY, source->temporary, 0, body);
-                if (concrete->temporary
-                        != image->temporaries.offset + source->temporary
-                    || concrete->place != SOL_MIR_MATERIALIZED_NONE
-                    || type == NULL || concrete->type != type->type) goto malformed;
-            } else {
-                const SolMirPlanTypedUse *type = find_use(plan, instance,
-                    SOL_MIR_PLAN_USE_PLACE_FINAL, source->place, 0, body);
-                if (source->place >= ir->place_count) goto malformed;
-                const SolIrPlace *source_place = &ir->places[source->place];
-                SolMirMaterializedPlaceId expected_place = place_for(owner, image,
-                    (SolMirPlace){source_place->local, source->place});
-                if (concrete->place != expected_place
-                    || concrete->temporary != SOL_MIR_MATERIALIZED_NONE
-                    || type == NULL || concrete->type != type->type) goto malformed;
-            }
-        }
-        expected_call_arguments += image->call_arguments.count;
-        for (size_t instruction = 0; instruction < image->instructions.count;
-            ++instruction) {
-            const SolMirInstruction *source = &template->mir.instructions[instruction];
-            const SolMirMaterializedInstruction *concrete
-                = &owner->instructions[image->instructions.offset + instruction];
-            SolMirMaterializedInstruction reconstructed;
-            if (!translate_instruction(owner, image, instance, source,
-                    instruction, &reconstructed)
-                || !instruction_equal(concrete, &reconstructed)) goto malformed;
-            if (concrete->kind != source->kind || concrete->block != source->block
-                || concrete->source_expression != source->source_expression
-                || concrete->span.start != source->span.start
-                || concrete->span.end != source->span.end
-                || (concrete->type != SOL_MIR_MATERIALIZED_NONE
-                    && concrete->type >= owner->type_count)
-                || (concrete->local != SOL_MIR_MATERIALIZED_NONE
-                    && (concrete->local < image->locals.offset
-                        || concrete->local >= image->locals.offset
-                            + image->locals.count))
-                || (concrete->place != SOL_MIR_MATERIALIZED_NONE
-                    && (concrete->place < image->places.offset
-                        || concrete->place >= image->places.offset
-                            + image->places.count))
-                || (concrete->result != SOL_MIR_MATERIALIZED_NONE
-                    && concrete->result >= owner->value_count)
-                || (concrete->left != SOL_MIR_MATERIALIZED_NONE
-                    && concrete->left >= owner->value_count)
-                || (concrete->right != SOL_MIR_MATERIALIZED_NONE
-                    && concrete->right >= owner->value_count)
-                || (concrete->temporary != SOL_MIR_MATERIALIZED_NONE
-                    && concrete->temporary >= owner->temporary_count)
-                || (concrete->previous != SOL_MIR_MATERIALIZED_NONE
-                    && concrete->previous >= owner->temporary_count)
-                || !slice_ok(concrete->construct_operands,
-                    owner->construct_operand_count)) goto malformed;
-            SolMirPlace source_place;
-            if (instruction_place(source, &source_place)) {
-                if (concrete->place != place_for(owner, image, source_place)) {
-                    goto malformed;
-                }
-            } else if (concrete->place != SOL_MIR_MATERIALIZED_NONE) goto malformed;
-            if (concrete->result != (source->result == SOL_MIR_NONE
-                    ? SOL_MIR_MATERIALIZED_NONE
-                    : image->values.offset + source->result)) goto malformed;
-            if (source->kind == SOL_MIR_INST_PARAMETER_LIVE
-                || source->kind == SOL_MIR_INST_STORAGE_LIVE
-                || source->kind == SOL_MIR_INST_DROP_IF_INITIALIZED
-                || source->kind == SOL_MIR_INST_STORAGE_DEAD) {
-                if (concrete->local != local_for(owner, image, source->as.local)) {
-                    goto malformed;
-                }
-            } else if (concrete->local != SOL_MIR_MATERIALIZED_NONE) goto malformed;
-            if (source->type == SOL_IR_NONE) {
-                if (concrete->type != SOL_MIR_MATERIALIZED_NONE) goto malformed;
-            } else {
-                const SolMirPlanTypedUse *type = find_use(plan, instance,
-                    SOL_MIR_PLAN_USE_MIR_INSTRUCTION, instruction, 0, body);
-                if (type == NULL || concrete->type != type->type) goto malformed;
-            }
-        }
-        expected_instructions += image->instructions.count;
-        if (image->invokes.offset != expected_invokes
-            || !slice_ok(image->invokes, owner->invoke_binding_count)) goto malformed;
-        size_t binding_at = 0;
-        for (size_t block = 0; block < image->topology.block_count; ++block) {
-            const SolMirTerminator *term = &image->topology.blocks[block].terminator;
-            if (term->kind != SOL_MIR_TERM_INVOKE) continue;
-            if (binding_at >= image->invokes.count) goto malformed;
-            const SolMirMaterializedInvokeBinding *binding
-                = &owner->invoke_bindings[image->invokes.offset + binding_at++];
-            SolMirProgramSource source;
-            if (binding->block != block
-                || !source_for_term(owner->plan, instance->callable, term, &source)
-                || !source_equal(binding->source, source)) goto malformed;
-            const SolMirPlanDemand *found = NULL;
-            for (size_t demand = 0; demand < owner->plan->demand_count; ++demand) {
-                const SolMirPlanDemand *item = &owner->plan->demands[demand];
-                if (item->parent == id
-                    && item->context == instance->contexts.offset
-                    && (item->kind == SOL_MIR_PLAN_DEMAND_INVOKE
-                        || item->kind == SOL_MIR_PLAN_DEMAND_CALLBACK)
-                    && source_equal(item->source, source)) {
-                    if (found != NULL) goto malformed;
-                    found = item;
-                }
-            }
-            if (found == NULL || binding->symbolic_callable != found->symbolic_target
-                || binding->dispatch_trait != found->dispatch_trait
-                || binding->dispatch_requirement != found->dispatch_requirement
-                || binding->instance != found->instance || binding->import != found->import
-                || binding->target_kind != (found->instance != SOL_MIR_PLAN_NONE
-                    ? SOL_MIR_MATERIALIZED_TARGET_INSTANCE
-                    : SOL_MIR_MATERIALIZED_TARGET_IMPORT)) goto malformed;
-            Materializer verifier = {(SolMirMaterialization *)(uintptr_t)owner,
-                diagnostics, SOL_MIR_MATERIALIZE_BUILD_INTERNAL_FAILED};
-            if (!verify_signature(&verifier, instance, &image->topology,
-                    term, found)) goto malformed;
-        }
-        if (binding_at != image->invokes.count) goto malformed;
-        expected_invokes += image->invokes.count;
     }
 #undef RANGE
-    expected_bindings = expected_overlays + expected_invokes;
-    size_t expected_work = expected_cfg;
-    if (expected_invokes > SIZE_MAX - expected_work
-        || owner->image_count > SIZE_MAX - expected_work - expected_invokes
-        || expected_overlays > SIZE_MAX - expected_work - expected_invokes
-            - owner->image_count) goto malformed;
-    expected_work += expected_invokes + owner->image_count + expected_overlays;
-    if (owner->context_count > SIZE_MAX - owner->type_count) goto malformed;
-    size_t expected_records = owner->type_count + owner->context_count;
-    if (owner->overlay_count > SIZE_MAX - expected_records
-        || owner->local_count > SIZE_MAX - expected_records - owner->overlay_count
-        || owner->place_count > SIZE_MAX - expected_records - owner->overlay_count
-            - owner->local_count) goto malformed;
-    expected_records += owner->overlay_count + owner->local_count + owner->place_count;
-    size_t remaining[] = {owner->projection_count, owner->value_count,
-        owner->instruction_count, owner->temporary_count,
-        owner->construct_operand_count, owner->call_argument_count};
-    for (size_t index = 0; index < sizeof(remaining) / sizeof(remaining[0]); ++index) {
-        if (remaining[index] > SIZE_MAX - expected_records) goto malformed;
-        expected_records += remaining[index];
-    }
-    if (expected_records > SIZE_MAX - expected_work
-        || copy_work > SIZE_MAX - expected_work - expected_records) goto malformed;
-    expected_work += expected_records + copy_work;
     free(ranges);
-    if (expected_types != owner->type_id_count
-        || expected_accesses != owner->access_count
-        || expected_overlays != owner->overlay_count
-        || expected_invokes != owner->invoke_binding_count
-        || expected_locals != owner->local_count
-        || expected_places != owner->place_count
-        || expected_projections != owner->projection_count
-        || expected_values != owner->value_count
-        || expected_instructions != owner->instruction_count
-        || expected_temporaries != owner->temporary_count
-        || expected_operands != owner->construct_operand_count
-        || expected_call_arguments != owner->call_argument_count
-        || expected_records != owner->usage.concrete_records
-        || expected_cfg != owner->usage.cfg_items
-        || expected_bindings != owner->usage.bindings
-        || expected_bytes != owner->usage.owned_bytes
-        || expected_work != owner->usage.materialization_work) {
-        return validation_error(diagnostics,
-            "materialized MIR counts are not canonical");
-    }
+    SolMirMaterialization expected;
+    sol_mir_materialization_init(&expected);
+    expected.plan = owner->plan; expected.limits = owner->limits;
+    Builder builder = {&expected, NULL, SOL_MIR_MATERIALIZE_BUILD_INTERNAL_FAILED};
+    if (!build_scratch(&builder)) { sol_mir_materialization_free(&expected); goto malformed; }
+    bool equal = arrays_equal(owner, &expected);
+    sol_mir_materialization_free(&expected);
+    if (!equal) goto malformed;
     return true;
-malformed:
+range_malformed:
     free(ranges);
+malformed:
     return validation_error(diagnostics,
-        "materialized MIR provenance, overlay, binding, slice, or allocation is malformed");
+        "materialized MIR concrete CFG, provenance, slice, or allocation is malformed");
 }
 
-typedef struct { char *data; size_t length; size_t capacity; bool failed; } Buffer;
+typedef struct { char *data; size_t length, capacity; bool failed; } Buffer;
 
 static void format(Buffer *buffer, const char *pattern, ...) {
     if (buffer->failed) return;
-    va_list arguments;
-    va_start(arguments, pattern);
-    va_list copy;
-    va_copy(copy, arguments);
-    int count = vsnprintf(NULL, 0, pattern, copy);
-    va_end(copy);
+    va_list args; va_start(args, pattern); va_list copy; va_copy(copy, args);
+    int count = vsnprintf(NULL, 0, pattern, copy); va_end(copy);
     if (count < 0 || (size_t)count > SIZE_MAX - buffer->length - 1) {
-        buffer->failed = true; va_end(arguments); return;
+        buffer->failed = true; va_end(args); return;
     }
     size_t needed = buffer->length + (size_t)count + 1;
     if (needed > buffer->capacity) {
@@ -1890,181 +1502,215 @@ static void format(Buffer *buffer, const char *pattern, ...) {
             capacity *= 2;
         }
         char *grown = realloc(buffer->data, capacity);
-        if (grown == NULL) { buffer->failed = true; va_end(arguments); return; }
+        if (grown == NULL) { buffer->failed = true; va_end(args); return; }
         buffer->data = grown; buffer->capacity = capacity;
     }
     (void)vsnprintf(buffer->data + buffer->length,
-        buffer->capacity - buffer->length, pattern, arguments);
-    va_end(arguments);
-    buffer->length += (size_t)count;
+        buffer->capacity - buffer->length, pattern, args);
+    va_end(args); buffer->length += (size_t)count;
 }
 
 bool sol_mir_materialization_render(FILE *stream,
     const SolMirMaterialization *owner) {
     if (stream == NULL || !sol_mir_materialization_validate(owner, NULL)) return false;
-    Buffer buffer = {0};
-    format(&buffer, "materialized_mir images=%zu types=%zu contexts=%zu overlays=%zu invokes=%zu\n",
-        owner->image_count, owner->type_count, owner->context_count,
-        owner->overlay_count, owner->invoke_binding_count);
-    for (size_t id = 0; id < owner->type_count; ++id) {
-        const SolMirMaterializedType *type = &owner->types[id];
-        format(&buffer, "type t%zu kind=%d definition=%zu copy=%d args=[", id,
-            (int)type->kind, type->definition, type->is_copy ? 1 : 0);
-        for (size_t item = 0; item < type->arguments.count; ++item) {
-            format(&buffer, "%st%zu", item == 0 ? "" : ",",
-                owner->type_ids[type->arguments.offset + item]);
-        }
-        format(&buffer, "] params=[");
-        for (size_t item = 0; item < type->parameters.count; ++item) {
-            format(&buffer, "%st%zu/%d", item == 0 ? "" : ",",
-                owner->type_ids[type->parameters.offset + item],
-                (int)owner->accesses[type->parameter_accesses.offset + item]);
-        }
-        format(&buffer, "] result=");
-        if (type->result == SOL_MIR_MATERIALIZED_NONE) format(&buffer, "none");
-        else format(&buffer, "t%zu", type->result);
-        format(&buffer, " effects=%zu ownership=[", type->effects);
-        for (size_t item = 0; item < type->ownership_components.count; ++item) {
-            format(&buffer, "%st%zu", item == 0 ? "" : ",",
-                owner->type_ids[type->ownership_components.offset + item]);
-        }
-        format(&buffer, "]\n");
+    Buffer out = {0};
+    format(&out, "materialized_mir images=%zu types=%zu imports=%zu bindings=%zu handlers=%zu blocks=%zu edges=%zu writebacks=%zu\n",
+        owner->image_count, owner->type_count, owner->import_count,
+        owner->binding_count, owner->handler_count, owner->block_count,
+        owner->edge_count, owner->writeback_count);
+    for (size_t i = 0; i < owner->type_count; ++i) {
+        const SolMirMaterializedType *type = &owner->types[i];
+        format(&out, "type t%zu kind=%d definition=%zu copy=%d effects=e%zu\n",
+            i, (int)type->kind, type->definition, type->is_copy, type->effects);
     }
-    for (size_t id = 0; id < owner->context_count; ++id) {
-        const SolMirPlanContext *context = &owner->contexts[id];
-        format(&buffer, "context k%zu kind=%d instance=i%zu block=%zu definition=%zu obligation=%zu source=c%zu:x%zu\n",
-            id, (int)context->kind, context->instance, context->source_block,
+    for (size_t i = 0; i < owner->effect_atom_count; ++i) {
+        const SolMirMaterializedEffectAtom *atom = &owner->effect_atoms[i];
+        format(&out, "effect_atom e%zu name=", i);
+        for (size_t j = 0; j < atom->name.count; ++j) {
+            format(&out, "%02x", (unsigned char)owner->effect_names[
+                atom->name.offset + j]);
+        }
+        format(&out, " authority=%d ordinal=%zu\n", (int)atom->authority,
+            atom->ordinal);
+    }
+    for (size_t i = 0; i < owner->effect_row_count; ++i) {
+        const SolMirMaterializedEffectRow *row = &owner->effect_rows[i];
+        format(&out, "effect_row e%zu atoms=[", i);
+        for (size_t j = 0; j < row->atoms.count; ++j) {
+            format(&out, "%s%zu", j == 0 ? "" : ",",
+                owner->effect_row_atoms[row->atoms.offset + j]);
+        }
+        format(&out, "]\n");
+    }
+    format(&out, "literal_bytes=");
+    for (size_t i = 0; i < owner->literal_byte_count; ++i) {
+        format(&out, "%02x", (unsigned char)owner->literal_bytes[i]);
+    }
+    format(&out, "\n");
+    for (size_t i = 0; i < owner->context_count; ++i) {
+        const SolMirPlanContext *context = &owner->contexts[i];
+        format(&out, "context k%zu kind=%d instance=i%zu block=%zu definition=%zu obligation=%zu source=c%zu:x%zu\n",
+            i, (int)context->kind, context->instance, context->source_block,
             context->definition, context->obligation, context->source.callable,
             context->source.expression);
     }
-    for (size_t id = 0; id < owner->image_count; ++id) {
-        const SolMirMaterializedImage *image = &owner->images[id];
-        format(&buffer, "image i%zu callable=c%zu receiver=", image->instance,
-            image->source_callable);
-        if (image->receiver == SOL_MIR_PLAN_NONE) format(&buffer, "none");
-        else format(&buffer, "t%zu", image->receiver);
-        format(&buffer, " type_args=[");
-        for (size_t item = 0; item < image->type_arguments.count; ++item) {
-            format(&buffer, "%st%zu", item == 0 ? "" : ",",
-                owner->type_ids[image->type_arguments.offset + item]);
+    for (size_t i = 0; i < owner->import_count; ++i) {
+        const SolMirMaterializedImport *item = &owner->imports[i];
+        format(&out, "import m%zu callable=c%zu receiver=%zu result=t%zu effects=e%zu params=[",
+            i, item->source_callable, item->receiver, item->result, item->effects);
+        for (size_t j = 0; j < item->parameter_types.count; ++j) {
+            format(&out, "%st%zu/%d", j == 0 ? "" : ",",
+                owner->type_ids[item->parameter_types.offset + j],
+                (int)owner->accesses[item->parameter_accesses.offset + j]);
         }
-        format(&buffer, "] params=[");
-        for (size_t item = 0; item < image->parameter_types.count; ++item) {
-            format(&buffer, "%st%zu/%d", item == 0 ? "" : ",",
-                owner->type_ids[image->parameter_types.offset + item],
-                (int)owner->accesses[image->parameter_accesses.offset + item]);
+        format(&out, "] source_import=%zu\n", item->source_import);
+    }
+    for (size_t i = 0; i < owner->binding_count; ++i) {
+        const SolMirMaterializedBinding *item = &owner->bindings[i];
+        format(&out, "binding d%zu plan=d%zu kind=%d parent=%zu context=%zu source=c%zu:x%zu target=%c%zu symbolic=c%zu trait=%zu requirement=%zu\n",
+            i, item->source_demand, (int)item->kind, item->parent,
+            item->context, item->source.callable,
+            item->source.expression,
+            item->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE ? 'i' : 'm',
+            item->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+                ? item->instance : item->import,
+            item->symbolic_callable, item->dispatch_trait,
+            item->dispatch_requirement);
+    }
+    for (size_t i = 0; i < owner->image_count; ++i) {
+        const SolMirMaterializedImage *image = &owner->images[i];
+        format(&out, "image i%zu callable=c%zu receiver=%zu result=t%zu effects=e%zu entry=b%zu blocks=%zu handlers=%zu provenance=authentication-only\n",
+            i, image->source_callable, image->receiver, image->result,
+            image->effects, image->entry, image->blocks.count,
+            image->handlers.count);
+        for (size_t j = 0; j < image->locals.count; ++j) {
+            const SolMirMaterializedLocal *x = &owner->locals[image->locals.offset + j];
+            format(&out, "  local l%zu source=l%zu type=t%zu access=%d kind=%d ordinal=%zu\n",
+                image->locals.offset + j, x->source_local, x->type,
+                (int)x->access, (int)x->kind, x->ordinal);
         }
-        format(&buffer, "] result=t%zu effects=e%zu template=c%zu\n",
-            image->result, image->effects, image->topology.callable);
-        for (size_t item = 0; item < image->overlays.count; ++item) {
-            const SolMirMaterializedTypeOverlay *overlay
-                = &owner->overlays[image->overlays.offset + item];
-            format(&buffer, "  overlay context=k%zu kind=%d source=%zu ordinal=%zu type=t%zu access=%d\n",
-                overlay->context,
-                (int)overlay->kind, overlay->source, overlay->ordinal,
-                overlay->type, (int)overlay->access);
-        }
-        for (size_t item = 0; item < image->locals.count; ++item) {
-            const SolMirMaterializedLocal *local
-                = &owner->locals[image->locals.offset + item];
-            format(&buffer, "  local l%zu source=l%zu kind=%d ordinal=%zu type=t%zu access=%d\n",
-                image->locals.offset + item, local->source_local, (int)local->kind,
-                local->ordinal, local->type, (int)local->access);
-        }
-        for (size_t item = 0; item < image->places.count; ++item) {
-            const SolMirMaterializedPlace *place
-                = &owner->places[image->places.offset + item];
-            format(&buffer, "  place p%zu source=%zu local=l%zu root=t%zu final=t%zu projections=%zu\n",
-                image->places.offset + item, place->source_place, place->local,
-                place->root_type, place->final_type, place->projections.count);
-            for (size_t projection = 0; projection < place->projections.count;
-                ++projection) {
-                const SolMirMaterializedProjection *projection_record
-                    = &owner->projections[place->projections.offset + projection];
-                format(&buffer, "    projection r%zu source=%zu kind=%d field=%zu tuple=%zu type=t%zu\n",
-                    place->projections.offset + projection,
-                    projection_record->source_projection,
-                    (int)projection_record->kind,
-                    projection_record->source_field,
-                    projection_record->tuple_ordinal, projection_record->type);
+        for (size_t j = 0; j < image->places.count; ++j) {
+            const SolMirMaterializedPlace *x = &owner->places[image->places.offset + j];
+            format(&out, "  place p%zu source=%zu local=l%zu root=t%zu final=t%zu projections=[%zu,%zu]\n",
+                image->places.offset + j, x->source_place, x->local,
+                x->root_type, x->final_type, x->projections.offset,
+                x->projections.count);
+            for (size_t p = 0; p < x->projections.count; ++p) {
+                const SolMirMaterializedProjection *projection
+                    = &owner->projections[x->projections.offset + p];
+                format(&out, "    projection r%zu kind=%d type=t%zu field=%zu tuple=%zu source=%zu\n",
+                    x->projections.offset + p, (int)projection->kind,
+                    projection->type, projection->source_field,
+                    projection->tuple_ordinal, projection->source_projection);
             }
         }
-        for (size_t item = 0; item < image->values.count; ++item) {
-            const SolMirMaterializedValue *value
-                = &owner->values[image->values.offset + item];
-            format(&buffer, "  value v%zu kind=%d block=b%zu type=t%zu source_definition=%zu instruction=%zu source=x%zu\n",
-                image->values.offset + item, (int)value->kind, value->block,
-                value->type, value->source_definition, value->instruction,
-                value->source_expression);
+        for (size_t j = 0; j < image->values.count; ++j) {
+            const SolMirMaterializedValue *x = &owner->values[image->values.offset + j];
+            format(&out, "  value v%zu kind=%d block=b%zu type=t%zu definition=%zu instruction=%zu source=x%zu span=%zu..%zu\n",
+                image->values.offset + j, (int)x->kind, x->block, x->type,
+                x->source_definition, x->instruction, x->source_expression,
+                x->span.start, x->span.end);
         }
-        for (size_t item = 0; item < image->instructions.count; ++item) {
-            const SolMirMaterializedInstruction *instruction
-                = &owner->instructions[image->instructions.offset + item];
-            format(&buffer, "  instruction n%zu kind=%d block=b%zu type=",
-                image->instructions.offset + item, (int)instruction->kind,
-                instruction->block);
-            if (instruction->type == SOL_MIR_MATERIALIZED_NONE) {
-                format(&buffer, "none");
-            } else format(&buffer, "t%zu", instruction->type);
-            format(&buffer, " result=%zu local=%zu place=%zu left=%zu right=%zu temporary=%zu previous=%zu preserve=%zu operator=%d statement=%zu match=x%zu arm=%zu arm_ordinal=%zu pattern=%zu scrutinee=%zu snapshot=%zu construct=%d definition=%zu variant=%zu operands=[%zu,%zu] roots=[%zu,%zu] operations=[%zu,%zu] source=x%zu integer=%lld boolean=%d\n",
-                instruction->result, instruction->local, instruction->place,
-                instruction->left, instruction->right, instruction->temporary,
-                instruction->previous, instruction->preserve_depth,
-                (int)instruction->operator_kind, instruction->source_statement,
-                instruction->match_expression, instruction->source_arm,
-                instruction->arm_ordinal, instruction->source_pattern,
-                instruction->pattern_scrutinee, instruction->source_snapshot,
-                (int)instruction->construct_kind,
-                instruction->construct_definition,
-                instruction->construct_variant,
-                instruction->construct_operands.offset,
-                instruction->construct_operands.count,
-                instruction->source_capability_roots.offset,
-                instruction->source_capability_roots.count,
-                instruction->source_operation_roots.offset,
-                instruction->source_operation_roots.count,
-                instruction->source_expression,
-                (long long)instruction->integer,
-                instruction->boolean ? 1 : 0);
+        for (size_t j = 0; j < image->instructions.count; ++j) {
+            const SolMirMaterializedInstruction *x = &owner->instructions[image->instructions.offset + j];
+            format(&out, "  instruction n%zu kind=%d block=b%zu result=%zu type=%zu integer=%lld boolean=%d text=[%zu,%zu] local=%zu place=%zu left=%zu right=%zu temporary=%zu previous=%zu preserve=%zu operator=%d statement=%zu match=%zu arm=%zu arm_ordinal=%zu pattern=%zu scrutinee=%zu snapshot=%zu handler=%zu construct=%d definition=%zu variant=%zu operands=[%zu,%zu] roots=[%zu,%zu] operations=[%zu,%zu] source=x%zu span=%zu..%zu\n",
+                image->instructions.offset + j, (int)x->kind, x->block,
+                x->result, x->type, (long long)x->integer, x->boolean,
+                x->text.offset, x->text.count, x->local, x->place, x->left,
+                x->right, x->temporary, x->previous, x->preserve_depth,
+                (int)x->operator_kind, x->source_statement, x->match_expression,
+                x->source_arm, x->arm_ordinal, x->source_pattern,
+                x->pattern_scrutinee, x->source_snapshot, x->handler,
+                (int)x->construct_kind, x->construct_definition,
+                x->construct_variant, x->construct_operands.offset,
+                x->construct_operands.count, x->source_capability_roots.offset,
+                x->source_capability_roots.count, x->source_operation_roots.offset,
+                x->source_operation_roots.count, x->source_expression,
+                x->span.start, x->span.end);
         }
-        for (size_t item = 0; item < image->temporaries.count; ++item) {
-            const SolMirMaterializedTemporary *temporary
-                = &owner->temporaries[image->temporaries.offset + item];
-            format(&buffer, "  temporary q%zu type=t%zu source=x%zu\n",
-                image->temporaries.offset + item, temporary->type,
-                temporary->source_expression);
+        for (size_t j = 0; j < image->temporaries.count; ++j) {
+            const SolMirMaterializedTemporary *x
+                = &owner->temporaries[image->temporaries.offset + j];
+            format(&out, "  temporary q%zu type=t%zu source=x%zu span=%zu..%zu\n",
+                image->temporaries.offset + j, x->type, x->source_expression,
+                x->span.start, x->span.end);
         }
-        for (size_t item = 0; item < image->construct_operands.count; ++item) {
-            const SolMirMaterializedConstructOperand *operand
-                = &owner->construct_operands[image->construct_operands.offset + item];
-            format(&buffer, "  construct_operand o%zu formal=%zu type=t%zu temporary=q%zu source=x%zu\n",
-                image->construct_operands.offset + item, operand->formal,
-                operand->type, operand->temporary, operand->source_expression);
+        for (size_t j = 0; j < image->construct_operands.count; ++j) {
+            const SolMirMaterializedConstructOperand *x
+                = &owner->construct_operands[image->construct_operands.offset + j];
+            format(&out, "  construct_operand o%zu formal=%zu source=x%zu type=t%zu temporary=q%zu\n",
+                image->construct_operands.offset + j, x->formal,
+                x->source_expression, x->type, x->temporary);
         }
-        for (size_t item = 0; item < image->call_arguments.count; ++item) {
-            const SolMirMaterializedCallArgument *argument
-                = &owner->call_arguments[image->call_arguments.offset + item];
-            format(&buffer, "  call_argument a%zu formal=%zu access=%d type=t%zu temporary=%zu place=%zu source=x%zu\n",
-                image->call_arguments.offset + item, argument->formal,
-                (int)argument->access, argument->type, argument->temporary,
-                argument->place, argument->source_expression);
+        for (size_t j = 0; j < image->call_arguments.count; ++j) {
+            const SolMirMaterializedCallArgument *x
+                = &owner->call_arguments[image->call_arguments.offset + j];
+            format(&out, "  call_argument a%zu formal=%zu access=%d source=x%zu type=t%zu temporary=%zu place=%zu\n",
+                image->call_arguments.offset + j, x->formal, (int)x->access,
+                x->source_expression, x->type, x->temporary, x->place);
         }
-        for (size_t item = 0; item < image->invokes.count; ++item) {
-            const SolMirMaterializedInvokeBinding *binding
-                = &owner->invoke_bindings[image->invokes.offset + item];
-            format(&buffer, "  invoke block=b%zu source=c%zu:x%zu symbolic=c%zu target=",
-                binding->block, binding->source.callable,
-                binding->source.expression, binding->symbolic_callable);
-            if (binding->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE) {
-                format(&buffer, "i%zu", binding->instance);
-            } else format(&buffer, "import%zu", binding->import);
-            format(&buffer, " trait=%zu requirement=%zu\n",
-                binding->dispatch_trait, binding->dispatch_requirement);
+        for (size_t j = 0; j < image->handlers.count; ++j) {
+            const SolMirMaterializedHandler *x = &owner->handlers[image->handlers.offset + j];
+            format(&out, "  handler h%zu source=d%zu provider=d%zu authority=p%zu provider_place=p%zu operation=c%zu effect=%zu root=l%zu\n",
+                image->handlers.offset + j, x->source_binding, x->provider_binding,
+                x->authority, x->provider, x->handled_operation, x->source_effect,
+                x->source_root);
+        }
+        for (size_t j = 0; j < image->blocks.count; ++j) {
+            const SolMirMaterializedBlock *block = &owner->blocks[image->blocks.offset + j];
+            const SolMirMaterializedTerminator *term = &block->terminator;
+            format(&out, "  block b%zu source=b%zu order=%zu params=[",
+                block->id, block->source_block, block->order);
+            for (size_t p = 0; p < block->parameters.count; ++p) {
+                format(&out, "%sv%zu", p == 0 ? "" : ",",
+                    owner->parameter_values[block->parameters.offset + p]);
+            }
+            format(&out, "] instructions=[%zu,%zu] started=%d span=%zu..%zu\n",
+                block->instructions.offset, block->instructions.count,
+                block->started, block->span.start, block->span.end);
+            format(&out, "    terminator kind=%d binding=%zu effects=%zu call_kind=%d callee=%zu receiver={formal=%zu access=%d source=%zu type=%zu temporary=%zu place=%zu} arguments=[%zu,%zu] result=%zu value=%zu condition=%zu value_result=%zu residual_result=%zu representation=%zu operand=%zu edge=%zu true=%zu false=%zu normal=%zu failure=%zu value_edge=%zu residual_edge=%zu satisfied=%zu violation=%zu loop=%zu writebacks=[%zu,%zu] statement=%zu definition=%zu obligation=%zu ordinal=%zu propagation=%d phase=%d outcome=%d source=x%zu span=%zu..%zu\n",
+                (int)term->kind, term->binding, term->effects,
+                (int)term->call_kind, term->callee, term->receiver.formal,
+                (int)term->receiver.access, term->receiver.source_expression,
+                term->receiver.type, term->receiver.temporary,
+                term->receiver.place, term->arguments.offset,
+                term->arguments.count, term->result, term->value,
+                term->condition, term->value_result, term->residual_result,
+                term->representation, term->operand, term->edge,
+                term->true_edge, term->false_edge, term->normal_edge,
+                term->failure_edge, term->value_edge, term->residual_edge,
+                term->satisfied_edge, term->violation_edge, term->loop,
+                term->writebacks.offset, term->writebacks.count,
+                term->source_statement, term->source_definition,
+                term->source_obligation, term->obligation_ordinal,
+                (int)term->propagation_kind, (int)term->contract_phase,
+                (int)term->contract_outcome, term->source_expression,
+                term->span.start, term->span.end);
+        }
+        for (size_t j = 0; j < image->loops.count; ++j) {
+            const SolMirMaterializedLoop *x = &owner->loops[image->loops.offset + j];
+            format(&out, "  loop z%zu source=z%zu statement=%zu parent=%zu preheader=b%zu header=b%zu condition=b%zu body=b%zu backedge=b%zu exit=b%zu obligations=[%zu,%zu] span=%zu..%zu\n",
+                image->loops.offset + j, x->source_loop, x->source_statement,
+                x->parent, x->preheader, x->header, x->condition, x->body,
+                x->backedge, x->exit, x->source_obligations.offset,
+                x->source_obligations.count, x->span.start, x->span.end);
         }
     }
-    bool ok = !buffer.failed
-        && (buffer.length == 0
-            || fwrite(buffer.data, 1, buffer.length, stream) == buffer.length);
-    free(buffer.data);
-    return ok;
+    for (size_t i = 0; i < owner->edge_count; ++i) {
+        format(&out, "edge g%zu block=b%zu arguments=[", i,
+            owner->edges[i].block);
+        for (size_t j = 0; j < owner->edges[i].arguments.count; ++j) {
+            format(&out, "%sv%zu", j == 0 ? "" : ",",
+                owner->edge_values[owner->edges[i].arguments.offset + j]);
+        }
+        format(&out, "]\n");
+    }
+    for (size_t i = 0; i < owner->writeback_count; ++i) {
+        const SolMirMaterializedWriteback *x = &owner->writebacks[i];
+        format(&out, "writeback w%zu receiver=%d formal=%zu place=p%zu type=t%zu\n",
+            i, x->receiver, x->formal, x->place, x->type);
+    }
+    bool ok = !out.failed && (out.length == 0
+        || fwrite(out.data, 1, out.length, stream) == out.length);
+    free(out.data); return ok;
 }

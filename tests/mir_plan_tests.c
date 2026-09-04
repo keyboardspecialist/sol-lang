@@ -430,6 +430,7 @@ static void test_e6_entry_census(void) {
     CHECK(outcome == SOL_MIR_PLAN_BUILD_SUCCEEDED);
     CHECK(plan.instance_count == 8);
     CHECK(plan.import_count == 4);
+    CHECK(plan.demand_count == 13);
     CHECK(plan.dictionary_entry_count == 1);
     SolIrCallableId expected_callables[] = {
         callable_kind(ir, "launch", SOL_IR_CALLABLE_FUNCTION),
@@ -552,6 +553,7 @@ static void test_e6_entry_census(void) {
         == SOL_MIR_PLAN_BUILD_SUCCEEDED);
     CHECK(plan.instance_count == 14);
     CHECK(plan.import_count == 4);
+    CHECK(plan.demand_count == 23);
     CHECK(plan.dictionary_entry_count == 1);
     SolIrCallableId expected_all[14] = {
         callable_kind(ir, "launch", SOL_IR_CALLABLE_FUNCTION),

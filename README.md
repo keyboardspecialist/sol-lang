@@ -721,31 +721,35 @@ validated source domains. Every owned plan arena records its allocation capacity
 and effect atom strings carry validated lengths.
 Contextless generic, receiver, or effect-polymorphic fixture roots reject because
 the API intentionally has no explicit root-context input. The E6 entry plan is
-exactly 8 instances and 4 typed imports; entry plus tests is 14 and 4. CFG
-materialization now includes P2.3a and P2.3b1. The separate unstable
+exactly 8 instances, 4 typed imports, 12 invokes, and 13 demands; entry plus tests
+is 14, 4, 18, and 23. CFG materialization now includes P2.3a through P2.3b2. The separate unstable
 `SolMirMaterialization` owner borrows a validated `SolMirPlan`, which must outlive it
 along with the plan's borrowed program and owning IR. It owns one image per plan
 instance in plan-instance order. Plans assign explicit canonical IDs to one body
 context per instance and every refinement site/obligation; typed uses and demands name
 those records rather than deriving a context from a block number. Materialization
 consumes every typed use exactly once into a context-bearing semantic record and owns
-checked concrete specialization metadata for types, signatures, locals,
-places/projections, values, temporaries, instructions, construct operands, and call
-arguments. Copy classification is recomputed using the owning-IR fixed-point rule from
-substituted ownership components, including generic and recursive record/enum fields
-and distinct/refined representations. Each image also contains an independently
-allocated exact symbolic MIR clone. In P2.3b1 that clone remains the structurally
-executable CFG and still owns blocks, terminators, edges, parameter/edge value lists,
-loops, handler behavior, dispatch/writeback structure, and any payload not represented
-by a checked specialization record. The new records are exact, image-local,
-reconstructively validated overlays; they are not yet a second complete executable
-CFG and do not make the symbolic topology provenance-only. Builds are transactional
-and bound instances, cloned CFG items, concrete records/bindings, owned bytes, and
-work; rendering validates and buffers before one write. Handler source/provider plans
-still reject. P2.3b2 remains responsible for complete concrete blocks, terminators,
-edges, parameter/edge values, loops and deferred payloads, plus handler bindings,
-dispatch, exclusive writeback, and specialization/callable fixed-point closure.
-P2.3b3 then independently validates concrete SSA, affine ownership, cleanup,
+concrete types, signatures, locals, places/projections, values, temporaries,
+instructions, operands, closed effect rows, imports, complete blocks and terminators,
+edges and their arguments, block parameters, and loops. One canonical binding exists
+for every root, invoke, callback, predicate, handler, function-value, bound-operation,
+and predicate-function-value plan demand. Invokes name only a binding and closed
+concrete effect row; successful normal edges own ordered exclusive writebacks, with
+the receiver first and arguments in formal order. Handler enter/exit instructions name
+explicit nested-capable frames containing exact source/provider bindings and concrete
+authority/provider places. Copy classification is recomputed using the owning-IR
+fixed-point rule from substituted ownership components, including generic and recursive
+record/enum fields and distinct/refined representations.
+
+Each image also contains an independently allocated exact symbolic MIR clone. That
+symbolic topology is authentication-only: executable dispatch does not use borrowed
+plan imports, generic/effect/evidence slices, symbolic callable targets, or symbolic
+CFG IDs. Validation reconstructs every concrete record from the immutable canonical
+plan, checks image-local namespaces and owned-slice/range separation, and proves every
+plan demand, instance, and import is represented without a second evidence-resolution
+pass. Builds are transactional and bound instances, cloned and concrete CFG items,
+concrete records/bindings, owned bytes, and work; rendering validates and buffers
+before one write. P2.3 and P2.3b3 remain open. P2.3b3 independently validates concrete SSA, affine ownership, cleanup,
 contracts/refinements, handler balance, and full E6 dataflow. No representation/layout,
 runtime ABI, symbol/linkage, or backend choice is made here.
 
