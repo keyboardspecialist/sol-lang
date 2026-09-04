@@ -199,8 +199,12 @@ static void test_instances_types_cycles_and_limits(void) {
     sol_mir_plan_init(&plan);
     CHECK(build_program(&compilation.ir, callable(&compilation.ir, "root"),
         &program, &diagnostics) == SOL_MIR_PROGRAM_BUILD_SUCCEEDED);
-    CHECK(build_plan(&program, NULL, &plan, &diagnostics)
-        == SOL_MIR_PLAN_BUILD_SUCCEEDED);
+    SolMirPlanBuildOutcome first_outcome = build_plan(&program, NULL, &plan,
+        &diagnostics);
+    if (first_outcome != SOL_MIR_PLAN_BUILD_SUCCEEDED) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &diagnostics);
+    }
+    CHECK(first_outcome == SOL_MIR_PLAN_BUILD_SUCCEEDED);
     CHECK(sol_mir_plan_validate(&plan, NULL));
     CHECK(plan.instance_count == 4);
     size_t identity_instances = 0;
@@ -221,8 +225,8 @@ static void test_instances_types_cycles_and_limits(void) {
     CHECK(plan.usage.typed_uses == plan.typed_use_count);
 
     SolMirPlanLimits exact = {plan.usage.instances, plan.usage.concrete_types,
-        plan.usage.demands, plan.usage.typed_uses, plan.usage.planning_work,
-        plan.usage.substitution_depth};
+        plan.usage.demands, plan.usage.typed_uses, plan.usage.contexts,
+        plan.usage.planning_work, plan.usage.substitution_depth};
     SolMirPlan limited;
     sol_mir_plan_init(&limited);
     CHECK(build_plan(&program, &exact, &limited, &diagnostics)
@@ -246,6 +250,10 @@ static void test_instances_types_cycles_and_limits(void) {
     CHECK(build_plan(&program, &less, &limited, &diagnostics)
         == SOL_MIR_PLAN_BUILD_RESOURCE_EXHAUSTED);
     less = exact;
+    --less.max_contexts;
+    CHECK(build_plan(&program, &less, &limited, &diagnostics)
+        == SOL_MIR_PLAN_BUILD_RESOURCE_EXHAUSTED);
+    less = exact;
     --less.max_planning_work;
     CHECK(build_plan(&program, &less, &limited, &diagnostics)
         == SOL_MIR_PLAN_BUILD_RESOURCE_EXHAUSTED);
@@ -265,6 +273,22 @@ static void test_instances_types_cycles_and_limits(void) {
     CHECK(!sol_mir_plan_validate(&plan, NULL));
     plan.typed_uses[0].type = saved;
     CHECK(sol_mir_plan_validate(&plan, NULL));
+    SolMirPlanContextId saved_use_context = plan.typed_uses[0].context;
+    plan.typed_uses[0].context = SOL_MIR_PLAN_NONE;
+    CHECK(!sol_mir_plan_validate(&plan, NULL));
+    plan.typed_uses[0].context = saved_use_context;
+    if (plan.context_count > 1) {
+        SolMirPlanContext first_context = plan.contexts[0];
+        plan.contexts[0] = plan.contexts[1];
+        plan.contexts[1] = first_context;
+        CHECK(!sol_mir_plan_validate(&plan, NULL));
+        plan.contexts[1] = plan.contexts[0];
+        plan.contexts[0] = first_context;
+    }
+    SolMirPlanSlice saved_uses = plan.instances[0].typed_uses;
+    --plan.instances[0].typed_uses.count;
+    CHECK(!sol_mir_plan_validate(&plan, NULL));
+    plan.instances[0].typed_uses = saved_uses;
     SolMirPlanType *types = plan.types;
     plan.types = (SolMirPlanType *)(void *)plan.instances;
     CHECK(!sol_mir_plan_validate(&plan, NULL));
@@ -289,6 +313,7 @@ static void test_instances_types_cycles_and_limits(void) {
     CHECK_COUNT_BOUND(dictionary_entry_count, dictionary_entry_capacity);
     CHECK_COUNT_BOUND(import_count, import_capacity);
     CHECK_COUNT_BOUND(typed_use_count, typed_use_capacity);
+    CHECK_COUNT_BOUND(context_count, context_capacity);
     CHECK_COUNT_BOUND(demand_count, demand_capacity);
 #undef CHECK_COUNT_BOUND
     size_t type_capacity = plan.type_capacity;
@@ -710,10 +735,16 @@ static void test_nested_types_effect_closure_and_root_policy(void) {
             == SOL_MIR_PLAN_USE_UNREACHABLE_PROOF;
     }
     CHECK(saw_loop && saw_unreachable);
+    CHECK(plan.context_count >= plan.instance_count);
+    for (size_t index = 0; index < plan.instance_count; ++index) {
+        CHECK(plan.instances[index].contexts.count >= 1);
+        CHECK(plan.contexts[plan.instances[index].contexts.offset].kind
+            == SOL_MIR_PLAN_CONTEXT_BODY);
+    }
     CHECK(sol_mir_plan_validate(&plan, NULL));
     SolMirPlanLimits exact = {plan.usage.instances, plan.usage.concrete_types,
-        plan.usage.demands, plan.usage.typed_uses, plan.usage.planning_work,
-        plan.usage.substitution_depth};
+        plan.usage.demands, plan.usage.typed_uses, plan.usage.contexts,
+        plan.usage.planning_work, plan.usage.substitution_depth};
     CHECK(exact.max_substitution_depth > 1);
     SolMirPlanLimits shallow = exact;
     --shallow.max_substitution_depth;

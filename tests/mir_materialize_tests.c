@@ -195,6 +195,14 @@ static void test_generic_recursion_lifecycle_limits_and_render(void) {
     size_t first_length = 0;
     char *first_text = render(&first, &first_length);
     CHECK(first_text != NULL && first_length != 0);
+    if (first_text != NULL) {
+        CHECK(strstr(first_text, "type t") != NULL);
+        CHECK(strstr(first_text, "context k") != NULL);
+        CHECK(strstr(first_text, "  local l") != NULL);
+        CHECK(strstr(first_text, "  place p") != NULL);
+        CHECK(strstr(first_text, "  value v") != NULL);
+        CHECK(strstr(first_text, "  instruction n") != NULL);
+    }
 
     SolMirMaterialization second;
     sol_mir_materialization_init(&second);
@@ -208,7 +216,8 @@ static void test_generic_recursion_lifecycle_limits_and_render(void) {
     free(first_text); free(second_text);
 
     SolMirMaterializeLimits exact = {first.usage.instances,
-        first.usage.cfg_items, first.usage.bindings, first.usage.owned_bytes,
+        first.usage.cfg_items, first.usage.bindings,
+        first.usage.concrete_records, first.usage.owned_bytes,
         first.usage.materialization_work};
     SolMirMaterialization limited;
     sol_mir_materialization_init(&limited);
@@ -226,6 +235,7 @@ static void test_generic_recursion_lifecycle_limits_and_render(void) {
     LIMIT_FAIL(max_instances);
     LIMIT_FAIL(max_cfg_items);
     LIMIT_FAIL(max_bindings);
+    LIMIT_FAIL(max_concrete_records);
     LIMIT_FAIL(max_owned_bytes);
     LIMIT_FAIL(max_materialization_work);
 #undef LIMIT_FAIL
@@ -287,6 +297,27 @@ static void test_generic_recursion_lifecycle_limits_and_render(void) {
     first.overlays[0].type = plan.type_count;
     CHECK(!sol_mir_materialization_validate(&first, NULL));
     first.overlays[0].type = saved_overlay;
+    SolMirPlanContextId saved_context = first.overlays[0].context;
+    first.overlays[0].context = SOL_MIR_PLAN_NONE;
+    CHECK(!sol_mir_materialization_validate(&first, NULL));
+    first.overlays[0].context = saved_context;
+    bool saved_copy = first.types[0].is_copy;
+    first.types[0].is_copy = !saved_copy;
+    CHECK(!sol_mir_materialization_validate(&first, NULL));
+    first.types[0].is_copy = saved_copy;
+    SolMirMaterializedType *saved_types = first.types;
+    first.types = (SolMirMaterializedType *)(void *)first.images;
+    CHECK(!sol_mir_materialization_validate(&first, NULL));
+    first.types = saved_types;
+    empty = tmpfile();
+    CHECK(empty != NULL);
+    if (empty != NULL) {
+        first.types[0].is_copy = !saved_copy;
+        CHECK(!sol_mir_materialization_render(empty, &first));
+        CHECK(ftell(empty) == 0);
+        first.types[0].is_copy = saved_copy;
+        fclose(empty);
+    }
     CHECK(sol_mir_materialization_validate(&first, NULL));
     sol_mir_materialization_free(&limited);
     sol_mir_materialization_free(&second);
@@ -393,10 +424,343 @@ static void test_handler_boundary_is_transactional(void) {
     free_compilation(&compilation);
 }
 
+static size_t other_value(const SolMirMaterialization *owner, size_t image) {
+    for (size_t id = 0; id < owner->image_count; ++id) {
+        if (id != image && owner->images[id].values.count != 0) {
+            return owner->images[id].values.offset;
+        }
+    }
+    return SOL_MIR_MATERIALIZED_NONE;
+}
+
+static size_t other_temporary(const SolMirMaterialization *owner, size_t image) {
+    for (size_t id = 0; id < owner->image_count; ++id) {
+        if (id != image && owner->images[id].temporaries.count != 0) {
+            return owner->images[id].temporaries.offset;
+        }
+    }
+    return SOL_MIR_MATERIALIZED_NONE;
+}
+
+static size_t other_place(const SolMirMaterialization *owner, size_t image) {
+    for (size_t id = 0; id < owner->image_count; ++id) {
+        if (id != image && owner->images[id].places.count != 0) {
+            return owner->images[id].places.offset;
+        }
+    }
+    return SOL_MIR_MATERIALIZED_NONE;
+}
+
+static size_t other_construct_operands(const SolMirMaterialization *owner,
+    size_t image) {
+    for (size_t id = 0; id < owner->image_count; ++id) {
+        if (id != image && owner->images[id].construct_operands.count != 0) {
+            return owner->images[id].construct_operands.offset;
+        }
+    }
+    return SOL_MIR_MATERIALIZED_NONE;
+}
+
+static void test_refinement_contexts_copy_and_concrete_records(void) {
+    Compilation compilation;
+    bool compiled = compile_text(&compilation,
+        "module concrete_records\n"
+        "capability Token {}\n"
+        "record Box<T> { value: T }\n"
+        "type Identity<T> = refined T where true\n"
+        "function project_int(box: Box<Int64>) -> Int64 { "
+        "let pair = (box.value, 0) return pair.0 }\n"
+        "function project_bool(box: Box<Bool>) -> Bool { "
+        "let pair = (box.value, false) return pair.0 }\n"
+        "function root(token: capability Token, flag: Bool) -> Int64 { "
+        "let copied = Box<Int64> { value = 1 } "
+        "let owned = Box<capability Token> { value = token } "
+        "let projected = project_int(copied) "
+        "let truth = project_bool(Box<Bool> { value = true }) "
+        "let sum = projected + 1 "
+        "let passthrough = { sum } "
+        "if flag { let first = Identity<Int64>(passthrough) return 1 } "
+        "else { let second = Identity<Bool>(truth) return 2 } }\n");
+    if (!compiled) sol_diagnostics_render_human(stderr, &compilation.source,
+        &compilation.diagnostics);
+    CHECK(compiled);
+    SolDiagnostics diagnostics;
+    sol_diagnostics_init(&diagnostics);
+    SolMirProgram program;
+    SolMirPlan plan;
+    SolMirMaterialization materialization;
+    sol_mir_program_init(&program);
+    sol_mir_plan_init(&plan);
+    sol_mir_materialization_init(&materialization);
+    SolMirMaterializeBuildOutcome outcome;
+    bool built = build_all(&compilation.ir,
+        callable(&compilation.ir, "root", SOL_IR_CALLABLE_FUNCTION), NULL, 0,
+        &program, &plan, &materialization, NULL, &diagnostics, &outcome);
+    CHECK(built);
+    if (!built || outcome != SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &diagnostics);
+    }
+    CHECK(outcome == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED);
+    size_t refinement_contexts = 0;
+    for (size_t context = 0; context < plan.context_count; ++context) {
+        refinement_contexts += plan.contexts[context].kind
+            == SOL_MIR_PLAN_CONTEXT_REFINEMENT;
+    }
+    CHECK(refinement_contexts == 2);
+    CHECK(materialization.overlay_count == plan.typed_use_count);
+    bool copy_box = false;
+    bool owned_box = false;
+    for (size_t type = 0; type < materialization.type_count; ++type) {
+        const SolMirMaterializedType *item = &materialization.types[type];
+        if (item->kind != SOL_IR_TYPE_NOMINAL || item->arguments.count != 1) continue;
+        SolMirMaterializedTypeId argument
+            = materialization.type_ids[item->arguments.offset];
+        if (materialization.types[argument].kind == SOL_IR_TYPE_INT64) {
+            copy_box = copy_box || item->is_copy;
+        }
+        if (materialization.types[argument].kind == SOL_IR_TYPE_NOMINAL
+            && materialization.plan->program->ir->definitions[
+                materialization.types[argument].definition].kind
+                == SOL_IR_DEFINITION_CAPABILITY) {
+            owned_box = owned_box || !item->is_copy;
+        }
+    }
+    CHECK(copy_box && owned_box);
+    CHECK(materialization.local_count != 0 && materialization.place_count != 0
+        && materialization.projection_count != 0
+        && materialization.value_count != 0
+        && materialization.instruction_count != 0
+        && materialization.temporary_count != 0
+        && materialization.construct_operand_count != 0);
+    for (size_t left = 0; left < materialization.place_count; ++left) {
+        for (size_t right = left + 1; right < materialization.place_count; ++right) {
+            CHECK(materialization.places[left].instance
+                    != materialization.places[right].instance
+                || materialization.places[left].source_place
+                    != materialization.places[right].source_place
+                || materialization.places[left].local
+                    != materialization.places[right].local);
+        }
+    }
+    CHECK(sol_mir_materialization_validate(&materialization, NULL));
+    bool mutated_binary = false;
+    bool mutated_expression = false;
+    bool mutated_temporary = false;
+    bool mutated_place = false;
+    bool mutated_construct = false;
+    bool mutated_source = false;
+    for (size_t image = 0; image < materialization.image_count; ++image) {
+        SolMirMaterializedImage *item = &materialization.images[image];
+        size_t foreign_value = other_value(&materialization, image);
+        size_t foreign_temporary = other_temporary(&materialization, image);
+        size_t foreign_place = other_place(&materialization, image);
+        size_t foreign_operands
+            = other_construct_operands(&materialization, image);
+        for (size_t offset = 0; offset < item->instructions.count; ++offset) {
+            SolMirMaterializedInstruction *instruction
+                = &materialization.instructions[item->instructions.offset + offset];
+            if (!mutated_binary && instruction->kind == SOL_MIR_INST_BINARY
+                && foreign_value != SOL_MIR_MATERIALIZED_NONE) {
+                size_t saved = instruction->left;
+                instruction->left = foreign_value;
+                CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+                instruction->left = saved;
+                mutated_binary = true;
+            }
+            if (!mutated_expression
+                && instruction->kind == SOL_MIR_INST_EXPRESSION_RESULT
+                && foreign_value != SOL_MIR_MATERIALIZED_NONE) {
+                size_t saved = instruction->left;
+                instruction->left = foreign_value;
+                CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+                instruction->left = saved;
+                mutated_expression = true;
+            }
+            if (!mutated_temporary
+                && instruction->temporary != SOL_MIR_MATERIALIZED_NONE
+                && foreign_temporary != SOL_MIR_MATERIALIZED_NONE) {
+                size_t saved = instruction->temporary;
+                instruction->temporary = foreign_temporary;
+                CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+                instruction->temporary = saved;
+                mutated_temporary = true;
+            }
+            if (!mutated_place && instruction->place != SOL_MIR_MATERIALIZED_NONE
+                && foreign_place != SOL_MIR_MATERIALIZED_NONE) {
+                size_t saved = instruction->place;
+                instruction->place = foreign_place;
+                CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+                instruction->place = saved;
+                mutated_place = true;
+            }
+            if (!mutated_construct && instruction->kind == SOL_MIR_INST_CONSTRUCT
+                && instruction->construct_operands.count != 0
+                && foreign_operands != SOL_MIR_MATERIALIZED_NONE) {
+                size_t saved_offset = instruction->construct_operands.offset;
+                SolIrDefinitionId saved_definition
+                    = instruction->construct_definition;
+                instruction->construct_operands.offset = foreign_operands;
+                CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+                instruction->construct_operands.offset = saved_offset;
+                instruction->construct_definition = saved_definition == SOL_IR_NONE
+                    ? 0 : SOL_IR_NONE;
+                CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+                instruction->construct_definition = saved_definition;
+                size_t saved_roots = instruction->source_capability_roots.count;
+                ++instruction->source_capability_roots.count;
+                CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+                instruction->source_capability_roots.count = saved_roots;
+                mutated_construct = true;
+            }
+            if (!mutated_source
+                && instruction->source_expression != SOL_IR_NONE) {
+                size_t saved = instruction->source_expression;
+                instruction->source_expression = SOL_IR_NONE;
+                CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+                instruction->source_expression = saved;
+                mutated_source = true;
+            }
+        }
+    }
+    CHECK(mutated_binary);
+    CHECK(mutated_expression);
+    CHECK(mutated_temporary);
+    CHECK(mutated_place);
+    CHECK(mutated_construct);
+    CHECK(mutated_source);
+    bool mutated_construct_temporary = false;
+    for (size_t image = 0; image < materialization.image_count
+        && !mutated_construct_temporary; ++image) {
+        SolMirMaterializedImage *item = &materialization.images[image];
+        if (item->temporaries.count < 2 || item->construct_operands.count == 0) {
+            continue;
+        }
+        SolMirMaterializedConstructOperand *operand
+            = &materialization.construct_operands[
+                item->construct_operands.offset];
+        size_t saved = operand->temporary;
+        size_t relative = saved - item->temporaries.offset;
+        operand->temporary = item->temporaries.offset
+            + (relative + 1) % item->temporaries.count;
+        CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+        operand->temporary = saved;
+        mutated_construct_temporary = true;
+    }
+    CHECK(mutated_construct_temporary);
+    bool mutated_projection = false;
+    for (size_t left = 0; left < materialization.place_count; ++left) {
+        if (materialization.places[left].projections.count == 0) continue;
+        for (size_t right = left + 1; right < materialization.place_count; ++right) {
+            if (materialization.places[right].instance
+                    == materialization.places[left].instance
+                || materialization.places[right].projections.count == 0) continue;
+            size_t saved = materialization.places[left].projections.offset;
+            materialization.places[left].projections.offset
+                = materialization.places[right].projections.offset;
+            CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+            materialization.places[left].projections.offset = saved;
+            mutated_projection = true;
+            break;
+        }
+        if (mutated_projection) break;
+    }
+    CHECK(mutated_projection);
+    if (materialization.place_count != 0) {
+        SolMirMaterializedTypeId saved = materialization.places[0].final_type;
+        materialization.places[0].final_type = materialization.type_count;
+        CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+        materialization.places[0].final_type = saved;
+    }
+    if (materialization.instruction_count != 0) {
+        SolMirMaterializedPlaceId saved = materialization.instructions[0].place;
+        materialization.instructions[0].place = materialization.place_count;
+        CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+        materialization.instructions[0].place = saved;
+    }
+    sol_mir_materialization_free(&materialization);
+    sol_mir_plan_free(&plan);
+    sol_mir_program_free(&program);
+    sol_diagnostics_free(&diagnostics);
+    free_compilation(&compilation);
+}
+
+static void test_recursive_nominal_planning_and_copy_cycle(void) {
+    Compilation compilation;
+    bool compiled = compile_text(&compilation,
+        "module recursive_nominals\n"
+        "capability Token {}\n"
+        "record Node { next: Option<Node> }\n"
+        "enum Chain<T> { end, next(value: Chain<T>), item(value: T) }\n"
+        "function root(node: Node, chain: Chain<Int64>, "
+        "owned: Chain<capability Token>) -> Int64 { return 0 }\n");
+    if (!compiled) sol_diagnostics_render_human(stderr, &compilation.source,
+        &compilation.diagnostics);
+    CHECK(compiled);
+    SolDiagnostics diagnostics;
+    sol_diagnostics_init(&diagnostics);
+    SolMirProgram program;
+    SolMirPlan plan;
+    SolMirMaterialization materialization;
+    sol_mir_program_init(&program);
+    sol_mir_plan_init(&plan);
+    sol_mir_materialization_init(&materialization);
+    SolMirMaterializeBuildOutcome outcome;
+    CHECK(build_all(&compilation.ir,
+        callable(&compilation.ir, "root", SOL_IR_CALLABLE_FUNCTION), NULL, 0,
+        &program, &plan, &materialization, NULL, &diagnostics, &outcome));
+    if (outcome != SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED) {
+        sol_diagnostics_render_human(stderr, &compilation.source, &diagnostics);
+    }
+    CHECK(outcome == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED);
+    bool node_cycle = false;
+    bool generic_copy_cycle = false;
+    bool generic_noncopy_cycle = false;
+    for (size_t id = 0; id < materialization.type_count; ++id) {
+        const SolMirMaterializedType *type = &materialization.types[id];
+        if (type->kind != SOL_IR_TYPE_NOMINAL) continue;
+        const char *name = compilation.ir.definitions[type->definition].name;
+        for (size_t component = 0; component < type->ownership_components.count;
+            ++component) {
+            SolMirMaterializedTypeId child = materialization.type_ids[
+                type->ownership_components.offset + component];
+            if (strcmp(name, "Node") == 0) {
+                const SolMirMaterializedType *option
+                    = &materialization.types[child];
+                node_cycle = option->kind == SOL_IR_TYPE_OPTION
+                    && option->ownership_components.count == 1
+                    && materialization.type_ids[
+                        option->ownership_components.offset] == id
+                    && type->is_copy && option->is_copy;
+            } else if (strcmp(name, "Chain") == 0) {
+                bool self_cycle = child == id;
+                SolMirMaterializedTypeId argument = materialization.type_ids[
+                    type->arguments.offset];
+                if (materialization.types[argument].kind == SOL_IR_TYPE_INT64) {
+                    generic_copy_cycle = generic_copy_cycle
+                        || (self_cycle && type->is_copy);
+                } else {
+                    generic_noncopy_cycle = generic_noncopy_cycle
+                        || (self_cycle && !type->is_copy);
+                }
+            }
+        }
+    }
+    CHECK(node_cycle && generic_copy_cycle && generic_noncopy_cycle);
+    CHECK(sol_mir_plan_validate(&plan, NULL));
+    CHECK(sol_mir_materialization_validate(&materialization, NULL));
+    sol_mir_materialization_free(&materialization);
+    sol_mir_plan_free(&plan);
+    sol_mir_program_free(&program);
+    sol_diagnostics_free(&diagnostics);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_generic_recursion_lifecycle_limits_and_render();
     test_evidence_and_import_bindings();
     test_handler_boundary_is_transactional();
+    test_refinement_contexts_copy_and_concrete_records();
+    test_recursive_nominal_planning_and_copy_cycle();
     if (failures != 0) {
         fprintf(stderr, "%d MIR materialization test(s) failed\n", failures);
         return 1;

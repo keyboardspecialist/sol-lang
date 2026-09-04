@@ -722,23 +722,32 @@ and effect atom strings carry validated lengths.
 Contextless generic, receiver, or effect-polymorphic fixture roots reject because
 the API intentionally has no explicit root-context input. The E6 entry plan is
 exactly 8 instances and 4 typed imports; entry plus tests is 14 and 4. CFG
-materialization now has a first bounded slice, P2.3a. The separate unstable
+materialization now includes P2.3a and P2.3b1. The separate unstable
 `SolMirMaterialization` owner borrows a validated `SolMirPlan`, which must outlive it
 along with the plan's borrowed program and owning IR. It owns one image per plan
-instance in plan-instance order. Each image contains an independently allocated exact
-clone of every template MIR arena used only as topology/source provenance, plus a
-distinct exhaustive context-zero concrete type overlay, concrete signature/effects,
-and one instance-or-import target binding for every executable invoke. Source
-`SolIrTypeId`, callable, trait, requirement, and source IDs retained in the clone or
-binding are explicitly provenance, never executable concrete metadata. Builds are
-transactional and bound instances, cloned CFG items/bindings, owned bytes, and work;
-rendering validates and buffers before one write. P2.3a deliberately rejects any
-plan with handler source/provider demands. Full E6 materialization closure and its
-instance/import census are not asserted by this slice even though the existing E6
-fixture itself does not exercise handlers. P2.3b remains responsible for explicit
-handler bindings, concrete executable SSA/place/instruction fields, affine/cleanup
-revalidation, full E6 and specialization/callable fixed-point closure. Representation,
-runtime ABI, symbols/linkage, and a backend also remain open.
+instance in plan-instance order. Plans assign explicit canonical IDs to one body
+context per instance and every refinement site/obligation; typed uses and demands name
+those records rather than deriving a context from a block number. Materialization
+consumes every typed use exactly once into a context-bearing semantic record and owns
+checked concrete specialization metadata for types, signatures, locals,
+places/projections, values, temporaries, instructions, construct operands, and call
+arguments. Copy classification is recomputed using the owning-IR fixed-point rule from
+substituted ownership components, including generic and recursive record/enum fields
+and distinct/refined representations. Each image also contains an independently
+allocated exact symbolic MIR clone. In P2.3b1 that clone remains the structurally
+executable CFG and still owns blocks, terminators, edges, parameter/edge value lists,
+loops, handler behavior, dispatch/writeback structure, and any payload not represented
+by a checked specialization record. The new records are exact, image-local,
+reconstructively validated overlays; they are not yet a second complete executable
+CFG and do not make the symbolic topology provenance-only. Builds are transactional
+and bound instances, cloned CFG items, concrete records/bindings, owned bytes, and
+work; rendering validates and buffers before one write. Handler source/provider plans
+still reject. P2.3b2 remains responsible for complete concrete blocks, terminators,
+edges, parameter/edge values, loops and deferred payloads, plus handler bindings,
+dispatch, exclusive writeback, and specialization/callable fixed-point closure.
+P2.3b3 then independently validates concrete SSA, affine ownership, cleanup,
+contracts/refinements, handler balance, and full E6 dataflow. No representation/layout,
+runtime ABI, symbol/linkage, or backend choice is made here.
 
 ### Phase 0 — Executable language model
 

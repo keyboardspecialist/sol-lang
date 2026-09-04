@@ -11,6 +11,7 @@ typedef size_t SolMirPlanTypeId;
 typedef size_t SolMirPlanEffectRowId;
 typedef size_t SolMirPlanInstanceId;
 typedef size_t SolMirPlanImportId;
+typedef size_t SolMirPlanContextId;
 
 #define SOL_MIR_PLAN_NONE SIZE_MAX
 
@@ -44,6 +45,9 @@ typedef struct {
     size_t parameter_access_offset;
     SolMirPlanTypeId result;
     SolMirPlanEffectRowId effects;
+    /* Substituted fields/representation used to classify ownership. */
+    size_t ownership_component_offset;
+    size_t ownership_component_count;
 } SolMirPlanType;
 
 typedef struct {
@@ -88,11 +92,24 @@ typedef struct {
     SolMirPlanTypedUseKind kind;
     size_t source;
     size_t ordinal;
-    /* Zero for the callable template; nonzero identifies a refinement site. */
-    size_t context;
+    SolMirPlanContextId context;
     SolMirPlanTypeId type;
     SolAccessMode access;
 } SolMirPlanTypedUse;
+
+typedef enum {
+    SOL_MIR_PLAN_CONTEXT_BODY,
+    SOL_MIR_PLAN_CONTEXT_REFINEMENT,
+} SolMirPlanContextKind;
+
+typedef struct {
+    SolMirPlanContextKind kind;
+    SolMirPlanInstanceId instance;
+    SolMirBlockId source_block;
+    SolIrDefinitionId definition;
+    SolObligationId obligation;
+    SolMirProgramSource source;
+} SolMirPlanContext;
 
 typedef struct {
     SolIrCallableId callable;
@@ -106,6 +123,7 @@ typedef struct {
     SolMirPlanEffectRowId effect_tail;
     SolMirPlanEffectRowId effects;
     SolMirPlanSlice typed_uses;
+    SolMirPlanSlice contexts;
 } SolMirPlanInstance;
 
 typedef struct {
@@ -138,7 +156,7 @@ typedef struct {
     SolMirPlanImportId import;
     SolIrDefinitionId dispatch_trait;
     SolIrCallableId dispatch_requirement;
-    size_t context;
+    SolMirPlanContextId context;
 } SolMirPlanDemand;
 
 typedef struct {
@@ -146,6 +164,7 @@ typedef struct {
     size_t max_concrete_types;
     size_t max_demands;
     size_t max_typed_uses;
+    size_t max_contexts;
     size_t max_planning_work;
     size_t max_substitution_depth;
 } SolMirPlanLimits;
@@ -155,6 +174,7 @@ typedef struct {
     size_t concrete_types;
     size_t demands;
     size_t typed_uses;
+    size_t contexts;
     size_t planning_work;
     size_t substitution_depth;
 } SolMirPlanUsage;
@@ -197,6 +217,9 @@ typedef struct {
     SolMirPlanTypedUse *typed_uses;
     size_t typed_use_count;
     size_t typed_use_capacity;
+    SolMirPlanContext *contexts;
+    size_t context_count;
+    size_t context_capacity;
     SolMirPlanDemand *demands;
     size_t demand_count;
     size_t demand_capacity;

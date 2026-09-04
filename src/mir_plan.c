@@ -14,6 +14,9 @@ typedef struct {
     size_t parameter_count;
     SolMirPlanTypeId result;
     SolMirPlanEffectRowId effects;
+    SolMirPlanTypeId *ownership_components;
+    size_t ownership_component_count;
+    bool ownership_complete;
 } RawType;
 
 typedef struct {
@@ -94,6 +97,9 @@ struct Builder {
     SolMirPlanDemand *demands;
     size_t demand_count;
     size_t demand_capacity;
+    SolMirPlanContext *contexts;
+    size_t context_count;
+    size_t context_capacity;
 };
 
 static bool plan_empty(const SolMirPlan *plan) {
@@ -127,23 +133,27 @@ void sol_mir_plan_free(SolMirPlan *plan) {
     free(plan->dictionary_entries);
     free(plan->imports);
     free(plan->typed_uses);
+    free(plan->contexts);
     free(plan->demands);
     sol_mir_plan_init(plan);
 }
 
 SolMirPlanLimits sol_mir_plan_default_limits(void) {
-    return (SolMirPlanLimits){4096, 65536, 131072, 1000000, 4000000, 256};
+    return (SolMirPlanLimits){4096, 65536, 131072, 1000000, 1000000,
+        4000000, 256};
 }
 
 static bool limits_zero(SolMirPlanLimits limits) {
     return limits.max_instances == 0 && limits.max_concrete_types == 0
         && limits.max_demands == 0 && limits.max_typed_uses == 0
+        && limits.max_contexts == 0
         && limits.max_planning_work == 0 && limits.max_substitution_depth == 0;
 }
 
 static bool limits_complete(SolMirPlanLimits limits) {
     return limits.max_instances != 0 && limits.max_concrete_types != 0
         && limits.max_demands != 0 && limits.max_typed_uses != 0
+        && limits.max_contexts != 0
         && limits.max_planning_work != 0 && limits.max_substitution_depth != 0;
 }
 
@@ -551,12 +561,17 @@ static bool raw_type_equal(const RawType *left, const RawType *right) {
         && left->argument_count == right->argument_count
         && left->parameter_count == right->parameter_count
         && left->result == right->result && left->effects == right->effects
+        && left->ownership_component_count == right->ownership_component_count
         && (left->argument_count == 0 || memcmp(left->arguments, right->arguments,
             left->argument_count * sizeof(*left->arguments)) == 0)
         && (left->parameter_count == 0 || (memcmp(left->parameters,
             right->parameters, left->parameter_count * sizeof(*left->parameters)) == 0
             && memcmp(left->accesses, right->accesses,
-                left->parameter_count * sizeof(*left->accesses)) == 0));
+                left->parameter_count * sizeof(*left->accesses)) == 0))
+        && (left->ownership_component_count == 0
+            || memcmp(left->ownership_components, right->ownership_components,
+                left->ownership_component_count
+                    * sizeof(*left->ownership_components)) == 0);
 }
 
 static bool intern_type(Builder *builder, RawType *candidate,
@@ -567,6 +582,7 @@ static bool intern_type(Builder *builder, RawType *candidate,
             free(candidate->arguments);
             free(candidate->parameters);
             free(candidate->accesses);
+            free(candidate->ownership_components);
             *result = index;
             return true;
         }
@@ -579,6 +595,40 @@ static bool intern_type(Builder *builder, RawType *candidate,
             builder->type_count + 1, sizeof(*builder->types))) return false;
     builder->types[builder->type_count] = *candidate;
     *result = builder->type_count++;
+    builder->plan->usage.concrete_types = builder->type_count;
+    return true;
+}
+
+static bool find_nominal_type(Builder *builder,
+    SolIrDefinitionId definition, const SolMirPlanTypeId *arguments,
+    size_t argument_count, SolMirPlanTypeId *result) {
+    for (size_t id = 0; id < builder->type_count; ++id) {
+        if (!charge(builder, 1)) return false;
+        const RawType *type = &builder->types[id];
+        if (type->kind == SOL_IR_TYPE_NOMINAL && type->definition == definition
+            && type->argument_count == argument_count
+            && (argument_count == 0 || memcmp(type->arguments, arguments,
+                argument_count * sizeof(*arguments)) == 0)) {
+            *result = id;
+            return true;
+        }
+    }
+    *result = SOL_MIR_PLAN_NONE;
+    return true;
+}
+
+static bool reserve_nominal_type(Builder *builder, RawType *candidate,
+    SolMirPlanTypeId *result) {
+    if (builder->type_count == builder->plan->limits.max_concrete_types) {
+        return fail(builder, SOL_MIR_PLAN_BUILD_RESOURCE_EXHAUSTED,
+            "concrete type limit exceeded");
+    }
+    if (!grow((void **)&builder->types, &builder->type_capacity,
+            builder->type_count + 1, sizeof(*builder->types))) return false;
+    *result = builder->type_count++;
+    builder->types[*result] = *candidate;
+    candidate->arguments = NULL;
+    candidate->argument_count = 0;
     builder->plan->usage.concrete_types = builder->type_count;
     return true;
 }
@@ -676,6 +726,7 @@ static bool substitute_type(Environment *environment, SolIrTypeId source,
                 &candidate.result)
             || !row_for_callable(builder, exact_id, 0,
                 &candidate.effects)) goto failed;
+        candidate.ownership_complete = true;
         if (intern_type(builder, &candidate, result)) return true;
         goto failed;
     }
@@ -708,11 +759,93 @@ static bool substitute_type(Environment *environment, SolIrTypeId source,
             || !row_from_source(environment, type->effects,
                 type->effect_parameter, true, &candidate.effects)) goto failed;
     }
+    if (type->kind == SOL_IR_TYPE_OPTION || type->kind == SOL_IR_TYPE_RESULT
+        || type->kind == SOL_IR_TYPE_TUPLE) {
+        candidate.ownership_component_count = candidate.argument_count;
+        candidate.ownership_components = allocate(candidate.argument_count,
+            sizeof(*candidate.ownership_components));
+        if (candidate.argument_count != 0
+            && candidate.ownership_components == NULL) goto failed;
+        if (candidate.argument_count != 0) memcpy(candidate.ownership_components,
+            candidate.arguments, candidate.argument_count
+                * sizeof(*candidate.ownership_components));
+    } else if (type->kind == SOL_IR_TYPE_NOMINAL) {
+        if (type->definition >= builder->ir->definition_count) goto failed;
+        SolMirPlanTypeId existing;
+        if (!find_nominal_type(builder, type->definition, candidate.arguments,
+                candidate.argument_count, &existing)) goto failed;
+        if (existing != SOL_MIR_PLAN_NONE) {
+            free(candidate.arguments);
+            *result = existing;
+            return true;
+        }
+        const SolIrDefinition *definition
+            = &builder->ir->definitions[type->definition];
+        SolMirPlanTypeId reserved;
+        if (!reserve_nominal_type(builder, &candidate, &reserved)) goto failed;
+        Environment nominal_environment = *environment;
+        nominal_environment.nominal = type->definition;
+        nominal_environment.nominal_arguments = builder->types[reserved].arguments;
+        nominal_environment.nominal_argument_count
+            = builder->types[reserved].argument_count;
+        size_t component_count = 0;
+        if (definition->kind == SOL_IR_DEFINITION_RECORD) {
+            component_count = definition->fields.count;
+        } else if (definition->kind == SOL_IR_DEFINITION_ENUM) {
+            for (size_t variant = 0; variant < definition->variants.count; ++variant) {
+                SolIrSlice fields = builder->ir->variants[
+                    definition->variants.offset + variant].fields;
+                if (fields.count > SIZE_MAX - component_count) goto failed;
+                component_count += fields.count;
+            }
+        } else if (definition->kind == SOL_IR_DEFINITION_DISTINCT
+            || definition->kind == SOL_IR_DEFINITION_REFINED) {
+            component_count = 1;
+        }
+        builder->types[reserved].ownership_component_count = component_count;
+        builder->types[reserved].ownership_components = allocate(component_count,
+            sizeof(*builder->types[reserved].ownership_components));
+        if (component_count != 0
+            && builder->types[reserved].ownership_components == NULL) {
+            goto failed;
+        }
+        size_t component = 0;
+        if (definition->kind == SOL_IR_DEFINITION_RECORD) {
+            for (size_t field = 0; field < definition->fields.count; ++field) {
+                if (!substitute_type(&nominal_environment, builder->ir->fields[
+                        definition->fields.offset + field].type, depth + 1,
+                        &builder->types[reserved]
+                            .ownership_components[component++])) goto failed;
+            }
+        } else if (definition->kind == SOL_IR_DEFINITION_ENUM) {
+            for (size_t variant = 0; variant < definition->variants.count; ++variant) {
+                SolIrSlice fields = builder->ir->variants[
+                    definition->variants.offset + variant].fields;
+                for (size_t field = 0; field < fields.count; ++field) {
+                    if (!substitute_type(&nominal_environment,
+                            builder->ir->fields[fields.offset + field].type,
+                            depth + 1,
+                            &builder->types[reserved]
+                                .ownership_components[component++])) goto failed;
+                }
+            }
+        } else if (component_count == 1) {
+            if (definition->representation >= builder->ir->type_count
+                || !substitute_type(&nominal_environment,
+                    definition->representation, depth + 1,
+                    &builder->types[reserved].ownership_components[0])) goto failed;
+        }
+        builder->types[reserved].ownership_complete = true;
+        *result = reserved;
+        return true;
+    }
+    candidate.ownership_complete = true;
     if (intern_type(builder, &candidate, result)) return true;
 failed:
     free(candidate.arguments);
     free(candidate.parameters);
     free(candidate.accesses);
+    free(candidate.ownership_components);
     return false;
 }
 
@@ -806,6 +939,34 @@ static bool repeated_growth_for_parent(const Builder *builder,
         current = instance->parent;
     }
     return false;
+}
+
+static bool same_program_source(SolMirProgramSource a,
+    SolMirProgramSource b);
+
+static bool add_context(Builder *builder, SolMirPlanContext context,
+    SolMirPlanContextId *result) {
+    for (size_t index = 0; index < builder->context_count; ++index) {
+        const SolMirPlanContext *item = &builder->contexts[index];
+        if (item->kind == context.kind && item->instance == context.instance
+            && item->source_block == context.source_block
+            && item->definition == context.definition
+            && item->obligation == context.obligation
+            && same_program_source(item->source, context.source)) {
+            *result = index;
+            return true;
+        }
+    }
+    if (builder->context_count == builder->plan->limits.max_contexts) {
+        return fail(builder, SOL_MIR_PLAN_BUILD_RESOURCE_EXHAUSTED,
+            "canonical context limit exceeded");
+    }
+    if (!grow((void **)&builder->contexts, &builder->context_capacity,
+            builder->context_count + 1, sizeof(*builder->contexts))) return false;
+    builder->contexts[builder->context_count] = context;
+    *result = builder->context_count++;
+    builder->plan->usage.contexts = builder->context_count;
+    return true;
 }
 
 static bool add_use(Environment *environment, SolMirPlanTypedUseKind kind,
@@ -1666,7 +1827,16 @@ static bool scan_instance(Builder *builder, SolMirPlanInstanceId instance_id) {
     const SolMir *mir = &template->mir;
     const SolIrCallable *callable = &builder->ir->callables[instance->callable];
     Environment environment = {builder, instance, instance_id, SOL_IR_NONE,
-        NULL, 0, SOL_MIR_PLAN_NONE, 0};
+        NULL, 0, SOL_MIR_PLAN_NONE, SOL_MIR_PLAN_NONE};
+    SolMirProgramSource body_source;
+    SolSpan body_span = callable->body < builder->ir->expression_count
+        ? builder->ir->expressions[callable->body].span : callable->span;
+    SolMirPlanContext body_context = {SOL_MIR_PLAN_CONTEXT_BODY, instance_id,
+        SOL_MIR_NONE, callable->owner, SOL_IR_NONE, {0}};
+    if (!source_for(builder, instance->callable, callable->body, body_span,
+            &body_source)) return false;
+    body_context.source = body_source;
+    if (!add_context(builder, body_context, &environment.context)) return false;
     if (callable->receiver != SOL_IR_NONE) {
         if (!add_use(&environment, SOL_MIR_PLAN_USE_RECEIVER,
                 callable->receiver, 0, builder->ir->locals[callable->receiver].type,
@@ -1755,18 +1925,24 @@ static bool scan_instance(Builder *builder, SolMirPlanInstanceId instance_id) {
                 builder->ir->expressions[term->as.check_refined.source_expression].type,
                 1, &nominal_type)) return false;
         RawType *nominal = &builder->types[nominal_type];
-        Environment predicate = environment;
-        predicate.nominal = term->as.check_refined.definition;
-        predicate.nominal_arguments = nominal->arguments;
-        predicate.nominal_argument_count = nominal->argument_count;
-        predicate.self_type = nominal_type;
-        predicate.context = block + 1;
         for (size_t obligation = 0; obligation < builder->ir->obligation_count;
             ++obligation) {
             const SolIrObligation *item = &builder->ir->obligations[obligation];
-            if (item->owner_kind == SOL_CONTRACT_OWNER_TYPE
-                && item->owner == term->as.check_refined.definition
-                && !scan_predicate_obligation(&environment, item,
+            if (item->owner_kind != SOL_CONTRACT_OWNER_TYPE
+                || item->owner != term->as.check_refined.definition) continue;
+            Environment predicate = environment;
+            predicate.nominal = term->as.check_refined.definition;
+            predicate.nominal_arguments = nominal->arguments;
+            predicate.nominal_argument_count = nominal->argument_count;
+            predicate.self_type = nominal_type;
+            SolMirPlanContext refinement = {SOL_MIR_PLAN_CONTEXT_REFINEMENT,
+                instance_id, block, term->as.check_refined.definition,
+                item->id, {0}};
+            if (!source_for(builder, instance->callable,
+                    term->as.check_refined.source_expression, term->span,
+                    &refinement.source)
+                || !add_context(builder, refinement, &predicate.context)
+                || !scan_predicate_obligation(&environment, item,
                     &predicate)) return false;
         }
     }
@@ -1799,6 +1975,7 @@ static void free_builder(Builder *builder, bool atoms_published) {
         free(builder->types[index].arguments);
         free(builder->types[index].parameters);
         free(builder->types[index].accesses);
+        free(builder->types[index].ownership_components);
     }
     for (size_t index = 0; index < builder->row_count; ++index) {
         free(builder->rows[index].atoms);
@@ -1823,6 +2000,7 @@ static void free_builder(Builder *builder, bool atoms_published) {
     free(builder->instances);
     free(builder->imports);
     free(builder->demands);
+    free(builder->contexts);
 }
 
 static int compare_atom_id(const Builder *builder, size_t left, size_t right) {
@@ -1989,6 +2167,9 @@ static bool canonicalize_types(Builder *builder) {
         for (size_t child = 0; child < type->parameter_count; ++child) {
             remap_type_id(&type->parameters[child], remap);
         }
+        for (size_t child = 0; child < type->ownership_component_count; ++child) {
+            remap_type_id(&type->ownership_components[child], remap);
+        }
         remap_type_id(&type->result, remap);
     }
     for (size_t index = 0; index < builder->instance_count; ++index) {
@@ -2073,6 +2254,9 @@ static bool canonicalize_instances(Builder *builder) {
                 = remap[builder->demands[index].instance];
         }
     }
+    for (size_t index = 0; index < builder->context_count; ++index) {
+        builder->contexts[index].instance = remap[builder->contexts[index].instance];
+    }
     free(old); free(remap);
     return true;
 }
@@ -2137,6 +2321,53 @@ static int source_compare(SolMirProgramSource a, SolMirProgramSource b) {
     CMP(callable); CMP(expression); CMP(file); CMP(start); CMP(end);
 #undef CMP
     return 0;
+}
+
+static int context_compare(const void *left, const void *right) {
+    const SolMirPlanContext *a = left;
+    const SolMirPlanContext *b = right;
+#define CMP(field) if (a->field != b->field) return a->field < b->field ? -1 : 1
+    CMP(instance); CMP(kind); CMP(source_block); CMP(definition); CMP(obligation);
+#undef CMP
+    return source_compare(a->source, b->source);
+}
+
+static bool canonicalize_contexts(Builder *builder) {
+    size_t count = builder->context_count;
+    size_t *old = allocate(count, sizeof(*old));
+    size_t *remap = allocate(count, sizeof(*remap));
+    if (count != 0 && (old == NULL || remap == NULL)) {
+        free(old); free(remap); return false;
+    }
+    for (size_t index = 0; index < count; ++index) old[index] = index;
+    for (size_t index = 1; index < count; ++index) {
+        SolMirPlanContext value = builder->contexts[index];
+        size_t old_value = old[index];
+        size_t at = index;
+        while (at != 0 && context_compare(&value,
+                &builder->contexts[at - 1]) < 0) {
+            builder->contexts[at] = builder->contexts[at - 1];
+            old[at] = old[at - 1];
+            --at;
+        }
+        builder->contexts[at] = value;
+        old[at] = old_value;
+    }
+    for (size_t index = 0; index < count; ++index) remap[old[index]] = index;
+    for (size_t instance = 0; instance < builder->instance_count; ++instance) {
+        for (size_t use = 0; use < builder->instances[instance].use_count; ++use) {
+            builder->instances[instance].uses[use].context
+                = remap[builder->instances[instance].uses[use].context];
+        }
+    }
+    for (size_t demand = 0; demand < builder->demand_count; ++demand) {
+        if (builder->demands[demand].context != SOL_MIR_PLAN_NONE) {
+            builder->demands[demand].context
+                = remap[builder->demands[demand].context];
+        }
+    }
+    free(old); free(remap);
+    return true;
 }
 
 static int demand_compare(const void *left, const void *right) {
@@ -2225,7 +2456,9 @@ static bool publish(Builder *builder) {
     SolMirPlan *plan = builder->plan;
     if (!canonicalize_atoms(builder) || !canonicalize_rows(builder)
         || !canonicalize_types(builder) || !canonicalize_instances(builder)
-        || !canonicalize_imports(builder)) return false;
+        || !canonicalize_contexts(builder) || !canonicalize_imports(builder)) {
+        return false;
+    }
     for (size_t index = 0; index < builder->instance_count; ++index) {
         RawInstance *instance = &builder->instances[index];
         if (instance->use_count > 1) qsort(instance->uses, instance->use_count,
@@ -2238,13 +2471,17 @@ static bool publish(Builder *builder) {
     plan->type_capacity = plan->type_count;
     for (size_t index = 0; index < builder->type_count; ++index) {
         RawType *source = &builder->types[index];
+        if (!source->ownership_complete) return false;
         if (source->argument_count > SIZE_MAX - source->parameter_count
+            || source->ownership_component_count > SIZE_MAX
+                - source->argument_count - source->parameter_count
             || plan->type_component_count > SIZE_MAX
                 - source->argument_count - source->parameter_count
+                - source->ownership_component_count
             || plan->type_parameter_access_count > SIZE_MAX
                 - source->parameter_count) return false;
         plan->type_component_count += source->argument_count
-            + source->parameter_count;
+            + source->parameter_count + source->ownership_component_count;
         plan->type_parameter_access_count += source->parameter_count;
     }
     plan->type_components = allocate(plan->type_component_count,
@@ -2281,6 +2518,13 @@ static bool publish(Builder *builder) {
         access += source->parameter_count;
         target->result = source->result;
         target->effects = source->effects;
+        target->ownership_component_offset = component;
+        target->ownership_component_count = source->ownership_component_count;
+        if (source->ownership_component_count != 0) memcpy(
+            plan->type_components + component, source->ownership_components,
+            source->ownership_component_count
+                * sizeof(*source->ownership_components));
+        component += source->ownership_component_count;
     }
     plan->effect_atoms = builder->atoms;
     plan->effect_atom_count = builder->atom_count;
@@ -2396,6 +2640,14 @@ static bool publish(Builder *builder) {
         if (source->use_count != 0) memcpy(plan->typed_uses + typed_use,
             source->uses, source->use_count * sizeof(*source->uses));
         typed_use += source->use_count;
+        size_t context_start = 0;
+        while (context_start < builder->context_count
+            && builder->contexts[context_start].instance < index) ++context_start;
+        size_t context_end = context_start;
+        while (context_end < builder->context_count
+            && builder->contexts[context_end].instance == index) ++context_end;
+        target->contexts = (SolMirPlanSlice){context_start,
+            context_end - context_start};
     }
     plan->imports = allocate(builder->import_count, sizeof(*plan->imports));
     plan->import_count = builder->import_count;
@@ -2421,10 +2673,15 @@ static bool publish(Builder *builder) {
     plan->demand_count = builder->demand_count;
     plan->demand_capacity = plan->demand_count;
     builder->demands = NULL;
+    plan->contexts = builder->contexts;
+    plan->context_count = builder->context_count;
+    plan->context_capacity = plan->context_count;
+    builder->contexts = NULL;
     plan->usage.instances = plan->instance_count;
     plan->usage.concrete_types = plan->type_count;
     plan->usage.demands = plan->demand_count;
     plan->usage.typed_uses = plan->typed_use_count;
+    plan->usage.contexts = plan->context_count;
     return true;
 }
 
@@ -2481,6 +2738,7 @@ static SolMirPlanBuildOutcome build_scratch(const SolMirPlanBuildRequest *reques
         demand.import = SOL_MIR_PLAN_NONE;
         demand.dispatch_trait = SOL_IR_NONE;
         demand.dispatch_requirement = SOL_IR_NONE;
+        demand.context = SOL_MIR_PLAN_NONE;
         SolIrExpressionId body = callable->body;
         SolSpan span = body < builder.ir->expression_count
             ? builder.ir->expressions[body].span : callable->span;
@@ -2600,11 +2858,16 @@ static bool slices_valid(const SolMirPlan *plan, SolDiagnostics *diagnostics) {
                 - expected_type_accesses) return false;
         expected_components += type->parameter_count;
         expected_type_accesses += type->parameter_count;
+        if (type->ownership_component_offset != expected_components
+            || type->ownership_component_count
+                > plan->type_component_count - expected_components) return false;
+        expected_components += type->ownership_component_count;
         if ((type->result != SOL_MIR_PLAN_NONE && type->result >= plan->type_count)
             || (type->effects != SOL_MIR_PLAN_NONE
                 && type->effects >= plan->effect_row_count)) return false;
         for (size_t child = type->argument_offset;
-            child < type->parameter_offset + type->parameter_count; ++child) {
+            child < type->ownership_component_offset
+                + type->ownership_component_count; ++child) {
             if (plan->type_components[child] >= plan->type_count) return false;
         }
     }
@@ -2644,6 +2907,7 @@ static bool slices_valid(const SolMirPlan *plan, SolDiagnostics *diagnostics) {
     }
     for (size_t index = 0; index < plan->typed_use_count; ++index) {
         if (plan->typed_uses[index].type >= plan->type_count
+            || plan->typed_uses[index].context >= plan->context_count
             || plan->typed_uses[index].kind > SOL_MIR_PLAN_USE_UNREACHABLE_PROOF) {
             return false;
         }
@@ -2662,7 +2926,19 @@ static bool slices_valid(const SolMirPlan *plan, SolDiagnostics *diagnostics) {
             || !SLICE_OK(item->parameter_types, plan->instance_type_id_count)
             || !SLICE_OK(item->parameter_accesses, plan->instance_access_count)
             || !SLICE_OK(item->dictionary, plan->dictionary_entry_count)
-            || !SLICE_OK(item->typed_uses, plan->typed_use_count)) return false;
+            || !SLICE_OK(item->typed_uses, plan->typed_use_count)
+            || !SLICE_OK(item->contexts, plan->context_count)) return false;
+        if (item->contexts.count == 0
+            || plan->contexts[item->contexts.offset].kind
+                != SOL_MIR_PLAN_CONTEXT_BODY) return false;
+        for (size_t context = 0; context < item->contexts.count; ++context) {
+            const SolMirPlanContext *record
+                = &plan->contexts[item->contexts.offset + context];
+            if (record->instance != index
+                || (context != 0 && context_compare(record - 1, record) >= 0)) {
+                return false;
+            }
+        }
 #undef SLICE_OK
     }
     for (size_t index = 0; index < plan->import_count; ++index) {
@@ -2689,7 +2965,25 @@ static bool slices_valid(const SolMirPlan *plan, SolDiagnostics *diagnostics) {
             || (item->import != SOL_MIR_PLAN_NONE
                 && item->import >= plan->import_count)
             || (item->instance == SOL_MIR_PLAN_NONE)
-                == (item->import == SOL_MIR_PLAN_NONE)) return false;
+                == (item->import == SOL_MIR_PLAN_NONE)
+            || (item->parent == SOL_MIR_PLAN_NONE
+                ? item->context != SOL_MIR_PLAN_NONE
+                : item->context >= plan->context_count
+                    || plan->contexts[item->context].instance
+                        != item->parent)) return false;
+    }
+    for (size_t index = 0; index < plan->context_count; ++index) {
+        const SolMirPlanContext *context = &plan->contexts[index];
+        if (context->instance >= plan->instance_count
+            || context->kind > SOL_MIR_PLAN_CONTEXT_REFINEMENT
+            || (index != 0 && context_compare(&plan->contexts[index - 1],
+                context) >= 0)
+            || (context->kind == SOL_MIR_PLAN_CONTEXT_BODY
+                && (context->source_block != SOL_MIR_NONE
+                    || context->obligation != SOL_IR_NONE))
+            || (context->kind == SOL_MIR_PLAN_CONTEXT_REFINEMENT
+                && (context->source_block == SOL_MIR_NONE
+                    || context->obligation == SOL_IR_NONE))) return false;
     }
     return true;
 }
@@ -2711,6 +3005,7 @@ static bool memory_valid(const SolMirPlan *plan, SolDiagnostics *diagnostics) {
     RANGE(dictionary_entries, dictionary_entry_capacity);
     RANGE(imports, import_capacity);
     RANGE(typed_uses, typed_use_capacity);
+    RANGE(contexts, context_capacity);
     RANGE(demands, demand_capacity);
 #undef RANGE
     for (size_t index = 0; index < plan->effect_atom_count; ++index) {
@@ -2732,6 +3027,7 @@ static bool limits_equal(SolMirPlanLimits a, SolMirPlanLimits b) {
         && a.max_concrete_types == b.max_concrete_types
         && a.max_demands == b.max_demands
         && a.max_typed_uses == b.max_typed_uses
+        && a.max_contexts == b.max_contexts
         && a.max_planning_work == b.max_planning_work
         && a.max_substitution_depth == b.max_substitution_depth;
 }
@@ -2740,6 +3036,7 @@ static bool usage_equal(SolMirPlanUsage a, SolMirPlanUsage b) {
     return a.instances == b.instances
         && a.concrete_types == b.concrete_types
         && a.demands == b.demands && a.typed_uses == b.typed_uses
+        && a.contexts == b.contexts
         && a.planning_work == b.planning_work
         && a.substitution_depth == b.substitution_depth;
 }
@@ -2780,6 +3077,8 @@ static bool plans_equal(const SolMirPlan *a, const SolMirPlan *b) {
         || a->import_capacity != b->import_capacity
         || a->typed_use_count != b->typed_use_count
         || a->typed_use_capacity != b->typed_use_capacity
+        || a->context_count != b->context_count
+        || a->context_capacity != b->context_capacity
         || a->demand_count != b->demand_count
         || a->demand_capacity != b->demand_capacity) return false;
     for (size_t index = 0; index < a->type_count; ++index) {
@@ -2791,7 +3090,11 @@ static bool plans_equal(const SolMirPlan *a, const SolMirPlan *b) {
             || x->parameter_offset != y->parameter_offset
             || x->parameter_count != y->parameter_count
             || x->parameter_access_offset != y->parameter_access_offset
-            || x->result != y->result || x->effects != y->effects) return false;
+            || x->result != y->result || x->effects != y->effects
+            || x->ownership_component_offset
+                != y->ownership_component_offset
+            || x->ownership_component_count
+                != y->ownership_component_count) return false;
     }
     for (size_t index = 0; index < a->type_component_count; ++index) {
         if (a->type_components[index] != b->type_components[index]) return false;
@@ -2827,7 +3130,8 @@ static bool plans_equal(const SolMirPlan *a, const SolMirPlan *b) {
             || !slice_equal(x->parameter_accesses, y->parameter_accesses)
             || x->result != y->result || x->effect_tail != y->effect_tail
             || x->effects != y->effects
-            || !slice_equal(x->typed_uses, y->typed_uses)) return false;
+            || !slice_equal(x->typed_uses, y->typed_uses)
+            || !slice_equal(x->contexts, y->contexts)) return false;
     }
     for (size_t index = 0; index < a->instance_type_id_count; ++index) {
         if (a->instance_type_ids[index] != b->instance_type_ids[index]) return false;
@@ -2860,6 +3164,14 @@ static bool plans_equal(const SolMirPlan *a, const SolMirPlan *b) {
             || x->type != y->type
             || x->access != y->access) return false;
     }
+    for (size_t index = 0; index < a->context_count; ++index) {
+        const SolMirPlanContext *x = &a->contexts[index];
+        const SolMirPlanContext *y = &b->contexts[index];
+        if (x->kind != y->kind || x->instance != y->instance
+            || x->source_block != y->source_block
+            || x->definition != y->definition || x->obligation != y->obligation
+            || !source_equal(x->source, y->source)) return false;
+    }
     for (size_t index = 0; index < a->demand_count; ++index) {
         const SolMirPlanDemand *x = &a->demands[index];
         const SolMirPlanDemand *y = &b->demands[index];
@@ -2887,10 +3199,12 @@ bool sol_mir_plan_validate(const SolMirPlan *plan, SolDiagnostics *diagnostics) 
         && plan->usage.concrete_types == plan->type_count
         && plan->usage.demands == plan->demand_count
         && plan->usage.typed_uses == plan->typed_use_count
+        && plan->usage.contexts == plan->context_count
         && plan->usage.instances <= plan->limits.max_instances
         && plan->usage.concrete_types <= plan->limits.max_concrete_types
         && plan->usage.demands <= plan->limits.max_demands
         && plan->usage.typed_uses <= plan->limits.max_typed_uses
+        && plan->usage.contexts <= plan->limits.max_contexts
         && plan->usage.planning_work <= plan->limits.max_planning_work
         && plan->usage.substitution_depth <= plan->limits.max_substitution_depth
         && canonical_arena(plan->type_count, plan->type_capacity, plan->types)
@@ -2916,6 +3230,8 @@ bool sol_mir_plan_validate(const SolMirPlan *plan, SolDiagnostics *diagnostics) 
             plan->import_capacity, plan->imports)
         && canonical_arena(plan->typed_use_count,
             plan->typed_use_capacity, plan->typed_uses)
+        && canonical_arena(plan->context_count,
+            plan->context_capacity, plan->contexts)
         && canonical_arena(plan->demand_count,
             plan->demand_capacity, plan->demands);
     if (!header) {
