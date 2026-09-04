@@ -722,8 +722,23 @@ and effect atom strings carry validated lengths.
 Contextless generic, receiver, or effect-polymorphic fixture roots reject because
 the API intentionally has no explicit root-context input. The E6 entry plan is
 exactly 8 instances and 4 typed imports; entry plus tests is 14 and 4. CFG
-materialization, representation, runtime ABI, symbols/linkage, and a backend remain
-open.
+materialization now has a first bounded slice, P2.3a. The separate unstable
+`SolMirMaterialization` owner borrows a validated `SolMirPlan`, which must outlive it
+along with the plan's borrowed program and owning IR. It owns one image per plan
+instance in plan-instance order. Each image contains an independently allocated exact
+clone of every template MIR arena used only as topology/source provenance, plus a
+distinct exhaustive context-zero concrete type overlay, concrete signature/effects,
+and one instance-or-import target binding for every executable invoke. Source
+`SolIrTypeId`, callable, trait, requirement, and source IDs retained in the clone or
+binding are explicitly provenance, never executable concrete metadata. Builds are
+transactional and bound instances, cloned CFG items/bindings, owned bytes, and work;
+rendering validates and buffers before one write. P2.3a deliberately rejects any
+plan with handler source/provider demands. Full E6 materialization closure and its
+instance/import census are not asserted by this slice even though the existing E6
+fixture itself does not exercise handlers. P2.3b remains responsible for explicit
+handler bindings, concrete executable SSA/place/instruction fields, affine/cleanup
+revalidation, full E6 and specialization/callable fixed-point closure. Representation,
+runtime ABI, symbols/linkage, and a backend also remain open.
 
 ### Phase 0 — Executable language model
 
