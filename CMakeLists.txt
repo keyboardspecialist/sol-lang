@@ -67,6 +67,7 @@ add_library(sol_compiler STATIC
     src/lexer.c
     src/mir.c
     src/mir_eval.c
+    src/mir_layout.c
     src/mir_materialize.c
     src/mir_materialize_validate.c
     src/mir_plan.c
@@ -188,6 +189,11 @@ if(BUILD_TESTING)
     target_compile_definitions(sol_mir_representation_tests PRIVATE
         SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
+    add_executable(sol_mir_layout_tests tests/mir_layout_tests.c)
+    target_link_libraries(sol_mir_layout_tests PRIVATE sol_compiler)
+    target_compile_definitions(sol_mir_layout_tests PRIVATE
+        SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
     add_executable(sol_interpreter_tests tests/interpreter_tests.c)
     target_link_libraries(sol_interpreter_tests PRIVATE sol_compiler)
     add_executable(sol_inspection_tests tests/inspection_tests.c)
@@ -222,6 +228,7 @@ if(BUILD_TESTING)
         target_compile_options(sol_mir_plan_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_mir_materialize_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_mir_representation_tests PRIVATE /std:c17 /W4)
+        target_compile_options(sol_mir_layout_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_interpreter_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_inspection_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_test_declaration_tests PRIVATE /std:c17 /W4)
@@ -244,6 +251,7 @@ if(BUILD_TESTING)
         target_compile_options(sol_mir_plan_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_mir_materialize_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_mir_representation_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
+        target_compile_options(sol_mir_layout_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_interpreter_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_inspection_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_test_declaration_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
@@ -251,7 +259,7 @@ if(BUILD_TESTING)
             target_compile_options(sol_cli_io_helper PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         endif()
     else()
-        set_target_properties(sol_frontend_tests sol_compilation_tests sol_formatter_tests sol_sema_tests sol_typecheck_tests sol_effectcheck_tests sol_contract_tests sol_package_tests sol_ir_tests sol_mir_tests sol_mir_eval_tests sol_mir_program_tests sol_mir_plan_tests sol_mir_materialize_tests sol_mir_representation_tests sol_interpreter_tests sol_inspection_tests sol_test_declaration_tests PROPERTIES
+        set_target_properties(sol_frontend_tests sol_compilation_tests sol_formatter_tests sol_sema_tests sol_typecheck_tests sol_effectcheck_tests sol_contract_tests sol_package_tests sol_ir_tests sol_mir_tests sol_mir_eval_tests sol_mir_program_tests sol_mir_plan_tests sol_mir_materialize_tests sol_mir_representation_tests sol_mir_layout_tests sol_interpreter_tests sol_inspection_tests sol_test_declaration_tests PROPERTIES
             C_STANDARD 17
             C_STANDARD_REQUIRED ON
             C_EXTENSIONS OFF
@@ -289,6 +297,8 @@ if(BUILD_TESTING)
         target_link_options(sol_mir_materialize_tests PRIVATE -fsanitize=address,undefined)
         target_compile_options(sol_mir_representation_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(sol_mir_representation_tests PRIVATE -fsanitize=address,undefined)
+        target_compile_options(sol_mir_layout_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+        target_link_options(sol_mir_layout_tests PRIVATE -fsanitize=address,undefined)
         target_compile_options(sol_interpreter_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(sol_interpreter_tests PRIVATE -fsanitize=address,undefined)
         target_compile_options(sol_inspection_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
@@ -312,6 +322,7 @@ if(BUILD_TESTING)
     add_test(NAME mir_plan COMMAND sol_mir_plan_tests)
     add_test(NAME mir_materialize COMMAND sol_mir_materialize_tests)
     add_test(NAME mir_representation COMMAND sol_mir_representation_tests)
+    add_test(NAME mir_layout COMMAND sol_mir_layout_tests)
     add_test(NAME interpreter COMMAND sol_interpreter_tests)
     add_test(NAME inspection COMMAND sol_inspection_tests)
     add_test(NAME test_declarations COMMAND sol_test_declaration_tests)

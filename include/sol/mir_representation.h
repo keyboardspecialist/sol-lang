@@ -28,7 +28,7 @@ typedef enum {
     SOL_MIR_STORAGE_NONE,
     SOL_MIR_STORAGE_SCALAR,
     SOL_MIR_STORAGE_TEXT_HANDLE,
-    /* Abstract represented aggregate value; P2.5 chooses inline vs indirect. */
+    /* Abstract aggregate value; P2.5a lays inhabited nonzero values out indirectly. */
     SOL_MIR_STORAGE_AGGREGATE_VALUE,
     SOL_MIR_STORAGE_CALLABLE_HANDLE,
     SOL_MIR_STORAGE_CAPABILITY_HANDLE,

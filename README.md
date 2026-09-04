@@ -805,8 +805,8 @@ an independent greatest fixed point recomputes Copy and must agree with material
 Unit and inhabited all-zero products have no abstract storage, uninhabited types retain
 a separate flag and no value storage, sums always reserve abstract tagged aggregate
 storage, and inhabited aggregates use an abstract aggregate-value storage class.
-Recursive recipe edges do not choose indirection; P2.5 decides inline versus indirect
-storage together with layout. Distinct/refined
+Recursive recipe edges do not choose indirection; P2.5a now selects uniform indirect
+storage for nonzero inhabited aggregate values. Distinct/refined
 recipes retain nominal identity while following backing storage. Text, functions, and
 capabilities use distinct abstract handles. Explicit Copy and drop kinds describe
 trivial, text, aggregate, wrapper, forbidden/unreachable, callable, and capability
@@ -831,9 +831,56 @@ separate translation unit and independently derives every recipe field, flat-are
 boundary, fixed point, abstract classification, producer, and receiver-root slice from
 the validated materialization without invoking representation construction or building
 a second representation. Its E6 entry-plus-four-tests census is exact and exhaustive.
-P2.4a, P2.4b, and parent P2.4 are complete. P2.5 remains open: there are still no pointer/tag
-widths, byte sizes, alignments, offsets, niches, runtime ABI, symbols/linkage, backend
-choices, or P2.6 source-semantic operation plans in this boundary.
+P2.4a, P2.4b, and parent P2.4 are complete. P2.5a adds a separate unstable
+`SolMirLayout` owner borrowing a validated representation. Every build requires an
+explicit validated target descriptor; there is no ambient host default. The initial
+`sol_mir_target_wasm32()` profile is pointer-size/alignment 4, Int64 alignment 8,
+little-endian, with object sizes bounded by `UINT32_MAX`. Descriptors accept pointer
+sizes 4 or 8, power-of-two alignments that divide their scalar sizes, either explicit
+endianness, and a nonzero `uint64_t` object bound no larger than the target pointer's
+unsigned addressable maximum (`UINT32_MAX` for pointer-4 and `UINT64_MAX` for
+pointer-8).
+
+The chosen internal profile represents `Int64` as an 8-byte, target-aligned two's-
+complement scalar and `Bool` as one byte aligned to one with values 0/1. Unit, Never,
+uninhabited values, and inhabited zero-sized products occupy zero bytes aligned to one.
+Every other inhabited nonzero tuple, record, enum, `Option`, or `Result` value is a
+pointer-sized owning handle to a separately described object; empty inhabited products
+have no object and uninhabited aggregates have neither value storage nor an object.
+Distinct and refined types remain nominally distinct layout records while transparently
+following both backing value and object layout. There are no niches.
+
+Product objects use checked source-order packing and record each field's offset,
+alignment, size, leading padding, object maximum alignment, and tail padding. Sum
+objects always contain an explicit u32 tag at offset zero, including one-variant sums.
+Their common payload starts at `align_up(4, maximum inhabited payload alignment)`;
+each inhabited variant has independently source-packed fields with absolute object
+offsets, and the object reserves the maximum inhabited payload capacity. Empty enums remain
+uninhabited and tags above `UINT32_MAX` reject. Zero-sized fields may share offsets.
+Shape records remain complete for unreachable aggregates: fields of an uninhabited
+product and fields of an uninhabited sum variant have `has_storage=false` with canonical
+zero offset/size/padding and alignment one. Every variant retains its semantic tag and
+inhabitedness; `has_payload_storage=false` identifies variants that contribute no
+physical payload. Object bounds therefore apply only to physically present storage.
+
+Text objects contain a target handle followed by a pointer-sized length. Callable
+objects contain a target token and add an environment handle when the represented
+signature has a bound-operation producer. Capability objects contain a root token and
+a private-source handle. These are object layouts only: target-token assignment, null
+encoding, allocation headers, transfer semantics, and function-table policy remain
+deferred. Every materialized record-field or tuple-ordinal projection maps its exact
+base/result recipe and immediate object-relative field offset; reserved index and
+dereference projections reject.
+
+Layout construction has exact count, persistent-byte, build scratch/work, and
+validation scratch/work limits and an all-zero transactional destination. P2.5a
+validation preflights canonical arenas and detectable owned/borrowed overlap, validates
+the borrowed representation, reconstructs the expected layout, checks local ranges and
+exact arena coverage, and buffers deterministic rendering before one write. As with
+other trusted mutable internal owners, rejected pointer/capacity mutations must be
+restored before free. P2.5 remains open for P2.5b's independent validator and complete
+mutation census. Runtime ABI, symbols/linkage, source-semantic operation plans, and
+backend behavior remain deferred to P2.6, P2.7, P3, and later checkpoints.
 
 ### Phase 0 — Executable language model
 
