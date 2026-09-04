@@ -291,13 +291,28 @@ static bool shallow_ranges(const SolMirMaterialization *o) {
             || (site->instruction != SOL_MIR_MATERIALIZED_NONE
                 && site->instruction >= o->instruction_count)
             || (site->handler != SOL_MIR_MATERIALIZED_NONE
-                && site->handler >= o->handler_count)) return false;
+                && site->handler >= o->handler_count)
+            || (site->produced_function_type != SOL_MIR_MATERIALIZED_NONE
+                && site->produced_function_type >= o->type_count)
+            || (site->captured_receiver_type != SOL_MIR_MATERIALIZED_NONE
+                && site->captured_receiver_type >= o->type_count)) return false;
         if (site->kind == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION
             && (!target_valid(o, site->operation.target_kind,
                     site->operation.instance, site->operation.import)
                 || site->operation.receiver >= o->type_count
-                || site->operation.root >= o->place_count
-                || site->operation.effects >= o->effect_row_count)) return false;
+                || (site->operation.root != SOL_MIR_MATERIALIZED_NONE
+                    && site->operation.root >= o->place_count)
+                || site->operation.effects >= o->effect_row_count
+                || site->captured_receiver_kind
+                    <= SOL_MIR_MATERIALIZED_RECEIVER_NONE
+                || site->captured_receiver_kind
+                    > SOL_MIR_MATERIALIZED_RECEIVER_VALUE
+                || site->captured_receiver_expression >= o->plan->program->ir->expression_count
+                || !slice(site->captured_receiver_roots, o->receiver_root_count)
+                || site->captured_receiver_roots.count == 0)) return false;
+        for (size_t r = 0; r < site->captured_receiver_roots.count; ++r)
+            if (o->receiver_roots[site->captured_receiver_roots.offset + r]
+                >= o->local_count) return false;
     }
     return true;
 }
@@ -481,7 +496,15 @@ static bool concrete_types(const View *view) {
 
 static bool validate_type_and_effect_arenas(const SolMirMaterialization *o) {
     unsigned char *copy = o->type_count == 0 ? NULL : malloc(o->type_count);
-    if (o->type_count != 0 && copy == NULL) return false;
+    unsigned char *fields = o->shape_field_count == 0 ? NULL
+        : calloc(o->shape_field_count, 1);
+    unsigned char *variants = o->shape_variant_count == 0 ? NULL
+        : calloc(o->shape_variant_count, 1);
+    if ((o->type_count != 0 && copy == NULL)
+        || (o->shape_field_count != 0 && fields == NULL)
+        || (o->shape_variant_count != 0 && variants == NULL)) {
+        free(copy); free(fields); free(variants); return false;
+    }
     bool valid = true;
     for (size_t i = 0; i < o->type_count; ++i) {
         const SolMirMaterializedType *type = &o->types[i];
@@ -489,9 +512,109 @@ static bool validate_type_and_effect_arenas(const SolMirMaterialization *o) {
             || !slice(type->arguments, o->type_id_count)
             || !slice(type->parameters, o->type_id_count)
             || !slice(type->parameter_accesses, o->access_count)
+            || !slice(type->fields, o->shape_field_count)
+            || !slice(type->variants, o->shape_variant_count)
             || !slice(type->ownership_components, o->type_id_count)
             || type->parameters.count != type->parameter_accesses.count) {
             valid = false; break;
+        }
+        bool nominal = type->kind == SOL_IR_TYPE_NOMINAL;
+        if ((!nominal && (type->fields.count != 0 || type->variants.count != 0
+                    || type->backing != SOL_MIR_MATERIALIZED_NONE
+                    || type->capability_source != SOL_MIR_MATERIALIZED_NONE
+                    || type->nominal_open))
+            || (type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_RECORD
+                && (type->variants.count != 0
+                    || type->backing != SOL_MIR_MATERIALIZED_NONE
+                    || type->capability_source != SOL_MIR_MATERIALIZED_NONE))
+            || (type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_ENUM
+                && (type->fields.count != 0
+                    || type->backing != SOL_MIR_MATERIALIZED_NONE
+                    || type->capability_source != SOL_MIR_MATERIALIZED_NONE))
+            || ((type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_DISTINCT
+                    || type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_REFINED)
+                && (type->fields.count != 0 || type->variants.count != 0
+                    || type->backing >= o->type_count
+                    || type->capability_source != SOL_MIR_MATERIALIZED_NONE))
+            || (type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_CAPABILITY
+                && (type->fields.count != 0 || type->variants.count != 0
+                    || type->backing != SOL_MIR_MATERIALIZED_NONE
+                    || (type->capability_source != SOL_MIR_MATERIALIZED_NONE
+                        && type->capability_source >= o->type_count)))) {
+            valid = false; break;
+        }
+        if (nominal) {
+            const SolIr *ir = o->plan->program->ir;
+            if (type->definition >= ir->definition_count
+                || type->nominal_open != ir->definitions[type->definition].open) {
+                valid = false; break;
+            }
+            const SolIrDefinition *definition = &ir->definitions[type->definition];
+            if ((type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_RECORD
+                    && (definition->kind != SOL_IR_DEFINITION_RECORD
+                        || type->fields.count != definition->fields.count))
+                || (type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_ENUM
+                    && (definition->kind != SOL_IR_DEFINITION_ENUM
+                        || type->variants.count != definition->variants.count))
+                || (type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_DISTINCT
+                    && definition->kind != SOL_IR_DEFINITION_DISTINCT)
+                || (type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_REFINED
+                    && definition->kind != SOL_IR_DEFINITION_REFINED)
+                || (type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_CAPABILITY
+                    && definition->kind != SOL_IR_DEFINITION_CAPABILITY)) {
+                valid = false; break;
+            }
+            if (type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_CAPABILITY) {
+                SolMirMaterializedTypeId expected = o->plan->types[i].capability_source;
+                if (type->capability_source != expected
+                    || (definition->capability_source == SOL_IR_NONE)
+                        != (expected == SOL_MIR_MATERIALIZED_NONE)) {
+                    valid = false; break;
+                }
+            }
+            if ((type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_DISTINCT
+                    || type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_REFINED)
+                && (type->ownership_components.count != 1
+                    || o->type_ids[type->ownership_components.offset]
+                        != type->backing)) { valid = false; break; }
+        }
+        for (size_t f = 0; f < type->fields.count; ++f) {
+            size_t slot = type->fields.offset + f;
+            const SolMirMaterializedShapeField *field = &o->shape_fields[slot];
+            if (fields[slot] || field->ordinal != f || field->type >= o->type_count) {
+                valid = false; break;
+            }
+            if (type->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_RECORD
+                && field->source_field != o->plan->program->ir->definitions[
+                    type->definition].fields.offset + f) { valid = false; break; }
+            fields[slot] = 1;
+        }
+        for (size_t v = 0; valid && v < type->variants.count; ++v) {
+            size_t slot = type->variants.offset + v;
+            const SolMirMaterializedShapeVariant *variant
+                = &o->shape_variants[slot];
+            if (variants[slot] || variant->ordinal != v
+                || !slice(variant->fields, o->shape_field_count)) {
+                valid = false; break;
+            }
+            const SolIrDefinition *definition = &o->plan->program->ir->definitions[
+                type->definition];
+            if (variant->source_variant != definition->variants.offset + v
+                || variant->fields.count != o->plan->program->ir->variants[
+                    variant->source_variant].fields.count) { valid = false; break; }
+            variants[slot] = 1;
+            for (size_t f = 0; f < variant->fields.count; ++f) {
+                size_t field_slot = variant->fields.offset + f;
+                const SolMirMaterializedShapeField *field
+                    = &o->shape_fields[field_slot];
+                if (fields[field_slot] || field->ordinal != f
+                    || field->type >= o->type_count) { valid = false; break; }
+                if (field->source_field != o->plan->program->ir->variants[
+                        variant->source_variant].fields.offset + f) {
+                    valid = false; break;
+                }
+                fields[field_slot] = 1;
+            }
         }
         if ((type->kind == SOL_IR_TYPE_NOMINAL
                 && (type->nominal_category < SOL_MIR_MATERIALIZED_NOMINAL_RECORD
@@ -536,7 +659,11 @@ static bool validate_type_and_effect_arenas(const SolMirMaterialization *o) {
     valid = valid && !changed;
     for (size_t i = 0; valid && i < o->type_count; ++i)
         valid = o->types[i].is_copy == (copy[i] != 0);
-    free(copy);
+    for (size_t i = 0; valid && i < o->shape_field_count; ++i)
+        valid = fields[i] == 1;
+    for (size_t i = 0; valid && i < o->shape_variant_count; ++i)
+        valid = variants[i] == 1;
+    free(copy); free(fields); free(variants);
     for (size_t i = 0; valid && i < o->effect_atom_count; ++i) {
         const SolMirMaterializedEffectAtom *atom = &o->effect_atoms[i];
         if (!slice(atom->name, o->effect_name_count)
@@ -2066,6 +2193,101 @@ static bool validate_semantic_sites(const SolMirMaterialization *o) {
             && site->source.start == binding->source.start
             && site->source.end == binding->source.end;
         if (!valid) break;
+        bool callable_value = site->kind == SOL_MIR_PLAN_DEMAND_FUNCTION_VALUE
+            || site->kind == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION
+            || site->kind == SOL_MIR_PLAN_DEMAND_PREDICATE_FUNCTION_VALUE;
+        if (callable_value) {
+            if (site->produced_function_type >= o->type_count
+                || o->types[site->produced_function_type].kind
+                    != SOL_IR_TYPE_FUNCTION) { valid = false; break; }
+            const SolMirMaterializedType *function
+                = &o->types[site->produced_function_type];
+            SolMirMaterializedTypeId receiver, result;
+            SolMirMaterializedEffectRowId effects;
+            SolMirPlanSlice parameters, accesses;
+            if (!argument_signature(o, binding, &receiver, &parameters,
+                    &accesses, &result, &effects)
+                || function->result != result || function->effects != effects
+                || function->parameters.count != parameters.count
+                || function->parameter_accesses.count != accesses.count) {
+                valid = false; break;
+            }
+            for (size_t p = 0; p < parameters.count; ++p) {
+                if (o->type_ids[function->parameters.offset + p]
+                        != o->type_ids[parameters.offset + p]
+                    || o->accesses[function->parameter_accesses.offset + p]
+                        != o->accesses[accesses.offset + p]) {
+                    valid = false; break;
+                }
+            }
+            if (!valid) break;
+            if ((site->kind == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION
+                    && (receiver >= o->type_count
+                        || site->captured_receiver_type != receiver))
+                || (site->kind != SOL_MIR_PLAN_DEMAND_BOUND_OPERATION
+                    && site->captured_receiver_type != SOL_MIR_MATERIALIZED_NONE)) {
+                valid = false; break;
+            }
+            if (site->kind == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION) {
+                const SolMirMaterializedImage *image = &o->images[site->parent];
+                bool capture = false;
+                if (site->captured_receiver_kind
+                        == SOL_MIR_MATERIALIZED_RECEIVER_PLACE) {
+                    capture = in(image->places, site->captured_receiver_place)
+                        && o->places[site->captured_receiver_place].final_type
+                            == site->captured_receiver_type
+                        && site->captured_receiver_temporary
+                            == SOL_MIR_MATERIALIZED_NONE
+                        && site->captured_receiver_value
+                            == SOL_MIR_MATERIALIZED_NONE;
+                } else if (site->captured_receiver_kind
+                        == SOL_MIR_MATERIALIZED_RECEIVER_TEMPORARY) {
+                    capture = in(image->temporaries,
+                            site->captured_receiver_temporary)
+                        && o->temporaries[site->captured_receiver_temporary].type
+                            == site->captured_receiver_type
+                        && site->captured_receiver_place
+                            == SOL_MIR_MATERIALIZED_NONE
+                        && site->captured_receiver_value
+                            == SOL_MIR_MATERIALIZED_NONE;
+                } else if (site->captured_receiver_kind
+                        == SOL_MIR_MATERIALIZED_RECEIVER_VALUE) {
+                    capture = in(image->values, site->captured_receiver_value)
+                        && o->values[site->captured_receiver_value].type
+                            == site->captured_receiver_type
+                        && site->captured_receiver_place
+                            == SOL_MIR_MATERIALIZED_NONE
+                        && site->captured_receiver_temporary
+                            == SOL_MIR_MATERIALIZED_NONE
+                        && o->values[site->captured_receiver_value].instruction
+                            == site->captured_receiver_instruction;
+                } else if (site->captured_receiver_kind
+                        == SOL_MIR_MATERIALIZED_RECEIVER_SOURCE_EXPRESSION) {
+                    capture = site->captured_receiver_place
+                            == SOL_MIR_MATERIALIZED_NONE
+                        && site->captured_receiver_temporary
+                            == SOL_MIR_MATERIALIZED_NONE
+                        && site->captured_receiver_value
+                            == SOL_MIR_MATERIALIZED_NONE
+                        && site->captured_receiver_instruction
+                            == SOL_MIR_MATERIALIZED_NONE;
+                }
+                if (!capture
+                    || (site->operation.root != SOL_MIR_MATERIALIZED_NONE
+                        && site->operation.root != site->captured_receiver_place)) {
+                    valid = false; break;
+                }
+                for (size_t r = 0; r < site->captured_receiver_roots.count; ++r)
+                    if (!in(image->locals, o->receiver_roots[
+                            site->captured_receiver_roots.offset + r])) {
+                        valid = false; break;
+                    }
+                if (!valid) break;
+            }
+        } else if (site->produced_function_type != SOL_MIR_MATERIALIZED_NONE
+            || site->captured_receiver_type != SOL_MIR_MATERIALIZED_NONE) {
+            valid = false; break;
+        }
         if (site->kind != SOL_MIR_PLAN_DEMAND_ROOT) {
             valid = site->parent < o->image_count
                 && site->context < o->context_count
@@ -2250,6 +2472,7 @@ static bool validate_arena_closure(const SolMirMaterialization *o) {
     COUNTERS(projections, o->projection_count);
     COUNTERS(writebacks, o->writeback_count); COUNTERS(handler_enters, o->handler_count);
     COUNTERS(handler_exits, o->handler_count); COUNTERS(temp_initializers, o->temporary_count);
+    COUNTERS(receiver_roots, o->receiver_root_count);
 #undef COUNTERS
     bool valid = (o->edge_count == 0 || edges) && (o->edge_value_count == 0 || edge_values)
         && (o->parameter_value_count == 0 || parameters)
@@ -2257,6 +2480,7 @@ static bool validate_arena_closure(const SolMirMaterialization *o) {
         && (o->construct_operand_count == 0 || operands)
         && (o->projection_count == 0 || projections)
         && (o->writeback_count == 0 || writebacks)
+        && (o->receiver_root_count == 0 || receiver_roots)
         && (o->handler_count == 0 || (handler_enters && handler_exits))
         && (o->temporary_count == 0 || temp_initializers);
     for (size_t b = 0; valid && b < o->block_count; ++b) {
@@ -2326,18 +2550,29 @@ static bool validate_arena_closure(const SolMirMaterialization *o) {
             projections[slot] = 1;
         }
     }
+    for (size_t s = 0; valid && s < o->semantic_site_count; ++s) {
+        const SolMirMaterializedSemanticSite *site = &o->semantic_sites[s];
+        for (size_t r = 0; r < site->captured_receiver_roots.count; ++r) {
+            size_t slot = site->captured_receiver_roots.offset + r;
+            valid = slot < o->receiver_root_count && !receiver_roots[slot];
+            if (!valid) break;
+            receiver_roots[slot] = 1;
+        }
+    }
 #define ALL(counter, count) for (size_t i = 0; valid && i < (count); ++i) \
     valid = (counter)[i] == 1
     ALL(edges, o->edge_count); ALL(edge_values, o->edge_value_count);
     ALL(parameters, o->parameter_value_count); ALL(arguments, o->call_argument_count);
     ALL(operands, o->construct_operand_count); ALL(projections, o->projection_count);
     ALL(writebacks, o->writeback_count);
+    ALL(receiver_roots, o->receiver_root_count);
     ALL(handler_enters, o->handler_count); ALL(handler_exits, o->handler_count);
     ALL(temp_initializers, o->temporary_count);
 #undef ALL
     free(edges); free(edge_values); free(parameters); free(arguments); free(operands);
     free(projections);
     free(writebacks); free(handler_enters); free(handler_exits); free(temp_initializers);
+    free(receiver_roots);
     return valid;
 }
 

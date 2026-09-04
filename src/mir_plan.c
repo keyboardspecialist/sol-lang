@@ -14,6 +14,7 @@ typedef struct {
     size_t parameter_count;
     SolMirPlanTypeId result;
     SolMirPlanEffectRowId effects;
+    SolMirPlanTypeId capability_source;
     SolMirPlanTypeId *ownership_components;
     size_t ownership_component_count;
     bool ownership_complete;
@@ -561,6 +562,7 @@ static bool raw_type_equal(const RawType *left, const RawType *right) {
         && left->argument_count == right->argument_count
         && left->parameter_count == right->parameter_count
         && left->result == right->result && left->effects == right->effects
+        && left->capability_source == right->capability_source
         && left->ownership_component_count == right->ownership_component_count
         && (left->argument_count == 0 || memcmp(left->arguments, right->arguments,
             left->argument_count * sizeof(*left->arguments)) == 0)
@@ -685,6 +687,7 @@ static bool substitute_type(Environment *environment, SolIrTypeId source,
     candidate.definition = type->definition;
     candidate.result = SOL_MIR_PLAN_NONE;
     candidate.effects = SOL_MIR_PLAN_NONE;
+    candidate.capability_source = SOL_MIR_PLAN_NONE;
     if (type->kind == SOL_IR_TYPE_FUNCTION && type->definition != SOL_IR_NONE) {
         if (type->definition >= builder->ir->definition_count) return false;
         SolIrCallableId exact_id
@@ -834,6 +837,14 @@ static bool substitute_type(Environment *environment, SolIrTypeId source,
                 || !substitute_type(&nominal_environment,
                     definition->representation, depth + 1,
                     &builder->types[reserved].ownership_components[0])) goto failed;
+        } else if (definition->kind == SOL_IR_DEFINITION_CAPABILITY
+            && definition->capability_source != SOL_IR_NONE) {
+            SolMirPlanTypeId capability_source;
+            if (definition->capability_source >= builder->ir->local_count
+                || !substitute_type(&nominal_environment,
+                    builder->ir->locals[definition->capability_source].type,
+                    depth + 1, &capability_source)) goto failed;
+            builder->types[reserved].capability_source = capability_source;
         }
         builder->types[reserved].ownership_complete = true;
         *result = reserved;
@@ -1933,7 +1944,6 @@ static bool scan_instance(Builder *builder, SolMirPlanInstanceId instance_id) {
         if (!substitute_type(&environment,
                 builder->ir->expressions[term->as.check_refined.source_expression].type,
                 1, &nominal_type)) return false;
-        RawType *nominal = &builder->types[nominal_type];
         for (size_t obligation = 0; obligation < builder->ir->obligation_count;
             ++obligation) {
             const SolIrObligation *item = &builder->ir->obligations[obligation];
@@ -1941,8 +1951,10 @@ static bool scan_instance(Builder *builder, SolMirPlanInstanceId instance_id) {
                 || item->owner != term->as.check_refined.definition) continue;
             Environment predicate = environment;
             predicate.nominal = term->as.check_refined.definition;
-            predicate.nominal_arguments = nominal->arguments;
-            predicate.nominal_argument_count = nominal->argument_count;
+            predicate.nominal_arguments
+                = builder->types[nominal_type].arguments;
+            predicate.nominal_argument_count
+                = builder->types[nominal_type].argument_count;
             predicate.self_type = nominal_type;
             SolMirPlanContext refinement = {SOL_MIR_PLAN_CONTEXT_REFINEMENT,
                 instance_id, block, term->as.check_refined.definition,
@@ -2180,6 +2192,7 @@ static bool canonicalize_types(Builder *builder) {
             remap_type_id(&type->ownership_components[child], remap);
         }
         remap_type_id(&type->result, remap);
+        remap_type_id(&type->capability_source, remap);
     }
     for (size_t index = 0; index < builder->instance_count; ++index) {
         RawInstance *instance = &builder->instances[index];
@@ -2527,6 +2540,7 @@ static bool publish(Builder *builder) {
         access += source->parameter_count;
         target->result = source->result;
         target->effects = source->effects;
+        target->capability_source = source->capability_source;
         target->ownership_component_offset = component;
         target->ownership_component_count = source->ownership_component_count;
         if (source->ownership_component_count != 0) memcpy(
@@ -2873,7 +2887,32 @@ static bool slices_valid(const SolMirPlan *plan, SolDiagnostics *diagnostics) {
         expected_components += type->ownership_component_count;
         if ((type->result != SOL_MIR_PLAN_NONE && type->result >= plan->type_count)
             || (type->effects != SOL_MIR_PLAN_NONE
-                && type->effects >= plan->effect_row_count)) return false;
+                && type->effects >= plan->effect_row_count)
+            || (type->capability_source != SOL_MIR_PLAN_NONE
+                && type->capability_source >= plan->type_count)) return false;
+        if ((type->kind != SOL_IR_TYPE_NOMINAL
+                || type->definition >= plan->program->ir->definition_count
+                || plan->program->ir->definitions[type->definition].kind
+                    != SOL_IR_DEFINITION_CAPABILITY)
+            && type->capability_source != SOL_MIR_PLAN_NONE) return false;
+        if (type->kind == SOL_IR_TYPE_NOMINAL
+            && type->definition < plan->program->ir->definition_count
+            && plan->program->ir->definitions[type->definition].kind
+                == SOL_IR_DEFINITION_CAPABILITY) {
+            const SolIr *ir = plan->program->ir;
+            SolIrLocalId source = ir->definitions[type->definition].capability_source;
+            if ((source == SOL_IR_NONE)
+                    != (type->capability_source == SOL_MIR_PLAN_NONE)) return false;
+            if (source != SOL_IR_NONE) {
+                SolIrTypeId source_type = ir->locals[source].type;
+                if (source_type >= ir->type_count
+                    || ir->types[source_type].kind != SOL_IR_TYPE_NOMINAL
+                    || plan->types[type->capability_source].kind
+                        != SOL_IR_TYPE_NOMINAL
+                    || plan->types[type->capability_source].definition
+                        != ir->types[source_type].definition) return false;
+            }
+        }
         for (size_t child = type->argument_offset;
             child < type->ownership_component_offset
                 + type->ownership_component_count; ++child) {
@@ -3103,6 +3142,7 @@ static bool plans_equal(const SolMirPlan *a, const SolMirPlan *b) {
             || x->parameter_count != y->parameter_count
             || x->parameter_access_offset != y->parameter_access_offset
             || x->result != y->result || x->effects != y->effects
+            || x->capability_source != y->capability_source
             || x->ownership_component_offset
                 != y->ownership_component_offset
             || x->ownership_component_count

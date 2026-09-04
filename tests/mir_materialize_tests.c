@@ -285,10 +285,16 @@ static void test_generic_recursion_lifecycle_limits_and_render(void) {
         && memcmp(first_text, second_text, first_length) == 0);
     free(first_text); free(second_text);
 
-    SolMirMaterializeLimits exact = {first.usage.instances,
-        first.usage.cfg_items, first.usage.bindings,
-        first.usage.concrete_records, first.usage.owned_bytes,
-        first.usage.materialization_work, first.usage.validation_work};
+    SolMirMaterializeLimits exact = {
+        .max_instances = first.usage.instances,
+        .max_cfg_items = first.usage.cfg_items,
+        .max_bindings = first.usage.bindings,
+        .max_concrete_records = first.usage.concrete_records,
+        .max_owned_bytes = first.usage.owned_bytes,
+        .max_materialization_work = first.usage.materialization_work,
+        .max_shape_resolution_work = first.usage.shape_resolution_work,
+        .max_validation_work = first.usage.validation_work,
+    };
     SolMirMaterialization limited;
     sol_mir_materialization_init(&limited);
     SolMirMaterializeBuildRequest limited_request = {&plan, &exact};
@@ -308,6 +314,7 @@ static void test_generic_recursion_lifecycle_limits_and_render(void) {
     LIMIT_FAIL(max_concrete_records);
     LIMIT_FAIL(max_owned_bytes);
     LIMIT_FAIL(max_materialization_work);
+    LIMIT_FAIL(max_shape_resolution_work);
     LIMIT_FAIL(max_validation_work);
 #undef LIMIT_FAIL
 
@@ -904,6 +911,7 @@ static void test_recursive_nominal_planning_and_copy_cycle(void) {
     bool node_cycle = false;
     bool generic_copy_cycle = false;
     bool generic_noncopy_cycle = false;
+    bool node_shape = false, chain_shape = false;
     for (size_t id = 0; id < materialization.type_count; ++id) {
         const SolMirMaterializedType *type = &materialization.types[id];
         if (type->kind != SOL_IR_TYPE_NOMINAL) continue;
@@ -920,6 +928,9 @@ static void test_recursive_nominal_planning_and_copy_cycle(void) {
                     && materialization.type_ids[
                         option->ownership_components.offset] == id
                     && type->is_copy && option->is_copy;
+                node_shape = type->fields.count == 1
+                    && materialization.shape_fields[type->fields.offset].ordinal == 0
+                    && materialization.shape_fields[type->fields.offset].type == child;
             } else if (strcmp(name, "Chain") == 0) {
                 bool self_cycle = child == id;
                 SolMirMaterializedTypeId argument = materialization.type_ids[
@@ -931,10 +942,16 @@ static void test_recursive_nominal_planning_and_copy_cycle(void) {
                     generic_noncopy_cycle = generic_noncopy_cycle
                         || (self_cycle && !type->is_copy);
                 }
+                chain_shape = chain_shape || (type->variants.count == 3
+                    && materialization.shape_variants[type->variants.offset].ordinal == 0
+                    && materialization.shape_variants[type->variants.offset + 1].ordinal == 1
+                    && materialization.shape_variants[type->variants.offset + 2].ordinal == 2);
             }
         }
     }
     CHECK(node_cycle && generic_copy_cycle && generic_noncopy_cycle);
+    CHECK(node_shape && chain_shape && materialization.shape_field_count != 0
+        && materialization.shape_variant_count != 0);
     CHECK(sol_mir_plan_validate(&plan, NULL));
     CHECK(sol_mir_materialization_validate(&materialization, NULL));
     bool capability_copy = false, category = false, fixed_point = false;
@@ -961,6 +978,16 @@ static void test_recursive_nominal_planning_and_copy_cycle(void) {
         }
     }
     CHECK(capability_copy && category && fixed_point);
+    if (materialization.shape_field_count != 0) {
+        size_t saved = materialization.shape_fields[0].ordinal;
+        ++materialization.shape_fields[0].ordinal;
+        CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+        materialization.shape_fields[0].ordinal = saved;
+        SolIrFieldId source = materialization.shape_fields[0].source_field;
+        materialization.shape_fields[0].source_field = SOL_IR_NONE;
+        CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+        materialization.shape_fields[0].source_field = source;
+    }
     CHECK(sol_mir_materialization_validate_concrete(&materialization, NULL));
     sol_mir_materialization_free(&materialization);
     sol_mir_plan_free(&plan);

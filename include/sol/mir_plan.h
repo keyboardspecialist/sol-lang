@@ -45,6 +45,8 @@ typedef struct {
     size_t parameter_access_offset;
     SolMirPlanTypeId result;
     SolMirPlanEffectRowId effects;
+    /* Concrete derived-capability source; not an ownership component. */
+    SolMirPlanTypeId capability_source;
     /* Substituted fields/representation used to classify ownership. */
     size_t ownership_component_offset;
     size_t ownership_component_count;

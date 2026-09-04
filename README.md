@@ -743,7 +743,16 @@ operation keys, and concrete authority/provider places. The builder records nomi
 categories and substituted ownership components from authenticated owning IR;
 independent concrete validation then recomputes the exact Copy fixed point solely from
 those materialized type records, including recursive records/enums and
-distinct/refined representations. A symbolic generic move that
+distinct/refined representations. Concrete type metadata now separately owns
+substituted source-order nominal field and variant shapes, preserving source IDs,
+ordinals, and per-variant boundaries; distinct/refined backing types, optional
+derived-capability source types, nominal openness, produced function types, and
+bound-operation receiver types are explicit rather than inferred from ownership
+components. Derived-capability private source chains are separate concrete plan/type
+edges, so selecting only the most-derived capability still closes every source type
+without treating private sources as Copy ownership components. Recursive and generic
+nominal fields and capability sources resolve through canonical plan contexts without
+recursively expanding C records. A symbolic generic move that
 specializes to a concrete Copy type is normalized to an executable copy, while the
 authentication-only topology retains its source opcode.
 
@@ -770,8 +779,57 @@ materialization closure is exactly 8 images, 4 imports, and 12 invokes for entry
 14, 4, and 18 for entry plus all tests; every bodyful E6 callable is represented.
 Builds are transactional and bound instances, cloned and concrete CFG items, concrete
 records/bindings, owned bytes, and work; rendering validates and buffers before one
-write. P2.4 representation recipes are the next boundary. No representation/layout,
-runtime ABI, symbol/linkage, or backend choice is made here.
+write. Concrete source-shape substitution also has an exact dedicated work sub-limit;
+exhausting it preserves the resource-exhausted outcome rather than being relabeled as
+an unsupported shape.
+
+P2.4a adds the separate unstable `SolMirRepresentation` owner. It borrows a validated
+materialization and owns exactly one same-ID target-neutral recipe for every concrete
+type, plus flat field, variant, recipe-ID/access, and callable-producer arenas. Recipes
+cover `Int64`, `Bool`, `Text`, Unit, Never, tuples, records, enums, `Option`, `Result`,
+distinct/refined wrappers, structural functions, and capabilities. Exact function
+values and bound operations are producer records attached to function recipes, so one
+signature may have multiple producers; a bound producer retains its resolved
+instance/import, concrete captured receiver type, optional place/temporary/value,
+source expression/context, normalized concrete root set, and effects. Computed legal
+receivers, including authority-preserving call results, therefore do not require a
+place; conditional or aliased dynamic callable producers rejected by P2.1 remain
+outside this boundary rather than failing later in materialization. Capability recipes
+retain the concrete nominal definition and optional concrete capability source type,
+not runtime roots or source pointers.
+
+Fields and variants retain source order. Every sum has an explicit semantic tag:
+source enum ordinal, `Option` None=0/Some=1, and `Result` Ok=0/Err=1. No niche is
+selected. Bounded least fixed points classify inhabitedness and then zero-sized values;
+an independent greatest fixed point recomputes Copy and must agree with materialization.
+Unit and inhabited all-zero products have no abstract storage, uninhabited types retain
+a separate flag and no value storage, sums always reserve abstract tagged aggregate
+storage, and inhabited aggregates use an abstract aggregate-value storage class.
+Recursive recipe edges do not choose indirection; P2.5 decides inline versus indirect
+storage together with layout. Distinct/refined
+recipes retain nominal identity while following backing storage. Text, functions, and
+capabilities use distinct abstract handles. Explicit Copy and drop kinds describe
+trivial, text, aggregate, wrapper, forbidden/unreachable, callable, and capability
+behavior without selecting byte sizes.
+
+The representation builder has complete limits and usage, all-zero transactional
+destinations, rejects reachable open enums, and validates allocation independence from
+all transitive borrowed arenas. `owned_bytes` measures persistent output allocations;
+separate exact peak build- and validation-scratch byte limits cover fixed-point facts,
+local validation counters, reconstructive representation output, and a conservative
+bound for prerequisite materialization validation/reconstruction. Build work charges
+counting, nested shape population, producer/root copying, fixed-point scans, and
+wrapper traversal. Validation preflights checked counts, capacities, persistent bytes,
+work, scratch, and raw allocation ranges before reading any owned arena element, then
+rejects borrowed overlap before typed traversal. As with the other unstable mutable
+owners, malformed pointer/capacity tests must restore original allocation bases and
+extents before `free`; freeing a deliberately aliased rejected mutation is invalid.
+Rendering validates and buffers before one write.
+P2.4a validation intentionally combines exact reconstruction with strong local graph,
+slice, tag, fixed-point, producer-consumption, and ownership checks. P2.4 and the full
+independent E6 recipe census remain open for P2.4b. There are still no pointer/tag
+widths, byte sizes, alignments, offsets, niches, runtime ABI, symbols/linkage, backend
+choices, or P2.6 source-semantic operation plans in this boundary.
 
 ### Phase 0 — Executable language model
 

@@ -40,6 +40,18 @@ typedef enum {
 } SolMirMaterializedNominalCategory;
 
 typedef struct {
+    SolIrFieldId source_field;
+    size_t ordinal;
+    SolMirMaterializedTypeId type;
+} SolMirMaterializedShapeField;
+
+typedef struct {
+    SolIrVariantId source_variant;
+    size_t ordinal;
+    SolMirPlanSlice fields;
+} SolMirMaterializedShapeVariant;
+
+typedef struct {
     SolIrTypeKind kind;
     SolIrDefinitionId definition; /* Source provenance, not a layout choice. */
     SolMirMaterializedNominalCategory nominal_category;
@@ -48,7 +60,13 @@ typedef struct {
     SolMirPlanSlice parameter_accesses;
     SolMirMaterializedTypeId result;
     SolMirMaterializedEffectRowId effects;
+    /* Concrete source-order nominal shape, separate from ownership semantics. */
+    SolMirPlanSlice fields;
+    SolMirPlanSlice variants;
+    SolMirMaterializedTypeId backing;
+    SolMirMaterializedTypeId capability_source;
     SolMirPlanSlice ownership_components;
+    bool nominal_open;
     bool is_copy;
 } SolMirMaterializedType;
 
@@ -264,6 +282,14 @@ typedef enum {
     SOL_MIR_MATERIALIZED_PRODUCER_HANDLER,
 } SolMirMaterializedProducerKind;
 
+typedef enum {
+    SOL_MIR_MATERIALIZED_RECEIVER_NONE,
+    SOL_MIR_MATERIALIZED_RECEIVER_SOURCE_EXPRESSION,
+    SOL_MIR_MATERIALIZED_RECEIVER_PLACE,
+    SOL_MIR_MATERIALIZED_RECEIVER_TEMPORARY,
+    SOL_MIR_MATERIALIZED_RECEIVER_VALUE,
+} SolMirMaterializedReceiverKind;
+
 typedef struct {
     SolMirPlanDemandKind kind;
     SolMirMaterializedBindingId binding;
@@ -276,6 +302,15 @@ typedef struct {
     SolMirMaterializedBlockId block;
     SolMirMaterializedInstructionId instruction;
     SolMirMaterializedHandlerId handler;
+    SolMirMaterializedTypeId produced_function_type;
+    SolMirMaterializedTypeId captured_receiver_type;
+    SolMirMaterializedReceiverKind captured_receiver_kind;
+    SolIrExpressionId captured_receiver_expression;
+    SolMirMaterializedPlaceId captured_receiver_place;
+    SolMirMaterializedTemporaryId captured_receiver_temporary;
+    SolMirMaterializedValueId captured_receiver_value;
+    SolMirMaterializedInstructionId captured_receiver_instruction;
+    SolMirPlanSlice captured_receiver_roots;
     SolMirMaterializedOperationKey operation;
 } SolMirMaterializedSemanticSite;
 
@@ -350,6 +385,7 @@ typedef struct {
     size_t max_concrete_records;
     size_t max_owned_bytes;
     size_t max_materialization_work;
+    size_t max_shape_resolution_work;
     size_t max_validation_work;
 } SolMirMaterializeLimits;
 
@@ -360,6 +396,7 @@ typedef struct {
     size_t concrete_records;
     size_t owned_bytes;
     size_t materialization_work;
+    size_t shape_resolution_work;
     size_t validation_work;
 } SolMirMaterializeUsage;
 
@@ -374,6 +411,12 @@ typedef struct {
     SolMirMaterializedType *types;
     size_t type_count;
     size_t type_capacity;
+    SolMirMaterializedShapeField *shape_fields;
+    size_t shape_field_count;
+    size_t shape_field_capacity;
+    SolMirMaterializedShapeVariant *shape_variants;
+    size_t shape_variant_count;
+    size_t shape_variant_capacity;
     SolMirMaterializedTypeId *type_ids;
     size_t type_id_count;
     size_t type_id_capacity;
@@ -431,6 +474,9 @@ typedef struct {
     SolMirMaterializedSemanticSite *semantic_sites;
     size_t semantic_site_count;
     size_t semantic_site_capacity;
+    SolMirMaterializedLocalId *receiver_roots;
+    size_t receiver_root_count;
+    size_t receiver_root_capacity;
     SolMirMaterializedImport *imports;
     size_t import_count;
     size_t import_capacity;
