@@ -873,14 +873,24 @@ base/result recipe and immediate object-relative field offset; reserved index an
 dereference projections reject.
 
 Layout construction has exact count, persistent-byte, build scratch/work, and
-validation scratch/work limits and an all-zero transactional destination. P2.5a
-validation preflights canonical arenas and detectable owned/borrowed overlap, validates
-the borrowed representation, reconstructs the expected layout, checks local ranges and
-exact arena coverage, and buffers deterministic rendering before one write. As with
-other trusted mutable internal owners, rejected pointer/capacity mutations must be
-restored before free. P2.5 remains open for P2.5b's independent validator and complete
-mutation census. Runtime ABI, symbols/linkage, source-semantic operation plans, and
-backend behavior remain deferred to P2.6, P2.7, P3, and later checkpoints.
+validation scratch/work limits and an all-zero transactional destination. P2.5b moves
+validation to a separate translation unit. It independently checks the descriptor and
+derives every value/object layout, source-order product and sum packing decision,
+canonical dead record, projection map, exact arena consumption, and successful-builder
+resource charge without calling construction helpers or building a second layout.
+Validation preflights checked dimensions, disjoint owned ranges, and each borrowed
+owner-record link for null and overlap, validates the representation, and then rejects
+overlap with every transitive representation, materialization, plan, program,
+template/image MIR, IR, and string arena before reading layout records. Borrowed links
+must still be trusted readable pointers; validation detects malformed structure and
+overlap but is not an arbitrary-address recovery API. The frozen E6 Wasm32 closure has
+an exact 21-type, 11-field, 9-variant, 5-projection census, including every record and
+source identity. Rendering still
+validates and buffers before one write. As with other trusted mutable internal owners,
+rejected pointer/capacity mutations must be restored before free. P2.5a, P2.5b, and
+parent P2.5 are complete; P2.6 is next. Runtime ABI, symbols/linkage, source-semantic
+operation plans, and backend behavior remain deferred to P2.6, P2.7, P3, and later
+checkpoints.
 
 ### Phase 0 — Executable language model
 

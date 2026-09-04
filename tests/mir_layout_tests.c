@@ -369,7 +369,6 @@ static void test_layout_contract(void) {
             && p.layout.projections[2].object_offset == 8
             && p.layout.projections[3].object_offset == 0);
     }
-
     size_t first_length = 0, second_length = 0;
     char *first = render(&p.layout, &first_length);
     SolMirLayout repeated; sol_mir_layout_init(&repeated);
@@ -380,12 +379,44 @@ static void test_layout_contract(void) {
     CHECK(first != NULL && second != NULL && first_length == second_length
         && memcmp(first, second, first_length) == 0);
     free(first); free(second); sol_mir_layout_free(&repeated);
-    SolMirTargetDescriptor big = {8, 8, 4, SOL_MIR_ENDIAN_BIG, UINT64_MAX};
+    SolMirTargetDescriptor big = wasm;
+    big.endianness = SOL_MIR_ENDIAN_BIG;
     SolMirLayoutBuildRequest big_request = {&p.representation, &big, NULL};
     CHECK(sol_mir_layout_build(&big_request, &repeated, &p.diagnostics)
         == SOL_MIR_LAYOUT_BUILD_SUCCEEDED);
     CHECK(repeated.target.endianness == SOL_MIR_ENDIAN_BIG
-        && repeated.target.pointer_size == 8);
+        && repeated.target.pointer_size == 4);
+    for (size_t i = 0; i < p.layout.type_count; ++i)
+        CHECK(repeated.types[i].value_size == p.layout.types[i].value_size
+            && repeated.types[i].object_size == p.layout.types[i].object_size
+            && repeated.types[i].payload_offset == p.layout.types[i].payload_offset);
+    for (size_t i = 0; i < p.layout.field_count; ++i)
+        CHECK(repeated.fields[i].offset == p.layout.fields[i].offset);
+    size_t little_length = 0, big_length = 0;
+    char *little_text = render(&p.layout, &little_length);
+    char *big_text = render(&repeated, &big_length);
+    CHECK(little_text != NULL && big_text != NULL
+        && little_length == big_length
+        && memcmp(little_text, big_text, little_length) != 0);
+    free(little_text); free(big_text);
+    sol_mir_layout_free(&repeated);
+    SolMirTargetDescriptor pointer8 = {8, 8, 4, SOL_MIR_ENDIAN_LITTLE,
+        UINT64_MAX};
+    SolMirLayoutBuildRequest pointer8_request
+        = {&p.representation, &pointer8, NULL};
+    CHECK(sol_mir_layout_build(&pointer8_request, &repeated, &p.diagnostics)
+        == SOL_MIR_LAYOUT_BUILD_SUCCEEDED);
+    const SolMirTypeLayout *pointer8_mixed = named_layout(&repeated, "Mixed");
+    const SolMirTypeLayout *pointer8_token = named_layout(&repeated, "Token");
+    CHECK(pointer8_mixed != NULL && pointer8_mixed->value_size == 8);
+    CHECK(pointer8_token != NULL && pointer8_token->value_size == 8
+        && pointer8_token->object_size == 16
+        && pointer8_token->private_source_handle_offset == 8);
+    for (size_t i = 0; i < repeated.type_count; ++i)
+        if (p.representation.recipes[i].kind == SOL_MIR_RECIPE_TEXT)
+            CHECK(repeated.types[i].value_size == 8
+                && repeated.types[i].object_size == 16
+                && repeated.types[i].length_offset == 8);
     sol_mir_layout_free(&repeated);
 
     SolMirLayoutLimits exact = {
@@ -424,6 +455,9 @@ static void test_layout_contract(void) {
         CHECK(ftell(stream) == 0); fclose(stream);
     }
     p.layout.fields[0].offset = saved_offset;
+    p.layout.fields[0].offset = UINT64_MAX;
+    CHECK(!sol_mir_layout_validate(&p.layout, NULL));
+    p.layout.fields[0].offset = saved_offset;
     SolMirFieldLayout *saved_fields = p.layout.fields;
     p.layout.fields = (SolMirFieldLayout *)(void *)p.layout.types;
     CHECK(!sol_mir_layout_validate(&p.layout, NULL));
@@ -450,6 +484,18 @@ static void test_layout_contract(void) {
     REJECT_COUNT(type); REJECT_COUNT(field);
     REJECT_COUNT(variant); REJECT_COUNT(projection);
 #undef REJECT_COUNT
+    size_t saved_type_count = p.layout.type_count;
+    size_t saved_type_capacity = p.layout.type_capacity;
+    size_t saved_usage_types = p.layout.usage.type_layouts;
+    size_t saved_type_limit = p.layout.limits.max_type_layouts;
+    p.layout.type_count = p.layout.type_capacity = SIZE_MAX;
+    p.layout.usage.type_layouts = SIZE_MAX;
+    p.layout.limits.max_type_layouts = SIZE_MAX;
+    CHECK(!sol_mir_layout_validate(&p.layout, NULL));
+    p.layout.type_count = saved_type_count;
+    p.layout.type_capacity = saved_type_capacity;
+    p.layout.usage.type_layouts = saved_usage_types;
+    p.layout.limits.max_type_layouts = saved_type_limit;
 #define REJECT_USAGE(member) do { \
     size_t saved = p.layout.usage.member; \
     ++p.layout.usage.member; \
@@ -462,6 +508,209 @@ static void test_layout_contract(void) {
     REJECT_USAGE(build_work); REJECT_USAGE(validation_scratch_bytes);
     REJECT_USAGE(validation_work);
 #undef REJECT_USAGE
+    for (size_t i = 0; i < p.layout.type_count; ++i) {
+#define MUTATE_TYPE(member, value) do { \
+    SolMirTypeLayout saved = p.layout.types[i]; \
+    p.layout.types[i].member = (value); \
+    CHECK(!sol_mir_layout_validate(&p.layout, NULL)); \
+    p.layout.types[i] = saved; \
+} while (0)
+        MUTATE_TYPE(recipe, p.layout.types[i].recipe ^ 1u);
+        MUTATE_TYPE(value_size, p.layout.types[i].value_size ^ UINT64_C(1));
+        MUTATE_TYPE(value_alignment,
+            p.layout.types[i].value_alignment == 1 ? 2 : 1);
+        MUTATE_TYPE(object_kind,
+            (SolMirLayoutObjectKind)(p.layout.types[i].object_kind ^ 1));
+        MUTATE_TYPE(has_object, !p.layout.types[i].has_object);
+        MUTATE_TYPE(object_size, p.layout.types[i].object_size ^ UINT64_C(1));
+        MUTATE_TYPE(object_alignment,
+            p.layout.types[i].object_alignment == 1 ? 2 : 1);
+        MUTATE_TYPE(tail_padding,
+            p.layout.types[i].tail_padding ^ UINT64_C(1));
+        MUTATE_TYPE(tag_offset, p.layout.types[i].tag_offset ^ UINT64_C(1));
+        MUTATE_TYPE(tag_size, p.layout.types[i].tag_size ^ UINT64_C(1));
+        MUTATE_TYPE(payload_offset,
+            p.layout.types[i].payload_offset ^ UINT64_C(1));
+        MUTATE_TYPE(payload_size, p.layout.types[i].payload_size ^ UINT64_C(1));
+        MUTATE_TYPE(data_handle_offset,
+            p.layout.types[i].data_handle_offset ^ UINT64_C(1));
+        MUTATE_TYPE(length_offset,
+            p.layout.types[i].length_offset ^ UINT64_C(1));
+        MUTATE_TYPE(target_token_offset,
+            p.layout.types[i].target_token_offset ^ UINT64_C(1));
+        MUTATE_TYPE(environment_handle_offset,
+            p.layout.types[i].environment_handle_offset ^ UINT64_C(1));
+        MUTATE_TYPE(root_token_offset,
+            p.layout.types[i].root_token_offset ^ UINT64_C(1));
+        MUTATE_TYPE(private_source_handle_offset,
+            p.layout.types[i].private_source_handle_offset ^ UINT64_C(1));
+#undef MUTATE_TYPE
+    }
+    for (size_t i = 0; i < p.layout.field_count; ++i) {
+#define MUTATE_FIELD(member, value) do { \
+    SolMirFieldLayout saved = p.layout.fields[i]; \
+    p.layout.fields[i].member = (value); \
+    CHECK(!sol_mir_layout_validate(&p.layout, NULL)); \
+    p.layout.fields[i] = saved; \
+} while (0)
+        MUTATE_FIELD(field, p.layout.fields[i].field ^ 1u);
+        MUTATE_FIELD(owner_recipe, p.layout.fields[i].owner_recipe ^ 1u);
+        MUTATE_FIELD(variant, p.layout.fields[i].variant ^ 1u);
+        MUTATE_FIELD(has_storage, !p.layout.fields[i].has_storage);
+        MUTATE_FIELD(offset, p.layout.fields[i].offset ^ UINT64_C(1));
+        MUTATE_FIELD(size, p.layout.fields[i].size ^ UINT64_C(1));
+        MUTATE_FIELD(alignment, p.layout.fields[i].alignment == 1 ? 2 : 1);
+        MUTATE_FIELD(padding_before,
+            p.layout.fields[i].padding_before ^ UINT64_C(1));
+#undef MUTATE_FIELD
+    }
+    for (size_t i = 0; i < p.layout.variant_count; ++i) {
+#define MUTATE_VARIANT(member, value) do { \
+    SolMirVariantLayout saved = p.layout.variants[i]; \
+    p.layout.variants[i].member = (value); \
+    CHECK(!sol_mir_layout_validate(&p.layout, NULL)); \
+    p.layout.variants[i] = saved; \
+} while (0)
+        MUTATE_VARIANT(variant, p.layout.variants[i].variant ^ 1u);
+        MUTATE_VARIANT(owner_recipe, p.layout.variants[i].owner_recipe ^ 1u);
+        MUTATE_VARIANT(tag, p.layout.variants[i].tag ^ UINT32_C(1));
+        MUTATE_VARIANT(inhabited, !p.layout.variants[i].inhabited);
+        MUTATE_VARIANT(has_payload_storage,
+            !p.layout.variants[i].has_payload_storage);
+        MUTATE_VARIANT(payload_size,
+            p.layout.variants[i].payload_size ^ UINT64_C(1));
+        MUTATE_VARIANT(payload_alignment,
+            p.layout.variants[i].payload_alignment == 1 ? 2 : 1);
+        MUTATE_VARIANT(tail_padding,
+            p.layout.variants[i].tail_padding ^ UINT64_C(1));
+#undef MUTATE_VARIANT
+    }
+    for (size_t i = 0; i < p.layout.projection_count; ++i) {
+#define MUTATE_PROJECTION(member, value) do { \
+    SolMirProjectionMap saved = p.layout.projections[i]; \
+    p.layout.projections[i].member = (value); \
+    CHECK(!sol_mir_layout_validate(&p.layout, NULL)); \
+    p.layout.projections[i] = saved; \
+} while (0)
+        MUTATE_PROJECTION(projection, p.layout.projections[i].projection ^ 1u);
+        MUTATE_PROJECTION(place, p.layout.projections[i].place ^ 1u);
+        MUTATE_PROJECTION(base_recipe, p.layout.projections[i].base_recipe ^ 1u);
+        MUTATE_PROJECTION(result_recipe,
+            p.layout.projections[i].result_recipe ^ 1u);
+        MUTATE_PROJECTION(field_layout,
+            p.layout.projections[i].field_layout ^ 1u);
+        MUTATE_PROJECTION(object_offset,
+            p.layout.projections[i].object_offset ^ UINT64_C(1));
+#undef MUTATE_PROJECTION
+    }
+    for (size_t i = 0; i < p.representation.field_count; ++i) {
+#define MUTATE_RECIPE_FIELD(member, value) do { \
+    SolMirRecipeField saved = p.representation.fields[i]; \
+    p.representation.fields[i].member = (value); \
+    CHECK(!sol_mir_layout_validate(&p.layout, NULL)); \
+    p.representation.fields[i] = saved; \
+} while (0)
+        MUTATE_RECIPE_FIELD(source_field,
+            p.representation.fields[i].source_field ^ 1u);
+        MUTATE_RECIPE_FIELD(ordinal,
+            p.representation.fields[i].ordinal ^ 1u);
+        MUTATE_RECIPE_FIELD(type, p.representation.fields[i].type ^ 1u);
+#undef MUTATE_RECIPE_FIELD
+    }
+    for (size_t i = 0; i < p.representation.variant_count; ++i) {
+#define MUTATE_RECIPE_VARIANT(member, value) do { \
+    SolMirRecipeVariant saved = p.representation.variants[i]; \
+    p.representation.variants[i].member = (value); \
+    CHECK(!sol_mir_layout_validate(&p.layout, NULL)); \
+    p.representation.variants[i] = saved; \
+} while (0)
+        MUTATE_RECIPE_VARIANT(source_variant,
+            p.representation.variants[i].source_variant ^ 1u);
+        MUTATE_RECIPE_VARIANT(ordinal,
+            p.representation.variants[i].ordinal ^ 1u);
+        MUTATE_RECIPE_VARIANT(semantic_tag,
+            p.representation.variants[i].semantic_tag ^ 1u);
+        MUTATE_RECIPE_VARIANT(fields.offset,
+            p.representation.variants[i].fields.offset ^ 1u);
+        MUTATE_RECIPE_VARIANT(fields.count,
+            p.representation.variants[i].fields.count ^ 1u);
+#undef MUTATE_RECIPE_VARIANT
+    }
+    for (size_t i = 0; i < p.materialization.projection_count; ++i) {
+#define MUTATE_SOURCE_PROJECTION(member, value) do { \
+    SolMirMaterializedProjection saved = p.materialization.projections[i]; \
+    p.materialization.projections[i].member = (value); \
+    CHECK(!sol_mir_layout_validate(&p.layout, NULL)); \
+    p.materialization.projections[i] = saved; \
+} while (0)
+        MUTATE_SOURCE_PROJECTION(kind, (SolIrProjectionKind)99);
+        MUTATE_SOURCE_PROJECTION(type,
+            p.materialization.projections[i].type ^ 1u);
+        MUTATE_SOURCE_PROJECTION(source_field,
+            p.materialization.projections[i].source_field ^ 1u);
+        MUTATE_SOURCE_PROJECTION(tuple_ordinal,
+            p.materialization.projections[i].tuple_ordinal ^ 1u);
+        MUTATE_SOURCE_PROJECTION(source_projection,
+            p.materialization.projections[i].source_projection ^ 1u);
+#undef MUTATE_SOURCE_PROJECTION
+    }
+    for (size_t i = 0; i < p.representation.recipe_count; ++i) {
+        SolMirRecipe saved = p.representation.recipes[i];
+        if (saved.fields.count != 0) {
+            p.representation.recipes[i].fields.offset ^= 1u;
+            CHECK(!sol_mir_layout_validate(&p.layout, NULL));
+            p.representation.recipes[i] = saved;
+        }
+        if (saved.variants.count != 0) {
+            p.representation.recipes[i].variants.offset ^= 1u;
+            CHECK(!sol_mir_layout_validate(&p.layout, NULL));
+            p.representation.recipes[i] = saved;
+        }
+    }
+    SolMirTargetDescriptor saved_target = p.layout.target;
+#define REJECT_TARGET(member, value) do { \
+    p.layout.target = saved_target; p.layout.target.member = (value); \
+    CHECK(!sol_mir_layout_validate(&p.layout, NULL)); \
+} while (0)
+    REJECT_TARGET(pointer_size, 16); REJECT_TARGET(pointer_alignment, 3);
+    REJECT_TARGET(int64_alignment, 3);
+    REJECT_TARGET(endianness, (SolMirEndianness)2);
+    REJECT_TARGET(max_object_bytes, 0);
+#undef REJECT_TARGET
+    p.layout.target = saved_target;
+#define REJECT_NULL(member) do { \
+    void *saved = p.layout.member; p.layout.member = NULL; \
+    CHECK(!sol_mir_layout_validate(&p.layout, NULL)); \
+    p.layout.member = saved; \
+} while (0)
+    REJECT_NULL(types); REJECT_NULL(fields); REJECT_NULL(variants);
+    REJECT_NULL(projections);
+#undef REJECT_NULL
+#define REJECT_TYPE_ALIAS(pointer) do { \
+    SolMirTypeLayout *saved = p.layout.types; \
+    p.layout.types = (SolMirTypeLayout *)(void *)(pointer); \
+    CHECK(!sol_mir_layout_validate(&p.layout, NULL)); \
+    p.layout.types = saved; \
+} while (0)
+    REJECT_TYPE_ALIAS(p.representation.recipes);
+    REJECT_TYPE_ALIAS(p.layout.fields);
+    REJECT_TYPE_ALIAS(p.layout.fields + 1);
+    REJECT_TYPE_ALIAS(p.layout.variants);
+    REJECT_TYPE_ALIAS(p.layout.projections);
+    REJECT_TYPE_ALIAS(&p.representation);
+    REJECT_TYPE_ALIAS(&p.materialization);
+    REJECT_TYPE_ALIAS(&p.plan);
+    REJECT_TYPE_ALIAS(&p.program);
+    REJECT_TYPE_ALIAS(&c.ir);
+    REJECT_TYPE_ALIAS(&p.program.templates[0].mir);
+    REJECT_TYPE_ALIAS(&p.materialization.images[0].topology);
+    REJECT_TYPE_ALIAS(p.materialization.types);
+    REJECT_TYPE_ALIAS(p.plan.types);
+    REJECT_TYPE_ALIAS(p.program.templates);
+    REJECT_TYPE_ALIAS(p.program.templates[0].mir.blocks);
+    REJECT_TYPE_ALIAS(c.ir.types);
+    REJECT_TYPE_ALIAS(c.ir.source_path);
+#undef REJECT_TYPE_ALIAS
     CHECK(sol_mir_layout_validate(&p.layout, NULL));
 
     SolMirLayout occupied; sol_mir_layout_init(&occupied);
@@ -483,8 +732,12 @@ static void test_layout_contract(void) {
     CHECK(occupied.representation == NULL);
     p.representation.variants[0].semantic_tag = saved_tag;
 
-    SolMirTargetDescriptor tiny = wasm; tiny.max_object_bytes = 23;
+    SolMirTargetDescriptor tiny = wasm; tiny.max_object_bytes = 24;
     SolMirLayoutBuildRequest tiny_request = {&p.representation, &tiny, NULL};
+    CHECK(sol_mir_layout_build(&tiny_request, &occupied, &p.diagnostics)
+        == SOL_MIR_LAYOUT_BUILD_SUCCEEDED);
+    sol_mir_layout_free(&occupied);
+    tiny.max_object_bytes = 23;
     CHECK(sol_mir_layout_build(&tiny_request, &occupied, &p.diagnostics)
         == SOL_MIR_LAYOUT_BUILD_RESOURCE_EXHAUSTED);
     tiny.pointer_size = 8; tiny.pointer_alignment = 8;
@@ -626,6 +879,165 @@ static void test_e6_census(void) {
         offset8 += p.layout.projections[i].object_offset == 8;
     }
     CHECK(offset0 == 3 && offset8 == 2);
+    static const SolMirRecipeKind kinds[21] = {
+        SOL_MIR_RECIPE_INT64, SOL_MIR_RECIPE_BOOL, SOL_MIR_RECIPE_TEXT,
+        SOL_MIR_RECIPE_UNIT, SOL_MIR_RECIPE_NEVER, SOL_MIR_RECIPE_RECORD,
+        SOL_MIR_RECIPE_RECORD, SOL_MIR_RECIPE_ENUM, SOL_MIR_RECIPE_ENUM,
+        SOL_MIR_RECIPE_REFINED, SOL_MIR_RECIPE_CAPABILITY,
+        SOL_MIR_RECIPE_CAPABILITY, SOL_MIR_RECIPE_CAPABILITY,
+        SOL_MIR_RECIPE_OPTION, SOL_MIR_RECIPE_OPTION, SOL_MIR_RECIPE_RESULT,
+        SOL_MIR_RECIPE_TUPLE, SOL_MIR_RECIPE_FUNCTION,
+        SOL_MIR_RECIPE_FUNCTION, SOL_MIR_RECIPE_FUNCTION,
+        SOL_MIR_RECIPE_FUNCTION,
+    };
+    static const uint64_t value_sizes[21] = {
+        8, 1, 4, 0, 0, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    };
+    static const uint64_t value_alignments[21] = {
+        8, 1, 4, 1, 1, 4, 4, 4, 4, 8, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    };
+    static const SolMirLayoutObjectKind object_kinds[21] = {
+        0, 0, 3, 0, 0, 1, 1, 2, 2, 0, 5, 5, 5, 2, 2, 2, 1, 4, 4, 4, 4,
+    };
+    static const uint64_t object_sizes[21] = {
+        0, 0, 8, 0, 0, 16, 8, 8, 4, 0, 8, 8, 8, 16, 8, 16, 16, 4, 4, 4, 4,
+    };
+    static const uint64_t object_alignments[21] = {
+        1, 1, 4, 1, 1, 8, 4, 4, 4, 1, 4, 4, 4, 8, 4, 8, 8, 4, 4, 4, 4,
+    };
+    static const uint64_t tails[21] = {
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7, 0, 0, 0, 0,
+    };
+    size_t object_none = 0, object_text = 0, object_product = 0;
+    size_t object_sum = 0, object_callable = 0, object_capability = 0;
+    for (size_t i = 0; i < 21; ++i) {
+        const SolMirTypeLayout *type = &p.layout.types[i];
+        CHECK(p.representation.recipes[i].kind == kinds[i]);
+        CHECK(type->recipe == i && type->value_size == value_sizes[i]
+            && type->value_alignment == value_alignments[i]
+            && type->object_kind == object_kinds[i]
+            && type->has_object == (object_sizes[i] != 0)
+            && type->object_size == object_sizes[i]
+            && type->object_alignment == object_alignments[i]
+            && type->tail_padding == tails[i]);
+        object_none += type->object_kind == SOL_MIR_LAYOUT_OBJECT_NONE;
+        object_text += type->object_kind == SOL_MIR_LAYOUT_OBJECT_TEXT;
+        object_product += type->object_kind == SOL_MIR_LAYOUT_OBJECT_PRODUCT;
+        object_sum += type->object_kind == SOL_MIR_LAYOUT_OBJECT_SUM;
+        object_callable += type->object_kind == SOL_MIR_LAYOUT_OBJECT_CALLABLE;
+        object_capability += type->object_kind == SOL_MIR_LAYOUT_OBJECT_CAPABILITY;
+        uint64_t tag_offset = SOL_MIR_LAYOUT_OFFSET_NONE, tag_size = 0;
+        uint64_t payload_offset = SOL_MIR_LAYOUT_OFFSET_NONE, payload_size = 0;
+        uint64_t data = SOL_MIR_LAYOUT_OFFSET_NONE, length = SOL_MIR_LAYOUT_OFFSET_NONE;
+        uint64_t target = SOL_MIR_LAYOUT_OFFSET_NONE, environment = SOL_MIR_LAYOUT_OFFSET_NONE;
+        uint64_t root = SOL_MIR_LAYOUT_OFFSET_NONE, private_source = SOL_MIR_LAYOUT_OFFSET_NONE;
+        if (i == 2) { data = 0; length = 4; }
+        if (i == 7) { tag_offset = 0; tag_size = 4; payload_offset = 4; payload_size = 4; }
+        if (i == 8) { tag_offset = 0; tag_size = 4; payload_offset = 4; }
+        if (i == 13) { tag_offset = 0; tag_size = 4; payload_offset = 8; payload_size = 8; }
+        if (i == 14) { tag_offset = 0; tag_size = 4; payload_offset = 4; payload_size = 4; }
+        if (i == 15) { tag_offset = 0; tag_size = 4; payload_offset = 8; payload_size = 8; }
+        if (i >= 17) target = 0;
+        if (i >= 10 && i <= 12) { root = 0; private_source = 4; }
+        CHECK(type->tag_offset == tag_offset && type->tag_size == tag_size
+            && type->payload_offset == payload_offset
+            && type->payload_size == payload_size
+            && type->data_handle_offset == data && type->length_offset == length
+            && type->target_token_offset == target
+            && type->environment_handle_offset == environment
+            && type->root_token_offset == root
+            && type->private_source_handle_offset == private_source);
+    }
+    CHECK(object_none == 5 && object_text == 1 && object_product == 3
+        && object_sum == 5 && object_callable == 4 && object_capability == 3);
+    CHECK(strcmp(c.ir.definitions[p.representation.recipes[5].concrete_definition].name,
+            "Pair") == 0);
+    CHECK(strcmp(c.ir.definitions[p.representation.recipes[6].concrete_definition].name,
+            "Packet") == 0);
+    CHECK(strcmp(c.ir.definitions[p.representation.recipes[7].concrete_definition].name,
+            "Envelope") == 0);
+    CHECK(strcmp(c.ir.definitions[p.representation.recipes[8].concrete_definition].name,
+            "Failure") == 0);
+    CHECK(strcmp(c.ir.definitions[p.representation.recipes[9].concrete_definition].name,
+            "Positive") == 0);
+    CHECK(strcmp(c.ir.definitions[p.representation.recipes[10].concrete_definition].name,
+            "Console") == 0);
+    CHECK(strcmp(c.ir.definitions[p.representation.recipes[11].concrete_definition].name,
+            "Arguments") == 0);
+    CHECK(strcmp(c.ir.definitions[p.representation.recipes[12].concrete_definition].name,
+            "Configuration") == 0);
+    static const size_t field_types[11] = {0, 0, 1, 16, 6, 0, 2, 0, 8, 0, 1};
+    static const size_t field_ordinals[11] = {0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 1};
+    static const size_t field_owners[11] = {5, 5, 6, 6, 7, 13, 14, 15, 15, 16, 16};
+    static const size_t field_variants[11] = {
+        SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX, 0, 4, 6, 7, 8, SIZE_MAX, SIZE_MAX,
+    };
+    static const uint64_t field_offsets[11] = {0, 8, 0, 4, 4, 8, 4, 8, 8, 0, 8};
+    static const uint64_t field_sizes[11] = {8, 8, 1, 4, 4, 8, 4, 8, 4, 8, 1};
+    static const uint64_t field_alignments[11] = {8, 8, 1, 4, 4, 8, 4, 8, 4, 8, 1};
+    static const uint64_t field_padding[11] = {0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0};
+    for (size_t i = 0; i < 11; ++i) {
+        const SolMirFieldLayout *field = &p.layout.fields[i];
+        CHECK(p.representation.fields[i].type == field_types[i]
+            && p.representation.fields[i].ordinal == field_ordinals[i]
+            && ((i < 5) == (p.representation.fields[i].source_field
+                != SOL_IR_NONE)));
+        CHECK(field->field == i && field->owner_recipe == field_owners[i]
+            && field->variant == field_variants[i] && field->has_storage
+            && field->offset == field_offsets[i] && field->size == field_sizes[i]
+            && field->alignment == field_alignments[i]
+            && field->padding_before == field_padding[i]);
+    }
+    CHECK(strcmp(c.ir.fields[p.representation.fields[0].source_field].name,
+            "left") == 0);
+    CHECK(strcmp(c.ir.fields[p.representation.fields[1].source_field].name,
+            "right") == 0);
+    CHECK(strcmp(c.ir.fields[p.representation.fields[2].source_field].name,
+            "ignored") == 0);
+    CHECK(strcmp(c.ir.fields[p.representation.fields[3].source_field].name,
+            "data") == 0);
+    CHECK(strcmp(c.ir.fields[p.representation.fields[4].source_field].name,
+            "packet") == 0);
+    static const size_t variant_owners[9] = {7, 7, 8, 13, 13, 14, 14, 15, 15};
+    static const uint32_t variant_tags[9] = {0, 1, 0, 0, 1, 0, 1, 0, 1};
+    static const uint64_t variant_sizes[9] = {4, 0, 0, 0, 8, 0, 4, 8, 4};
+    static const uint64_t variant_alignments[9] = {4, 1, 1, 1, 8, 1, 4, 8, 4};
+    static const size_t variant_field_offsets[9] = {4, 5, 5, 5, 5, 6, 6, 7, 8};
+    static const size_t variant_field_counts[9] = {1, 0, 0, 0, 1, 0, 1, 1, 1};
+    for (size_t i = 0; i < 9; ++i) {
+        const SolMirVariantLayout *variant = &p.layout.variants[i];
+        CHECK(variant->variant == i && variant->owner_recipe == variant_owners[i]
+            && variant->tag == variant_tags[i]
+            && p.representation.variants[i].ordinal == variant_tags[i]
+            && p.representation.variants[i].semantic_tag == variant_tags[i]
+            && ((i < 3) == (p.representation.variants[i].source_variant
+                != SOL_IR_NONE))
+            && variant->inhabited && variant->has_payload_storage
+            && variant->payload_size == variant_sizes[i]
+            && variant->payload_alignment == variant_alignments[i]
+            && variant->tail_padding == 0);
+        CHECK(p.representation.variants[i].fields.offset
+                == variant_field_offsets[i]
+            && p.representation.variants[i].fields.count
+                == variant_field_counts[i]);
+    }
+    CHECK(strcmp(c.ir.variants[p.representation.variants[0].source_variant].name,
+            "wrapped") == 0);
+    CHECK(strcmp(c.ir.variants[p.representation.variants[1].source_variant].name,
+            "empty") == 0);
+    CHECK(strcmp(c.ir.variants[p.representation.variants[2].source_variant].name,
+            "invalid") == 0);
+    static const size_t projection_fields[5] = {0, 0, 1, 0, 1};
+    static const size_t projection_places[5] = {17, 18, 19, 21, 24};
+    static const uint64_t projection_offsets[5] = {0, 0, 8, 0, 8};
+    for (size_t i = 0; i < 5; ++i) {
+        const SolMirProjectionMap *map = &p.layout.projections[i];
+        CHECK(map->projection == i
+            && map->place == projection_places[i]
+            && map->base_recipe == 5 && map->result_recipe == 0
+            && map->field_layout == projection_fields[i]
+            && map->object_offset == projection_offsets[i]);
+    }
     pipeline_free(&p); free_e6(&c, &package);
 }
 

@@ -68,6 +68,7 @@ add_library(sol_compiler STATIC
     src/mir.c
     src/mir_eval.c
     src/mir_layout.c
+    src/mir_layout_validate.c
     src/mir_materialize.c
     src/mir_materialize_validate.c
     src/mir_plan.c
