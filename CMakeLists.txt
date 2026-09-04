@@ -72,6 +72,7 @@ add_library(sol_compiler STATIC
     src/mir_plan.c
     src/mir_program.c
     src/mir_representation.c
+    src/mir_representation_validate.c
     src/mir_render.c
     src/ownership.c
     src/package.c
@@ -182,6 +183,9 @@ if(BUILD_TESTING)
     add_executable(sol_mir_representation_tests tests/mir_representation_tests.c)
     target_link_libraries(sol_mir_representation_tests PRIVATE sol_compiler)
     target_compile_definitions(sol_mir_tests PRIVATE
+        SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+    target_compile_definitions(sol_mir_representation_tests PRIVATE
         SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
     add_executable(sol_interpreter_tests tests/interpreter_tests.c)

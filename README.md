@@ -783,7 +783,7 @@ write. Concrete source-shape substitution also has an exact dedicated work sub-l
 exhausting it preserves the resource-exhausted outcome rather than being relabeled as
 an unsupported shape.
 
-P2.4a adds the separate unstable `SolMirRepresentation` owner. It borrows a validated
+P2.4 adds the separate unstable `SolMirRepresentation` owner. It borrows a validated
 materialization and owns exactly one same-ID target-neutral recipe for every concrete
 type, plus flat field, variant, recipe-ID/access, and callable-producer arenas. Recipes
 cover `Int64`, `Bool`, `Text`, Unit, Never, tuples, records, enums, `Option`, `Result`,
@@ -815,19 +815,23 @@ behavior without selecting byte sizes.
 The representation builder has complete limits and usage, all-zero transactional
 destinations, rejects reachable open enums, and validates allocation independence from
 all transitive borrowed arenas. `owned_bytes` measures persistent output allocations;
-separate exact peak build- and validation-scratch byte limits cover fixed-point facts,
-local validation counters, reconstructive representation output, and a conservative
-bound for prerequisite materialization validation/reconstruction. Build work charges
+separate exact peak build- and validation-scratch byte limits cover fixed-point facts
+and a conservative bound for prerequisite materialization validation. Build work charges
 counting, nested shape population, producer/root copying, fixed-point scans, and
-wrapper traversal. Validation preflights checked counts, capacities, persistent bytes,
+wrapper traversal. Independent validation exactly replays those charges from validated
+materialization dimensions and validation-only facts, including dynamic convergence
+and short-circuit field/variant scans; it does not trust recorded build work. Validation
+preflights checked counts, capacities, persistent bytes,
 work, scratch, and raw allocation ranges before reading any owned arena element, then
 rejects borrowed overlap before typed traversal. As with the other unstable mutable
 owners, malformed pointer/capacity tests must restore original allocation bases and
 extents before `free`; freeing a deliberately aliased rejected mutation is invalid.
-Rendering validates and buffers before one write.
-P2.4a validation intentionally combines exact reconstruction with strong local graph,
-slice, tag, fixed-point, producer-consumption, and ownership checks. P2.4 and the full
-independent E6 recipe census remain open for P2.4b. There are still no pointer/tag
+Rendering validates and buffers before one write. P2.4b moves validation into a
+separate translation unit and independently derives every recipe field, flat-arena
+boundary, fixed point, abstract classification, producer, and receiver-root slice from
+the validated materialization without invoking representation construction or building
+a second representation. Its E6 entry-plus-four-tests census is exact and exhaustive.
+P2.4a, P2.4b, and parent P2.4 are complete. P2.5 remains open: there are still no pointer/tag
 widths, byte sizes, alignments, offsets, niches, runtime ABI, symbols/linkage, backend
 choices, or P2.6 source-semantic operation plans in this boundary.
 
