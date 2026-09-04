@@ -888,9 +888,31 @@ an exact 21-type, 11-field, 9-variant, 5-projection census, including every reco
 source identity. Rendering still
 validates and buffers before one write. As with other trusted mutable internal owners,
 rejected pointer/capacity mutations must be restored before free. P2.5a, P2.5b, and
-parent P2.5 are complete; P2.6 is next. Runtime ABI, symbols/linkage, source-semantic
-operation plans, and backend behavior remain deferred to P2.6, P2.7, P3, and later
-checkpoints.
+parent P2.5 are complete. P2.6a adds the separate bounded `SolMirOperations` owner
+after layout: one concrete access plan per materialized place plus operation-local
+paths; exact constructor, recursive pattern, propagation, checked arithmetic/equality,
+snapshot, callable-producer, and handler plans; segregated authenticated source
+provenance; independent reconstruction validation; and transactional buffered
+rendering. Propagation records separately identify source success extraction, source
+residual extraction, and destination residual construction variants, tags, fields,
+and offsets. Equality graphs carry exact recursive recipe, field, variant, and tag
+edges. Build dimensions and scratch are checked before owner allocation; build and
+validation work are incrementally charged by their actual scans, recursive walks,
+allocations, and record traversals, with transactional cleanup on exhaustion.
+Operation validation work includes the layout validator's authenticated recorded work,
+and validation scratch is the exact peak of the sequential layout and operation-local
+phases. Limit sets are either wholly populated or wholly zero. Executable operation records require no source expression, pattern, field,
+variant, obligation, or snapshot IDs. Contract and refinement slots explicitly remain
+`UNRESOLVED_BODY`; synthetic predicate bodies and bodyless import contracts are the
+sole runtime-semantic deferral to P2.6b, while loop proof obligations remain erased.
+The all-roots E6 census is 28 constructors, 16 binary operations plus one compound
+update, three pattern tests and three extractions, two propagations, one snapshot,
+three contract slots plus one refinement slot, no handlers or callable producers,
+and one access plan per materialized place with five total access steps. Independent
+opcode classification finds five checked arithmetic operations and twelve
+comparison/equality operations in that current closure.
+Parent P2.6 therefore remains open. Symbols/linkage, runtime ABI, and backend behavior
+remain deferred to P2.7, P3, and later checkpoints.
 
 ### Phase 0 — Executable language model
 

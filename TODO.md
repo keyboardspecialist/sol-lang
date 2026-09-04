@@ -111,8 +111,8 @@ raw-IR, MIR-lowering, MIR-evaluator, and raw-interpreter tests retain direct int
 access for malformed IR/MIR mutation, phase-corruption assertions, differential
 evaluation, and trusted host-callback coverage.
 
-The production track is underway. P1 through P2.5 are complete for the frozen E6
-profile; P2.6 is the next open checkpoint:
+The production track is underway. P1 through P2.6a are complete for the frozen E6
+profile; P2.6b is the next open checkpoint:
 
 | Done | Order | Milestone | Dependency and numbered-backlog scope |
 | --- | ---: | --- | --- |
@@ -181,6 +181,8 @@ external dependencies, public IR, concurrency, or broader handlers.
 | [x] | P2.5a | Build usable target-parameterized layouts and access maps | A separate bounded owner borrows a validated representation; validates explicit pointer-4/8 target descriptors and the initial little-endian Wasm32 profile; assigns same-ID type, field, and variant layouts plus one map per materialized projection; uses checked `uint64_t` packing for uniform indirect aggregates, explicit-u32 sums, transparent nominal wrappers, and text/callable/capability objects; rejects unsupported projections, overflow, object bounds, cycles, aliases, and malformed reconstruction transactionally; and validates/renders without partial output |
 | [x] | P2.5b | Independently validate and census target layouts | A separate validator derives every type/object, source-packed field/variant, projected-place map, arena-consumption proof, and exact resource dimension without construction helpers or a second owner; it rejects transitive borrowed aliases before layout-record traversal, and the complete E6 Wasm32 layout and mutation censuses are frozen. |
 | [ ] | P2.6 | Close source-owned semantic operations | Convert constructors, projected accesses, pattern tests/bindings, propagation, checked arithmetic, contract/refinement predicates, snapshots, and handler-provider references into concrete representation-aware plans or synthetic monomorphic bodies so backend input no longer evaluates owning-IR expressions or source-owned obligations |
+| [x] | P2.6a | Build and independently validate concrete operation plans | A separate bounded owner borrowing one validated target layout closes projected accesses, constructors and capability inheritance, recursive pattern tests/extractions, Option/Result propagation, normalized checked arithmetic and recipe-directed equality, concrete snapshot capture, materialized callable producers, and handler bindings/root matching. Executable records use only concrete IDs, recipes, layouts, offsets, tags, and backend-neutral opcodes; source IDs are segregated authenticated provenance. Every contract/refinement check has an explicit `UNRESOLVED_BODY` envelope, and loop proof obligations remain runtime-erased. |
+| [ ] | P2.6b | Materialize predicate and import-contract bodies | Replace every P2.6a `UNRESOLVED_BODY` predicate envelope with a synthetic monomorphic executable body and close bodyless import contract execution; retain runtime-erased loop proof obligations |
 | [ ] | P2.7 | Freeze symbols and whole-program linkage | Derive collision-checked ASCII symbols from semantic identity and canonical instance keys; assign deterministic internal-callable, entry-export, and function-table identities; resolve every ordinary callable internally; retain only typed symbolic runtime and approved-host requirements for P3; and make ordering independent of addresses and filesystem roots |
 | [ ] | P2.8 | Freeze and census the concrete-program contract | Exhaustively validate and canonically render the complete concrete owner; add malformed-input and repeated-lowering equality tests; require the E6 entry closure to be finite and concrete, including generic/trait instances, contracts/refinements, hosted imports, and all reachable failure/cleanup paths; do not select a runtime ABI or emit Wasm |
 
