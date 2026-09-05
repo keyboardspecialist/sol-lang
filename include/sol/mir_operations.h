@@ -4,6 +4,11 @@
 #include "sol/mir_layout.h"
 
 typedef size_t SolMirOperationAccessId;
+typedef size_t SolMirPredicateBodyId;
+typedef size_t SolMirPredicateBlockId;
+typedef size_t SolMirPredicateInputId;
+typedef size_t SolMirPredicateValueId;
+typedef size_t SolMirPredicateInstructionId;
 #define SOL_MIR_OPERATION_NONE SIZE_MAX
 
 typedef struct {
@@ -250,7 +255,6 @@ typedef struct {
     SolMirMaterializedEffectRowId effects;
 } SolMirOperationHandlerPlan;
 
-typedef enum { SOL_MIR_OPERATION_PREDICATE_UNRESOLVED_BODY } SolMirOperationPredicateState;
 typedef enum {
     SOL_MIR_OPERATION_PREDICATE_CONTRACT,
     SOL_MIR_OPERATION_PREDICATE_REFINEMENT,
@@ -258,7 +262,7 @@ typedef enum {
 
 typedef struct {
     SolMirOperationPredicateKind kind;
-    SolMirOperationPredicateState state;
+    SolMirPredicateBodyId body;
     SolMirPlanInstanceId image;
     SolMirMaterializedBlockId block;
     SolMirPlanContextId context;
@@ -273,6 +277,114 @@ typedef struct {
 } SolMirOperationPredicatePlan;
 
 typedef enum {
+    SOL_MIR_PREDICATE_INPUT_RECEIVER,
+    SOL_MIR_PREDICATE_INPUT_PRIVATE_SOURCE,
+    SOL_MIR_PREDICATE_INPUT_PARAMETER,
+    SOL_MIR_PREDICATE_INPUT_COMPLETE_RESULT,
+    SOL_MIR_PREDICATE_INPUT_SUCCESS_RESULT,
+    SOL_MIR_PREDICATE_INPUT_SNAPSHOT,
+    SOL_MIR_PREDICATE_INPUT_REFINEMENT_SELF,
+} SolMirPredicateInputKind;
+
+typedef struct {
+    SolMirPredicateInputKind kind;
+    size_t ordinal;
+    SolMirRecipeId recipe;
+    SolAccessMode access;
+} SolMirPredicateInput;
+
+typedef enum {
+    SOL_MIR_PREDICATE_VALUE_INPUT,
+    SOL_MIR_PREDICATE_VALUE_INSTRUCTION,
+} SolMirPredicateValueKind;
+
+typedef struct {
+    SolMirPredicateValueKind kind;
+    SolMirRecipeId recipe;
+    SolMirPredicateBlockId block;
+    size_t definition;
+} SolMirPredicateValue;
+
+typedef enum {
+    SOL_MIR_PREDICATE_INST_I64,
+    SOL_MIR_PREDICATE_INST_BOOL,
+    SOL_MIR_PREDICATE_INST_TEXT,
+    SOL_MIR_PREDICATE_INST_UNIT,
+    SOL_MIR_PREDICATE_INST_UNARY,
+    SOL_MIR_PREDICATE_INST_BINARY,
+} SolMirPredicateInstructionKind;
+
+typedef struct {
+    SolMirPredicateInstructionKind kind;
+    SolMirPredicateBlockId block;
+    SolMirPredicateValueId result;
+    SolMirRecipeId recipe;
+    SolMirOperationOpcode opcode;
+    SolMirPredicateValueId left;
+    SolMirPredicateValueId right;
+    int64_t integer;
+    bool boolean;
+    SolMirPlanSlice bytes;
+    unsigned failures;
+} SolMirPredicateInstruction;
+
+typedef enum { SOL_MIR_PREDICATE_TERM_RETURN } SolMirPredicateTerminatorKind;
+typedef struct {
+    SolMirPredicateTerminatorKind kind;
+    SolMirPredicateValueId value;
+} SolMirPredicateTerminator;
+
+typedef struct {
+    SolMirPredicateBodyId body;
+    SolMirPlanSlice instructions;
+    SolMirPredicateTerminator terminator;
+} SolMirPredicateBlock;
+
+typedef enum {
+    SOL_MIR_PREDICATE_OWNER_INSTANCE,
+    SOL_MIR_PREDICATE_OWNER_IMPORT,
+} SolMirPredicateOwnerKind;
+
+typedef struct {
+    SolMirPredicateOwnerKind owner_kind;
+    SolMirPlanInstanceId instance;
+    SolMirMaterializedImportId import;
+    SolMirPlanContextId context;
+    SolContractClauseKind phase;
+    SolContractOutcomeKind outcome;
+    SolMirPlanSlice inputs;
+    SolMirPlanSlice blocks;
+    SolMirPlanSlice values;
+    SolMirPredicateBlockId entry;
+    SolMirRecipeId output_recipe;
+} SolMirPredicateBody;
+
+typedef struct {
+    SolMirMaterializedImportId import;
+    SolMirRecipeId receiver;
+    SolAccessMode receiver_access;
+    SolMirPlanSlice parameters;
+    SolMirPlanSlice parameter_accesses;
+    SolMirRecipeId result;
+    SolMirMaterializedEffectRowId effects;
+    SolMirPlanSlice requires;
+    SolMirPlanSlice snapshots;
+    SolMirPlanSlice ensures;
+    bool host_invoke;
+} SolMirImportContractEnvelope;
+
+typedef struct {
+    SolMirMaterializedImportId import;
+    SolMirPlanContextId context;
+    size_t slot;
+    SolMirPredicateInputKind input_kind;
+    size_t ordinal;
+    SolMirRecipeId recipe;
+    SolAccessMode access;
+    size_t provenance;
+} SolMirImportSnapshotCapture;
+
+typedef enum {
     SOL_MIR_OPERATION_PROVENANCE_CONSTRUCT,
     SOL_MIR_OPERATION_PROVENANCE_PATTERN_TEST,
     SOL_MIR_OPERATION_PROVENANCE_PATTERN_EXTRACTION,
@@ -282,6 +394,7 @@ typedef enum {
     SOL_MIR_OPERATION_PROVENANCE_PREDICATE,
     SOL_MIR_OPERATION_PROVENANCE_HANDLER,
     SOL_MIR_OPERATION_PROVENANCE_CALLABLE,
+    SOL_MIR_OPERATION_PROVENANCE_IMPORT_SNAPSHOT,
 } SolMirOperationProvenanceKind;
 
 typedef struct {
@@ -304,6 +417,11 @@ typedef struct {
     size_t max_equality_children;
     size_t max_snapshots, max_callables, max_handlers;
     size_t max_predicates, max_recipe_ids, max_roots, max_provenance;
+    size_t max_predicate_bodies, max_predicate_blocks, max_predicate_inputs;
+    size_t max_predicate_values, max_predicate_instructions;
+    size_t max_import_envelopes, max_import_contract_references;
+    size_t max_import_snapshots;
+    size_t max_literal_bytes;
     size_t max_owned_bytes, max_build_scratch_bytes, max_build_work;
     size_t max_validation_scratch_bytes, max_validation_work;
 } SolMirOperationsLimits;
@@ -314,6 +432,10 @@ typedef struct {
     size_t propagations, arithmetic, equality_nodes, equality_children;
     size_t snapshots, callables;
     size_t handlers, predicates, recipe_ids, roots, provenance;
+    size_t predicate_bodies, predicate_blocks, predicate_inputs;
+    size_t predicate_values, predicate_instructions;
+    size_t import_envelopes, import_contract_references, literal_bytes;
+    size_t import_snapshots;
     size_t owned_bytes, build_scratch_bytes, build_work;
     size_t validation_scratch_bytes, validation_work;
 } SolMirOperationsUsage;
@@ -335,6 +457,15 @@ typedef struct {
     X(callables, SolMirOperationCallablePlan, callable) \
     X(handlers, SolMirOperationHandlerPlan, handler) \
     X(predicates, SolMirOperationPredicatePlan, predicate) \
+    X(predicate_bodies, SolMirPredicateBody, predicate_body) \
+    X(predicate_blocks, SolMirPredicateBlock, predicate_block) \
+    X(predicate_inputs, SolMirPredicateInput, predicate_input) \
+    X(predicate_values, SolMirPredicateValue, predicate_value) \
+    X(predicate_instructions, SolMirPredicateInstruction, predicate_instruction) \
+    X(import_envelopes, SolMirImportContractEnvelope, import_envelope) \
+    X(import_contract_references, SolMirPredicateBodyId, import_contract_reference) \
+    X(import_snapshots, SolMirImportSnapshotCapture, import_snapshot) \
+    X(literal_bytes, char, literal_byte) \
     X(recipe_ids, SolMirRecipeId, recipe_id) \
     X(roots, SolMirMaterializedLocalId, root) \
     X(provenance, SolMirOperationProvenance, provenance)

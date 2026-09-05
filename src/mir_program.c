@@ -702,9 +702,17 @@ static bool scan_predicates(Builder *builder, SolIrCallableId callable,
         if (!charge_work(builder, 1)) return false;
         const SolIrObligation *obligation = &ir->obligations[index];
         if (obligation->owner_kind == SOL_CONTRACT_OWNER_ITEM
-            && obligation->owner == owner
-            && !scan_expression(builder, callable, obligation->predicate,
-                true, 0)) return false;
+            && obligation->owner == owner) {
+            for (size_t snapshot = 0; snapshot < obligation->snapshots.count;
+                ++snapshot) {
+                SolIrSnapshotId id = obligation->snapshots.offset + snapshot;
+                if (id >= ir->snapshot_count
+                    || !scan_expression(builder, callable,
+                        ir->snapshots[id].operand, true, 0)) return false;
+            }
+            if (!scan_expression(builder, callable, obligation->predicate,
+                    true, 0)) return false;
+        }
     }
     for (size_t block = 0; block < mir->block_count; ++block) {
         const SolMirTerminator *term = &mir->blocks[block].terminator;
@@ -723,6 +731,26 @@ static bool scan_predicates(Builder *builder, SolIrCallableId callable,
             && !scan_evidence(builder, callable, SOL_IR_NONE,
                 term->as.check_refined.source_expression, term->span,
                 construction->as.call.evidence)) return false;
+    }
+    return true;
+}
+
+static bool scan_import_predicates(Builder *builder, SolIrCallableId callable) {
+    const SolIr *ir = builder->program->ir;
+    for (size_t index = 0; index < ir->obligation_count; ++index) {
+        if (!charge_work(builder, 1)) return false;
+        const SolIrObligation *obligation = &ir->obligations[index];
+        if (obligation->owner_kind != SOL_CONTRACT_OWNER_CAPABILITY_MEMBER
+            || obligation->owner != callable) continue;
+        for (size_t snapshot = 0; snapshot < obligation->snapshots.count;
+            ++snapshot) {
+            SolIrSnapshotId id = obligation->snapshots.offset + snapshot;
+            if (id >= ir->snapshot_count
+                || !scan_expression(builder, callable,
+                    ir->snapshots[id].operand, true, 0)) return false;
+        }
+        if (!scan_expression(builder, callable, obligation->predicate,
+                true, 0)) return false;
     }
     return true;
 }
@@ -822,9 +850,9 @@ static bool classify(Builder *builder, SolIrCallableId callable) {
                 report(builder, "bodyless capability target is unapproved or unsafe for the production host boundary");
                 return false;
             }
-            if (!append_import(builder, callable)) return false;
             builder->classes[callable] = CLASS_IMPORT;
-            return true;
+            return append_import(builder, callable)
+                && scan_import_predicates(builder, callable);
         }
         if (metadata->kind == SOL_IR_CALLABLE_TRAIT_REQUIREMENT) {
             builder->classes[callable] = CLASS_REQUIREMENT;

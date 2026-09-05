@@ -59,6 +59,8 @@ typedef struct {
     size_t parameter_count;
     SolMirPlanTypeId result;
     SolMirPlanEffectRowId effects;
+    SolMirPlanTypedUse *uses;
+    size_t use_count, use_capacity;
 } RawImport;
 
 typedef struct Builder Builder;
@@ -963,6 +965,8 @@ static bool add_context(Builder *builder, SolMirPlanContext context,
             && item->source_block == context.source_block
             && item->definition == context.definition
             && item->obligation == context.obligation
+            && item->target_kind == context.target_kind
+            && item->import == context.import
             && same_program_source(item->source, context.source)) {
             *result = index;
             return true;
@@ -1052,9 +1056,28 @@ static bool same_program_source(SolMirProgramSource a,
 }
 
 static bool add_demand(Builder *builder, SolMirPlanDemand demand) {
+    if (demand.kind == SOL_MIR_PLAN_DEMAND_ROOT) {
+        demand.owner_kind = SOL_MIR_PLAN_DEMAND_OWNER_ROOT;
+        demand.parent = SOL_MIR_PLAN_NONE;
+        demand.parent_import = SOL_MIR_PLAN_NONE;
+    } else {
+        if (demand.context >= builder->context_count) return false;
+        const SolMirPlanContext *context = &builder->contexts[demand.context];
+        if (context->target_kind == SOL_MIR_PLAN_TARGET_INSTANCE) {
+            demand.owner_kind = SOL_MIR_PLAN_DEMAND_OWNER_INSTANCE;
+            demand.parent = context->instance;
+            demand.parent_import = SOL_MIR_PLAN_NONE;
+        } else {
+            demand.owner_kind = SOL_MIR_PLAN_DEMAND_OWNER_IMPORT;
+            demand.parent = SOL_MIR_PLAN_NONE;
+            demand.parent_import = context->import;
+        }
+    }
     for (size_t index = 0; index < builder->demand_count; ++index) {
         const SolMirPlanDemand *item = &builder->demands[index];
-        if (item->kind == demand.kind && item->parent == demand.parent
+        if (item->kind == demand.kind && item->owner_kind == demand.owner_kind
+            && item->parent == demand.parent
+            && item->parent_import == demand.parent_import
             && same_program_source(item->source, demand.source)
             && item->symbolic_target == demand.symbolic_target
             && item->instance == demand.instance && item->import == demand.import
@@ -1267,6 +1290,9 @@ static bool import_key_equal(const RawImport *item, SolIrCallableId callable,
                 parameter_count * sizeof(*accesses)) == 0));
 }
 
+static bool scan_import_contracts(Environment *environment,
+    SolMirPlanImportId import);
+
 static bool add_import(Environment *environment, SolIrCallableId callable,
     SolMirPlanTypeId receiver, SolMirPlanEffectRowId effects,
     SolMirPlanImportId *result) {
@@ -1320,7 +1346,7 @@ static bool add_import(Environment *environment, SolIrCallableId callable,
         free(parameters); free(accesses); return false;
     }
     builder->imports[builder->import_count] = (RawImport){callable, receiver,
-        parameters, accesses, count, result_type, effects};
+        parameters, accesses, count, result_type, effects, NULL, 0, 0};
     *result = builder->import_count++;
     return true;
 }
@@ -1829,6 +1855,44 @@ static bool scan_predicate_obligation(Environment *environment,
     return scan_expression(predicate_environment, obligation->predicate, true, 0);
 }
 
+static bool scan_import_contracts(Environment *parent,
+    SolMirPlanImportId import_id) {
+    Builder *builder = parent->builder;
+    if (import_id >= builder->import_count) return false;
+    RawImport *raw = &builder->imports[import_id];
+    const SolIrCallable *callable = &builder->ir->callables[raw->callable];
+    RawInstance temporary;
+    memset(&temporary, 0, sizeof(temporary));
+    temporary.callable = raw->callable;
+    temporary.receiver = raw->receiver;
+    temporary.effects = raw->effects;
+    temporary.uses = raw->uses;
+    temporary.use_count = raw->use_count;
+    temporary.use_capacity = raw->use_capacity;
+    Environment environment = {builder, &temporary, SOL_MIR_PLAN_NONE,
+        SOL_IR_NONE, NULL, 0, SOL_MIR_PLAN_NONE, SOL_MIR_PLAN_NONE};
+    for (size_t i = 0; i < builder->ir->obligation_count; ++i) {
+        const SolIrObligation *item = &builder->ir->obligations[i];
+        if (item->owner_kind != SOL_CONTRACT_OWNER_CAPABILITY_MEMBER
+            || item->owner != raw->callable) continue;
+        SolMirPlanContext context = {SOL_MIR_PLAN_CONTEXT_CONTRACT,
+            SOL_MIR_PLAN_NONE, SOL_MIR_NONE, callable->owner, item->id, {0},
+            SOL_MIR_PLAN_TARGET_IMPORT, import_id};
+        if (!source_for(builder, raw->callable, item->predicate,
+                builder->ir->expressions[item->predicate].span, &context.source)
+            || !add_context(builder, context, &environment.context)
+            || !scan_predicate_obligation(&environment, item, &environment)) {
+            free(temporary.uses); raw->uses = NULL; raw->use_count = 0;
+            raw->use_capacity = 0; return false;
+        }
+    }
+    raw = &builder->imports[import_id];
+    raw->uses = temporary.uses;
+    raw->use_count = temporary.use_count;
+    raw->use_capacity = temporary.use_capacity;
+    return true;
+}
+
 static bool scan_instance(Builder *builder, SolMirPlanInstanceId instance_id) {
     RawInstance *instance = &builder->instances[instance_id];
     if (instance->scanned || instance->active) return true;
@@ -1843,7 +1907,8 @@ static bool scan_instance(Builder *builder, SolMirPlanInstanceId instance_id) {
     SolSpan body_span = callable->body < builder->ir->expression_count
         ? builder->ir->expressions[callable->body].span : callable->span;
     SolMirPlanContext body_context = {SOL_MIR_PLAN_CONTEXT_BODY, instance_id,
-        SOL_MIR_NONE, callable->owner, SOL_IR_NONE, {0}};
+        SOL_MIR_NONE, callable->owner, SOL_IR_NONE, {0},
+        SOL_MIR_PLAN_TARGET_INSTANCE, SOL_MIR_PLAN_NONE};
     if (!source_for(builder, instance->callable, callable->body, body_span,
             &body_source)) return false;
     body_context.source = body_source;
@@ -1928,7 +1993,8 @@ static bool scan_instance(Builder *builder, SolMirPlanInstanceId instance_id) {
         if (item->predicate >= builder->ir->expression_count) return false;
         Environment predicate = environment;
         SolMirPlanContext contract = {SOL_MIR_PLAN_CONTEXT_CONTRACT,
-            instance_id, SOL_MIR_NONE, callable->owner, item->id, {0}};
+            instance_id, SOL_MIR_NONE, callable->owner, item->id, {0},
+            SOL_MIR_PLAN_TARGET_INSTANCE, SOL_MIR_PLAN_NONE};
         if (!source_for(builder, instance->callable, item->predicate,
                 builder->ir->expressions[item->predicate].span,
                 &contract.source)
@@ -1958,7 +2024,8 @@ static bool scan_instance(Builder *builder, SolMirPlanInstanceId instance_id) {
             predicate.self_type = nominal_type;
             SolMirPlanContext refinement = {SOL_MIR_PLAN_CONTEXT_REFINEMENT,
                 instance_id, block, term->as.check_refined.definition,
-                item->id, {0}};
+                item->id, {0}, SOL_MIR_PLAN_TARGET_INSTANCE,
+                SOL_MIR_PLAN_NONE};
             if (!source_for(builder, instance->callable,
                     term->as.check_refined.source_expression, term->span,
                     &refinement.source)
@@ -2009,6 +2076,7 @@ static void free_builder(Builder *builder, bool atoms_published) {
     for (size_t index = 0; index < builder->import_count; ++index) {
         free(builder->imports[index].parameters);
         free(builder->imports[index].accesses);
+        free(builder->imports[index].uses);
     }
     if (!atoms_published) {
         for (size_t index = 0; index < builder->atom_count; ++index) {
@@ -2213,6 +2281,8 @@ static bool canonicalize_types(Builder *builder) {
         for (size_t child = 0; child < item->parameter_count; ++child) {
             remap_type_id(&item->parameters[child], remap);
         }
+        for (size_t use = 0; use < item->use_count; ++use)
+            remap_type_id(&item->uses[use].type, remap);
         remap_type_id(&item->result, remap);
     }
     free(builder->types);
@@ -2268,7 +2338,8 @@ static bool canonicalize_instances(Builder *builder) {
     }
     for (size_t index = 0; index < count; ++index) remap[old[index]] = index;
     for (size_t index = 0; index < builder->demand_count; ++index) {
-        if (builder->demands[index].parent != SOL_MIR_PLAN_NONE) {
+        if (builder->demands[index].owner_kind
+                == SOL_MIR_PLAN_DEMAND_OWNER_INSTANCE) {
             builder->demands[index].parent = remap[builder->demands[index].parent];
         }
         if (builder->demands[index].instance != SOL_MIR_PLAN_NONE) {
@@ -2277,7 +2348,9 @@ static bool canonicalize_instances(Builder *builder) {
         }
     }
     for (size_t index = 0; index < builder->context_count; ++index) {
-        builder->contexts[index].instance = remap[builder->contexts[index].instance];
+        if (builder->contexts[index].target_kind == SOL_MIR_PLAN_TARGET_INSTANCE)
+            builder->contexts[index].instance
+                = remap[builder->contexts[index].instance];
     }
     free(old); free(remap);
     return true;
@@ -2324,7 +2397,15 @@ static bool canonicalize_imports(Builder *builder) {
         if (builder->demands[index].import != SOL_MIR_PLAN_NONE) {
             builder->demands[index].import = remap[builder->demands[index].import];
         }
+        if (builder->demands[index].owner_kind
+                == SOL_MIR_PLAN_DEMAND_OWNER_IMPORT)
+            builder->demands[index].parent_import
+                = remap[builder->demands[index].parent_import];
     }
+    for (size_t index = 0; index < builder->context_count; ++index)
+        if (builder->contexts[index].target_kind == SOL_MIR_PLAN_TARGET_IMPORT)
+            builder->contexts[index].import
+                = remap[builder->contexts[index].import];
     free(old); free(remap);
     return true;
 }
@@ -2349,7 +2430,8 @@ static int context_compare(const void *left, const void *right) {
     const SolMirPlanContext *a = left;
     const SolMirPlanContext *b = right;
 #define CMP(field) if (a->field != b->field) return a->field < b->field ? -1 : 1
-    CMP(instance); CMP(kind); CMP(source_block); CMP(definition); CMP(obligation);
+    CMP(target_kind); CMP(instance); CMP(import); CMP(kind); CMP(source_block);
+    CMP(definition); CMP(obligation);
 #undef CMP
     return source_compare(a->source, b->source);
 }
@@ -2382,6 +2464,10 @@ static bool canonicalize_contexts(Builder *builder) {
                 = remap[builder->instances[instance].uses[use].context];
         }
     }
+    for (size_t import = 0; import < builder->import_count; ++import)
+        for (size_t use = 0; use < builder->imports[import].use_count; ++use)
+            builder->imports[import].uses[use].context
+                = remap[builder->imports[import].uses[use].context];
     for (size_t demand = 0; demand < builder->demand_count; ++demand) {
         if (builder->demands[demand].context != SOL_MIR_PLAN_NONE) {
             builder->demands[demand].context
@@ -2396,7 +2482,11 @@ static int demand_compare(const void *left, const void *right) {
     const SolMirPlanDemand *a = left;
     const SolMirPlanDemand *b = right;
     if (a->kind != b->kind) return a->kind < b->kind ? -1 : 1;
+    if (a->owner_kind != b->owner_kind)
+        return a->owner_kind < b->owner_kind ? -1 : 1;
     if (a->parent != b->parent) return a->parent < b->parent ? -1 : 1;
+    if (a->parent_import != b->parent_import)
+        return a->parent_import < b->parent_import ? -1 : 1;
     int source = source_compare(a->source, b->source);
     if (source != 0) return source;
 #define CMP(field) if (a->field != b->field) return a->field < b->field ? -1 : 1
@@ -2421,7 +2511,8 @@ static bool validate_expansion_path(Builder *builder,
     path[depth++] = current;
     for (size_t edge = 0; edge < builder->demand_count; ++edge) {
         const SolMirPlanDemand *demand = &builder->demands[edge];
-        if (demand->parent != current
+        if (demand->owner_kind != SOL_MIR_PLAN_DEMAND_OWNER_INSTANCE
+            || demand->parent != current
             || demand->instance == SOL_MIR_PLAN_NONE) continue;
         SolMirPlanInstanceId child_id = demand->instance;
         const RawInstance *child = &builder->instances[child_id];
@@ -2478,13 +2569,18 @@ static bool publish(Builder *builder) {
     SolMirPlan *plan = builder->plan;
     if (!canonicalize_atoms(builder) || !canonicalize_rows(builder)
         || !canonicalize_types(builder) || !canonicalize_instances(builder)
-        || !canonicalize_contexts(builder) || !canonicalize_imports(builder)) {
+        || !canonicalize_imports(builder) || !canonicalize_contexts(builder)) {
         return false;
     }
     for (size_t index = 0; index < builder->instance_count; ++index) {
         RawInstance *instance = &builder->instances[index];
         if (instance->use_count > 1) qsort(instance->uses, instance->use_count,
             sizeof(*instance->uses), use_compare);
+    }
+    for (size_t index = 0; index < builder->import_count; ++index) {
+        RawImport *import = &builder->imports[index];
+        if (import->use_count > 1) qsort(import->uses, import->use_count,
+            sizeof(*import->uses), use_compare);
     }
     if (builder->demand_count > 1) qsort(builder->demands,
         builder->demand_count, sizeof(*builder->demands), demand_compare);
@@ -2602,6 +2698,9 @@ static bool publish(Builder *builder) {
                 - builder->imports[index].parameter_count) return false;
         plan->instance_type_id_count += builder->imports[index].parameter_count;
         plan->instance_access_count += builder->imports[index].parameter_count;
+        if (plan->typed_use_count > SIZE_MAX - builder->imports[index].use_count)
+            return false;
+        plan->typed_use_count += builder->imports[index].use_count;
     }
     plan->instance_type_ids = allocate(plan->instance_type_id_count,
         sizeof(*plan->instance_type_ids));
@@ -2665,9 +2764,13 @@ static bool publish(Builder *builder) {
         typed_use += source->use_count;
         size_t context_start = 0;
         while (context_start < builder->context_count
+            && builder->contexts[context_start].target_kind
+                == SOL_MIR_PLAN_TARGET_INSTANCE
             && builder->contexts[context_start].instance < index) ++context_start;
         size_t context_end = context_start;
         while (context_end < builder->context_count
+            && builder->contexts[context_end].target_kind
+                == SOL_MIR_PLAN_TARGET_INSTANCE
             && builder->contexts[context_end].instance == index) ++context_end;
         target->contexts = (SolMirPlanSlice){context_start,
             context_end - context_start};
@@ -2688,9 +2791,25 @@ static bool publish(Builder *builder) {
         }
         type_id += source->parameter_count;
         instance_access += source->parameter_count;
+        size_t import_use = typed_use;
+        if (source->use_count != 0) memcpy(plan->typed_uses + typed_use,
+            source->uses, source->use_count * sizeof(*source->uses));
+        typed_use += source->use_count;
+        size_t context_start = 0;
+        while (context_start < builder->context_count
+            && !(builder->contexts[context_start].target_kind
+                    == SOL_MIR_PLAN_TARGET_IMPORT
+                && builder->contexts[context_start].import >= index)) ++context_start;
+        size_t context_end = context_start;
+        while (context_end < builder->context_count
+            && builder->contexts[context_end].target_kind
+                == SOL_MIR_PLAN_TARGET_IMPORT
+            && builder->contexts[context_end].import == index) ++context_end;
         plan->imports[index] = (SolMirPlanImport){source->callable,
             source->receiver, {old_types, source->parameter_count},
-            {old_accesses, source->parameter_count}, source->result, source->effects};
+            {old_accesses, source->parameter_count}, source->result, source->effects,
+            {import_use, source->use_count},
+            {context_start, context_end - context_start}};
     }
     plan->demands = builder->demands;
     plan->demand_count = builder->demand_count;
@@ -2767,6 +2886,14 @@ static SolMirPlanBuildOutcome build_scratch(const SolMirPlanBuildRequest *reques
             ? builder.ir->expressions[body].span : callable->span;
         if (!source_for(&builder, root->callable, body, span, &demand.source)
             || !add_demand(&builder, demand)) goto done;
+    }
+    for (size_t i = 0; i < builder.import_count; ++i) {
+        RawInstance owner;
+        memset(&owner, 0, sizeof(owner));
+        owner.callable = builder.imports[i].callable;
+        Environment environment = {&builder, &owner, SOL_MIR_PLAN_NONE,
+            SOL_IR_NONE, NULL, 0, SOL_MIR_PLAN_NONE, SOL_MIR_PLAN_NONE};
+        if (!scan_import_contracts(&environment, i)) goto done;
     }
     if (!validate_expansion_graph(&builder) || !publish(&builder)) goto done;
     builder.outcome = SOL_MIR_PLAN_BUILD_SUCCEEDED;
@@ -2960,6 +3087,7 @@ static bool slices_valid(const SolMirPlan *plan, SolDiagnostics *diagnostics) {
             return false;
         }
     }
+    size_t consumed_uses = 0, consumed_contexts = 0;
     for (size_t index = 0; index < plan->instance_count; ++index) {
         const SolMirPlanInstance *item = &plan->instances[index];
 #define SLICE_OK(slice, total) ((slice).offset <= (total) \
@@ -2974,19 +3102,30 @@ static bool slices_valid(const SolMirPlan *plan, SolDiagnostics *diagnostics) {
             || !SLICE_OK(item->parameter_types, plan->instance_type_id_count)
             || !SLICE_OK(item->parameter_accesses, plan->instance_access_count)
             || !SLICE_OK(item->dictionary, plan->dictionary_entry_count)
-            || !SLICE_OK(item->typed_uses, plan->typed_use_count)
-            || !SLICE_OK(item->contexts, plan->context_count)) return false;
+            || item->typed_uses.offset != consumed_uses
+            || item->contexts.offset != consumed_contexts
+            || item->typed_uses.offset > plan->typed_use_count
+            || item->typed_uses.count > plan->typed_use_count
+                - item->typed_uses.offset
+            || item->contexts.offset > plan->context_count
+            || item->contexts.count > plan->context_count
+                - item->contexts.offset) return false;
         if (item->contexts.count == 0
             || plan->contexts[item->contexts.offset].kind
-                != SOL_MIR_PLAN_CONTEXT_BODY) return false;
+                != SOL_MIR_PLAN_CONTEXT_BODY
+            || plan->contexts[item->contexts.offset].target_kind
+                != SOL_MIR_PLAN_TARGET_INSTANCE) return false;
         for (size_t context = 0; context < item->contexts.count; ++context) {
             const SolMirPlanContext *record
                 = &plan->contexts[item->contexts.offset + context];
-            if (record->instance != index
+            if (record->target_kind != SOL_MIR_PLAN_TARGET_INSTANCE
+                || record->instance != index || record->import != SOL_MIR_PLAN_NONE
                 || (context != 0 && context_compare(record - 1, record) >= 0)) {
                 return false;
             }
         }
+        consumed_uses += item->typed_uses.count;
+        consumed_contexts += item->contexts.count;
 #undef SLICE_OK
     }
     for (size_t index = 0; index < plan->import_count; ++index) {
@@ -3001,28 +3140,71 @@ static bool slices_valid(const SolMirPlan *plan, SolDiagnostics *diagnostics) {
                 - item->parameter_types.offset
             || item->parameter_accesses.offset > plan->instance_access_count
             || item->parameter_accesses.count > plan->instance_access_count
-                - item->parameter_accesses.offset) return false;
+                - item->parameter_accesses.offset
+            || item->typed_uses.offset != consumed_uses
+            || item->contexts.offset != consumed_contexts
+            || item->typed_uses.offset > plan->typed_use_count
+            || item->typed_uses.count > plan->typed_use_count
+                - item->typed_uses.offset
+            || item->contexts.offset > plan->context_count
+            || item->contexts.count > plan->context_count
+                - item->contexts.offset) return false;
+        for (size_t context = 0; context < item->contexts.count; ++context) {
+            const SolMirPlanContext *record
+                = &plan->contexts[item->contexts.offset + context];
+            if (record->target_kind != SOL_MIR_PLAN_TARGET_IMPORT
+                || record->instance != SOL_MIR_PLAN_NONE
+                || record->import != index
+                || record->kind != SOL_MIR_PLAN_CONTEXT_CONTRACT
+                || (context != 0 && context_compare(record - 1, record) >= 0))
+                return false;
+        }
+        consumed_uses += item->typed_uses.count;
+        consumed_contexts += item->contexts.count;
     }
+    if (consumed_uses != plan->typed_use_count
+        || consumed_contexts != plan->context_count) return false;
     for (size_t index = 0; index < plan->demand_count; ++index) {
         const SolMirPlanDemand *item = &plan->demands[index];
         if (item->kind > SOL_MIR_PLAN_DEMAND_PREDICATE_FUNCTION_VALUE
-            || (item->parent != SOL_MIR_PLAN_NONE
-                && item->parent >= plan->instance_count)
+            || item->owner_kind > SOL_MIR_PLAN_DEMAND_OWNER_IMPORT
+            || (item->owner_kind == SOL_MIR_PLAN_DEMAND_OWNER_ROOT
+                && (item->kind != SOL_MIR_PLAN_DEMAND_ROOT
+                    || item->parent != SOL_MIR_PLAN_NONE
+                    || item->parent_import != SOL_MIR_PLAN_NONE
+                    || item->context != SOL_MIR_PLAN_NONE))
+            || (item->owner_kind == SOL_MIR_PLAN_DEMAND_OWNER_INSTANCE
+                && (item->parent >= plan->instance_count
+                    || item->parent_import != SOL_MIR_PLAN_NONE
+                    || item->context >= plan->context_count
+                    || plan->contexts[item->context].target_kind
+                        != SOL_MIR_PLAN_TARGET_INSTANCE
+                    || plan->contexts[item->context].instance != item->parent))
+            || (item->owner_kind == SOL_MIR_PLAN_DEMAND_OWNER_IMPORT
+                && (item->parent != SOL_MIR_PLAN_NONE
+                    || item->parent_import >= plan->import_count
+                    || item->context >= plan->context_count
+                    || plan->contexts[item->context].target_kind
+                        != SOL_MIR_PLAN_TARGET_IMPORT
+                    || plan->contexts[item->context].import
+                        != item->parent_import))
             || (item->instance != SOL_MIR_PLAN_NONE
                 && item->instance >= plan->instance_count)
             || (item->import != SOL_MIR_PLAN_NONE
                 && item->import >= plan->import_count)
             || (item->instance == SOL_MIR_PLAN_NONE)
-                == (item->import == SOL_MIR_PLAN_NONE)
-            || (item->parent == SOL_MIR_PLAN_NONE
-                ? item->context != SOL_MIR_PLAN_NONE
-                : item->context >= plan->context_count
-                    || plan->contexts[item->context].instance
-                        != item->parent)) return false;
+                == (item->import == SOL_MIR_PLAN_NONE)) return false;
     }
     for (size_t index = 0; index < plan->context_count; ++index) {
         const SolMirPlanContext *context = &plan->contexts[index];
-        if (context->instance >= plan->instance_count
+        if ((context->target_kind == SOL_MIR_PLAN_TARGET_INSTANCE
+                && (context->instance >= plan->instance_count
+                    || context->import != SOL_MIR_PLAN_NONE))
+            || (context->target_kind == SOL_MIR_PLAN_TARGET_IMPORT
+                && (context->instance != SOL_MIR_PLAN_NONE
+                    || context->import >= plan->import_count
+                    || context->kind != SOL_MIR_PLAN_CONTEXT_CONTRACT))
+            || context->target_kind > SOL_MIR_PLAN_TARGET_IMPORT
             || context->kind > SOL_MIR_PLAN_CONTEXT_REFINEMENT
             || (index != 0 && context_compare(&plan->contexts[index - 1],
                 context) >= 0)
@@ -3206,7 +3388,9 @@ static bool plans_equal(const SolMirPlan *a, const SolMirPlan *b) {
         if (x->callable != y->callable || x->receiver != y->receiver
             || !slice_equal(x->parameter_types, y->parameter_types)
             || !slice_equal(x->parameter_accesses, y->parameter_accesses)
-            || x->result != y->result || x->effects != y->effects) return false;
+            || x->result != y->result || x->effects != y->effects
+            || !slice_equal(x->typed_uses, y->typed_uses)
+            || !slice_equal(x->contexts, y->contexts)) return false;
     }
     for (size_t index = 0; index < a->typed_use_count; ++index) {
         const SolMirPlanTypedUse *x = &a->typed_uses[index];
@@ -3219,7 +3403,8 @@ static bool plans_equal(const SolMirPlan *a, const SolMirPlan *b) {
     for (size_t index = 0; index < a->context_count; ++index) {
         const SolMirPlanContext *x = &a->contexts[index];
         const SolMirPlanContext *y = &b->contexts[index];
-        if (x->kind != y->kind || x->instance != y->instance
+        if (x->kind != y->kind || x->target_kind != y->target_kind
+            || x->instance != y->instance || x->import != y->import
             || x->source_block != y->source_block
             || x->definition != y->definition || x->obligation != y->obligation
             || !source_equal(x->source, y->source)) return false;
@@ -3227,7 +3412,8 @@ static bool plans_equal(const SolMirPlan *a, const SolMirPlan *b) {
     for (size_t index = 0; index < a->demand_count; ++index) {
         const SolMirPlanDemand *x = &a->demands[index];
         const SolMirPlanDemand *y = &b->demands[index];
-        if (x->kind != y->kind || x->parent != y->parent
+        if (x->kind != y->kind || x->owner_kind != y->owner_kind
+            || x->parent != y->parent || x->parent_import != y->parent_import
             || !source_equal(x->source, y->source)
             || x->symbolic_target != y->symbolic_target
             || x->instance != y->instance || x->import != y->import

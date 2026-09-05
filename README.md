@@ -902,13 +902,34 @@ allocations, and record traversals, with transactional cleanup on exhaustion.
 Operation validation work includes the layout validator's authenticated recorded work,
 and validation scratch is the exact peak of the sequential layout and operation-local
 phases. Limit sets are either wholly populated or wholly zero. Executable operation records require no source expression, pattern, field,
-variant, obligation, or snapshot IDs. Contract and refinement slots explicitly remain
-`UNRESOLVED_BODY`; synthetic predicate bodies and bodyless import contracts are the
-sole runtime-semantic deferral to P2.6b, while loop proof obligations remain erased.
+variant, obligation, or snapshot IDs. P2.6b1 removes the `UNRESOLVED_BODY` state
+and adds separate synthetic predicate IDs, immutable contextual inputs, SSA values,
+instructions, single blocks, and Bool returns. Its deliberately exact vocabulary is
+Int64/Bool/Text/Unit constants; direct unprojected receiver, parameter, complete or
+successful result, snapshot, and refinement-self inputs; and checked unary/binary
+arithmetic, comparison, or equality excluding `&&` and `||`. Calls, function and
+bound-operation values, projected or computed places, aggregate/wrapper/refined
+construction, `if`, match/patterns, blocks/locals, propagation, nested refinement
+references, and every other form reject transactionally rather than receiving lossy
+semantics. Validation independently authenticates source obligations field by field,
+including literal contents, local input recipes/access, opcodes/failures, SSA order,
+ownership/applicability, and snapshot provenance.
+
+Approved bodyless capability contracts are discovered independently of a body
+instance, retain import-owned substitutions, typed uses, contexts, and helper demands,
+and materialize one ordered require/snapshot/ensure envelope per concrete import.
+Snapshot inputs use envelope-local capture slots; global source snapshot IDs occur only
+in segregated provenance. Import-owned semantic sites carry explicit import ownership
+and no fake CFG coordinate. Rich predicate CFG lowering remains P2.6b2, so P2.6b and
+parent P2.6 remain open. Loop proof obligations remain erased.
 The all-roots E6 census is 28 constructors, 16 binary operations plus one compound
 update, three pattern tests and three extractions, two propagations, one snapshot,
 three contract slots plus one refinement slot, no handlers or callable producers,
-and one access plan per materialized place with five total access steps. Independent
+and one access plan per materialized place with five total access steps. Its separate
+predicate census is four bodies, four blocks, four inputs, ten values, three constants,
+three comparisons, and four returns, with no predicate edges, calls, constructions,
+locals, patterns, or propagations; one snapshot is referenced. The four E6 imports
+each have an empty contract envelope. Independent
 opcode classification finds five checked arithmetic operations and twelve
 comparison/equality operations in that current closure.
 Parent P2.6 therefore remains open. Symbols/linkage, runtime ABI, and backend behavior

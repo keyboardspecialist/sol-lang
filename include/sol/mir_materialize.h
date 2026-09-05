@@ -262,7 +262,9 @@ typedef struct {
 typedef struct {
     size_t source_demand;
     SolMirPlanDemandKind kind;
+    SolMirPlanDemandOwnerKind owner_kind;
     SolMirPlanInstanceId parent;
+    SolMirPlanImportId parent_import;
     SolMirPlanContextId context;
     SolMirProgramSource source;
     SolIrCallableId symbolic_callable; /* Provenance only; never executable. */
@@ -293,7 +295,9 @@ typedef enum {
 typedef struct {
     SolMirPlanDemandKind kind;
     SolMirMaterializedBindingId binding;
+    SolMirPlanDemandOwnerKind owner_kind;
     SolMirPlanInstanceId parent;
+    SolMirMaterializedImportId parent_import;
     SolMirPlanContextId context;
     SolMirProgramSource source;
     SolIrDefinitionId source_definition;
@@ -323,6 +327,8 @@ typedef struct {
     SolMirMaterializedTypeId result;
     SolMirMaterializedEffectRowId effects;
     SolMirPlanImportId source_import;
+    SolMirPlanSlice overlays;
+    SolMirPlanSlice contexts;
 } SolMirMaterializedImport;
 
 typedef struct { SolMirPlanSlice atoms; } SolMirMaterializedEffectRow;

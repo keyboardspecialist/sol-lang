@@ -229,11 +229,22 @@ static bool shallow_ranges(const SolMirMaterialization *o) {
         const SolMirMaterializedBinding *b = &o->bindings[i];
         if (!target_valid(o, b->target_kind, b->instance, b->import)
             || b->site >= o->semantic_site_count
-            || (b->parent != SOL_MIR_PLAN_NONE && b->parent >= o->image_count)) return false;
+            || b->owner_kind > SOL_MIR_PLAN_DEMAND_OWNER_IMPORT
+            || (b->owner_kind == SOL_MIR_PLAN_DEMAND_OWNER_ROOT
+                && (b->parent != SOL_MIR_PLAN_NONE
+                    || b->parent_import != SOL_MIR_PLAN_NONE))
+            || (b->owner_kind == SOL_MIR_PLAN_DEMAND_OWNER_INSTANCE
+                && (b->parent >= o->image_count
+                    || b->parent_import != SOL_MIR_PLAN_NONE))
+            || (b->owner_kind == SOL_MIR_PLAN_DEMAND_OWNER_IMPORT
+                && (b->parent != SOL_MIR_PLAN_NONE
+                    || b->parent_import >= o->import_count))) return false;
     }
     for (size_t i = 0; i < o->import_count; ++i) {
         const SolMirMaterializedImport *im = &o->imports[i];
-        if (!access_valid(im->receiver_access)) return false;
+        if (!access_valid(im->receiver_access)
+            || !slice(im->overlays, o->overlay_count)
+            || !slice(im->contexts, o->context_count)) return false;
     }
     for (size_t i = 0; i < o->edge_count; ++i) {
         const SolMirMaterializedEdge *edge = &o->edges[i];
@@ -286,7 +297,13 @@ static bool shallow_ranges(const SolMirMaterialization *o) {
     for (size_t i = 0; i < o->semantic_site_count; ++i) {
         const SolMirMaterializedSemanticSite *site = &o->semantic_sites[i];
         if (site->binding >= o->binding_count
-            || (site->parent != SOL_MIR_PLAN_NONE && site->parent >= o->image_count)
+            || site->owner_kind > SOL_MIR_PLAN_DEMAND_OWNER_IMPORT
+            || (site->owner_kind == SOL_MIR_PLAN_DEMAND_OWNER_INSTANCE
+                && (site->parent >= o->image_count
+                    || site->parent_import != SOL_MIR_PLAN_NONE))
+            || (site->owner_kind == SOL_MIR_PLAN_DEMAND_OWNER_IMPORT
+                && (site->parent != SOL_MIR_PLAN_NONE
+                    || site->parent_import >= o->import_count))
             || (site->block != SOL_MIR_MATERIALIZED_NONE && site->block >= o->block_count)
             || (site->instruction != SOL_MIR_MATERIALIZED_NONE
                 && site->instruction >= o->instruction_count)
@@ -2119,7 +2136,7 @@ static bool validate_closure(const SolMirMaterialization *o) {
         if (valid && binding->kind == SOL_MIR_PLAN_DEMAND_PREDICATE_FUNCTION_VALUE
             && result >= o->type_count) valid = false;
         (void)receiver; (void)parameters; (void)accesses; (void)effects;
-        if (binding->parent == SOL_MIR_PLAN_NONE) {
+        if (binding->owner_kind == SOL_MIR_PLAN_DEMAND_OWNER_ROOT) {
             if (binding->kind != SOL_MIR_PLAN_DEMAND_ROOT
                 || binding->target_kind != SOL_MIR_MATERIALIZED_TARGET_INSTANCE
                 || binding->instance >= o->image_count) valid = false;
@@ -2163,6 +2180,26 @@ static bool validate_closure(const SolMirMaterialization *o) {
                 imports[binding->import] = 1;
             } else { valid = false; break; }
         }
+        bool import_changed = true;
+        while (valid && import_changed) {
+            import_changed = false;
+            for (size_t d = 0; d < o->binding_count; ++d) {
+                const SolMirMaterializedBinding *binding = &o->bindings[d];
+                if (bindings[d]
+                    || binding->owner_kind != SOL_MIR_PLAN_DEMAND_OWNER_IMPORT
+                    || !imports[binding->parent_import]) continue;
+                bindings[d] = 1; import_changed = true;
+                if (binding->target_kind == SOL_MIR_MATERIALIZED_TARGET_IMPORT)
+                    imports[binding->import] = 1;
+                else if (binding->target_kind
+                        == SOL_MIR_MATERIALIZED_TARGET_INSTANCE) {
+                    if (!queued[binding->instance]) {
+                        queued[binding->instance] = 1;
+                        queue[count++] = binding->instance;
+                    }
+                } else valid = false;
+            }
+        }
     }
     for (size_t i = 0; valid && i < o->image_count; ++i) valid = images[i];
     for (size_t i = 0; valid && i < o->import_count; ++i) valid = imports[i];
@@ -2186,7 +2223,10 @@ static bool validate_semantic_sites(const SolMirMaterialization *o) {
         seen[site->binding] = 1;
         const SolMirMaterializedBinding *binding = &o->bindings[site->binding];
         valid = binding->site == i && site->kind == binding->kind
-            && site->parent == binding->parent && site->context == binding->context
+            && site->owner_kind == binding->owner_kind
+            && site->parent == binding->parent
+            && site->parent_import == binding->parent_import
+            && site->context == binding->context
             && site->source.callable == binding->source.callable
             && site->source.expression == binding->source.expression
             && site->source.file == binding->source.file
@@ -2288,9 +2328,28 @@ static bool validate_semantic_sites(const SolMirMaterialization *o) {
             || site->captured_receiver_type != SOL_MIR_MATERIALIZED_NONE) {
             valid = false; break;
         }
+        if (site->owner_kind == SOL_MIR_PLAN_DEMAND_OWNER_IMPORT) {
+            valid = site->kind != SOL_MIR_PLAN_DEMAND_ROOT
+                && site->parent == SOL_MIR_PLAN_NONE
+                && site->parent_import < o->import_count
+                && site->context < o->context_count
+                && o->contexts[site->context].target_kind
+                    == SOL_MIR_PLAN_TARGET_IMPORT
+                && o->contexts[site->context].import == site->parent_import
+                && site->producer_kind == SOL_MIR_MATERIALIZED_PRODUCER_PREDICATE
+                && site->block == SOL_MIR_MATERIALIZED_NONE
+                && site->instruction == SOL_MIR_MATERIALIZED_NONE
+                && site->handler == SOL_MIR_MATERIALIZED_NONE
+                && site->source_definition == o->contexts[site->context].definition
+                && site->source_obligation == o->contexts[site->context].obligation;
+            if (!valid) break;
+            continue;
+        }
         if (site->kind != SOL_MIR_PLAN_DEMAND_ROOT) {
             valid = site->parent < o->image_count
                 && site->context < o->context_count
+                && o->contexts[site->context].target_kind
+                    == SOL_MIR_PLAN_TARGET_INSTANCE
                 && o->contexts[site->context].instance == site->parent;
             if (!valid) break;
         }
@@ -2636,6 +2695,36 @@ bool sol_mir_materialization_validate_concrete(
         operands += im->construct_operands.count;
         arguments += im->call_arguments.count; loops += im->loops.count;
         handlers += im->handlers.count; overlays += im->overlays.count;
+        contexts += im->contexts.count;
+    }
+    for (size_t i = 0; valid && i < owner->import_count; ++i) {
+        const SolMirMaterializedImport *im = &owner->imports[i];
+        valid = im->source_import == i && im->overlays.offset == overlays
+            && im->contexts.offset == contexts;
+        const SolMirPlanImport *planned = &owner->plan->imports[i];
+        valid = valid && im->overlays.count == planned->typed_uses.count
+            && im->contexts.offset == planned->contexts.offset
+            && im->contexts.count == planned->contexts.count;
+        for (size_t u = 0; valid && u < im->overlays.count; ++u) {
+            const SolMirMaterializedTypeOverlay *actual
+                = &owner->overlays[im->overlays.offset + u];
+            const SolMirPlanTypedUse *expected
+                = &owner->plan->typed_uses[planned->typed_uses.offset + u];
+            valid = actual->kind == expected->kind
+                && actual->source == expected->source
+                && actual->ordinal == expected->ordinal
+                && actual->context == expected->context
+                && actual->type == expected->type
+                && actual->access == expected->access;
+        }
+        for (size_t c = 0; valid && c < im->contexts.count; ++c) {
+            const SolMirPlanContext *context
+                = &owner->contexts[im->contexts.offset + c];
+            valid = context->target_kind == SOL_MIR_PLAN_TARGET_IMPORT
+                && context->instance == SOL_MIR_PLAN_NONE
+                && context->import == i;
+        }
+        overlays += im->overlays.count;
         contexts += im->contexts.count;
     }
     valid = valid && blocks == owner->block_count && values == owner->value_count

@@ -1197,7 +1197,7 @@ static bool build_scratch(Builder *b) {
             source->receiver == SOL_MIR_PLAN_NONE ? SOL_ACCESS_OWNED : SOL_ACCESS_SHARED,
             {type_at, source->parameter_types.count},
             {access_at, source->parameter_accesses.count}, source->result,
-            source->effects, i};
+            source->effects, i, {0, 0}, source->contexts};
         if (source->parameter_types.count != 0) memcpy(out->type_ids + type_at,
             plan->instance_type_ids + source->parameter_types.offset,
             source->parameter_types.count * sizeof(*out->type_ids));
@@ -1213,30 +1213,41 @@ static bool build_scratch(Builder *b) {
         out->images[parent].bindings = (SolMirPlanSlice){binding_at, 0};
         for (size_t demand = 0; demand < plan->demand_count; ++demand) {
             const SolMirPlanDemand *source = &plan->demands[demand];
-            if (source->parent != parent) continue;
-            out->bindings[binding_at] = (SolMirMaterializedBinding){demand,
-                source->kind, source->parent, source->context, source->source,
-                source->symbolic_target, source->dispatch_trait,
-                source->dispatch_requirement,
-                source->instance != SOL_MIR_PLAN_NONE
+            if (source->owner_kind != SOL_MIR_PLAN_DEMAND_OWNER_INSTANCE
+                || source->parent != parent) continue;
+            out->bindings[binding_at] = (SolMirMaterializedBinding){
+                .source_demand = demand, .kind = source->kind,
+                .owner_kind = source->owner_kind, .parent = source->parent,
+                .parent_import = source->parent_import,
+                .context = source->context, .source = source->source,
+                .symbolic_callable = source->symbolic_target,
+                .dispatch_trait = source->dispatch_trait,
+                .dispatch_requirement = source->dispatch_requirement,
+                .target_kind = source->instance != SOL_MIR_PLAN_NONE
                     ? SOL_MIR_MATERIALIZED_TARGET_INSTANCE
                     : SOL_MIR_MATERIALIZED_TARGET_IMPORT,
-                source->instance, source->import, binding_at};
+                .instance = source->instance, .import = source->import,
+                .site = binding_at};
             ++binding_at;
             ++out->images[parent].bindings.count;
         }
     }
     for (size_t demand = 0; demand < plan->demand_count; ++demand) {
         const SolMirPlanDemand *source = &plan->demands[demand];
-        if (source->parent != SOL_MIR_PLAN_NONE) continue;
-        out->bindings[binding_at] = (SolMirMaterializedBinding){demand,
-            source->kind, source->parent, source->context, source->source,
-            source->symbolic_target, source->dispatch_trait,
-            source->dispatch_requirement,
-            source->instance != SOL_MIR_PLAN_NONE
+        if (source->owner_kind == SOL_MIR_PLAN_DEMAND_OWNER_INSTANCE) continue;
+        out->bindings[binding_at] = (SolMirMaterializedBinding){
+            .source_demand = demand, .kind = source->kind,
+            .owner_kind = source->owner_kind, .parent = source->parent,
+            .parent_import = source->parent_import,
+            .context = source->context, .source = source->source,
+            .symbolic_callable = source->symbolic_target,
+            .dispatch_trait = source->dispatch_trait,
+            .dispatch_requirement = source->dispatch_requirement,
+            .target_kind = source->instance != SOL_MIR_PLAN_NONE
                 ? SOL_MIR_MATERIALIZED_TARGET_INSTANCE
                 : SOL_MIR_MATERIALIZED_TARGET_IMPORT,
-            source->instance, source->import, binding_at};
+            .instance = source->instance, .import = source->import,
+            .site = binding_at};
         ++binding_at;
     }
     if (binding_at != plan->demand_count) return false;
@@ -1483,6 +1494,19 @@ static bool build_scratch(Builder *b) {
         }
         if (!clone_mir(b, mir, &image->topology)) return false;
     }
+    for (size_t i = 0; i < plan->import_count; ++i) {
+        const SolMirPlanImport *source = &plan->imports[i];
+        SolMirMaterializedImport *target = &out->imports[i];
+        target->overlays.offset = out->overlay_count;
+        for (size_t u = 0; u < source->typed_uses.count; ++u) {
+            const SolMirPlanTypedUse *use
+                = &plan->typed_uses[source->typed_uses.offset + u];
+            out->overlays[out->overlay_count++] = (SolMirMaterializedTypeOverlay){
+                use->kind, use->source, use->ordinal, use->context,
+                use->type, use->access};
+        }
+        target->overlays.count = out->overlay_count - target->overlays.offset;
+    }
     size_t receiver_root_at = 0;
     for (size_t id = 0; id < out->binding_count; ++id) {
         const SolMirMaterializedBinding *binding = &out->bindings[id];
@@ -1490,7 +1514,9 @@ static bool build_scratch(Builder *b) {
         *site = (SolMirMaterializedSemanticSite){
             .kind = binding->kind,
             .binding = id,
+            .owner_kind = binding->owner_kind,
             .parent = binding->parent,
+            .parent_import = binding->parent_import,
             .context = binding->context,
             .source = binding->source,
             .source_definition = SOL_IR_NONE,
@@ -1512,6 +1538,19 @@ static bool build_scratch(Builder *b) {
             if (binding->target_kind != SOL_MIR_MATERIALIZED_TARGET_INSTANCE
                 || binding->instance >= out->image_count) return false;
             site->block = out->images[binding->instance].entry;
+            continue;
+        }
+        if (binding->owner_kind == SOL_MIR_PLAN_DEMAND_OWNER_IMPORT) {
+            if (binding->parent != SOL_MIR_PLAN_NONE
+                || binding->parent_import >= out->import_count
+                || binding->context >= out->context_count
+                || out->contexts[binding->context].target_kind
+                    != SOL_MIR_PLAN_TARGET_IMPORT
+                || out->contexts[binding->context].import
+                    != binding->parent_import) return false;
+            site->source_definition = out->contexts[binding->context].definition;
+            site->source_obligation = out->contexts[binding->context].obligation;
+            site->producer_kind = SOL_MIR_MATERIALIZED_PRODUCER_PREDICATE;
             continue;
         }
         if (binding->parent >= out->image_count) return false;
@@ -2206,8 +2245,9 @@ bool sol_mir_materialization_render(FILE *stream,
     format(&out, "\n");
     for (size_t i = 0; i < owner->context_count; ++i) {
         const SolMirPlanContext *context = &owner->contexts[i];
-        format(&out, "context k%zu kind=%d instance=i%zu block=%zu definition=%zu obligation=%zu source=c%zu:x%zu\n",
-            i, (int)context->kind, context->instance, context->source_block,
+        format(&out, "context k%zu kind=%d owner=%d:%zu:%zu block=%zu definition=%zu obligation=%zu source=c%zu:x%zu\n",
+            i, (int)context->kind, (int)context->target_kind,
+            context->instance, context->import, context->source_block,
             context->definition, context->obligation, context->source.callable,
             context->source.expression);
     }
@@ -2221,13 +2261,15 @@ bool sol_mir_materialization_render(FILE *stream,
                 owner->type_ids[item->parameter_types.offset + j],
                 (int)owner->accesses[item->parameter_accesses.offset + j]);
         }
-        format(&out, "] source_import=%zu\n", item->source_import);
+        format(&out, "] source_import=%zu overlays=%zu:%zu contexts=%zu:%zu\n",
+            item->source_import, item->overlays.offset, item->overlays.count,
+            item->contexts.offset, item->contexts.count);
     }
     for (size_t i = 0; i < owner->binding_count; ++i) {
         const SolMirMaterializedBinding *item = &owner->bindings[i];
-        format(&out, "binding d%zu plan=d%zu kind=%d parent=%zu context=%zu source=c%zu:x%zu target=%c%zu symbolic=c%zu trait=%zu requirement=%zu\n",
-            i, item->source_demand, (int)item->kind, item->parent,
-            item->context, item->source.callable,
+        format(&out, "binding d%zu plan=d%zu kind=%d owner=%d:%zu:%zu context=%zu source=c%zu:x%zu target=%c%zu symbolic=c%zu trait=%zu requirement=%zu\n",
+            i, item->source_demand, (int)item->kind, (int)item->owner_kind,
+            item->parent, item->parent_import, item->context, item->source.callable,
             item->source.expression,
             item->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE ? 'i' : 'm',
             item->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE
@@ -2237,8 +2279,9 @@ bool sol_mir_materialization_render(FILE *stream,
     }
     for (size_t i = 0; i < owner->semantic_site_count; ++i) {
         const SolMirMaterializedSemanticSite *item = &owner->semantic_sites[i];
-        format(&out, "semantic_site s%zu kind=%d binding=d%zu parent=%zu context=%zu definition=%zu obligation=%zu block=%zu instruction=%zu handler=%zu function_type=%zu receiver_type=%zu receiver_kind=%d receiver_expression=%zu receiver_place=%zu receiver_temporary=%zu receiver_value=%zu receiver_instruction=%zu receiver_roots=[%zu,%zu]",
-            i, (int)item->kind, item->binding, item->parent, item->context,
+        format(&out, "semantic_site s%zu kind=%d binding=d%zu owner=%d:%zu:%zu context=%zu definition=%zu obligation=%zu block=%zu instruction=%zu handler=%zu function_type=%zu receiver_type=%zu receiver_kind=%d receiver_expression=%zu receiver_place=%zu receiver_temporary=%zu receiver_value=%zu receiver_instruction=%zu receiver_roots=[%zu,%zu]",
+            i, (int)item->kind, item->binding, (int)item->owner_kind,
+            item->parent, item->parent_import, item->context,
             item->source_definition, item->source_obligation, item->block,
             item->instruction, item->handler, item->produced_function_type,
             item->captured_receiver_type, (int)item->captured_receiver_kind,

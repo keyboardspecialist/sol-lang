@@ -44,6 +44,11 @@ static bool complete_limits(SolMirOperationsLimits v) {
         && REQUIRED(max_equality_nodes) && REQUIRED(max_equality_children)
         && REQUIRED(max_snapshots) && REQUIRED(max_callables)
         && REQUIRED(max_handlers) && REQUIRED(max_predicates)
+        && REQUIRED(max_predicate_bodies) && REQUIRED(max_predicate_blocks)
+        && REQUIRED(max_predicate_inputs) && REQUIRED(max_predicate_values)
+        && REQUIRED(max_predicate_instructions) && REQUIRED(max_import_envelopes)
+        && REQUIRED(max_import_contract_references) && REQUIRED(max_literal_bytes)
+        && REQUIRED(max_import_snapshots)
         && REQUIRED(max_recipe_ids) && REQUIRED(max_roots)
         && REQUIRED(max_provenance) && REQUIRED(max_owned_bytes)
         && REQUIRED(max_build_scratch_bytes) && REQUIRED(max_build_work)
@@ -309,6 +314,10 @@ typedef struct {
     size_t constructors, construct_operands, tests, extractions, nodes, paths;
     size_t propagations, arithmetic, equality_nodes, equality_children;
     size_t snapshots, predicates, callables, handlers, recipe_ids, roots;
+    size_t predicate_bodies, predicate_blocks, predicate_inputs;
+    size_t predicate_values, predicate_instructions, literal_bytes;
+    size_t import_envelopes, import_contract_references;
+    size_t import_snapshots;
     size_t provenance;
 } ExpectedBuildCounts;
 
@@ -572,6 +581,64 @@ static bool build_count_equality(ExpectedBuild *b,
     return true;
 }
 
+static bool build_count_predicate(ExpectedBuild *b, const SolIr *ir, size_t id,
+    size_t depth, ExpectedBuildCounts *c) {
+    if (!BUILD_RECURSE(b) || id >= ir->expression_count
+        || depth > ir->expression_count) return false;
+    const SolIrExpression *e = &ir->expressions[id];
+    switch (e->kind) {
+        case SOL_IR_EXPR_INTEGER: case SOL_IR_EXPR_BOOL: case SOL_IR_EXPR_UNIT:
+            ++c->predicate_values; ++c->predicate_instructions; return true;
+        case SOL_IR_EXPR_STRING:
+            if (!add_size(&c->literal_bytes, strlen(e->as.string))) return false;
+            ++c->predicate_values; ++c->predicate_instructions; return true;
+        case SOL_IR_EXPR_PLACE: case SOL_IR_EXPR_REFINEMENT_SELF:
+        case SOL_IR_EXPR_RESULT: case SOL_IR_EXPR_SNAPSHOT_READ:
+            if (e->kind == SOL_IR_EXPR_PLACE
+                && (e->as.place >= ir->place_count
+                    || ir->places[e->as.place].root_kind
+                        != SOL_IR_PLACE_ROOT_LOCAL
+                    || ir->places[e->as.place].projections.count != 0)) return false;
+            if (e->kind == SOL_IR_EXPR_SNAPSHOT_READ
+                && (e->as.snapshot >= ir->snapshot_count
+                    || ir->snapshots[e->as.snapshot].operand
+                        >= ir->expression_count
+                    || ir->expressions[ir->snapshots[e->as.snapshot].operand].kind
+                        != SOL_IR_EXPR_PLACE
+                    || ir->expressions[ir->snapshots[e->as.snapshot].operand]
+                        .as.place >= ir->place_count
+                    || ir->places[ir->expressions[
+                        ir->snapshots[e->as.snapshot].operand].as.place]
+                        .projections.count != 0)) return false;
+            ++c->predicate_inputs; ++c->predicate_values; return true;
+        case SOL_IR_EXPR_UNARY:
+            if (!build_count_predicate(b, ir, e->as.unary.operand,
+                    depth + 1, c)) return false;
+            ++c->predicate_values; ++c->predicate_instructions; return true;
+        case SOL_IR_EXPR_BINARY:
+            if (e->as.binary.operator_kind == SOL_TOKEN_AMP_AMP
+                || e->as.binary.operator_kind == SOL_TOKEN_PIPE_PIPE) return false;
+            if (!build_count_predicate(b, ir, e->as.binary.left, depth + 1, c)
+                || !build_count_predicate(b, ir, e->as.binary.right,
+                    depth + 1, c)) return false;
+            ++c->predicate_values; ++c->predicate_instructions; return true;
+        default: return false;
+    }
+}
+
+static bool build_replay_predicate(ExpectedBuild *b, const SolIr *ir,
+    size_t id, size_t depth) {
+    if (!BUILD_RECURSE(b) || id >= ir->expression_count
+        || depth > ir->expression_count) return false;
+    const SolIrExpression *e = &ir->expressions[id];
+    if (e->kind == SOL_IR_EXPR_UNARY)
+        return build_replay_predicate(b, ir, e->as.unary.operand, depth + 1);
+    if (e->kind == SOL_IR_EXPR_BINARY)
+        return build_replay_predicate(b, ir, e->as.binary.left, depth + 1)
+            && build_replay_predicate(b, ir, e->as.binary.right, depth + 1);
+    return true;
+}
+
 static bool build_derive_counts(ExpectedBuild *b, const SolMirLayout *layout,
     ExpectedBuildCounts *c) {
     memset(c, 0, sizeof(*c));
@@ -620,7 +687,31 @@ static bool build_derive_counts(ExpectedBuild *b, const SolMirLayout *layout,
         SolMirTerminatorKind kind = m->blocks[i].terminator.kind;
         if (kind == SOL_MIR_TERM_PROPAGATE) { ++c->propagations; ++c->provenance; }
         else if (kind == SOL_MIR_TERM_CHECK_CONTRACT
-            || kind == SOL_MIR_TERM_CHECK_REFINED) { ++c->predicates; ++c->provenance; }
+            || kind == SOL_MIR_TERM_CHECK_REFINED) {
+            ++c->predicates; ++c->provenance; ++c->predicate_bodies;
+            ++c->predicate_blocks;
+            size_t obligation = m->blocks[i].terminator.source_obligation;
+            if (obligation >= ir->obligation_count
+                || !build_count_predicate(b, ir,
+                    ir->obligations[obligation].predicate, 0, c)) return false;
+        }
+    }
+    c->import_envelopes = m->import_count;
+    for (size_t i = 0; i < m->import_count; ++i) {
+        for (size_t q = 0; q < m->imports[i].contexts.count; ++q) {
+            size_t context = m->imports[i].contexts.offset + q;
+            if (context >= m->context_count) return false;
+            size_t obligation = m->contexts[context].obligation;
+            if (obligation >= ir->obligation_count) return false;
+            ++c->predicate_bodies; ++c->predicate_blocks;
+            ++c->import_contract_references;
+            if (!add_size(&c->import_snapshots,
+                    ir->obligations[obligation].snapshots.count)) return false;
+            if (!add_size(&c->provenance,
+                    ir->obligations[obligation].snapshots.count)) return false;
+            if (!build_count_predicate(b, ir,
+                    ir->obligations[obligation].predicate, 0, c)) return false;
+        }
     }
     c->callables = r->callable_producer_count;
     c->handlers = m->handler_count;
@@ -781,6 +872,7 @@ static bool build_replay_population(ExpectedBuild *b,
             if (!BUILD_SCAN(b)) return false;
         if (build_place_image(b, m, p) == SOL_MIR_OPERATION_NONE) return false;
     }
+    size_t snapshot_count = 0;
     for (size_t i = 0; i < m->instruction_count; ++i) {
         if (!BUILD_SCAN(b)) return false;
         const SolMirMaterializedInstruction *x = &m->instructions[i];
@@ -883,6 +975,9 @@ static bool build_replay_population(ExpectedBuild *b,
             }
             for (size_t q = 0; q < m->images[image].contexts.count; ++q)
                 if (!BUILD_SCAN(b)) return false;
+            for (size_t q = 0; q < snapshot_count; ++q)
+                if (!BUILD_SCAN(b)) return false;
+            ++snapshot_count;
             if (!BUILD_POPULATE(b)) return false;
         }
     }
@@ -913,6 +1008,10 @@ static bool build_replay_population(ExpectedBuild *b,
                 if (!BUILD_SCAN(b)) return false;
             for (size_t q = 0; q < r->recipe_count; ++q)
                 if (!BUILD_SCAN(b)) return false;
+            size_t obligation = t->source_obligation;
+            if (obligation >= ir->obligation_count
+                || !build_replay_predicate(b, ir,
+                    ir->obligations[obligation].predicate, 0)) return false;
             if (!BUILD_POPULATE(b)) return false;
         }
     }
@@ -923,6 +1022,16 @@ static bool build_replay_population(ExpectedBuild *b,
             if (!BUILD_SCAN(b)) return false;
         if (!BUILD_POPULATE(b)) return false;
     }
+    for (size_t i = 0; i < m->import_count; ++i)
+        for (size_t q = 0; q < m->imports[i].contexts.count; ++q) {
+            size_t context = m->imports[i].contexts.offset + q;
+            size_t obligation = m->contexts[context].obligation;
+            for (size_t s = 0;
+                s < ir->obligations[obligation].snapshots.count; ++s)
+                if (!BUILD_POPULATE(b)) return false;
+            if (!build_replay_predicate(b, ir,
+                    ir->obligations[obligation].predicate, 0)) return false;
+        }
     for (size_t i = 0; i < m->handler_count; ++i) {
         if (!BUILD_SCAN(b)) return false;
         const SolMirMaterializedBinding *binding
@@ -962,6 +1071,13 @@ static bool expected_build_work(const SolMirLayout *layout, size_t *result) {
     EXPECT_ALLOCATION(c.equality_nodes); EXPECT_ALLOCATION(c.equality_children);
     EXPECT_ALLOCATION(c.snapshots); EXPECT_ALLOCATION(c.callables);
     EXPECT_ALLOCATION(c.handlers); EXPECT_ALLOCATION(c.predicates);
+    EXPECT_ALLOCATION(c.predicate_bodies); EXPECT_ALLOCATION(c.predicate_blocks);
+    EXPECT_ALLOCATION(c.predicate_inputs); EXPECT_ALLOCATION(c.predicate_values);
+    EXPECT_ALLOCATION(c.predicate_instructions);
+    EXPECT_ALLOCATION(c.import_envelopes);
+    EXPECT_ALLOCATION(c.import_contract_references);
+    EXPECT_ALLOCATION(c.import_snapshots);
+    EXPECT_ALLOCATION(c.literal_bytes);
     EXPECT_ALLOCATION(c.recipe_ids); EXPECT_ALLOCATION(c.roots);
     EXPECT_ALLOCATION(c.provenance);
 #undef EXPECT_ALLOCATION
@@ -1137,6 +1253,15 @@ static bool validate_provenance_shapes(const SolMirOperations *o) {
                     || p->source_variant != SOL_IR_NONE
                     || p->source_obligation != SOL_IR_NONE
                     || p->source_snapshot != SOL_IR_NONE) return false;
+                break;
+            case SOL_MIR_OPERATION_PROVENANCE_IMPORT_SNAPSHOT:
+                if (p->executable >= o->import_snapshot_count
+                    || p->source_expression == SOL_IR_NONE
+                    || p->source_pattern != SOL_IR_NONE
+                    || p->source_field != SOL_IR_NONE
+                    || p->source_variant != SOL_IR_NONE
+                    || p->source_obligation == SOL_IR_NONE
+                    || p->source_snapshot == SOL_IR_NONE) return false;
                 break;
             default: return false;
         }
@@ -1698,7 +1823,7 @@ static bool validate_propagations_predicates(const SolMirOperations *o,
             if (v->kind != SOL_MIR_OPERATION_PROVENANCE_PREDICATE
                 || v->executable != predicates || v->source_obligation != t->source_obligation
                 || v->source_expression != t->source_expression
-                || p->state != SOL_MIR_OPERATION_PREDICATE_UNRESOLVED_BODY
+                || p->body >= o->predicate_body_count
                 || p->image != block_image(m, i) || p->block != i
                 || p->context >= m->context_count
                 || m->contexts[p->context].obligation != t->source_obligation
@@ -1733,6 +1858,490 @@ static bool validate_propagations_predicates(const SolMirOperations *o,
         }
     }
     return propagations == o->propagation_count && predicates == o->predicate_count;
+}
+
+static bool validate_predicate_cfg(const SolMirOperations *o) {
+#define PFAIL(tag) do { return false; } while (0)
+    const SolMirRepresentation *r = o->layout->representation;
+    const SolMirMaterialization *m = r->materialization;
+    size_t inputs = 0, blocks = 0, values = 0, instructions = 0;
+    for (size_t i = 0; i < o->predicate_body_count; ++i) {
+        if (!tick(1)) return false;
+        const SolMirPredicateBody *body = &o->predicate_bodies[i];
+        bool instance_owner = body->owner_kind
+            == SOL_MIR_PREDICATE_OWNER_INSTANCE;
+        bool import_owner = body->owner_kind == SOL_MIR_PREDICATE_OWNER_IMPORT;
+        if ((!instance_owner && !import_owner)
+            || (instance_owner && (body->instance >= m->image_count
+                || body->import != SOL_MIR_OPERATION_NONE))
+            || (import_owner && (body->instance != SOL_MIR_OPERATION_NONE
+                || body->import >= m->import_count))
+            || body->context >= m->context_count
+            || (instance_owner
+                && (m->contexts[body->context].target_kind
+                        != SOL_MIR_PLAN_TARGET_INSTANCE
+                    || m->contexts[body->context].instance != body->instance))
+            || (import_owner
+                && (m->contexts[body->context].target_kind
+                        != SOL_MIR_PLAN_TARGET_IMPORT
+                    || m->contexts[body->context].import != body->import))
+            || body->inputs.offset != inputs || body->blocks.offset != blocks
+            || body->values.offset != values || body->blocks.count == 0
+            || body->entry != body->blocks.offset
+            || body->output_recipe >= r->recipe_count
+            || r->recipes[body->output_recipe].kind != SOL_MIR_RECIPE_BOOL) {
+            PFAIL("body");
+        }
+        inputs += body->inputs.count;
+        blocks += body->blocks.count;
+        values += body->values.count;
+    }
+    if (inputs != o->predicate_input_count || blocks != o->predicate_block_count
+        || values != o->predicate_value_count) PFAIL("totals");
+    for (size_t i = 0; i < o->predicate_input_count; ++i) {
+        if (!tick(1)) return false;
+        const SolMirPredicateInput *input = &o->predicate_inputs[i];
+        if (input->kind < SOL_MIR_PREDICATE_INPUT_RECEIVER
+            || input->kind > SOL_MIR_PREDICATE_INPUT_REFINEMENT_SELF
+            || input->recipe >= r->recipe_count
+            || input->access < SOL_ACCESS_OWNED
+            || input->access > SOL_ACCESS_EXCLUSIVE) PFAIL("input");
+    }
+    for (size_t i = 0; i < o->predicate_block_count; ++i) {
+        if (!tick(1)) return false;
+        const SolMirPredicateBlock *block = &o->predicate_blocks[i];
+        if (block->body >= o->predicate_body_count
+            || block->instructions.offset != instructions
+            || instructions > o->predicate_instruction_count
+            || block->instructions.count
+                > o->predicate_instruction_count - instructions
+            || block->terminator.kind != SOL_MIR_PREDICATE_TERM_RETURN
+            || block->terminator.value >= o->predicate_value_count)
+            PFAIL("block");
+        const SolMirPredicateBody *body = &o->predicate_bodies[block->body];
+        if (i < body->blocks.offset || i - body->blocks.offset >= body->blocks.count
+            || block->terminator.value < body->values.offset
+            || block->terminator.value - body->values.offset >= body->values.count
+            || o->predicate_values[block->terminator.value].recipe
+                != body->output_recipe) PFAIL("return");
+        instructions += block->instructions.count;
+    }
+    if (instructions != o->predicate_instruction_count) PFAIL("instruction totals");
+    for (size_t i = 0; i < o->predicate_value_count; ++i) {
+        if (!tick(1)) return false;
+        const SolMirPredicateValue *value = &o->predicate_values[i];
+        if (value->recipe >= r->recipe_count
+            || value->block >= o->predicate_block_count) return false;
+        if (value->kind == SOL_MIR_PREDICATE_VALUE_INPUT) {
+            if (value->definition >= o->predicate_input_count
+                || o->predicate_inputs[value->definition].recipe != value->recipe)
+                PFAIL("input value");
+        } else if (value->kind == SOL_MIR_PREDICATE_VALUE_INSTRUCTION) {
+            if (value->definition >= o->predicate_instruction_count
+                || o->predicate_instructions[value->definition].result != i)
+                PFAIL("instruction value");
+        } else PFAIL("value kind");
+    }
+    for (size_t i = 0; i < o->predicate_instruction_count; ++i) {
+        if (!tick(1)) return false;
+        const SolMirPredicateInstruction *instruction
+            = &o->predicate_instructions[i];
+        if (instruction->kind < SOL_MIR_PREDICATE_INST_I64
+            || instruction->kind > SOL_MIR_PREDICATE_INST_BINARY
+            || instruction->block >= o->predicate_block_count
+            || instruction->result >= o->predicate_value_count
+            || instruction->recipe >= r->recipe_count
+            || o->predicate_values[instruction->result].definition != i
+            || o->predicate_values[instruction->result].block != instruction->block
+            || instruction->bytes.offset > o->literal_byte_count
+            || instruction->bytes.count
+                > o->literal_byte_count - instruction->bytes.offset) PFAIL("instruction");
+        if ((instruction->left != SOL_MIR_OPERATION_NONE
+                && (instruction->left >= instruction->result
+                    || o->predicate_values[instruction->left].block
+                        != instruction->block))
+            || (instruction->right != SOL_MIR_OPERATION_NONE
+                && (instruction->right >= instruction->result
+                    || o->predicate_values[instruction->right].block
+                        != instruction->block))) PFAIL("dominance");
+    }
+    if (o->import_envelope_count != m->import_count) PFAIL("envelope total");
+    size_t references = 0, snapshots = 0;
+    for (size_t i = 0; i < o->import_envelope_count; ++i) {
+        if (!tick(1)) return false;
+        const SolMirImportContractEnvelope *e = &o->import_envelopes[i];
+        const SolMirMaterializedImport *source = &m->imports[i];
+        if (references > o->import_contract_reference_count
+            || snapshots > o->import_snapshot_count
+            || e->import != i || e->receiver != source->receiver
+            || e->receiver_access != source->receiver_access
+            || e->parameters.offset != source->parameter_types.offset
+            || e->parameters.count != source->parameter_types.count
+            || e->parameter_accesses.offset != source->parameter_accesses.offset
+            || e->parameter_accesses.count != source->parameter_accesses.count
+            || e->result != source->result || e->effects != source->effects
+            || !e->host_invoke
+            || e->requires.offset != references || e->snapshots.offset != snapshots
+            || e->ensures.offset != references + e->requires.count
+            || e->requires.count > o->import_contract_reference_count - references
+            || e->snapshots.count > o->import_snapshot_count - snapshots
+            || e->ensures.count > o->import_contract_reference_count
+                - references - e->requires.count) PFAIL("envelope");
+        for (size_t q = 0; q < e->requires.count + e->ensures.count; ++q) {
+            size_t body = o->import_contract_references[references + q];
+            if (body >= o->predicate_body_count
+                || o->predicate_bodies[body].owner_kind
+                    != SOL_MIR_PREDICATE_OWNER_IMPORT
+                || o->predicate_bodies[body].import != i) PFAIL("reference");
+        }
+        references += e->requires.count + e->ensures.count;
+        size_t capture_at = 0;
+        const SolIr *ir = m->plan->program->ir;
+        for (size_t c = 0; c < source->contexts.count; ++c) {
+            size_t context = source->contexts.offset + c;
+            size_t obligation_id = m->contexts[context].obligation;
+            if (obligation_id >= ir->obligation_count) PFAIL("snapshot obligation");
+            const SolIrObligation *obligation = &ir->obligations[obligation_id];
+            for (size_t q = 0; q < obligation->snapshots.count; ++q) {
+                if (capture_at >= e->snapshots.count) PFAIL("snapshot count");
+                size_t source_snapshot = obligation->snapshots.offset + q;
+                const SolIrSnapshot *snapshot = &ir->snapshots[source_snapshot];
+                const SolMirImportSnapshotCapture *capture
+                    = &o->import_snapshots[snapshots + capture_at];
+                if (snapshot->operand >= ir->expression_count
+                    || ir->expressions[snapshot->operand].kind
+                        != SOL_IR_EXPR_PLACE
+                    || ir->expressions[snapshot->operand].as.place
+                        >= ir->place_count) PFAIL("snapshot operand");
+                const SolIrPlace *place = &ir->places[
+                    ir->expressions[snapshot->operand].as.place];
+                const SolIrCallable *callable
+                    = &ir->callables[source->source_callable];
+                SolMirPredicateInputKind input_kind;
+                size_t ordinal = 0; SolAccessMode access = SOL_ACCESS_OWNED;
+                if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+                    || place->projections.count != 0) PFAIL("snapshot place");
+                if (place->local == callable->receiver) {
+                    input_kind = SOL_MIR_PREDICATE_INPUT_RECEIVER;
+                    access = callable->receiver_access;
+                } else {
+                    input_kind = SOL_MIR_PREDICATE_INPUT_PARAMETER;
+                    bool found = false;
+                    for (size_t p = 0; p < callable->parameters.count; ++p)
+                        if (ir->roots[callable->parameters.offset + p]
+                                == place->local) {
+                            ordinal = p; access = ir->locals[place->local].access;
+                            found = true; break;
+                        }
+                    if (!found) PFAIL("snapshot local");
+                }
+                SolMirRecipeId recipe = SOL_MIR_RECIPE_NONE;
+                for (size_t u = 0; u < source->overlays.count; ++u) {
+                    const SolMirMaterializedTypeOverlay *overlay
+                        = &m->overlays[source->overlays.offset + u];
+                    if (overlay->kind == SOL_MIR_PLAN_USE_EXPRESSION
+                        && overlay->context == context
+                        && overlay->source == snapshot->operand)
+                        recipe = overlay->type;
+                }
+                size_t provenance = provenance_find(o,
+                    SOL_MIR_OPERATION_PROVENANCE_IMPORT_SNAPSHOT,
+                    snapshots + capture_at);
+                if (capture->import != i || capture->context != context
+                    || capture->slot != capture_at
+                    || capture->input_kind != input_kind
+                    || capture->ordinal != ordinal || capture->access != access
+                    || capture->recipe != recipe || recipe >= r->recipe_count
+                    || provenance == SOL_MIR_OPERATION_NONE
+                    || capture->provenance != provenance
+                    || o->provenance[provenance].source_snapshot != source_snapshot
+                    || o->provenance[provenance].source_obligation != obligation_id
+                    || o->provenance[provenance].source_expression != snapshot->operand)
+                    PFAIL("import snapshot");
+                ++capture_at;
+            }
+        }
+        if (capture_at != e->snapshots.count) PFAIL("snapshot coverage");
+        snapshots += e->snapshots.count;
+    }
+    if (references != o->import_contract_reference_count
+        || snapshots != o->import_snapshot_count) PFAIL("reference total");
+#undef PFAIL
+    return true;
+}
+
+typedef struct {
+    const SolMirOperations *operations;
+    const SolIr *ir;
+    const SolMirPredicateBody *body;
+    size_t block;
+    size_t input;
+    size_t value;
+    size_t instruction;
+    size_t literal;
+    size_t snapshot_base;
+} PredicateAuthentication;
+
+static SolMirRecipeId authenticated_expression_recipe(
+    const SolMirOperations *o, const SolMirPredicateBody *body,
+    size_t expression) {
+    const SolMirMaterialization *m = o->layout->representation->materialization;
+    SolMirPlanSlice overlays = body->owner_kind == SOL_MIR_PREDICATE_OWNER_IMPORT
+        ? m->imports[body->import].overlays : m->images[body->instance].overlays;
+    for (size_t i = 0; i < overlays.count; ++i) {
+        if (!tick(1)) return SOL_MIR_RECIPE_NONE;
+        const SolMirMaterializedTypeOverlay *use
+            = &m->overlays[overlays.offset + i];
+        if (use->kind == SOL_MIR_PLAN_USE_EXPRESSION
+            && use->context == body->context && use->source == expression)
+            return use->type;
+    }
+    return SOL_MIR_RECIPE_NONE;
+}
+
+static bool authenticate_predicate_expression(PredicateAuthentication *a,
+    size_t expression, size_t depth, SolMirPredicateValueId *result) {
+    if (!tick(SOL_MIR_OPERATIONS_WORK_RECURSE)
+        || expression >= a->ir->expression_count
+        || depth > a->ir->expression_count) return false;
+    const SolIrExpression *source = &a->ir->expressions[expression];
+    SolMirRecipeId recipe = authenticated_expression_recipe(a->operations,
+        a->body, expression);
+    if (recipe >= a->operations->layout->representation->recipe_count
+        || a->value >= a->body->values.offset + a->body->values.count)
+        return false;
+    if (source->kind == SOL_IR_EXPR_PLACE
+        || source->kind == SOL_IR_EXPR_RESULT
+        || source->kind == SOL_IR_EXPR_SNAPSHOT_READ
+        || source->kind == SOL_IR_EXPR_REFINEMENT_SELF) {
+        if (a->input >= a->body->inputs.offset + a->body->inputs.count)
+            return false;
+        SolMirPredicateInputKind kind;
+        size_t ordinal = 0; SolAccessMode access = SOL_ACCESS_OWNED;
+        const SolMirMaterialization *m
+            = a->operations->layout->representation->materialization;
+        SolIrCallableId callable_id = a->body->owner_kind
+                == SOL_MIR_PREDICATE_OWNER_IMPORT
+            ? m->imports[a->body->import].source_callable
+            : m->images[a->body->instance].source_callable;
+        const SolIrCallable *callable = &a->ir->callables[callable_id];
+        if (source->kind == SOL_IR_EXPR_RESULT) {
+            kind = a->body->outcome == SOL_CONTRACT_OUTCOME_SUCCESS
+                ? SOL_MIR_PREDICATE_INPUT_SUCCESS_RESULT
+                : SOL_MIR_PREDICATE_INPUT_COMPLETE_RESULT;
+        } else if (source->kind == SOL_IR_EXPR_SNAPSHOT_READ) {
+            kind = SOL_MIR_PREDICATE_INPUT_SNAPSHOT;
+            const SolIrObligation *obligation
+                = &a->ir->obligations[m->contexts[a->body->context].obligation];
+            bool found = false;
+            for (size_t i = 0; i < obligation->snapshots.count; ++i)
+                if (obligation->snapshots.offset + i == source->as.snapshot) {
+                    if (i > SIZE_MAX - a->snapshot_base) return false;
+                    ordinal = a->snapshot_base + i; found = true; break;
+                }
+            if (!found) return false;
+            const SolIrSnapshot *snapshot = &a->ir->snapshots[source->as.snapshot];
+            if (snapshot->operand >= a->ir->expression_count
+                || a->ir->expressions[snapshot->operand].kind
+                    != SOL_IR_EXPR_PLACE
+                || a->ir->expressions[snapshot->operand].as.place
+                    >= a->ir->place_count) return false;
+            const SolIrPlace *place = &a->ir->places[
+                a->ir->expressions[snapshot->operand].as.place];
+            if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+                || place->projections.count != 0) return false;
+        } else if (source->kind == SOL_IR_EXPR_REFINEMENT_SELF) {
+            kind = SOL_MIR_PREDICATE_INPUT_REFINEMENT_SELF;
+        } else {
+            if (source->as.place >= a->ir->place_count) return false;
+            const SolIrPlace *place = &a->ir->places[source->as.place];
+            if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+                || place->projections.count != 0) return false;
+            if (place->local == callable->receiver) {
+                kind = SOL_MIR_PREDICATE_INPUT_RECEIVER;
+                access = callable->receiver_access;
+            } else if (place->local == callable->capability_source) {
+                return false;
+            } else {
+                kind = SOL_MIR_PREDICATE_INPUT_PARAMETER;
+                bool found = false;
+                for (size_t i = 0; i < callable->parameters.count; ++i)
+                    if (a->ir->roots[callable->parameters.offset + i]
+                            == place->local) {
+                        ordinal = i; access = a->ir->locals[place->local].access;
+                        found = true; break;
+                    }
+                if (!found) return false;
+            }
+        }
+        const SolMirPredicateInput *input
+            = &a->operations->predicate_inputs[a->input];
+        const SolMirPredicateValue *value
+            = &a->operations->predicate_values[a->value];
+        if (input->kind != kind || input->ordinal != ordinal
+            || input->recipe != recipe || input->access != access
+            || value->kind != SOL_MIR_PREDICATE_VALUE_INPUT
+            || value->recipe != recipe || value->block != a->block
+            || value->definition != a->input) return false;
+        *result = a->value; ++a->input; ++a->value; return true;
+    }
+    SolMirPredicateValueId left = SOL_MIR_OPERATION_NONE;
+    SolMirPredicateValueId right = SOL_MIR_OPERATION_NONE;
+    SolMirPredicateInstructionKind kind;
+    SolMirOperationOpcode opcode_value = (SolMirOperationOpcode)0;
+    unsigned failures = 0;
+    int64_t integer = 0; bool boolean = false;
+    SolMirPlanSlice bytes = {0, 0};
+    if (source->kind == SOL_IR_EXPR_INTEGER) {
+        kind = SOL_MIR_PREDICATE_INST_I64; integer = source->as.integer;
+    } else if (source->kind == SOL_IR_EXPR_BOOL) {
+        kind = SOL_MIR_PREDICATE_INST_BOOL; boolean = source->as.boolean;
+    } else if (source->kind == SOL_IR_EXPR_STRING) {
+        kind = SOL_MIR_PREDICATE_INST_TEXT;
+        size_t length = strlen(source->as.string);
+        bytes = (SolMirPlanSlice){a->literal, length};
+        if (a->literal > a->operations->literal_byte_count
+            || length > a->operations->literal_byte_count - a->literal)
+            return false;
+        for (size_t i = 0; i < length; ++i)
+            if (a->operations->literal_bytes[a->literal + i]
+                    != source->as.string[i]) return false;
+        a->literal += length;
+    } else if (source->kind == SOL_IR_EXPR_UNIT) {
+        kind = SOL_MIR_PREDICATE_INST_UNIT;
+    } else if (source->kind == SOL_IR_EXPR_UNARY) {
+        kind = SOL_MIR_PREDICATE_INST_UNARY;
+        if (!authenticate_predicate_expression(a, source->as.unary.operand,
+                depth + 1, &left)
+            || !expected_opcode(SOL_MIR_INST_UNARY,
+                source->as.unary.operator_kind, &opcode_value, &failures)) return false;
+    } else if (source->kind == SOL_IR_EXPR_BINARY) {
+        if (source->as.binary.operator_kind == SOL_TOKEN_AMP_AMP
+            || source->as.binary.operator_kind == SOL_TOKEN_PIPE_PIPE) return false;
+        kind = SOL_MIR_PREDICATE_INST_BINARY;
+        if (!authenticate_predicate_expression(a, source->as.binary.left,
+                depth + 1, &left)
+            || !authenticate_predicate_expression(a, source->as.binary.right,
+                depth + 1, &right)
+            || !expected_opcode(SOL_MIR_INST_BINARY,
+                source->as.binary.operator_kind, &opcode_value, &failures)) return false;
+    } else return false;
+    if (a->instruction >= a->operations->predicate_instruction_count
+        || a->value >= a->body->values.offset + a->body->values.count)
+        return false;
+    const SolMirPredicateInstruction *instruction
+        = &a->operations->predicate_instructions[a->instruction];
+    const SolMirPredicateValue *value
+        = &a->operations->predicate_values[a->value];
+    if (instruction->kind != kind || instruction->block != a->block
+        || instruction->result != a->value || instruction->recipe != recipe
+        || instruction->opcode != opcode_value || instruction->left != left
+        || instruction->right != right || instruction->integer != integer
+        || instruction->boolean != boolean
+        || instruction->bytes.offset != bytes.offset
+        || instruction->bytes.count != bytes.count
+        || instruction->failures != failures
+        || value->kind != SOL_MIR_PREDICATE_VALUE_INSTRUCTION
+        || value->recipe != recipe || value->block != a->block
+        || value->definition != a->instruction) return false;
+    *result = a->value; ++a->instruction; ++a->value; return true;
+}
+
+static bool authenticate_predicate_body(const SolMirOperations *o,
+    size_t body_id, size_t obligation_id, size_t *literal) {
+    const SolMirRepresentation *r = o->layout->representation;
+    const SolMirMaterialization *m = r->materialization;
+    const SolIr *ir = m->plan->program->ir;
+    if (body_id >= o->predicate_body_count
+        || obligation_id >= ir->obligation_count) return false;
+    const SolMirPredicateBody *body = &o->predicate_bodies[body_id];
+    const SolIrObligation *obligation = &ir->obligations[obligation_id];
+    bool applicable = (obligation->kind == SOL_CONTRACT_REQUIRES
+            && obligation->outcome == SOL_CONTRACT_OUTCOME_ALWAYS
+            && !obligation->result_available)
+        || (obligation->kind == SOL_CONTRACT_ENSURES
+            && ((obligation->outcome == SOL_CONTRACT_OUTCOME_ALWAYS
+                    && obligation->result_available)
+                || obligation->outcome == SOL_CONTRACT_OUTCOME_SUCCESS
+                || (obligation->outcome == SOL_CONTRACT_OUTCOME_FAILURE
+                    && !obligation->result_available)));
+    SolMirRecipeId owner_result = body->owner_kind
+            == SOL_MIR_PREDICATE_OWNER_IMPORT
+        ? m->imports[body->import].result : m->images[body->instance].result;
+    if ((obligation->outcome == SOL_CONTRACT_OUTCOME_SUCCESS
+            || obligation->outcome == SOL_CONTRACT_OUTCOME_FAILURE)
+        && (owner_result >= r->recipe_count
+            || r->recipes[owner_result].kind != SOL_MIR_RECIPE_RESULT))
+        applicable = false;
+    if (body->context >= m->context_count
+        || m->contexts[body->context].obligation != obligation_id
+        || !applicable || body->phase != obligation->kind
+        || body->outcome != obligation->outcome
+        || body->blocks.count != 1 || body->entry != body->blocks.offset
+        || body->output_recipe >= r->recipe_count
+        || r->recipes[body->output_recipe].kind != SOL_MIR_RECIPE_BOOL)
+        return false;
+    const SolMirPredicateBlock *block = &o->predicate_blocks[body->entry];
+    SolMirPlanSlice owner_contexts = body->owner_kind
+            == SOL_MIR_PREDICATE_OWNER_IMPORT
+        ? m->imports[body->import].contexts : m->images[body->instance].contexts;
+    size_t snapshot_base = 0;
+    for (size_t i = 0; i < owner_contexts.count; ++i) {
+        size_t context = owner_contexts.offset + i;
+        if (context == body->context) break;
+        if (m->contexts[context].kind != SOL_MIR_PLAN_CONTEXT_CONTRACT) continue;
+        size_t prior = m->contexts[context].obligation;
+        if (prior >= ir->obligation_count
+            || ir->obligations[prior].snapshots.count
+                > SIZE_MAX - snapshot_base) return false;
+        snapshot_base += ir->obligations[prior].snapshots.count;
+    }
+    PredicateAuthentication a = {o, ir, body, body->entry,
+        body->inputs.offset, body->values.offset, block->instructions.offset,
+        *literal, snapshot_base};
+    SolMirPredicateValueId result;
+    if (!authenticate_predicate_expression(&a, obligation->predicate, 0, &result)
+        || a.input != body->inputs.offset + body->inputs.count
+        || a.value != body->values.offset + body->values.count
+        || a.instruction != block->instructions.offset + block->instructions.count
+        || block->terminator.kind != SOL_MIR_PREDICATE_TERM_RETURN
+        || block->terminator.value != result) return false;
+    *literal = a.literal; return true;
+}
+
+static bool authenticate_predicates(const SolMirOperations *o) {
+    const SolMirMaterialization *m = o->layout->representation->materialization;
+    size_t expected_body = 0, literal = 0;
+    for (size_t i = 0; i < o->predicate_count; ++i) {
+        const SolMirOperationPredicatePlan *predicate = &o->predicates[i];
+        if (predicate->body != expected_body
+            || !authenticate_predicate_body(o, expected_body,
+                m->contexts[predicate->context].obligation, &literal)) return false;
+        ++expected_body;
+    }
+    for (size_t i = 0; i < o->import_envelope_count; ++i) {
+        const SolMirImportContractEnvelope *envelope = &o->import_envelopes[i];
+        for (size_t q = 0; q < envelope->requires.count; ++q) {
+            size_t body = o->import_contract_references[envelope->requires.offset + q];
+            if (body != expected_body
+                || o->predicate_bodies[body].phase != SOL_CONTRACT_REQUIRES
+                || !authenticate_predicate_body(o, body,
+                    m->contexts[o->predicate_bodies[body].context].obligation,
+                    &literal)) return false;
+            ++expected_body;
+        }
+        for (size_t q = 0; q < envelope->ensures.count; ++q) {
+            size_t body = o->import_contract_references[envelope->ensures.offset + q];
+            if (body != expected_body
+                || o->predicate_bodies[body].phase != SOL_CONTRACT_ENSURES
+                || !authenticate_predicate_body(o, body,
+                    m->contexts[o->predicate_bodies[body].context].obligation,
+                    &literal)) return false;
+            ++expected_body;
+        }
+    }
+    return expected_body == o->predicate_body_count
+        && literal == o->literal_byte_count;
 }
 
 static bool validate_snapshots(const SolMirOperations *o, size_t *prov) {
@@ -1788,11 +2397,16 @@ static bool validate_snapshots(const SolMirOperations *o, size_t *prov) {
                 expected_context = id;
             }
         }
+        size_t expected_slot = 0;
+        for (size_t q = 0; q < at; ++q) {
+            if (!tick(1)) return false;
+            expected_slot += o->snapshots[q].image == p->image;
+        }
         if (v->kind != SOL_MIR_OPERATION_PROVENANCE_SNAPSHOT || v->executable != at
             || v->source_snapshot != x->source_snapshot
             || v->source_obligation != ir->snapshots[x->source_snapshot].obligation
             || p->image != instruction_image(m, i) || p->instruction != i
-            || p->slot != at || p->context != expected_context
+            || p->slot != expected_slot || p->context != expected_context
             || p->access != expected_access || p->local != expected_local
             || p->local >= m->local_count || p->root_recipe != m->locals[p->local].type
             || p->path.count != source_place->projections.count
@@ -2343,8 +2957,11 @@ static bool validate(const SolMirOperations *o, SolDiagnostics *diagnostics,
     if (!validate_constructors(o, &prov) || !validate_patterns(o, &prov)
         || !validate_arithmetic(o, &prov) || !validate_snapshots(o, &prov)
         || !validate_path_consumption(o)
-        || !validate_propagations_predicates(o, &prov))
+        || !validate_propagations_predicates(o, &prov)
+        || !validate_predicate_cfg(o) || !authenticate_predicates(o))
         return invalid(diagnostics, "operation instruction or terminator plans are malformed");
+    if (!add_size(&prov, o->import_snapshot_count))
+        return invalid(diagnostics, "operation provenance count overflows");
     if (!validate_callables_handlers(o, &prov, 0)
         || prov != o->provenance_count)
         return invalid(diagnostics, "operation callable, handler, or provenance plans are malformed");

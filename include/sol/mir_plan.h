@@ -105,6 +105,11 @@ typedef enum {
     SOL_MIR_PLAN_CONTEXT_REFINEMENT,
 } SolMirPlanContextKind;
 
+typedef enum {
+    SOL_MIR_PLAN_TARGET_INSTANCE,
+    SOL_MIR_PLAN_TARGET_IMPORT,
+} SolMirPlanTargetKind;
+
 typedef struct {
     SolMirPlanContextKind kind;
     SolMirPlanInstanceId instance;
@@ -112,6 +117,8 @@ typedef struct {
     SolIrDefinitionId definition;
     SolObligationId obligation;
     SolMirProgramSource source;
+    SolMirPlanTargetKind target_kind;
+    SolMirPlanImportId import;
 } SolMirPlanContext;
 
 typedef struct {
@@ -136,6 +143,8 @@ typedef struct {
     SolMirPlanSlice parameter_accesses;
     SolMirPlanTypeId result;
     SolMirPlanEffectRowId effects;
+    SolMirPlanSlice typed_uses;
+    SolMirPlanSlice contexts;
 } SolMirPlanImport;
 
 typedef enum {
@@ -150,9 +159,17 @@ typedef enum {
     SOL_MIR_PLAN_DEMAND_PREDICATE_FUNCTION_VALUE,
 } SolMirPlanDemandKind;
 
+typedef enum {
+    SOL_MIR_PLAN_DEMAND_OWNER_ROOT,
+    SOL_MIR_PLAN_DEMAND_OWNER_INSTANCE,
+    SOL_MIR_PLAN_DEMAND_OWNER_IMPORT,
+} SolMirPlanDemandOwnerKind;
+
 typedef struct {
     SolMirPlanDemandKind kind;
+    SolMirPlanDemandOwnerKind owner_kind;
     SolMirPlanInstanceId parent;
+    SolMirPlanImportId parent_import;
     SolMirProgramSource source;
     SolIrCallableId symbolic_target;
     SolMirPlanInstanceId instance;

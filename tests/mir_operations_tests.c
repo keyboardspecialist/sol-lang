@@ -183,6 +183,16 @@ static SolMirOperationsLimits exact_limits(const SolMirOperations *o) {
         .max_callables = NONZERO(o->usage.callables),
         .max_handlers = NONZERO(o->usage.handlers),
         .max_predicates = NONZERO(o->usage.predicates),
+        .max_predicate_bodies = NONZERO(o->usage.predicate_bodies),
+        .max_predicate_blocks = NONZERO(o->usage.predicate_blocks),
+        .max_predicate_inputs = NONZERO(o->usage.predicate_inputs),
+        .max_predicate_values = NONZERO(o->usage.predicate_values),
+        .max_predicate_instructions = NONZERO(o->usage.predicate_instructions),
+        .max_import_envelopes = NONZERO(o->usage.import_envelopes),
+        .max_import_contract_references
+            = NONZERO(o->usage.import_contract_references),
+        .max_import_snapshots = NONZERO(o->usage.import_snapshots),
+        .max_literal_bytes = NONZERO(o->usage.literal_bytes),
         .max_recipe_ids = NONZERO(o->usage.recipe_ids),
         .max_roots = NONZERO(o->usage.roots),
         .max_provenance = NONZERO(o->usage.provenance),
@@ -240,9 +250,24 @@ static void test_e6_operations(void) {
     for (size_t i = 0; i < o->predicate_count; ++i) {
         contract += o->predicates[i].kind == SOL_MIR_OPERATION_PREDICATE_CONTRACT;
         refinement += o->predicates[i].kind == SOL_MIR_OPERATION_PREDICATE_REFINEMENT;
-        CHECK(o->predicates[i].state == SOL_MIR_OPERATION_PREDICATE_UNRESOLVED_BODY);
+        CHECK(o->predicates[i].body < o->predicate_body_count);
     }
     CHECK(contract == 3 && refinement == 1);
+    CHECK(o->predicate_body_count == 4 && o->predicate_block_count == 4
+        && o->predicate_input_count == 4 && o->predicate_value_count == 10
+        && o->predicate_instruction_count == 6
+        && o->import_envelope_count == 4);
+    size_t predicate_constants = 0, predicate_comparisons = 0;
+    for (size_t i = 0; i < o->predicate_instruction_count; ++i) {
+        predicate_constants += o->predicate_instructions[i].kind
+                == SOL_MIR_PREDICATE_INST_I64
+            || o->predicate_instructions[i].kind == SOL_MIR_PREDICATE_INST_BOOL;
+        predicate_comparisons += o->predicate_instructions[i].kind
+                == SOL_MIR_PREDICATE_INST_BINARY
+            && o->predicate_instructions[i].opcode >= SOL_MIR_OPERATION_I64_LT
+            && o->predicate_instructions[i].opcode <= SOL_MIR_OPERATION_VALUE_NE;
+    }
+    CHECK(predicate_constants == 3 && predicate_comparisons == 3);
     for (size_t i = 0; i < o->propagation_count; ++i) {
         const SolMirOperationPropagationPlan *plan = &o->propagations[i];
         if (plan->source_residual_field_layout == SOL_MIR_OPERATION_NONE) {
@@ -312,6 +337,11 @@ static void test_e6_operations(void) {
     LESS(max_propagations); LESS(max_arithmetic); LESS(max_equality_nodes);
     LESS(max_equality_children);
     LESS(max_snapshots); LESS(max_predicates); LESS(max_recipe_ids);
+    LESS(max_predicate_bodies); LESS(max_predicate_blocks);
+    LESS(max_predicate_inputs); LESS(max_predicate_values);
+    LESS(max_predicate_instructions); LESS(max_import_envelopes);
+    LESS(max_import_contract_references); LESS(max_import_snapshots);
+    LESS(max_literal_bytes);
     LESS(max_provenance); LESS(max_owned_bytes); LESS(max_build_scratch_bytes);
     LESS(max_build_work); LESS(max_validation_scratch_bytes);
     LESS(max_validation_work);
@@ -388,9 +418,48 @@ static void test_e6_operations(void) {
     MUTATE(snapshots, 0, slot, 2);
     MUTATE(snapshots, 0, context, SOL_MIR_OPERATION_NONE);
     MUTATE(snapshots, 0, path.count, o->snapshots[0].path.count + 1);
-    MUTATE(predicates, 0, state, (SolMirOperationPredicateState)99);
+    MUTATE(predicates, 0, body, SOL_MIR_OPERATION_NONE);
     MUTATE(predicates, 0, context, SOL_MIR_OPERATION_NONE);
     MUTATE(predicates, 0, output_recipe, SOL_MIR_RECIPE_NONE);
+    MUTATE(predicate_bodies, 0, entry, SOL_MIR_OPERATION_NONE);
+    MUTATE(predicate_blocks, 0, terminator.value, SOL_MIR_OPERATION_NONE);
+    MUTATE(predicate_values, 0, recipe, SOL_MIR_RECIPE_NONE);
+    MUTATE(predicate_instructions, 0, result, SOL_MIR_OPERATION_NONE);
+    MUTATE(import_envelopes, 0, import, SOL_MIR_OPERATION_NONE);
+    MUTATE(import_envelopes, 0, host_invoke, false);
+    size_t integer_instruction = 0;
+    while (integer_instruction < o->predicate_instruction_count
+        && o->predicate_instructions[integer_instruction].kind
+            != SOL_MIR_PREDICATE_INST_I64) ++integer_instruction;
+    CHECK(integer_instruction < o->predicate_instruction_count);
+    if (integer_instruction < o->predicate_instruction_count)
+        MUTATE(predicate_instructions, integer_instruction, integer, 42);
+    MUTATE(predicate_inputs, 0, ordinal, o->predicate_inputs[0].ordinal + 1);
+    MUTATE(predicate_inputs, 0, kind, SOL_MIR_PREDICATE_INPUT_SNAPSHOT);
+    MUTATE(predicate_inputs, 0, access, SOL_ACCESS_SHARED);
+    size_t binary_predicate = 0;
+    while (binary_predicate < o->predicate_instruction_count
+        && o->predicate_instructions[binary_predicate].kind
+            != SOL_MIR_PREDICATE_INST_BINARY) ++binary_predicate;
+    CHECK(binary_predicate < o->predicate_instruction_count);
+    if (binary_predicate < o->predicate_instruction_count) {
+        MUTATE(predicate_instructions, binary_predicate, opcode,
+            SOL_MIR_OPERATION_I64_ADD);
+        MUTATE(predicate_instructions, binary_predicate, failures,
+            SOL_MIR_OPERATION_FAILURE_OVERFLOW);
+    }
+    MUTATE(predicate_bodies, 0, phase, SOL_CONTRACT_ENSURES);
+    MUTATE(predicate_bodies, 0, outcome, SOL_CONTRACT_OUTCOME_FAILURE);
+    MUTATE(predicate_bodies, 0, context, o->predicate_bodies[1].context);
+    MUTATE(predicate_bodies, 0, owner_kind, SOL_MIR_PREDICATE_OWNER_IMPORT);
+    if (o->predicate_body_count > 1) {
+        SolMirPredicateBody first_body = o->predicate_bodies[0];
+        o->predicate_bodies[0] = o->predicate_bodies[1];
+        o->predicate_bodies[1] = first_body;
+        CHECK(!sol_mir_operations_validate(o, NULL));
+        o->predicate_bodies[1] = o->predicate_bodies[0];
+        o->predicate_bodies[0] = first_body;
+    }
     MUTATE(provenance, 0, source_expression,
         o->provenance[0].source_expression ^ 1u);
     size_t capability = 0;
@@ -477,6 +546,12 @@ static void test_e6_operations(void) {
     REJECT_HEADER(equality_node, equality_nodes);
     REJECT_HEADER(equality_child, equality_children);
     REJECT_HEADER(snapshot, snapshots); REJECT_HEADER(predicate, predicates);
+    REJECT_HEADER(predicate_body, predicate_bodies);
+    REJECT_HEADER(predicate_block, predicate_blocks);
+    REJECT_HEADER(predicate_input, predicate_inputs);
+    REJECT_HEADER(predicate_value, predicate_values);
+    REJECT_HEADER(predicate_instruction, predicate_instructions);
+    REJECT_HEADER(import_envelope, import_envelopes);
     REJECT_HEADER(provenance, provenance);
 #undef REJECT_HEADER
 #define ALIAS_ACCESS(pointer) do { \
@@ -710,7 +785,7 @@ static void test_handlers_and_unresolved_callable_rejection(void) {
         "function apply(callback: function(Int64) -> Bool effects { pure }) -> Bool "
         "effects { pure } { return true }\n"
         "function root(base: capability Base) -> Bool effects { pure } "
-        "requires { apply(callback) && apply(base.choose) } "
+        "requires { apply(base.choose) } "
         "{ return base.choose(1) }\n";
     CHECK(compile_text(&c, exact_callable));
     root = (SolMirProgramRoot){callable(&c.ir, "root", SOL_IR_CALLABLE_FUNCTION),
@@ -718,9 +793,8 @@ static void test_handlers_and_unresolved_callable_rejection(void) {
     pipeline_init(&p);
     SolIrCallableId choose = callable(&c.ir, "choose", SOL_IR_CALLABLE_CAPABILITY);
     built = build_pipeline(&c.ir, &root, 1, &choose, 1, &p, NULL);
-    if (!built) sol_diagnostics_render_human(stderr, &c.source, &p.diagnostics);
-    CHECK(built && p.operations.callable_count == 2
-        && p.operations.root_count == 1);
+    CHECK(!built && p.operations.layout == NULL
+        && p.representation.callable_producer_count == 1);
     if (built) {
         size_t exact = SOL_MIR_OPERATION_NONE, bound = SOL_MIR_OPERATION_NONE;
         for (size_t i = 0; i < p.operations.callable_count; ++i) {
@@ -800,6 +874,301 @@ static void test_handlers_and_unresolved_callable_rejection(void) {
     pipeline_free(&p); free_text(&c);
 }
 
+static void test_bodyless_import_contract(void) {
+    static const char source[] =
+        "module import_contract\n"
+        "capability ContractHost { function echo(value: Int64) -> Int64 "
+        "effects { pure } requires { value > 0 } "
+        "ensures { result >= old(value) result >= old(value) } }\n"
+        "function root(host: capability ContractHost) -> Int64 effects { pure } "
+        "{ return host.echo(7) }\n";
+    Compilation c; bool compiled = compile_text(&c, source); CHECK(compiled);
+    if (!compiled) {
+        sol_diagnostics_render_human(stderr, &c.source, &c.diagnostics);
+        free_text(&c); return;
+    }
+    SolIrCallableId echo = callable(&c.ir, "echo", SOL_IR_CALLABLE_CAPABILITY);
+    SolMirProgramRoot root = {callable(&c.ir, "root", SOL_IR_CALLABLE_FUNCTION),
+        SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    Pipeline p; pipeline_init(&p);
+    bool built = build_pipeline(&c.ir, &root, 1, &echo, 1, &p, NULL);
+    if (!built) sol_diagnostics_render_human(stderr, &c.source, &p.diagnostics);
+    CHECK(built);
+    if (built) {
+        CHECK(p.plan.import_count == 1 && p.plan.imports[0].contexts.count == 3);
+        CHECK(p.materialization.imports[0].contexts.count == 3
+            && p.materialization.imports[0].overlays.count != 0);
+        CHECK(p.operations.import_envelope_count == 1
+            && p.operations.import_envelopes[0].requires.count == 1
+            && p.operations.import_envelopes[0].ensures.count == 2
+            && p.operations.import_envelopes[0].snapshots.count == 2
+            && p.operations.predicate_body_count == 3);
+        CHECK(p.operations.import_snapshots[0].slot == 0
+            && p.operations.import_snapshots[1].slot == 1);
+        CHECK(sol_mir_operations_validate(&p.operations, NULL));
+        SolMirOperationsLimits exact = exact_limits(&p.operations);
+        SolMirOperations limited; sol_mir_operations_init(&limited);
+        SolMirOperationsBuildRequest request = {&p.layout, &exact};
+        CHECK(sol_mir_operations_build(&request, &limited, &p.diagnostics)
+            == SOL_MIR_OPERATIONS_BUILD_SUCCEEDED);
+        sol_mir_operations_free(&limited);
+        --exact.max_import_snapshots;
+        CHECK(sol_mir_operations_build(&request, &limited, &p.diagnostics)
+            == SOL_MIR_OPERATIONS_BUILD_RESOURCE_EXHAUSTED);
+        exact = exact_limits(&p.operations);
+        --exact.max_import_contract_references;
+        CHECK(sol_mir_operations_build(&request, &limited, &p.diagnostics)
+            == SOL_MIR_OPERATIONS_BUILD_RESOURCE_EXHAUSTED);
+        SolMirImportSnapshotCapture saved = p.operations.import_snapshots[0];
+        p.operations.import_snapshots[0].slot = 1;
+        CHECK(!sol_mir_operations_validate(&p.operations, NULL));
+        p.operations.import_snapshots[0] = saved;
+        SolMirOperationProvenance provenance
+            = p.operations.provenance[saved.provenance];
+        p.operations.provenance[saved.provenance].source_snapshot
+            = p.operations.provenance[
+                p.operations.import_snapshots[1].provenance].source_snapshot;
+        CHECK(!sol_mir_operations_validate(&p.operations, NULL));
+        p.operations.provenance[saved.provenance] = provenance;
+    }
+    pipeline_free(&p); free_text(&c);
+}
+
+static void test_p2_6b1_predicate_rejections(void) {
+    static const char *sources[] = {
+        "module short_circuit\nfunction root(value: Int64) -> Bool effects { pure } "
+            "requires { false && (1 / 0 > value) } { return true }\n",
+        "module projected\nrecord Box { value: Int64 }\n"
+            "function root(box: Box) -> Bool effects { pure } "
+            "requires { box.value > 0 } { return true }\n",
+        "module projected_snapshot\nrecord Box { value: Int64 }\n"
+            "function root(box: Box) -> Int64 effects { pure } "
+            "ensures { result >= old(box.value) } { return box.value }\n",
+        "module direct_call\nfunction helper(value: Int64) -> Bool effects { pure } "
+            "{ return value > 0 }\nfunction root(value: Int64) -> Bool effects { pure } "
+            "requires { helper(value) } { return true }\n",
+        "module function_value\nfunction helper(value: Int64) -> Bool effects { pure } "
+            "{ return value > 0 }\nfunction apply(callback: function(Int64) -> Bool "
+            "effects { pure }) -> Bool effects { pure } { return callback(1) }\n"
+            "function root() -> Bool effects { pure } "
+            "requires { apply(helper) } { return true }\n",
+        "module aggregate\nrecord Box { value: Int64 }\n"
+            "function root() -> Bool effects { pure } "
+            "requires { Box { value = 1 } == Box { value = 1 } } { return true }\n",
+        "module conditional\nfunction root() -> Bool effects { pure } "
+            "requires { if true { true } else { false } } { return true }\n",
+        "module matching\nfunction root(value: Bool) -> Bool effects { pure } "
+            "requires { match value { true => true false => false } } { return true }\n",
+        "module local_block\nfunction root() -> Bool effects { pure } "
+            "requires { { let value = true value } } { return true }\n",
+        "module nested_refined\ntype Positive = refined Int64 where self > 0\n"
+            "function root(value: Int64) -> Bool effects { pure } "
+            "requires { Positive(value) == Positive(value) } { return true }\n",
+    };
+    for (size_t i = 0; i < sizeof(sources) / sizeof(*sources); ++i) {
+        Compilation c; bool compiled = compile_text(&c, sources[i]); CHECK(compiled);
+        if (!compiled) { free_text(&c); continue; }
+        SolMirProgramRoot root = {callable(&c.ir, "root", SOL_IR_CALLABLE_FUNCTION),
+            SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+        Pipeline p; pipeline_init(&p);
+        bool built = build_pipeline(&c.ir, &root, 1, NULL, 0, &p, NULL);
+        CHECK(!built && p.operations.layout == NULL);
+        pipeline_free(&p); free_text(&c);
+    }
+}
+
+static void test_predicate_literal_authentication_and_rendering(void) {
+    static const char *sources[] = {
+        "module text_a\nfunction root() -> Bool effects { pure } "
+            "requires { \"a\" == \"a\" } { return true }\n",
+        "module text_b\nfunction root() -> Bool effects { pure } "
+            "requires { \"b\" == \"b\" } { return true }\n",
+    };
+    Compilation c[2]; Pipeline p[2]; char *text[2] = {NULL, NULL};
+    size_t length[2] = {0, 0};
+    for (size_t i = 0; i < 2; ++i) {
+        bool compiled = compile_text(&c[i], sources[i]); CHECK(compiled);
+        pipeline_init(&p[i]);
+        if (!compiled) continue;
+        SolMirProgramRoot root = {callable(&c[i].ir, "root",
+            SOL_IR_CALLABLE_FUNCTION), SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+        bool built = build_pipeline(&c[i].ir, &root, 1, NULL, 0, &p[i], NULL);
+        CHECK(built && p[i].operations.literal_byte_count == 2);
+        if (built) text[i] = render(&p[i].operations, &length[i]);
+    }
+    CHECK(text[0] != NULL && text[1] != NULL
+        && (length[0] != length[1] || memcmp(text[0], text[1], length[0]) != 0)
+        && strstr(text[0], "predicate_literal_bytes=6161") != NULL);
+    if (p[0].operations.literal_byte_count != 0) {
+        char saved = p[0].operations.literal_bytes[0];
+        p[0].operations.literal_bytes[0] = 'z';
+        CHECK(!sol_mir_operations_validate(&p[0].operations, NULL));
+        p[0].operations.literal_bytes[0] = saved;
+        SolMirOperationsLimits exact = exact_limits(&p[0].operations);
+        SolMirOperations limited; sol_mir_operations_init(&limited);
+        SolMirOperationsBuildRequest request = {&p[0].layout, &exact};
+        --exact.max_literal_bytes;
+        CHECK(sol_mir_operations_build(&request, &limited, &p[0].diagnostics)
+            == SOL_MIR_OPERATIONS_BUILD_RESOURCE_EXHAUSTED);
+    }
+    for (size_t i = 0; i < 2; ++i) {
+        free(text[i]); pipeline_free(&p[i]); free_text(&c[i]);
+    }
+}
+
+static void test_import_contract_helper_is_retained_then_rejected(void) {
+    static const char source[] =
+        "module import_helper\n"
+        "function positive(value: Int64) -> Bool effects { pure } "
+        "{ return value > 0 }\n"
+        "capability ContractHost { function echo(value: Int64) -> Int64 "
+        "effects { pure } requires { positive(value) } }\n"
+        "function root(host: capability ContractHost) -> Int64 effects { pure } "
+        "{ return host.echo(7) }\n";
+    Compilation c; bool compiled = compile_text(&c, source); CHECK(compiled);
+    if (!compiled) { free_text(&c); return; }
+    SolIrCallableId echo = callable(&c.ir, "echo", SOL_IR_CALLABLE_CAPABILITY);
+    SolMirProgramRoot root = {callable(&c.ir, "root", SOL_IR_CALLABLE_FUNCTION),
+        SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    Pipeline p; pipeline_init(&p);
+    SolMirProgramBuildRequest a = {&c.ir, &root, 1, &echo, 1, NULL};
+    SolMirPlanBuildRequest b = {&p.program, NULL};
+    SolMirMaterializeBuildRequest d = {&p.plan, NULL};
+    CHECK(sol_mir_program_build(&a, &p.program, &p.diagnostics)
+        == SOL_MIR_PROGRAM_BUILD_SUCCEEDED);
+    CHECK(sol_mir_plan_build(&b, &p.plan, &p.diagnostics)
+        == SOL_MIR_PLAN_BUILD_SUCCEEDED);
+    SolMirMaterializeBuildOutcome materialized
+        = sol_mir_materialize_build(&d, &p.materialization, &p.diagnostics);
+    if (materialized != SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED)
+        sol_diagnostics_render_human(stderr, &c.source, &p.diagnostics);
+    CHECK(materialized == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED);
+    CHECK(sol_mir_plan_validate(&p.plan, NULL)
+        && sol_mir_materialization_validate(&p.materialization, NULL));
+    size_t import_owned = 0;
+    for (size_t i = 0; i < p.materialization.binding_count; ++i) {
+        const SolMirMaterializedBinding *binding = &p.materialization.bindings[i];
+        if (binding->owner_kind != SOL_MIR_PLAN_DEMAND_OWNER_IMPORT) continue;
+        ++import_owned;
+        CHECK(binding->parent == SOL_MIR_PLAN_NONE
+            && binding->parent_import < p.materialization.import_count
+            && p.materialization.semantic_sites[binding->site].block
+                == SOL_MIR_MATERIALIZED_NONE);
+    }
+    CHECK(import_owned == 1);
+    SolMirRepresentationBuildRequest e = {&p.materialization, NULL};
+    SolMirTargetDescriptor wasm = sol_mir_target_wasm32();
+    SolMirLayoutBuildRequest f = {&p.representation, &wasm, NULL};
+    CHECK(sol_mir_representation_build(&e, &p.representation, &p.diagnostics)
+        == SOL_MIR_REPRESENTATION_BUILD_SUCCEEDED);
+    CHECK(sol_mir_layout_build(&f, &p.layout, &p.diagnostics)
+        == SOL_MIR_LAYOUT_BUILD_SUCCEEDED);
+    SolMirOperationsBuildRequest g = {&p.layout, NULL};
+    CHECK(sol_mir_operations_build(&g, &p.operations, &p.diagnostics)
+        == SOL_MIR_OPERATIONS_BUILD_UNSUPPORTED
+        && p.operations.layout == NULL);
+    size_t owned_demand = SOL_MIR_OPERATION_NONE;
+    for (size_t i = 0; i < p.plan.demand_count; ++i)
+        if (p.plan.demands[i].owner_kind == SOL_MIR_PLAN_DEMAND_OWNER_IMPORT)
+            owned_demand = i;
+    CHECK(owned_demand < p.plan.demand_count);
+    if (owned_demand < p.plan.demand_count) {
+        SolMirPlanDemand saved = p.plan.demands[owned_demand];
+        p.plan.demands[owned_demand].owner_kind
+            = SOL_MIR_PLAN_DEMAND_OWNER_INSTANCE;
+        CHECK(!sol_mir_plan_validate(&p.plan, NULL));
+        p.plan.demands[owned_demand] = saved;
+        size_t material_binding = 0;
+        while (material_binding < p.materialization.binding_count
+            && p.materialization.bindings[material_binding].source_demand
+                != owned_demand) ++material_binding;
+        CHECK(material_binding < p.materialization.binding_count);
+        SolMirMaterializedBinding binding
+            = p.materialization.bindings[material_binding];
+        p.materialization.bindings[material_binding].owner_kind
+            = SOL_MIR_PLAN_DEMAND_OWNER_ROOT;
+        CHECK(!sol_mir_materialization_validate(&p.materialization, NULL));
+        p.materialization.bindings[material_binding] = binding;
+        p.plan.demands[owned_demand].parent_import = SOL_MIR_PLAN_NONE;
+        CHECK(!sol_mir_plan_validate(&p.plan, NULL));
+        p.plan.demands[owned_demand] = saved;
+    }
+    pipeline_free(&p); free_text(&c);
+}
+
+static void test_multiple_import_context_canonicalization(void) {
+    static const char source[] =
+        "module import_order\n"
+        "capability Alpha { function first(value: Int64) -> Int64 effects { pure } "
+            "requires { value > 0 } }\n"
+        "capability Zeta { function second(value: Int64) -> Int64 effects { pure } "
+            "requires { value >= 0 } }\n"
+        "function root(alpha: capability Alpha, zeta: capability Zeta) -> Int64 "
+            "effects { pure } { return zeta.second(2) + alpha.first(1) }\n";
+    Compilation c; bool compiled = compile_text(&c, source); CHECK(compiled);
+    if (!compiled) { free_text(&c); return; }
+    SolIrCallableId first = callable(&c.ir, "first", SOL_IR_CALLABLE_CAPABILITY);
+    SolIrCallableId second = callable(&c.ir, "second", SOL_IR_CALLABLE_CAPABILITY);
+    SolIrCallableId approved[2] = {second, first};
+    SolMirProgramRoot root = {callable(&c.ir, "root", SOL_IR_CALLABLE_FUNCTION),
+        SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    Pipeline p; pipeline_init(&p);
+    bool built = build_pipeline(&c.ir, &root, 1, approved, 2, &p, NULL);
+    CHECK(built && p.plan.import_count == 2);
+    if (built) {
+        CHECK(p.plan.imports[0].callable < p.plan.imports[1].callable
+            && p.plan.imports[0].contexts.count == 1
+            && p.plan.imports[1].contexts.count == 1
+            && p.plan.imports[0].contexts.offset
+                + p.plan.imports[0].contexts.count
+                == p.plan.imports[1].contexts.offset
+            && p.plan.imports[0].typed_uses.offset
+                + p.plan.imports[0].typed_uses.count
+                == p.plan.imports[1].typed_uses.offset);
+        SolMirPlanSlice uses = p.plan.imports[0].typed_uses;
+        --p.plan.imports[0].typed_uses.count;
+        CHECK(!sol_mir_plan_validate(&p.plan, NULL));
+        p.plan.imports[0].typed_uses = uses;
+        SolMirPlanContext context
+            = p.plan.contexts[p.plan.imports[0].contexts.offset];
+        p.plan.contexts[p.plan.imports[0].contexts.offset].import = 1;
+        CHECK(!sol_mir_plan_validate(&p.plan, NULL));
+        p.plan.contexts[p.plan.imports[0].contexts.offset] = context;
+        p.plan.contexts[p.plan.imports[0].contexts.offset].target_kind
+            = SOL_MIR_PLAN_TARGET_INSTANCE;
+        CHECK(!sol_mir_plan_validate(&p.plan, NULL));
+        p.plan.contexts[p.plan.imports[0].contexts.offset] = context;
+        SolMirPlanTypedUse use
+            = p.plan.typed_uses[p.plan.imports[0].typed_uses.offset];
+        p.plan.typed_uses[p.plan.imports[0].typed_uses.offset].context
+            = p.plan.imports[1].contexts.offset;
+        CHECK(!sol_mir_plan_validate(&p.plan, NULL));
+        p.plan.typed_uses[p.plan.imports[0].typed_uses.offset] = use;
+        SolMirMaterializedTypeOverlay overlay
+            = p.materialization.overlays[p.materialization.imports[0].overlays.offset];
+        p.materialization.overlays[p.materialization.imports[0].overlays.offset].context
+            = p.materialization.imports[1].contexts.offset;
+        CHECK(!sol_mir_materialization_validate(&p.materialization, NULL));
+        p.materialization.overlays[p.materialization.imports[0].overlays.offset]
+            = overlay;
+        p.materialization.overlays[p.materialization.imports[0].overlays.offset].type
+            = (overlay.type + 1) % p.materialization.type_count;
+        CHECK(!sol_mir_materialization_validate(&p.materialization, NULL));
+        p.materialization.overlays[p.materialization.imports[0].overlays.offset]
+            = overlay;
+        SolMirPlanSlice contexts = p.materialization.imports[0].contexts;
+        p.materialization.imports[0].contexts = p.materialization.imports[1].contexts;
+        CHECK(!sol_mir_materialization_validate(&p.materialization, NULL));
+        p.materialization.imports[0].contexts = contexts;
+        size_t context_id = p.materialization.imports[0].contexts.offset;
+        SolMirPlanContext material_context = p.materialization.contexts[context_id];
+        p.materialization.contexts[context_id].import = 1;
+        CHECK(!sol_mir_materialization_validate(&p.materialization, NULL));
+        p.materialization.contexts[context_id] = material_context;
+    }
+    pipeline_free(&p); free_text(&c);
+}
+
 int main(void) {
     SolMirOperations empty;
     memset(&empty, 0xa5, sizeof(empty)); sol_mir_operations_init(&empty);
@@ -813,6 +1182,11 @@ int main(void) {
     test_recursive_equality_graph();
     test_source_search_work_is_not_an_arena_count();
     test_handlers_and_unresolved_callable_rejection();
+    test_bodyless_import_contract();
+    test_import_contract_helper_is_retained_then_rejected();
+    test_multiple_import_context_canonicalization();
+    test_p2_6b1_predicate_rejections();
+    test_predicate_literal_authentication_and_rendering();
     if (failures != 0) {
         fprintf(stderr, "%d MIR operations test(s) failed\n", failures); return 1;
     }

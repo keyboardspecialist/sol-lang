@@ -7050,6 +7050,8 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             ? obligation->owner
             : obligation->owner_kind == SOL_CONTRACT_OWNER_ITEM
                 ? ir->definitions[obligation->owner].callable : SOL_IR_NONE;
+        size_t expression_owner = callable == SOL_IR_NONE
+            ? obligation->owner : ir->callables[callable].owner;
         if (ir->local_count != 0) memset(introduced, 0,
             ir->local_count * sizeof(*introduced));
         if (callable != SOL_IR_NONE) {
@@ -7061,7 +7063,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             if (metadata->receiver != SOL_IR_NONE) introduced[metadata->receiver] = true;
         }
         if (!sol_ir_proof_expression_non_executable(ir,
-                obligation->predicate, callable, obligation->owner, obligation,
+                obligation->predicate, callable, expression_owner, obligation,
                 states, proof_states, proof_callables, local_callables,
                 introduced, 0)) {
             free(proof_states);
@@ -7077,7 +7079,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
             const SolIrSnapshot *entry
                 = &ir->snapshots[obligation->snapshots.offset + snapshot];
             if (!sol_ir_proof_expression_non_executable(ir, entry->operand,
-                    callable, obligation->owner, NULL, states, proof_states,
+                    callable, expression_owner, NULL, states, proof_states,
                     proof_callables, local_callables, introduced, 0)) {
                 free(proof_states);
                 free(proof_callables);
