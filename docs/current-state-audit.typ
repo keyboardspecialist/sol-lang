@@ -1,13 +1,15 @@
 #set document(
-  title: "Sol Current-State Audit and End-to-End Plan",
+  title: "Sol Current-State Audit: Production and Maintenance Plan",
   author: "OpenCode",
-  date: datetime(year: 2026, month: 8, day: 25, hour: 12, minute: 0, second: 0),
+  date: datetime(year: 2026, month: 9, day: 9, hour: 12, minute: 0, second: 0),
 )
 #set page(paper: "a4", margin: (x: 22mm, y: 20mm), numbering: "1 / 1")
 #set text(font: "Libertinus Serif", size: 10.5pt)
 #set heading(numbering: "1.1")
 #set par(justify: true, leading: 0.62em)
 #show raw: set text(font: "DejaVu Sans Mono", size: 8.5pt)
+#show link: set text(fill: rgb("4b7d56"))
+#set table(inset: 6pt, stroke: 0.4pt + rgb("cbd5cc"))
 
 #let status(kind, body) = block(
   width: 100%,
@@ -15,361 +17,397 @@
   fill: if kind == "IMPLEMENTED" { rgb("e8f3e8") } else { rgb("f5ece8") },
   stroke: (left: 3pt + rgb("4b7d56")),
   radius: (right: 2pt),
-  breakable: true,
+  breakable: false,
 )[#text(size: 7.5pt, weight: "bold", fill: rgb("4b7d56"))[#kind] #body]
 
 #align(center)[
   #text(size: 22pt, weight: "bold")[Sol Current-State Audit]
   #v(4pt)
-  #text(size: 14pt)[Remaining Work, Risks, and the Shortest End-to-End Path]
+  #text(size: 14pt)[Production and Maintenance Plan]
   #v(10pt)
-  #text(size: 9pt)[Executable-core state after E6 - August 25, 2026]
+  #text(size: 9pt)[Document-based assessment through P2.6]
+  #linebreak()
+  #text(size: 9pt)[September 9, 2026 | Implementation baseline: `6ec4ba9`]
 ]
 
-#v(16pt)
+#v(14pt)
 
 = Executive Assessment
 
-Sol currently has a credible end-to-end *executable language model*:
+Sol is an experimental language and C17 compiler with a substantial executable
+reference model, not a production-ready compiler or stable toolchain. Explicit
+domain types, ownership, effects, capability authority, contracts, and semantic
+identity form a coherent foundation for inspectable software change. Whether
+they make human or AI maintenance safer, faster, or cheaper remains unmeasured.
+
+#status("IMPLEMENTED", [E1-E6, P1, and P2.1-P2.6 are complete at the documented
+baseline. Reference application execution and runtime callable/refinement checks
+are operational. Separate internal production owners now reach concrete
+specialization, representation, target layout, and semantic-operation plans.])
+
+#status("OPEN", [P2 overall remains open. P2.7 is next overall and next production.
+There is no backend, production runtime ABI, `sol build`, full public IR, or SMT
+proof discharge. Wasm is the first production target, not delivered output.])
+
+The recommended strategy preserves the frozen executable core while testing a
+separate product hypothesis: can bounded semantic context and protected review
+improve realistic maintenance? Production delivery alone cannot answer that.
+The proposed first-domain direction is a capability-restricted hosted
+business-logic or validation component; M1 must still choose its user, workload,
+and host boundary. This audit selects no workload and creates no language prerequisite.
+
+== Scope and Source Authority
+
+This refresh replaces the stale August 25 assessment rather than appending a
+checkpoint history. It reconciles documentation, not fresh code inspection,
+compiler execution, security testing, or release certification. Baseline evidence
+is reported evidence, not a September 9 test result.
+
+#table(
+  columns: (1.1fr, 2.3fr),
+  table.header([*Source*], [*Authority and Use*]),
+  [#link("TODO.md")[TODO.md]],
+  [Sole live status, exact execution cursor, dependencies, stable task IDs, and acceptance criteria.],
+  [#link("README.md")[README.md]],
+  [Current introduction, runnable commands, supported scope, and evidence labels.],
+  [#link("docs/compiler-status.md")[Compiler status]],
+  [Detailed `6ec4ba9` implementation and compatibility snapshot; includes historical evidence.],
+  [#link("docs/project-analysis.md")[Project analysis]],
+  [Document-based product assessment, historical findings, and experiment rationale.],
+)
+
+Use the #link("Sol_Programming_Language_Design_Specification_v0.2.pdf")[design manual]
+for target-language design and its distinction from implemented scope. This audit
+is a dated orientation, not another work ledger.
+Links are relative to the repository-root PDF; retain that location when using them.
+
+#pagebreak()
+
+= Executable Baseline and Evidence
+
+== Reference Execution
+
+The normal compilation session owns phase order, bounded source/package loading,
+diagnostics, and frontend teardown. Successful compilation transfers self-contained
+owning typed IR through an opaque validated handle. The interpreter executes that
+IR after frontend state is freed; it does not execute the separate P1/P2 owners.
 
 ```text
-source/package
--> lexer and parser
--> syntax validation
--> HIR/name resolution
--> type/effect/contract analysis
--> owning typed IR
--> ownership validation
--> reference interpreter
--> sol test
+source/package -> syntax validation -> resolution/type/effect analysis
+-> owning typed IR -> ownership/final validation -> opaque handle
+-> reference execution: sol test / sol run
 ```
 
-This is real functionality rather than scaffolding. Records, enums, tuples, bounded generics, traits, effects, capabilities, contracts-as-obligations, ownership, mutation, loops, handlers, recursive patterns, cleanup, and host operations cross the complete pipeline.
+The implemented CLI provides `check`, `test`, `run`, `effects`, `inspect`, and
+`fmt`. Directory inputs form one deterministic dependency-free package with
+multi-file modules and explicit public imports, not manifests or downloaded
+dependencies. The bounded core includes records, enums, tuples, nominal types,
+Option/Result, bounded generics and traits, recursive matching, checked mutation,
+partial moves, lexical borrows/regions, loops, and exact handlers.
+
+Application execution resolves one explicit `@entry`: a public nongeneric free
+function with owned root-capability parameters, explicit closed effects, and
+`()` or `Int64` result. Unit maps to status 0; integer success must be in 0-255.
+The trusted host grants exact root/member operations for bounded console output,
+argument access, and configuration snapshots. There is no ambient filesystem,
+network, clock, randomness, console input, or live environment access.
+
+== Runtime Contracts Are Operational
+
+`SOL_INTERPRETER_CONTRACTS_CHECK` evaluates `requires`, captures entry-state `old`,
+and evaluates applicable `ensures` after a valid return, including Result outcomes
+and approved bodyless hosted-member contracts. False predicates have structured
+contract diagnostics; predicate runtime failures retain their failure identity.
+Checks share execution limits and preserve ordinary owned-binding cleanup.
+`sol run` and `sol test` request CHECK; explicit library callers may select IGNORE.
+Direct refined construction always evaluates its type-owned predicate.
+
+Loop invariants and `decreases` are typed, pure obligation templates but remain
+runtime-erased and unproved. Proof-backed `unreachable` retains an unresolved
+obligation; reaching it produces a defensive runtime error. No solver discharge
+is supplied by accepting this syntax or by materializing a predicate CFG.
+
+#table(
+  columns: (1fr, 2.5fr),
+  table.header([*Evidence Label*], [*Required Interpretation*]),
+  [Declared], [Source states intent. A well-typed predicate is not a proof.],
+  [Runtime-checked], [A supported check ran on a particular execution under its policy. It does not establish all-input behavior.],
+  [Proved-under-assumptions], [A proof covers an explicit property, model, and trusted assumptions. The bootstrap does not provide SMT discharge.],
+  [Unknown], [Unresolved, unsupported, omitted, or outside the modeled boundary. Unknown is neither success nor an empty dependency set.],
+)
+
+`pure` does not mean total, terminating, or automatically proved. E6 conformance,
+focused MIR-vs-owning-IR comparisons, malformed-input tests, and exact censuses
+support bounded compiler claims, not usability or general correctness. See the
+#link("docs/compiler-status.md#baseline-evidence")[baseline evidence snapshot]
+for historical test reports; no compiler suite was rerun for this document.
+
+#pagebreak()
+
+= Production Internals Through P2.6
+
+The completed checkpoints are meaningful compiler progress, but remain unstable
+internal APIs separate from the compilation session and CLI. Their closure is the
+frozen E6 profile, not all target-language breadth or every reference-interpreter
+program. Representation and Wasm32 layout are not a runtime ABI or a backend.
+
+#table(
+  columns: (0.65fr, 2.8fr),
+  table.header([*Complete*], [*Delivered Internal Boundary*]),
+  [P1], [Callable-scoped target-neutral CFG MIR for every bodyful E6 callable;
+    explicit SSA, ownership, storage, failure/cleanup, and source relations;
+    independent validation, canonical rendering, and bounded differential evaluation.],
+  [P2.1-P2.2], [A deterministic symbolic program and canonical monomorphic instance
+    plan, approved imports and specialization demands, finite closure, substitutions,
+    recursion handling, and bounded construction.],
+  [P2.3], [Owned concrete callable images, closed dispatch/effects, handlers,
+    normal-edge writeback, and independent SSA/ownership/cleanup revalidation.
+    Symbolic topology remains for authentication, not executable dispatch.],
+  [P2.4], [Canonical target-neutral recipes for concrete types, aggregate shapes,
+    callable producers, capability sources, Copy/drop classifications, and
+    independently validated arena/resource censuses.],
+  [P2.5], [Explicit target-parameterized layouts, initial Wasm32 descriptor, checked
+    size/alignment/padding, sum tags/payloads, and projected-place access maps.],
+  [P2.6], [Representation-aware operations plus source-independent predicate CFGs
+    and import-contract envelopes. Executable records use concrete IDs and operations;
+    source IDs are segregated authenticated provenance.],
+)
+
+== Restrictions Remain Part of the Contract
+
+The program owner requires exact direct static definition or bound-operation
+producers at callback sites. Ordinary first-class body callbacks and dynamic,
+conditional, or aliased callable producers remain outside that production closure,
+even where reference execution is broader. Contextless generic, receiver, and
+effect-polymorphic fixture roots reject without a root-context API. Reachable open
+enums reject at representation. These restrictions are not silently relaxed by P2.6.
+
+P1 callable contracts still reject contracted generic/effect-parameter or exclusive
+forms and fallible/projected snapshots; supported snapshots are direct scalar
+locals. Capability-member bodies have no standalone P1 MIR. Approved bodyless
+import contracts are nevertheless closed by P2.6 and are not globally unsupported.
+
+P2.6b2 supports rich bounded predicate control flow, exact pure calls, aggregate and
+refined construction, recursive matches/guards, immutable locals, and nested
+refinement references. It is no longer scalar-single-block-only and has no
+`UNRESOLVED_BODY` state. Contract-expression propagation still rejects under
+#box[`SOL-CONTRACT-002`]. The small E6 predicate census is a fixture shape, not a limit
+on all predicate support or a count of the whole test suite.
+
+== Internal Ownership Is Not a Serialization Boundary
+
+Raw owning IR and the mutable P owners are trusted compiler-internal C structures,
+not full public IR or hostile serialized input. Logical checks cannot establish
+that arbitrary foreign pointers address readable allocations. Borrowed upstream
+owners must remain alive and immutable through downstream use and destruction;
+teardown requires original builder-owned allocation bases. Independent validation
+does not turn these APIs into arbitrary-address recovery interfaces.
 
-Sol now has a bounded end-to-end interpreter application profile with explicit entrypoints, trusted host capabilities, executable core contracts/refinements, and `sol run`, plus structured callable-scoped CFG lowering, a symbolic production-program owner, and a canonical monomorphic instance plan for the E6 closure. It is not yet a production application toolchain: specialized CFG materialization, representation/layout, symbols/linkage, a native or WebAssembly backend, target runtime ABI, `sol build`, package manifests, dependencies, and public semantic IR remain open.
+`sol inspect` supplies selected versioned external projections, not these owners,
+a decoder, complete dependency coverage, or a guaranteed semantic cache key.
+The #link("docs/compiler-status.md")[detailed snapshot] owns the full compatibility limits.
 
-Current verification is healthy:
+#pagebreak()
 
-- Normal warning-clean test suite: 42/42 passed.
-- Clean ASan/UBSan suite: 42/42 passed.
-- P2.1/P2.2 focused normal and sanitizer coverage includes deterministic closure and plan construction, capacity/count/string corruption, concrete types and overlays, evidence composition, static predicate callable values, callee-coordinate effects, recursion, exact resource limits, and E6 censuses.
+= Production and Experiment Order
 
-= Current State
-
-== Source, Parsing, and Packages
-
-The compiler has deterministic single-file and directory-package loading, a lossless lexer, a recovering arena parser, exhaustive syntax-tree validation, canonical formatting, multi-file modules, imports, and stable top-level semantic IDs.
-
-The package model remains intentionally bounded. It has no manifests, dependency graph, lockfile, feature policy, aliases, re-exports, package-qualified identity, or host configuration. Directory packages are aggregated into package-global syntax and semantic arenas.
-
-== Semantic Pipeline
-
-Name resolution, bounded first-order generics, records, enums, tuples, structural function types, traits, method evidence, effects, capabilities, exact handlers, contracts, recursive patterns, and exhaustiveness are operational.
-
-The current HIR is primarily syntax-indexed semantic metadata rather than an independent typed semantic representation. Types, effects, contracts, and resolutions are maintained in parallel tables indexed by syntax IDs. This is effective for the bootstrap but will complicate incremental compilation and public semantic APIs.
-
-== Ownership and IR
-
-The compiler lowers successful programs to a genuine self-contained owning typed IR. The IR retains executable types, calls, places, effects, contract templates, cleanup, pattern trees, and dispatch metadata. Ownership checking covers affine moves, structural Copy, loans, partial moves, definite initialization, projected mutation, `inout` writeback, loops, regions, and deterministic cleanup.
-
-This IR is an unstable interpreter IR. It is not a control-flow MIR, stable serialized Sol IR, target-independent layout IR, or safe hostile-input format.
-
-#status("IMPLEMENTED", [P1a.1-P1a.3b3 add a separate unstable `SolMir` owner for one selected validated nongeneric free/test callable. The target-neutral subset normalizes scalar literals and operations, whole-local copy/move/store, lexical storage and conditional cleanup, blocks, `if`, short-circuit Boolean control, return, panic, lexical regions, `require`, proof-backed unreachable, and statement-form `loop`/`while` with nearest-loop break/continue into deterministic basic blocks with SSA instruction values and block parameters. Nongeneric direct function calls use abstract invoke terminators with explicit normal/failure-cleanup edges and ordered owned/shared/exclusive operands; exclusive whole-local writeback occurs only on the normal edge. Loop records bind preheaders, condition/body/exit edges, natural backedges, transfer cleanup boundaries, nested-loop identity, and erased proof-obligation slices. Authority-free infallible records, tuples, enum variants, Option/Result cases, and non-refined distinct wrappers lower to semantic construction instructions with exact tags and operand provenance. Typed reusable temporary slots stage multiple owned call/construction operands, consume exact suffixes, preserve outer operands across loop transfers, and clean abandoned operands in interpreter order. Checked refined construction retains its exact type-owned predicate obligation in an abstract two-edge terminator, consumes the representation on either edge, transports the nominal value only on success, and performs pending/local/region cleanup before resuming failure. Independent validation checks arenas, edges, invoke/construction/refinement provenance, exact temporary transitions, block-result aliases, source/type/control-event relations, local value availability, parameter activation, initialization/move transitions, lexical cleanup order, balanced regions, and cyclic loop CFG metadata. Unsupported forms fail transactionally. The production compilation session and interpreter do not consume MIR, and MIR does not choose predicate execution or runtime ABI policy; patterns, propagation, projected places, authority-bearing construction, handlers, dynamic/method/capability calls, contracts, generic lowering, layout, ABI, and backend execution remain P1a.3b4+.])
-
-#status("IMPLEMENTED", [P1a.3b4-P1a.3b14 extend the MIR owner through recursive matches and guards, Option/Result propagation, projected and partial-move places, callback/method/capability invokes, exact handler scopes, bounded callable contracts, generic/effect metadata and trait evidence, checked compound updates, and authority-bearing aggregate and derived-capability construction. All 14 bodyful E6 callables lower and validate deterministically; its five bodyless requirements and hosted capability members intentionally have no standalone CFG. The P1b checkpoints below subsequently complete dominance, canonical rendering, and differential MIR evaluation.])
-
-#status("IMPLEMENTED", [P1b.1 computes deterministic reverse-postorder immediate dominators over compact predecessor slices and validates every ordinary instruction, terminator, and edge-argument SSA use. Values may cross blocks only when their instruction or block-parameter definition dominates the use; same-block use-before-definition and sibling, join-bypass, backward-loop, and edge-argument leaks are rejected. Edge-produced terminator values retain their existing designated-edge scope.])
-
-#status("IMPLEMENTED", [P1b.2 shares the owning IR's greatest-fixed-point structural Copy classification and validates affine SSA availability path-sensitively. Consuming instruction and terminal uses make values unavailable; each edge independently consumes ordinary transported sources at most once and defines fresh target parameters; and may-unavailable joins converge across branches and loop backedges. Copy reuse remains unrestricted, while stale aliases and duplicate affine operands are rejected.])
-
-#status("IMPLEMENTED", [P1b.3 provides `sol_mir_render`, a validated, overflow-checked, deterministic versionless internal text form. It renders every semantic block, value, instruction, place, edge, temporary, loop, invoke, construction, contract, proof, and source relation with fixed ASCII spellings and escaping, explicit sentinel IDs, arena-stable references, and ascending semantic block order. Equivalent independently lowered MIR renders byte-identically; invalid input is rejected before buffered output transport. This form is explicitly not a stable serialization schema.])
-
-#status("IMPLEMENTED", [P1b.4 completes P1b with `sol_mir_evaluate`, an independent bounded evaluator over an explicit entry MIR and trusted immutable callable-indexed MIR provider. It executes the complete frozen MIR vocabulary under deterministic MIR-local resource limits and emits bounded structured traces without invoking owning-IR control evaluation. A separate bounded pure evaluator handles source-owned contract and refinement obligations. Preflight rejects unavailable bodyful capability closures and dynamic callable-producing closures before effects. Differential tests compare final values or failure categories/spans, raw host behavior, and exact owned-local cleanup against the reference interpreter. The API deliberately retains unstable interpreter values and raw host hooks and chooses no representation, ABI, or stable runtime surface.])
-
-#status("IMPLEMENTED", [P2.1 provides the separate unstable `SolMirProgram` owner over one borrowed validated `SolIr`. Canonical entry, test, or internal-fixture roots cache each reachable lowerable bodyful callable template once; exact approved data-only bodyless capability members become import demands; concrete trait evidence propagates only through compatible incoming invocation contexts and becomes full typed specialization demands; trait-bounded generic roots cannot borrow evidence from another root; and invoke, static callable, handler, and executable predicate relations retain path-free source provenance. Every callback site requires an exact direct static producer under current P1 support. Local callable-classification, retained-reference, and discovery-work limits fail transactionally; input deduplication, prerequisite owning-IR validation, and nested public MIR lowering/validation work are explicitly outside the local discovery meter. `SolMirProgram` follows the trusted mutable raw-owner model rather than accepting hostile arbitrary pointers: validation checks canonical null-empty headers and detectable top-level/nested overlap before rebuilding closure authenticity, and teardown requires original builder allocation bases. The owner does not monomorphize, clone or substitute CFGs, choose representation/layout/ABI/symbols, or emit backend code.])
-
-#status("IMPLEMENTED", [P2.2 provides the separate unstable `SolMirPlan` owner over one borrowed validated `SolMirProgram`. It structurally interns closed concrete types and semantic effect rows; keys instances by callable, concrete receiver and ordered arguments, callback-inferred authority-independent closed tail substitution, callee-coordinate effects, and resolved evidence dictionaries; composes forwarded evidence; and deduplicates identical recursion while rejecting repeated strict growth on one direct or mutual demand ancestry. Typed imports and provenance-bearing root/invoke/static-value/predicate/handler demands remain connected to exact sites. Flat per-instance overlays census signatures, locals, places and projections, MIR values/instructions/temporaries, source expressions/patterns/operands, snapshots, contracts/refinements, and proof-only types without cloning or mutating CFG arenas. Four cardinality limits, substitution depth, and a narrowly scoped interner/substitution/key-probe work meter fail transactionally; other loops are source-domain bounded. Validation checks count/capacity/null headers and bounded atom strings before traversal, defends detectable overlap, validates the borrowed program, rebuilds the expected plan, and compares fields independently. Contextless generic, receiver, and effect-polymorphic fixture roots reject because no root-context API exists. Current P1 still blocks ordinary first-class body callbacks; static predicate callable values are planned. E6 is exactly 8 instances/4 typed imports for entry and exactly one each of 14 bodyful callables plus 4 imports with tests. P2.3 still owns specialized CFG materialization.])
-
-== Interpreter and CLI
-
-The deterministic reference interpreter executes the bounded core with checked arithmetic, aggregate values, functions, callbacks, traits, capabilities, exact handlers, mutation, loops, patterns, cleanup, host operations, and explicit resource limits.
-
-The implemented commands are `sol check`, `sol test`, `sol run`, `sol effects`, `sol inspect`, and `sol fmt`. `sol run` executes one explicit package entrypoint after frontend teardown with bounded console, argument, and deterministic configuration capabilities. There is no `sol build` or executable artifact.
-
-== Contracts and Verification
-
-Contracts, refined predicates, loop invariants, decreases measures, snapshots, and obligations are parsed, typed, purity-checked, and retained as deterministic templates. They are not enforced or discharged. The interpreter's contract-check policy exists at the API level but is unsupported.
-
-This is the largest semantic gap relative to Sol's central claim: accepted contract syntax currently means that an obligation is well-formed, not that it has been proved or checked at runtime.
-
-= Principal Risks and Pitfalls
-
-== Runtime Contracts Are Absent
-
-Preconditions, postconditions, refinements, loop invariants, decreases clauses, and unreachable proofs are not enforced during execution. A program may compile and pass ordinary tests while violating a declared contract. Documentation currently discloses this, but tooling and users can still overinterpret contract acceptance.
-
-Priority: high. Runtime contract semantics should be implemented before Sol is presented as an application language with progressive verification.
-
-== Application Execution Boundary Is Incomplete
-
-The compiler defines argumentless `@entry`, package uniqueness, its bounded signature, capability-only parameters, successful result-to-status mapping, owning-IR/opaque-handle metadata, and trusted capability injection through an exact root/member registry. `sol run` adds missing-entry and status-boundary diagnostics plus stable panic/runtime rendering.
-
-This keeps later interpreter and backend work from embedding accidental function-name or truncating exit-status conventions.
-
-== Bounded Host Failure Text
-
-The raw host callback writes failure text into interpreter-owned fixed-capacity storage with an authoritative length. Empty failures select a stable default; embedded NULs and oversized lengths are rejected. No borrowed failure C string is scanned after callback return.
-
-The raw callback still receives raw IR and remains a trusted compiler-test interface. Ordinary opaque-handle interpretation rejects it; hosted entrypoint execution uses a separate data-only callback and exact opaque registry that expose no IR or authority token.
-
-== Public C IR Is Not a Hostile-Input Format
-
-The public C IR structure exposes mutable pointers and counts. Logical validation cannot prove that a non-null pointer actually addresses the advertised number of objects. Internally generated IR is strongly validated, but arbitrary foreign or corrupted C metadata cannot be made memory-safe by logical validation alone.
-
-A future public serialized IR requires a separate checked decoder and owned representation.
-
-== Bounded Compilation Resources
-
-Compilation sessions enforce configurable per-file and package bytes, source-file count, directory depth and visited entries, tokens, persistent compiler arenas, diagnostics, cumulative allocation bytes, and allocation-request limits. The first exhausted resource produces a deterministic resource failure and no validated handle.
-
-Specialized parser and semantic recursion ceilings remain in addition to the session-wide meter.
-
-== Package Filesystem Races
-
-Directory traversal is anchored to verified open descriptors and uses descriptor-relative inspection/opening. Source reads reject symlinks and non-regular files, match discovered device/inode identity, probe EOF, and recheck identity, size, and nanosecond modification/change timestamps.
-
-Duplicate source identities are rejected. Formatter commit-time transaction hardening remains distinct from compilation loading.
-
-== Sparse Generic Call Analysis
-
-Generic recursion analysis uses sparse outgoing/incoming adjacency and iterative strongly connected components with linear graph storage. Effect inference reuses its call-graph SCCs and packed ascending component members while retaining deterministic monotonic fixed-point rounds.
-
-== Repeated Whole-IR Validation
-
-Lowering retains independent pre-ownership and final validation. The opaque validated handle then serves as the immutable validation certificate for repeated interpretation and effects rendering, eliminating per-test whole-IR rescans.
-
-Public raw mutable-IR interpreter and effects APIs still validate every call, preserving malformed-table test and trust boundaries.
-
-== Syntax-Indexed Side Tables
-
-HIR, types, effects, and contracts are broad parallel tables indexed by syntax IDs. Every new construct requires coordinated updates across many arenas and validators. This architecture also forces package-global invalidation and makes caching or serialization difficult.
-
-The owned compilation session now centralizes phase order and teardown. A more coherent typed semantic layer remains desirable before incremental compilation or public semantic tooling.
-
-== Duplicated Semantic Rules
-
-Independent validation is valuable, but several semantic algorithms exist in parallel frontend and IR forms: match usefulness, finite inhabitation, contract purity, capability roots, callable effects, and ownership-related type recursion. Drift can either accept unsound metadata or reject valid frontend output as malformed IR.
-
-Shared specifications, generated tables, or common constructor-domain utilities should define policy while independent validators continue to verify representation-specific facts.
-
-== Portability and Release Infrastructure
-
-The bootstrap explicitly remains POSIX-only. Checked-in CI performs clean warning-as-error GCC and Clang ASan/UBSan builds. Optional Clang/libFuzzer parser, package, and bounded scalar-IR harnesses have fixed corpora and smoke runs. Scheduled deterministic stress cases track hashes, functional outcomes, and broad Linux timing ceilings.
-
-Install/export targets, release packaging, coverage gates, and a platform abstraction remain future work.
-
-== Testing Gaps
-
-The handwritten positive, negative, sanitizer, malformed-metadata, parser/package/scalar-IR fuzz, and sparse/package/repeated-execution stress coverage is strong. Missing categories include runtime-value fuzzing, systematic allocation-failure injection, generated semantic properties, standard JSON Schema validation, and interpreter/backend differential execution.
-
-= Remaining Roadmap
-
-The unfinished roadmap falls into five groups:
-
-- Items 28-39: closures, richer traits, constants, numerics, arrays, lifetimes, resources, collections, and iterators.
-- Items 40-44: manifests and dependencies, schemas, general effect polymorphism, cross-cutting semantic integration, and unsafe.
-- Items 45-50: MIR, FFI, backend, runtime ABI, entrypoints/build/run, and executable contracts.
-- Items 51-58: generated properties, SMT, formatter completion, public IR, language server, semantic patches, reports, and agent context.
-- Items 59-61: concurrency, reflection/build transforms, and general handlers.
-
-The current numeric order is not the shortest path to usable execution. Most language-breadth work in items 28-44 is not required to execute an application through the existing reference interpreter.
-
-= Recommended Endpoint
-
-The shortest meaningful endpoint is a bounded `sol run` profile using the existing owning IR and reference interpreter, with explicit entrypoint and host-capability semantics, followed by executable runtime contracts.
-
-This endpoint is not a production runtime. It is the smallest vertical slice that turns Sol from a language-test harness into an executable application model while exercising ownership, effects, authority, contracts, packages, diagnostics, and runtime behavior together.
-
-= Shortest End-to-End Path
-
-== Milestone 1: Shared Compilation Session and Hardening
-
-Create one reusable compilation/session API instead of keeping orchestration private to the CLI and duplicating it in tests.
-
-Exit criteria:
-
-- Compile one file or package into validated immutable owning IR.
-- Request check, inspection, effect, test, or run outputs through one phase owner.
-- Centralize initialization, teardown, diagnostics, and phase ordering.
-- Add package limits for bytes, files, depth, tokens, arenas, diagnostics, and allocation.
-- Replace the unsafe host error pointer with an owned or length-delimited error.
-- Replace cubic generic transitive closure with SCC analysis.
-- Validate immutable IR once for repeated execution.
-
-== Milestone 2: Entrypoint and Application ABI
-
-Split entrypoint semantics out of roadmap item 49 rather than waiting for a backend.
-
-Define:
-
-- An explicit entrypoint declaration or annotation.
-- Visibility and uniqueness rules.
-- Allowed generic, parameter, return, effect, and contract shapes.
-- Process exit-status mapping.
-- Panic and runtime-failure behavior.
-- Capability parameter injection.
-- Default execution limits.
-- Deterministic duplicate or missing-entry diagnostics.
-
-A bounded shape could resemble:
-
-```sol
-@entry
-public function launch(console: capability Console) -> Int64
-effects { console.write<console> } {
-    console.write("hello")
-    return 0
-}
-```
-
-Entrypoint identity should be retained explicitly in owning IR rather than inferred from a function-name scan.
-
-#status("IMPLEMENTED", [Argumentless `@entry` is package-unique when present and retained through syntax, HIR, and owning IR. It requires a public nongeneric free function with a body, explicit closed effects, owned nongeneric root-capability parameters, and exact `()` or `Int64` result. The opaque validated-IR handle resolves the marker and maps only successful `()` to 0 or in-range `Int64` to the identical 0-through-255 process status. Panic and other runtime failures remain structured interpreter failures. Ordinary compilation permits entrypoint absence for libraries; `sol run` will require one.])
-
-== Milestone 3: Minimal Trusted Host Profile
-
-Split interpreter host support out of roadmap item 48.
-
-Implement only what a representative application requires:
-
-- Console output.
-- A bounded process-argument representation.
-- Optional deterministic configuration input.
-- Explicit capability-root registry.
-- Operation allowlist.
-- Stable owned host failures.
-- Default and configurable execution limits.
-
-Filesystem, network, clock, randomness, and process mutation should remain absent until each receives an explicit authority and deterministic-test policy.
-
-#status("IMPLEMENTED", [A registry bound to one validated handle gives every entrypoint capability parameter a distinct opaque root and grants bodyless data-only members per exact root. Preflight rejects missing roots, missing or extra authority, ambiguous effect families, and cross-handle registries before Sol execution. Safe callbacks receive no IR, callable ID, root, or private source. The minimal conventions cover console `write`, immutable arguments `count`/`get`, and deterministic configuration `read`; callback results consume existing value/text budgets, dispatch consumes the host-call budget, and failures are copied into owned diagnostics.])
-
-== Milestone 4: `sol run`
-
-Add:
+This sequence mirrors the #link("TODO.md#execution-cursor")[live execution cursor]
+at refresh time. Only TODO owns subsequent status and order; completed E milestones
+are the starting point, not future endpoints.
 
 ```text
-sol run <file.sol|package-directory>
+E1-E6 + P1 + P2.1-P2.6 complete
+-> P2.7 (next overall and next production)
+-> M1 workload / experiment charter
+-> P2.8 concrete-program freeze
+-> P3 runtime ABI -> P4 Wasm backend/adapter -> P5 build/conformance
+
+After M1 feasibility + P2.8:
+M2 packets -> M3 deltas -> M4 edit/approval -> M5 held-out comparison
+M4E basic editor slice: optional after M1/M2 projection feasibility
 ```
 
-Required behavior:
+M1 publishes subsequent interleaving. If infeasible, record the blocker and
+continue P2.8 without inventing prerequisites. After P2.8, M2-M5 may proceed
+independently alongside P3 and the later production path, subject to their own
+dependencies, staffing, and exclusive file ownership. They are not mutually
+independent tasks: M3 needs M2, M4 needs M2/M3, and M5 needs M4. One coordinator
+maintains the single next-overall cursor.
 
-- Compile through the shared session.
-- Resolve exactly one entrypoint.
-- Verify all required host capabilities before execution.
-- Free frontend state before running owning IR.
-- Execute under deterministic limits.
-- Map return, panic, contract failure, and runtime failure to process status.
-- Emit human diagnostics and a versioned JSON runtime envelope.
+== Finish the Concrete Boundary, Then the Runtime
 
-At this point Sol has meaningful end-to-end application execution.
+#table(
+  columns: (0.65fr, 2.8fr),
+  table.header([*Open Track*], [*Bounded Outcome*]),
+  [P2.7], [Collision-checked ASCII symbols from semantic identity and canonical
+    instance keys; deterministic callable/export/table identities; ordinary
+    callable linkage resolved internally, with only typed runtime and approved-host requirements.],
+  [P2.8], [Complete concrete-owner validation, canonical rendering, malformed-input
+    coverage, repeated-lowering equality, and a finite E6 closure including failure
+    and cleanup. No ABI selection or Wasm emission.],
+  [P3], [Backend-neutral call/result/failure conventions, bounded owned-value
+    allocation/operations, cleanup and panic policy, capability/host and exact-handler
+    ABI, then runtime-lowered-program validation.],
+  [P4], [Pinned established Wasm toolchain, scalar and represented-value emission,
+    runtime checks and cleanup, trusted host adapter, and E6 Wasm execution.],
+  [P5], [Production build API and `sol build`, deterministic artifact writes,
+    artifact execution, interpreter/Wasm differential conformance, and reproducible
+    development/release acceptance.],
+)
 
-#status("IMPLEMENTED", [`sol run` accepts one file or directory package, optional deterministic `--config=KEY=VALUE` entries, and bounded application arguments after `--`. It compiles through the shared session, transfers owning IR before execution, grants only exact Console/Arguments/Configuration signatures and effects, rejects unsupported authority before side effects, and executes core contracts. Human mode preserves exact console bytes on stdout and sends boundary/runtime diagnostics to stderr. JSON mode emits one `sol.run-result` version-1 envelope with base64 console data, symbolic diagnostics, and exact returned status. Successful `()`/`Int64` results map to 0 or identical 0-through-255 status; missing entrypoints, invalid status values, host-profile failures, and runtime failures use driver status 1, while usage uses 2.])
+== P3.W1 Is an Experiment, Not Backend Completion
 
-== Milestone 5: Executable Contracts
+After P3.1 has tested call/result/failure conventions, timebox a candidate Wasm ABI
+integration experiment. Pin and report candidate tool versions, execute a minimal
+scalar call/result/failure module, and record ABI/tool mismatches. Allocation,
+cleanup, and host imports enter only after the relevant P3.2-P3.4 conventions are
+tested. This informs tool selection; it does not complete P4.1, backend/adapter
+tasks, Component Model support, E6 Wasm execution, or build tooling.
 
-Split runtime contract checking out of roadmap item 50.
+Stable numbered capabilities and completed named slices remain in the
+#link("TODO.md#numbered-capability-backlog")[numbered backlog]. This audit neither
+renumbers them nor duplicates their full exit criteria. Frozen-core production
+work does not activate manifests, libraries, public IR, proof, or new syntax by implication.
 
-Implement:
+#pagebreak()
 
-- `requires` before callable body execution.
-- `old` snapshots at callable entry.
-- `ensures` after successful return.
-- `Result` success/failure outcome clauses.
-- Runtime refined-value construction and validation.
-- Structured contract-failure diagnostics.
-- Exact ownership cleanup when a contract fails.
+= Bounded Maintenance Experiment
 
-Loop invariant and decreases checking may follow as a second increment if needed.
+#status("PROPOSED", [All M milestones are open proposals, not shipped commands or
+features. Use existing inspection, reference execution, ordinary edits, protected
+tests, and human approval. Full public IR (54), SMT (52), and a patch DSL (56) are
+not prerequisites, nor is a completed production backend.])
 
-#status("IMPLEMENTED", [The interpreter CHECK policy executes source-ordered callable preconditions, entry snapshots, always/success/failure postconditions, and bodyless hosted-member contracts under shared deterministic limits. Direct refined construction always validates its type-owned predicate. False predicates have dedicated structured diagnostics, predicate runtime failures retain their original diagnostic, and every exit performs exact ordinary-binding cleanup without exposing logical copies to cleanup observers. `sol run` and `sol test` request CHECK; explicit interpreter callers may retain IGNORE compatibility. Loop invariant and decreases templates remain runtime-erased.])
+== M1: Workload and Evaluation Charter
 
-== Milestone 6: Representative Application and Conformance
+Select one user and capability-restricted hosted business-logic/validation
+workload, with a concrete host boundary and realistic maintenance tasks. Protect
+the starting baseline and held-out tests. Publish feasibility, a timebox, metrics,
+stop/go thresholds, explicit non-goals, projection sufficiency/gaps, and subsequent
+interleaving. E6 is a conformance fixture, not the selected user or a usability benchmark.
 
-Add one multi-file executable fixture exercising imports, semantic IDs, records, enums, tuples, generics, traits, recursive matching, ownership, mutation, `Option`/`Result`, capability-injected console output, contracts, runtime failures, and cleanup.
+Prefer a narrow host or library solution to a new language family. If a real
+blocker appears, propose a separately bounded slice with authority, interface,
+tests, and acceptance criteria. No charter or workload selection is delivered by
+this documentation refresh.
 
-The same fixture should pass through `sol fmt`, `sol check`, `sol test`, `sol effects`, `sol inspect`, and `sol run`. This becomes the acceptance test for the versioned executable-core profile.
+== M2-M4: Context, Deltas, and Approval
 
-#status("IMPLEMENTED", [`tests/conformance/e6` is one canonical three-module application covering imports and a stable identity; records, enums, tuples, generics, trait dispatch, recursive matching, ownership, `inout` mutation, regions and cleanup; `Option`/`Result` propagation, typed errors, and runtime failure/unwind; executable contracts/refinement; and exact Console/Arguments/Configuration effects. One CTest case runs the unchanged directory through formatter check, compilation, four checked tests, effect inspection, inspection-v3 emission, and hosted execution with deterministic configuration/arguments and exact `E6 ok\n` output, then executes a configured panic path and checks its structured diagnostic.])
+*M2: declaration-centered packets (58 slice).* Produce bounded deterministic
+source, signatures, effects, contracts, and available references. Include a source
+snapshot hash, compiler/schema/options and selection metadata, and explicit
+omissions. Unavailable is not empty. Use semantic IDs only within their supported
+scope; package-local top-level identities do not identify every local/member or
+cross-dependency entity. Inspection bytes are not a promised semantic cache key.
 
-= Recommended Immediate Sequence
+*M3: conservative checked-snapshot deltas (57 slice).* Compare declaration,
+signature, effect, and contract facts after M2. Validate stable identities and
+base snapshots; reject stale, ambiguous, and unsupported comparisons. Preserve
+body edits and unknown behavior in the report. A changed predicate is not
+established weakening; an unchanged interface does not establish preserved behavior.
 
-```text
-current item 27
--> shared compilation session and hardening
--> entrypoint/application ABI
--> minimal interpreter host profile
--> sol run
--> executable contracts/refinements
--> representative application and conformance suite
-```
+*M4: ordinary-edit validation/approval (56 slice).* Exercise edit, check, test,
+delta, and human review against the protected baseline. Tests and acceptance
+policy cannot silently weaken. Changes to authority or contracts require explicit
+approval. This is not patch syntax, automated architectural repair, or a proof
+that an accepted edit is correct. Generated code has no bypass around compiler,
+host, test, or approval boundaries.
 
-Items 28-47 can mostly be deferred for this endpoint.
+*M4E: optional editor slice (55 slice).* After M1/M2 establish projection
+feasibility, timebox diagnostics, navigation, and packet presentation. It is not
+full LSP and is not required for M5. The proposed slices do not complete or earn
+partial-completion status for their broader numbered capabilities.
 
-= Production Path
+== M5: Held-Out Comparison
 
-After interpreter-based application execution stabilizes the semantics, the shortest production route is likely WebAssembly-first:
+After M4, compare semantic-tool assistance with source-only maintenance on
+protected held-out tasks. Both conditions retain the same compiler and test
+access, equivalent starting source and task definitions, and matched time,
+model, token, and attempt budgets where relevant. Source-only does not mean
+removing validation. Record separately any explicitly approved requirement changes.
 
-```text
-entrypoint/application ABI
--> ownership-explicit CFG/MIR for the current subset
--> monomorphization and representation strategy
--> target-independent runtime ABI
--> WebAssembly backend
--> WebAssembly host adapter
--> sol build
--> interpreter/WebAssembly differential suite
-```
+Measure correct-change rate, introduced regressions, reviewer effort, context
+size, iterations, diagnostic usefulness, and false confidence. Record unknowns
+and human review outcomes, not just whether generated source compiles. Small
+demonstrations establish feasibility; held-out work tests generalization.
 
-The production roadmap must explicitly cover generic monomorphization or dictionaries, aggregate and text layout, symbols and linkage, Wasm imports/exports, runtime memory management, panic and cleanup policy, source maps, artifact metadata, reproducibility, release CI, fuzzing, security review, and performance gates.
+Report gains, negative results, and inconclusive outcomes against the original
+thresholds. Decide continue, narrow, or stop rather than moving the success
+criteria. Production compiler progress can remain worthwhile without claiming a
+maintenance advantage that the experiment did not establish. Dependencies and
+acceptance details remain in the #link("TODO.md#bounded-maintenance-workflow-experiment")[live M track].
 
-= Roadmap Restructure
+#pagebreak()
 
-Recommended splits:
+= Risks, Decisions, and Deferrals
 
-- Item 40: application metadata; dependencies and locks; visibility and re-exports; sandboxed builds.
-- Item 48: interpreter host profile; target-independent runtime ABI; backend adapters.
-- Item 49: entrypoint semantics; interpreter `sol run`; backend `sol build`.
-- Item 50: normalized logical obligations, refinement-aware matching, and cost/resource checks beyond E5's runtime core.
-- Item 43: immediate integration acceptance criteria rather than one permanent mega-task.
+== Highest-Priority Assessment Risks
 
-Recommended new explicit tasks:
+*Product thesis and scope interaction.* A sophisticated compiler or successful
+Wasm artifact does not establish safer maintenance. The broad language vision
+can make unrelated work appear prerequisite, while P and M tracks can compete
+for staff and files. Preserve the frozen profile and one cursor; require workload
+evidence for additional scope. Novel syntax also brings model-training, examples,
+and repair-pattern debt: explicitness alone is not AI usability.
 
-- Versioned executable-core conformance suite.
-- Shared compilation/session API.
-- Compiler resource budgets.
-- Host capability registry.
-- Representative executable application.
-- Monomorphization and data-layout strategy.
-- Interpreter/backend differential testing.
-- Fuzzing, allocation-failure testing, clean-build CI, and release hardening.
+*Historical documentation drift.* The analyzed baseline mixed target design,
+runtime support, and stale E/P plans. The refreshed ledger and snapshots address
+that presentation failure; it is not a permanent allegation that contracts are
+absent. Keep TODO live, other assessments dated, and evidence labels explicit.
+The corrected manual reservation example distinguishes a new reservation's stock
+decrement from a same-request retry's unchanged stock. It remains target pseudocode,
+not implemented or proved transaction semantics.
 
-= Deferred Work
+*Guarantee overreach and trust.* Keep declared, runtime-checked,
+proved-under-assumptions, and unknown separate. Pure is not total. Capability
+permission does not establish business authorization, tenant isolation, or
+information-flow safety. Safe hosting must preserve exact grants and data-only
+transfer; raw mutable internal owners remain outside a hostile-input boundary.
 
-For the interpreter-based application endpoint, defer closures and richer traits, broad numeric and collection support, full package dependencies, general effect polymorphism, unsafe, C FFI, MIR/backend work, SMT, public IR, language-server functionality, semantic patches, concurrency, reflection, and general resumptive handlers.
+== Workload-Gated Semantic and Ergonomic Decisions
 
-Only a minimal package/application profile is required before `sol run`.
+Named arguments currently evaluate in canonical formal-parameter order, not
+written operand order. A signature reorder can change effects. Preserve that
+behavior now; reconsider alternatives only through an explicit decision and tests.
+Direct checked refined construction exists. Recoverable Result-based validation
+and safe representation projection are distinct proposed APIs, not capabilities
+already supplied by that construction. Neither becomes a new production
+prerequisite through this audit.
 
-= Conclusion
+Measure practical text/data needs, Boolean-test limitations, assertions and
+failure reporting, editor/debugging friction, and installation from a new user's
+perspective. The bootstrap is POSIX-only; documented setup requires C17, CMake,
+and Python for default tests, plus Ninja for the README recipe. Test discovery
+belongs to a configured build directory. This refresh makes no universal CTest
+failure claim and certifies no clean installation or test run.
 
-The frontend/interpreter core is substantially complete and internally coherent. The project should pause language breadth.
+== Compiler Investment and Unverified Risks
 
-The shortest route to demonstrable end-to-end value is:
+Preserve deterministic bounds, source provenance, independent validation,
+transactional failure, and exact cleanup. Historical concerns included raw host
+failure text, package races, scaling, and repeated immutable-IR validation; the
+documented E1 work addresses these with owned text, descriptor-relative loading,
+SCC analysis, resource budgets, and opaque validated handles. They are not
+reasserted here as confirmed current defects.
 
-1. Harden and centralize compilation.
-2. Define entrypoint and host semantics.
-3. Add `sol run` over the existing interpreter.
-4. Make contracts executable.
-5. Prove the workflow with one representative application.
+Parallel semantic tables, duplicated validation policy, and deep owner dependencies
+remain architecture risks to investigate, not newly code-audited bugs. Exact arena
+and resource censuses are useful regression evidence, not user-facing latency or
+maintenance measurements. Measure edit/check/test/inspect latency, memory, and
+defect patterns before refactoring validators or freezing incidental traversal
+counts. Conformance and sanitizer reports cannot substitute for workload usability
+or a fresh trust-boundary review.
 
-Only after these semantics are stable should they be embedded into MIR and a WebAssembly or native backend.
+== Keep Broad Language Work Deferred
+
+Do not pull closures, richer traits, broad numerics/collections, lifetime/resource
+and allocator systems, dependencies/manifests, unsafe/FFI, public IR/SMT, or full
+editor/patch systems into P2-P5 by implication. Additional backends or a VM,
+general resumptive handlers, concurrency, workflows/transactions, real-time
+claims, reflection/build transforms, and mandatory global sorting remain deferred
+or separately gated. Preserve implemented features; activate only demonstrated
+bounded needs under the #link("TODO.md#workload-gated-decisions")[live workload decisions].
+
+*Conclusion:* close P2.7, charter M1, then freeze P2.8. Continue the bounded
+production path while independently measuring maintenance value. Deliver evidence
+and honest unknowns, not broader guarantees than the current boundary supports.

@@ -1,9 +1,24 @@
 # Sol Compiler TODO
 
-This list tracks concrete bootstrap-compiler work. The broader language and
-toolchain phases remain documented in the [README](README.md#roadmap). Impact
-and complexity use a 1-5 scale, where 5 is foundational or architectural.
+This list is the sole live authority for work status and execution order, audited
+September 9, 2026 against baseline `6ec4ba9`. The broader language and toolchain
+phases remain documented in the [README](README.md#roadmap).
+[Project analysis](docs/project-analysis.md) is an analysis snapshot;
+[Compiler status](docs/compiler-status.md) is the detailed implementation snapshot
+dated September 9, 2026, not a competing queue. Impact and complexity use a 1-5
+scale, where 5 is foundational or architectural.
 Ordering accounts for dependencies rather than only the impact/complexity ratio.
+
+## Execution Cursor
+
+- **Next overall: P2.7.** **Next production: P2.7.**
+- Then M1: first-user workload and experiment charter; then P2.8.
+- M1 publishes subsequent interleaving. If infeasible, record the blocker and
+  continue P2.8 without inventing prerequisites.
+- After P2.8, M2-M5 may proceed independently in parallel with P3, subject to
+  experiment dependencies, staffing, and exclusive file ownership. M4E is optional.
+- One coordinator maintains this single next-overall cursor; parallel tracks do
+  not create competing priority lists.
 
 ## Completed Foundation Through E6 and P1
 
@@ -58,8 +73,9 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
       `sol run`, runtime callable contracts/refinements, and the E6 conformance application.
 - [x] Separate unstable target-neutral callable-scoped CFG MIR for every bodyful E6
       callable, with SSA/dominance and affine-value validation, canonical internal
-      rendering, and bounded MIR-vs-owning-IR differential evaluation. Representation,
-      runtime ABI, backend integration, and production-pipeline use remain open.
+      rendering, and bounded MIR-vs-owning-IR differential evaluation. At the P1
+      handoff, representation moved to P2; runtime ABI, backend integration, and
+      production-pipeline use remain later-track work.
 
 ## Construct Coverage
 
@@ -74,7 +90,7 @@ surface form requires either a prioritized row below or an explicit deferral her
 | Expressions | Bootstrap primitive/unit/path literals; structural tuple literals and numeric projections; unary/binary operators; calls and type applications; fields/method calls; records/variants; direct checked distinct/refined construction; `if`; `match`; blocks; `?`; exact handlers; contract `result`/`old`; canonical local/computed-root places with flattened field/tuple projections | Operational arrays/indexing (34); lifetime-bearing views and safe reference relationships (35, 38); raw-pointer dereference and unsafe pointer operations (44); closures/method values (28-29); refinement projection and pattern reasoning (50); unsafe assumptions/establishments (44); async/protocol expressions (59); general resumptive handlers (61) |
 | Patterns | Recursive wildcard, Boolean, binding, positional enum-variant, nominal-record, and structural-tuple patterns; pure guards; nested usefulness/exhaustiveness for `Bool`, records, tuples, and closed/open generic enums | Refined patterns (50); protocol-state patterns (59) |
 | Types and callable structure | `Int64`, `Bool`, `Text`, `Unit`, and `Never`; structural tuples of arity 2 through 16; nominal applications; `Option`/`Result`; capability and structural function types; bounded type/effect parameters; one trait bound; `borrow`/`inout` parameters | Richer traits/generic methods and required associated items (30); constants and constrained const parameters (31, 33); remaining numeric/byte/rune primitives and units/dimensions (32); arrays/collections (34, 38); lifetime relationships/views (35); resource/allocator and cost types/clauses (36-38); general effect rows/aliases (42); raw pointers/ABI types (44, 46); concurrency traits/types (59) |
-| Cross-cutting representation | Every successful-program AST statement/expression/pattern kind is parsed, structurally traversed, semantically analyzed, relocated, lowered through owning IR, and executable or explicitly non-runtime; discriminants, spans, linked-arena ownership, current executable type relations, callable context, canonical place/projection ownership, per-kind censuses, and composite relocation fixtures are independently validated. Separately, P1 lowers and validates every bodyful E6 callable into unstable target-neutral CFG MIR, with canonical rendering and bounded evaluation. | Per-form cross-phase acceptance coverage (43); monomorphization, representation, layout, symbols, and linkage (P2); executable-core runtime ABI and WebAssembly lowering/adapters (P3-P4 and tasks 47-48); reproducible artifacts and interpreter/Wasm differential testing (P5 and task 49) |
+| Cross-cutting representation | Every successful-program AST statement/expression/pattern kind is parsed, structurally traversed, semantically analyzed, relocated, lowered through owning IR, and executable or explicitly non-runtime; discriminants, spans, linked-arena ownership, current executable type relations, callable context, canonical place/projection ownership, per-kind censuses, and composite relocation fixtures are independently validated. Separately, P1 lowers and validates every bodyful E6 callable into unstable target-neutral CFG MIR, with canonical rendering and bounded evaluation. Concrete monomorphic planning/materialization, representation, target layout, and source-independent operation plans are complete through P2.6 for the frozen E6 profile. | Per-form cross-phase acceptance coverage (43); symbols/linkage and whole-program contract freeze/census (P2.7-P2.8); executable-core runtime ABI and WebAssembly lowering/adapters (P3-P4 and tasks 47-48); reproducible artifacts and interpreter/Wasm differential testing (P5 and task 49) |
 
 Unchecked exceptions and `throw`/`catch` are not planned; recoverable failure remains
 typed through `Result`, and cancellation remains typed. Unrestricted token/text macros
@@ -123,9 +139,10 @@ profile; P2.7 is the next open checkpoint:
 | [ ] | P4 | Integrate a WebAssembly backend and host adapter | P2, P3; task 47W and task 48C |
 | [ ] | P5 | Implement reproducible `sol build` artifacts and interpreter/Wasm differential tests | P4; task 49C |
 
-P1 and task 45 are complete for every bodyful E6 callable. The MIR remains an
-unstable callable-scoped internal form: it does not choose representation or ABI,
-is not consumed by the production compilation session or CLI, and is not a backend.
+P1 and task 45 are complete for every bodyful E6 callable. The P1 MIR remains an
+unstable callable-scoped internal form: that phase does not choose representation
+or ABI, is not consumed by the production compilation session or CLI, and is not a
+backend. P2.4-P2.6 now supply downstream representation, layout, and operation plans.
 P1 was split into these independently reviewable checkpoints:
 
 | Done | Order | Checkpoint | Exit criteria |
@@ -177,7 +194,7 @@ external dependencies, public IR, concurrency, or broader handlers.
 | [x] | P2.3b3 | Revalidate complete concrete dataflow | Independently validate concrete SSA dominance, affine ownership, moves/borrows/transports, cleanup on every exit, contracts/refinements, handler balance, and full E6 closure after P2.3b2 establishes one complete concrete executable vocabulary |
 | [x] | P2.4 | Define canonical concrete representations | P2.4a builds the complete target-neutral recipe graph; P2.4b independently validates and censuses the full frozen closure without selecting layout or ABI |
 | [x] | P2.4a | Complete concrete shapes and build canonical target-neutral recipes | Materialization owns substituted source-order nominal fields and variants, explicit wrapper backing and derived-capability source types, open/closed flags, and callable value/receiver types. A separate bounded owner assigns one same-ID recipe per concrete type, flat source-order fields/variants with explicit semantic tags, abstract storage, iterative inhabited/zero-size/Copy and explicit drop classifications, and one resolved producer per exact function or bound-operation site; open enums reject transactionally. No byte layout, ABI, symbols, or source-semantic operation plans are selected. |
-| [x] | P2.4b | Independently validate and census canonical representations | A separate validator derives exact recipes, flat-arena consumption, fixed points, classifications, producers, receiver roots, limits, and successful-build work from validated materialization scans and validation-only facts without calling construction helpers or building a second representation; the E6 entry-plus-four-tests closure has an exact exhaustive census. P2.5 layout and ABI and P2.6 source-semantic operation plans remain open. |
+| [x] | P2.4b | Independently validate and census canonical representations | A separate validator derives exact recipes, flat-arena consumption, fixed points, classifications, producers, receiver roots, limits, and successful-build work from validated materialization scans and validation-only facts without calling construction helpers or building a second representation; the E6 entry-plus-four-tests closure has an exact exhaustive census. At this checkpoint, layout and source-semantic operation plans were handed to P2.5 and P2.6 (now complete); runtime ABI remains P3 work. |
 | [x] | P2.5 | Compute target-parameterized layouts and access maps | Define checked layout parameterized by pointer width, integer alignment, endianness, and object-size bounds; provide the initial Wasm32 descriptor; compute size/alignment/padding, field and tuple offsets, sum tag/payload locations, projected-place maps, and callable/capability handle layouts; reject overflow and incomplete layouts structurally |
 | [x] | P2.5a | Build usable target-parameterized layouts and access maps | A separate bounded owner borrows a validated representation; validates explicit pointer-4/8 target descriptors and the initial little-endian Wasm32 profile; assigns same-ID type, field, and variant layouts plus one map per materialized projection; uses checked `uint64_t` packing for uniform indirect aggregates, explicit-u32 sums, transparent nominal wrappers, and text/callable/capability objects; rejects unsupported projections, overflow, object bounds, cycles, aliases, and malformed reconstruction transactionally; and validates/renders without partial output |
 | [x] | P2.5b | Independently validate and census target layouts | A separate validator derives every type/object, source-packed field/variant, projected-place map, arena-consumption proof, and exact resource dimension without construction helpers or a second owner; it rejects transitive borrowed aliases before layout-record traversal, and the complete E6 Wasm32 layout and mutation censuses are frozen. |
@@ -194,6 +211,7 @@ external dependencies, public IR, concurrency, or broader handlers.
 | Done | Order | Checkpoint | Exit criteria |
 | --- | ---: | --- | --- |
 | [ ] | P3.1 | Freeze call, result, and failure conventions | Define backend-neutral operations and signatures for direct/indirect calls, receiver-first methods, owned/shared/exclusive arguments, normal/failure returns, normal-only writeback, entry invocation, E2 exit mapping, stable runtime-import symbol IDs derived from P2 typed requirements, and structured source-aware failure records |
+| [ ] | P3.W1 | Bounded Wasm ABI Integration Experiment | Timebox after P3.1 has tested conventions: record candidate tool versions, validate and execute a minimal scalar call/result/failure module, and report ABI/tool mismatches. Add allocation, cleanup, or host imports only after the relevant P3.2-P3.4 conventions are tested. Inform, but do not complete, P4.1, 47W, 48C, component support, E6 Wasm execution, backend integration, or build tooling. |
 | [ ] | P3.2 | Define bounded allocation and owned-value operations | Specify compiler-owned allocation for current `Text` and aggregate representations, including checked sizing, zero-length behavior, quotas, copying, moving, equality, recursive destruction, allocation failure, and host-result ownership transfer without introducing the user allocator/resource model from tasks 36-38 |
 | [ ] | P3.3 | Freeze cleanup, panic, and failure policy | Lower local/place/temporary/snapshot destruction and region exits into exact cleanup actions on return, propagation, panic, host/arithmetic/allocation failure, no-match, contract/refinement violation, and reached-unreachable; preserve failure writeback/postcondition rules and deterministic failure precedence |
 | [ ] | P3.4 | Define capability and trusted-host ABI | Use the P2 capability representation to preserve root identity and derived private source across ABI calls; assign exact host operation and import IDs; encode E3 data-only argument/result forms; preflight every authority/import; and define bounded host success/failure transfer without exposing raw IR, arbitrary pointers/functions, or private sources across the safe adapter boundary |
@@ -221,14 +239,57 @@ external dependencies, public IR, concurrency, or broader handlers.
 | [ ] | P5.5 | Freeze reproducibility and release acceptance | Require byte-identical artifacts across repeated builds, checkout/output roots, mtimes, locale/timezone, discovery order, and supported CI hosts using pinned dependencies; verify package-relative metadata, stable import/export order, both profiles, clean-tree rebuilding, warning-clean tests, and ASan/UBSan; complete task 49C and P5 |
 
 Tasks 28-42, 44, 46, the allocation/resource/FFI extensions of task 48, the
-remaining verification scope of task 50, and tasks 51-61 stay deferred until a
-concrete requirement activates their smallest coherent subset. Tasks 43 and 47-50
-retain explicitly partial production scope below; task 45 is complete through P1.
+remaining verification scope of task 50, and tasks 51-61 remain deferred except
+for the proposed M2-M4E slices below or a separately approved workload-gated slice.
+Tasks 43 and 47-50 retain explicitly partial production scope below; task 45 is
+complete through P1. P3.W1 is a bounded integration experiment, not completion of
+the broader backend track.
+
+## Bounded Maintenance-Workflow Experiment
+
+All rows are OPEN proposals, not implemented features. This experiment does not
+wait for full public IR (54), SMT (52), a production backend, or patch syntax (56).
+M1 checks whether existing projections suffice and records gaps rather than
+quietly adding those systems as prerequisites. The Execution Cursor governs order.
+
+| Done | Order | Experiment | Bounded exit criteria |
+| --- | --- | --- | --- |
+| [ ] | M1 | First-user workload and experiment charter | Select one capability-restricted hosted business-logic/validation workload, user, and host boundary. Protect a baseline and held-out tasks/tests; publish a timebox, metrics, stop/go thresholds, existing-projection sufficiency and gaps, and subsequent cursor/interleaving. If infeasible, record the blocker and continue P2.8. |
+| [ ] | M2 | Declaration-centered context packets (58 slice) | After M1 feasibility and P2.8, produce bounded deterministic packets of source, signatures, effects, contracts, and available references. Include source snapshot hash, compiler/schema/options and selection metadata, and explicit omissions. Unavailable is not empty; use existing IDs only within their supported scope. Inspection bytes are not a guaranteed semantic cache key. |
+| [ ] | M3 | Conservative checked-snapshot deltas (57 slice) | After M2, report declaration, signature, effect, and contract edits between checked snapshots; validate stable IDs and reject stale, ambiguous, or unsupported comparisons. Keep body edits and unknowns visible: a changed predicate is not established weakening, and an unchanged interface does not establish preserved behavior. |
+| [ ] | M4 | Ordinary-edit validation and approval loop (56 slice) | After M2/M3, exercise edit/check/test/delta/human approval against the protected baseline. Tests and policy cannot silently weaken; authority or contract changes require explicit approval. This is a validation/approval slice, not full patch language, architectural auto-repair, or proof of correctness. |
+| [ ] | M4E | Optional basic editor slice (55 slice) | Only after M1/M2 establish projection feasibility, timebox diagnostics, navigation, and packet presentation. Not full LSP and not a prerequisite for M5. |
+| [ ] | M5 | Held-out workflow comparison | After M4, compare against source-only on protected held-out tasks with the same compiler/test access and, where relevant, model and budget. Measure correctness, regressions, review time, context size, iterations, diagnostic usefulness, and false confidence. Report negative/inconclusive results as well as gains; decide continue, narrow, or stop. |
+
+M2 maps to 58, M3 to 57, M4 only to the validation/approval slice of 56, and M4E
+to 55. These proposals do not earn `[~]` status; full scopes of 54-58 remain in
+the numbered backlog. No M1 charter or tool feature is implemented by this refresh.
+
+## Workload-Gated Decisions
+
+These are evidence-driven decisions, not implicit P2-P5 requirements or newly
+implemented semantics. M1/M5 may justify a separately bounded task; otherwise
+retain the existing behavior and deferrals.
+
+| Decision | Evidence and boundary |
+| --- | --- |
+| Recoverable refinement validation and safe projection | Determine whether the workload needs `Result`-returning validation and safe access to the representation (50); define a bounded API/semantic slice before implementation, without claiming existing checked construction already provides it. |
+| Small data facilities | Select only demonstrated text/bytes, constants, collections, or serialization needs (31-34, 38, 41 as applicable); do not activate their full families or dependencies by implication. |
+| Test ergonomics | Use observed task friction to decide bounded improvements over current Boolean tests (12, 51); property infrastructure is not an experiment prerequisite. |
+| Developer workflow | Measure editor, latency, installation, and debugging friction; use M4E or another explicit slice only where justified, not full LSP by default. |
+| Evaluation and contract semantics | Preserve current formal-parameter evaluation order for named arguments. Pure does not mean total, and an accepted typed contract is not a proof. Any alternatives require a separate decision and tests. |
+| Formatter policy (53) | Reconsider whether broader mandatory sorting is warranted; this refresh neither enacts a new sorting policy nor permits semantic reordering. |
+
+General handlers, additional backends or a VM, workflows/transactions, broad
+numerics and units, real-time features, and reflection remain deferred until
+concrete evidence justifies a bounded decision. Future alternatives are not
+implemented language guarantees.
 
 ## Numbered Capability Backlog
 
 Numbers below are stable capability identifiers, not the immediate execution order.
-The active order is defined by the E and P tracks above. Status uses `[x]` for a
+The active order is defined by the Execution Cursor and the E, P, and M tracks
+above, not by numeric ID or table position. Status uses `[x]` for a
 completed capability, `[~]` for a completed named slice with remaining scope, and
 `[ ]` for open scope with no completed slice. Slice names such as `48A` do not create
 or renumber stable capability IDs.
@@ -289,10 +350,10 @@ or renumber stable capability IDs.
 | [ ] | 52 | Integrate SMT proof policies, isolated solver execution, deterministic caching, counterexamples, cost proofs, and proof diagnostics | 4 | 5 | Logical obligation IR |
 | [ ] | 53 | Complete formatter width reflow, trailing-comma policy, sorting, comment reflow, and syntax-category fixtures without semantic reordering | 3 | 3 | Current parser/token-preserving formatter; each later syntax task owns its formatter integration |
 | [ ] | 54 | Define the versioned public semantic graph and canonical serialized Sol IR separately from internal interpreter IR and MIR | 5 | 5 | Stable IDs and mature semantics |
-| [ ] | 55 | Expose semantic information through a language server | 4 | 5 | Public schemas and graph |
-| [ ] | 56 | Implement intent/semantic patch declarations and patch validation | 4 | 5 | Public IR |
-| [ ] | 57 | Produce schema/API compatibility and semantic change reports, including migration requirements | 4 | 5 | Public IR, schemas, and patches |
-| [ ] | 58 | Generate bounded context bundles for editor and agent workflows | 3 | 4 | Semantic graph |
+| [ ] | 55 | Expose semantic information through a language server; M4E proposes only an optional basic editor slice | 4 | 5 | Public schemas and graph for full scope; M1/M2 projection feasibility for M4E |
+| [ ] | 56 | Implement intent/semantic patch declarations and patch validation; M4 proposes only ordinary-edit validation and human approval, not patch syntax | 4 | 5 | Public IR for full scope; M2/M3 for M4 |
+| [ ] | 57 | Produce schema/API compatibility and semantic change reports, including migration requirements; M3 proposes only conservative checked-snapshot deltas | 4 | 5 | Public IR, schemas, and patches for full scope; M2 for M3 |
+| [ ] | 58 | Generate bounded context bundles for editor and agent workflows; M2 proposes declaration-centered packets from available projections | 3 | 4 | Semantic graph for full scope; M1 feasibility and P2.8 for M2 |
 | [ ] | 59 | Stage structured async/concurrency, `Send`/`Share`, cancellation, actors/channels, protocol-state patterns and `emit`, transactions, and workflows | 5 | 5 | Closures (28-29), resources (36-38), completed P1/task 45 MIR, and P3 runtime ABI |
 | [ ] | 60 | Stage typed derives, sandboxed build transforms, and opt-in reflection without unrestricted macros | 3 | 5 | Package sandboxing and public IR |
 | [ ] | 61 | Generalize handlers after defining ownership across suspension and resumptions, multiple operations, dynamic authority matching, and row transformation | 5 | 5 | Effect polymorphism, concurrency, and runtime |
@@ -306,3 +367,12 @@ Each compiler increment should:
 - pass the full C17 warning-clean ASan/UBSan suite;
 - update implementation-status documentation;
 - be committed and pushed as an isolated checkpoint.
+
+Roadmap and experiment updates should also:
+
+- keep this file's cursor/status authoritative and documentation examples consistent
+  with the implemented CLI and semantics; label snapshot dates and historical handoffs;
+- distinguish implemented behavior, runtime checks, static acceptance, proofs, and
+  experimental evidence; record omissions, blockers, and negative results explicitly;
+- mark slices complete only with bounded exit evidence, not merely a proposal;
+  historical test counts are not fresh validation of a documentation-only refresh.

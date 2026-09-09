@@ -11,8 +11,8 @@
 #set document(
   title: "Sol Programming Language - Language and Toolchain Design Specification v0.2",
   author: "The Sol Project",
-  date: datetime(year: 2026, month: 8, day: 9, hour: 12, minute: 0, second: 0),
-  keywords: ("Sol", "programming language", "design specification", "effects", "contracts"),
+  date: datetime(year: 2026, month: 9, day: 9, hour: 12, minute: 0, second: 0),
+  keywords: ("Sol", "programming language", "design specification", "effects", "contracts", "6ec4ba9", "P2.6", "September 2026 revision"),
 )
 #set page(
   paper: "us-letter",
@@ -36,7 +36,7 @@
       set text(size: 7.5pt, fill: blue)
       grid(
         columns: (1fr, auto),
-        [Concept Draft with Executable-Core Decisions - August 9, 2026],
+        [v0.2 / 6ec4ba9 / P2.6 - September 9, 2026],
         [#counter(page).display("1")],
       )
     }
@@ -97,7 +97,7 @@
   stroke: 0.45pt + rgb("8d98a5"),
   fill: (x, y) => if y == 0 { navy } else if calc.even(y) { rgb("f5f7f9") } else { white },
   table.header(..header.map(cell => table.cell(cell))),
-  ..rows.flatten().map(cell => table.cell(cell)),
+  ..rows.flatten().map(cell => table.cell(breakable: false, cell)),
 )
 
 #let listing(caption, body) = figure(
@@ -124,7 +124,9 @@
     #text(size: 14pt, weight: "bold", fill: navy)[Concept Design v0.2]
   ]
   #v(0.25in)
-  #text(size: 12pt)[August 9, 2026]
+  #text(size: 12pt)[September 9, 2026]
+  #linebreak()
+  #text(size: 9pt, fill: blue)[Implementation baseline 6ec4ba9 / through P2.6]
   #v(0.6in)
   #text(size: 10pt, weight: "bold", fill: blue)[A LANGUAGE OPTIMIZED FOR HUMAN-AI CO-DEVELOPMENT]
   #v(1fr)
@@ -133,7 +135,7 @@
     #linebreak()
     #text(size: 9.5pt, weight: "semibold")[Concept Draft with Executable-Core Decisions]
     #linebreak()
-    #text(size: 8pt)[Target language design; experimental bootstrap front end; not a standardized or production-ready language.]
+    #text(size: 8pt)[Target design with an executable reference interpreter and experimental production internals. E1-E6, P1, and P2.1-P2.6 complete; P2 open. Not production-ready.]
   ]
 ]
 
@@ -145,17 +147,26 @@
   ([Field], [Value]),
   (
     ([Document], [Sol Programming Language - Language and Toolchain Design Specification]),
-    ([Version], [0.2 Concept Draft]),
-    ([Date], [August 9, 2026]),
+    ([Version], [0.2 Concept Draft; September 2026 documentation revision]),
+    ([Date], [September 9, 2026]),
     ([Status], [Concept Draft with Executable-Core Decisions]),
-    ([Baseline], [Target design updated through the current executable-core checkpoint]),
+    ([Baseline], [Implementation `6ec4ba9`; E1-E6, P1, P2.1-P2.6 complete; P2 remains open.]),
     ([Primary objective], [Define a language whose semantics, tooling, and source representation optimize safe maintenance by humans and AI systems.]),
     ([Normative vocabulary], [MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY distinguish required, recommended, and optional behavior.]),
-    ([Authority], [`docs/specification.typ` is authoritative. The root v0.2 PDF is generated from it.]),
+    ([Authority], [`docs/specification.typ` is the editable manual source. The root v0.2 PDF is generated; `TODO.md` alone owns live status and order.]),
   ),
 )
 
-#callout([SCOPE], [This document specifies a coherent target design, not merely a feature wishlist. It also records decisions already executable in the bootstrap front end. Unless a passage is explicitly marked *IMPLEMENTED*, it describes target language behavior. Items marked *FUTURE WORK* are not implemented.])
+#callout([SCOPE], [This document records the target design and bounded implemented decisions. Unless explicitly marked *IMPLEMENTED* or described as current bootstrap behavior, passages and examples are proposals, not delivered guarantees. Open alternatives remain open. This documentation-only refresh adds no compiler or M-track feature and reports no fresh compiler test run.])
+
+Current references, linked relative to the root PDF:
+
+- #link("TODO.md")[TODO.md: sole live queue and execution cursor]
+- #link("README.md")[README.md: project orientation]
+- #link("docs/compiler-status.md")[docs/compiler-status.md: detailed implementation snapshot]
+- #link("docs/project-analysis.md")[docs/project-analysis.md: dated findings and experiment rationale]
+
+The current #link("Sol_Current_State_Audit.pdf")[Current-State Audit] is a September 9, 2026 dated assessment of the same `6ec4ba9` baseline, not a live status authority. Its August 25 version is retained in git history; the v0.1 manual remains a historical artifact.
 
 #heading(level: 1, numbering: none)[Executive Summary]
 
@@ -163,28 +174,35 @@ Sol is a statically typed, memory-safe, effect-aware, verification-capable progr
 
 The target language combines a Rust-like safe implementation substrate, Koka/F\*-style effect tracking, Dafny-style contracts, algebraic data types, explicit capabilities, structured concurrency, state-machine protocols, schema-aware data evolution, and a stable semantic representation for programmatic editing. It intentionally avoids unrestricted textual metaprogramming, unchecked exceptions, implicit nullability, ambient authority, and multiple equivalent syntactic idioms.
 
-Sol uses a two-tier correctness model. The base language provides fast, predictable compilation with nominal types, ownership, exhaustive matching, explicit effects, and typed errors. A proof layer adds refinements, preconditions, postconditions, invariants, ghost state, and SMT-backed obligations. Normal application code need not become a theorem-proving exercise, but critical boundaries can be strengthened without changing languages.
+Sol targets progressive assurance. The implemented base combines nominal types, ownership, exhaustive matching, explicit effects, typed errors, callable runtime contracts, and checked refined construction. A future proof layer adds logical normalization, ghost state, and solver-backed discharge of obligations, including loop invariants and termination. Normal application code need not become a theorem-proving exercise. Runtime checks are useful before proof, but do not prove all executions.
 
 The compiler is intended to expose a canonical typed semantic graph, stable declaration identities, machine-readable diagnostics, constrained repair actions, proof caches, and behavior-change reports. These interfaces let tools patch declarations and obligations rather than brittle line numbers. Humans retain authority over intent, architecture, accepted effects, and proof policy.
 
-#status("IMPLEMENTED", [The C17 bootstrap is an experimental edition-2027 compiler front end with an interpreter application profile, not a production executor. It currently lexes and parses a core language plus authored Boolean unit tests, resolves lexical multi-file modules and imports, checks bounded generic, trait, ownership, effect, capability, contract, and refinement semantics, produces owning deterministic typed IR, executes its bounded core with deterministic cleanup and runtime contracts after frontend teardown, runs dedicated TEST entries through `sol test`, executes explicit applications through `sol run`, emits selected versioned external semantic projections through `sol inspect`, and constructs an unstable symbolic production-program MIR closure without specialization or representation decisions. Richer ownership/resource protocols and traits, general constrained or recursive row polymorphism, runtime loop obligations, examples/properties/generation, SMT discharge, monomorphization, representation/layout, code generation, a complete public IR, and semantic patches remain future work.])
+#status("IMPLEMENTED", [At `6ec4ba9`, the C17 edition-2027 bootstrap has bounded reference execution over owning typed IR, explicit trusted hosting, `sol run` and authored Boolean `sol test`, runtime callable CHECK policy, direct checked refined construction, deterministic cleanup, package-local stable top-level IDs, structured diagnostics, and selected versioned inspection projections. E1-E6 and P1 are complete. Separate experimental owners provide frozen-E6 callable CFG MIR, monomorphic planning and concrete materialization, representation recipes, target layout, and source-independent semantic operations/predicate bodies through P2.6. These owners are not the CLI execution pipeline and impose finite callable-closure restrictions beyond interpreter support.])
 
+P2 remains open: symbols/linkage (P2.7) precede the first-user charter (M1), then the concrete-program freeze (P2.8). Production runtime ABI, backend emission, `sol build`, full public IR, SMT discharge, and semantic patch tooling remain absent. Loop/decreases templates are runtime-erased and unresolved; unreachable obligations are not proved. No M proposal is implemented by this refresh.
+
+The proposed first focus is capability-restricted hosted business logic or validation; M1 still selects the user, workload, and host boundary. Existing projections and interpreter checks can support a small maintenance experiment without full IR or SMT. Safer or cheaper human/AI maintenance remains an unmeasured hypothesis, not a delivered benefit.
+
+#pagebreak()
 #heading(level: 2, numbering: none)[Key Decisions]
+
+Implemented decisions and longer-term proposals are distinguished below; the latter are not first-delivery requirements.
 
 #spec-table(
   (1fr, 2.25fr),
   ([Area], [Decision]),
   (
-    ([Execution], [Ahead-of-time native compilation is primary; WebAssembly components and a lightweight VM/REPL are first-class secondary targets.]),
+    ([Execution], [Reference interpreter delivered; WebAssembly is the first planned production target over the frozen E6 core. No backend or Component Model integration yet. Native output and a possible VM/REPL are deferred long-term options.]),
     ([Memory], [Affine ownership with inferred borrowing and lexical/explicit regions; ordinary code requires no tracing garbage collector.]),
-    ([Types], [Nominal algebraic types, distinct newtypes, generics, traits, refinements, units, and limited dependent relationships.]),
+    ([Types], [Nominal algebraic types, distinct/refined types, bounded generics and traits are implemented. Broader numerics/units and dependent relationships remain target design.]),
     ([Effects], [The target is general row polymorphism; the bootstrap implements closed normalized finite rows, one callback-inferred free-function row parameter, and exact capability-sensitive effects.]),
-    ([Failure], [Typed `Result` for recoverable failures; `panic` is a declared bug effect and forbidden in verified profiles.]),
-    ([Verification], [Contracts generate obligations. Bootstrap templates are implemented; runtime checks, abstract interpretation, SMT, and proof discharge are future work.]),
-    ([Concurrency], [Structured task scopes, cancellation propagation, race-safe sharing, actors/channels, and protocol-typed resources.]),
-    ([Metaprogramming], [Typed derives and semantic transforms only; no unrestricted token macros in the safe language.]),
-    ([AI interface], [Stable semantic IDs, canonical IR, structured diagnostics, semantic patches, and change-oriented compilation.]),
-    ([Compatibility], [Explicit versioned schemas, API fingerprints, migrations, and capability-aware FFI boundaries.]),
+    ([Failure], [Typed `Result` and declared `panic` are implemented; a future verified profile would forbid outward panic. No verified profile exists yet.]),
+    ([Verification], [Typed templates, callable runtime CHECK, and direct refined construction are implemented. Loop/decreases/unreachable obligations remain unresolved; logical normalization, SMT, and proof discharge are future work. Pure does not mean total or proof-eligible.]),
+    ([Concurrency], [Proposed structured tasks, cancellation, race-safe sharing, actors/channels, protocols, transactions, and workflows remain deferred.]),
+    ([Metaprogramming], [Typed derives and semantic transforms remain proposed; unrestricted token macros are a non-goal.]),
+    ([AI interface], [Package-local top-level semantic IDs, diagnostics, and selected inspection projections are implemented. Full public IR, semantic patches, change reports, and the bounded M experiment remain proposals.]),
+    ([Compatibility], [Selected inspection schemas are versioned today. Schema evolution, API fingerprints/migrations, dependency-qualified identity, and FFI remain proposed.]),
   ),
 )
 
@@ -206,7 +224,7 @@ Sol treats these facts as language semantics. Inputs and outputs alone do not de
 
 == Product Vision
 
-Sol should support ordinary services, systems tools, embedded control, libraries, and WebAssembly components without requiring formal-methods expertise. The same codebase should let critical modules add stronger contracts and proofs incrementally. Verification is a gradient, not a separate language or all-or-nothing project decision.
+The long-term vision spans ordinary services, systems tools, embedded control, libraries, and WebAssembly components without requiring formal-methods expertise. This is not the initial delivery scope. The proposed first domain is a capability-restricted hosted business-logic or validation component, selected by M1. The same codebase should eventually permit stronger contracts and proofs incrementally; testing the maintenance thesis does not require implementing that whole vision.
 
 The intended loop is: state intent and constraints; implement inside a narrow semantic envelope; compile to receive structured obligations; apply a semantic change; inspect a behavior-change report. The safe, reviewable path should be easier than the clever path.
 
@@ -270,8 +288,8 @@ The intended loop is: state intent and constraints; implement inside a narrow se
   (
     ([Intent is part of the program], [Contracts, effects, protocols, schema policy, and preservation constraints are versioned beside implementation.]),
     ([Public interfaces are explicit], [Inference reduces local annotation, but exported types and effects have one normalized form.]),
-    ([One obvious form], [The formatter is mandatory; alternate ordering, brace, import, and equivalent sugar are minimized.]),
-    ([Capability before convention], [I/O and authority require values or declared effects, never ambient global access.]),
+    ([One obvious form], [Canonical formatting minimizes noise; mandatory global declaration sorting is under reconsideration, not implemented policy.]),
+    ([Capability before convention], [I/O requires explicit capability authority. Declared effects describe behavior but never grant permission; imports grant names only.]),
     ([Proofs must compose], [Verification is modular, cached, and bounded by interfaces; whole-program SMT is not normal.]),
     ([Escape hatches are visible], [`unsafe`, unchecked FFI, raw memory, nondeterminism, and assumptions are explicit and auditable.]),
     ([Diagnostics are an API], [Compiler output is structured, stable, and carries machine-actionable repair alternatives.]),
@@ -281,13 +299,13 @@ The intended loop is: state intent and constraints; implement inside a narrow se
 
 == Target Users and Domains
 
-First-class domains are backend services, command-line tools, systems components, embedded and real-time control, security-sensitive libraries, data pipelines, and WebAssembly components. They reward explicit effects and predictable resources while sharing enough abstractions for one language.
+Long-term candidate domains include backend services, command-line tools, systems components, embedded and real-time control, security-sensitive libraries, data pipelines, and WebAssembly components. They impose different ecosystem and assurance requirements, so they are not simultaneous first-user commitments. M1 must choose one hosted component and its protected maintenance tasks, rather than treating every missing language family as foundational.
 
 The initial language is not optimized for browser UI frameworks, highly dynamic scripting, symbolic mathematics, or GPU kernels, though it should interoperate with them. A managed profile may improve desktop ergonomics later, but the baseline object model cannot depend on tracing collection.
 
 = Language Overview and Canonical Source Model
 
-== A Small Complete Example
+== A Small Target Example
 
 #listing([Representative target-design declaration with domain types, effects, a transaction boundary, and postconditions.], ```sol
 module inventory.reservation
@@ -308,11 +326,13 @@ record Reservation {
 }
 
 public transaction reserve(
+    inventory: capability Inventory,
+    clock: capability Clock,
     order: OrderId,
     item: ItemId,
     quantity: Quantity where quantity > 0,
 ) -> Result<Reservation, ReservationError>
-effects { database.transaction<Inventory> clock.read }
+effects { database.transaction<inventory> clock.read<clock> }
 ensures {
     success => inventory[item].available
         == old(inventory[item].available) - quantity
@@ -331,7 +351,7 @@ ensures {
 }
 ```)
 
-Modules and imports are explicit. Data types are algebraic and nominal. Nullability is `Option<T>`; recoverable failure is `Result<T, E>`. Transaction authority is visible. Contracts attach to declarations. Mutation is confined to a compiler-known resource scope. Transactions, refinements, imports, and this full example remain target design rather than accepted bootstrap input.
+Modules and imports are explicit. Data types are algebraic and nominal. Nullability is `Option<T>`; recoverable failure is `Result<T, E>`. This creation-only target example receives inventory and clock authority explicitly. Its provider-owned state projections, locking, atomic rollback, inline refinements, and transaction syntax are assumptions, not bootstrap APIs. Explicit imports and direct nominal refined construction are implemented in narrower forms; this full listing is not accepted bootstrap input. Section 13's retry example separately distinguishes replay from creation.
 
 == Lexical and Formatting Rules
 
@@ -349,9 +369,9 @@ Modules and imports are explicit. Data types are algebraic and nominal. Nullabil
 
 == Declaration Ordering
 
-Canonical order is module; edition/features; imports; public types; private types; constants; capabilities; functions; protocol/transaction declarations; specifications; tests. Tools MAY preserve deliberate named regions, but arbitrary ordering is not a style preference.
+One proposed organization is module; edition/features; imports; public types; private types; constants; capabilities; functions; protocol/transaction declarations; specifications; tests. Mandatory global sorting is under reconsideration: locality and review churn matter, and stable identity need not require sorting. The implemented formatter preserves declaration and token order and does not authorize semantic reordering. The following is an illustrative organization, not a currently enforced ordering rule.
 
-#listing([Canonical target file structure.], ```sol
+#listing([Illustrative target file organization, not mandatory sorting.], ```sol
 module billing.transfer
 edition 2027
 use identity.AccountId
@@ -404,6 +424,8 @@ modify account {
 
 Free functions are primitive. Method syntax is type-directed sugar when the first parameter is `self`. Extension methods are namespaced imports, not global monkey patches. Functions are nonvirtual except through trait values. Overload resolution is deliberately limited.
 
+The implemented interpreter evaluates named call arguments in canonical formal-parameter order, not their written operand order. Reordering a signature can therefore reorder effects even if named calls look unchanged. Alternatives remain a future explicit decision; this refresh preserves the current rule. Bootstrap method dispatch is the bounded coherent trait subset described in Section 3, not the target extension-method model.
+
 #listing([Method syntax as a projection of an ordinary function.], ```sol
 public function Money.add(
     self: Money<Currency>, other: Money<Currency>,
@@ -420,7 +442,7 @@ A module is a semantic namespace and compilation unit, not necessarily one file.
 
 Imports never globally change method lookup. Wildcards are rejected in library source and permitted only in REPL/test scopes. External names in public signatures carry canonical fully qualified identities in the semantic graph even when source uses imports.
 
-#status("IMPLEMENTED", [For directory `sol check`, the bootstrap recursively discovers regular `.sol` files in deterministic bytewise path order as one dependency-free package. Each file declares its module, multiple files may contribute to one module, and private declarations are visible throughout that module. File-scoped `use module.path.Symbol` imports resolve one public declaration and feed package-wide type, generic-bound, trait, effect, and contract checking. Import cycles are allowed because the subset has no top-level initialization. Direct file checking retains the earlier ignored-import compatibility behavior. Manifests, external dependencies, aliases, grouped/wildcard/relative imports, re-exports, separate private/module/package visibility, imported extension-method search, and stable cross-build identities are future work.])
+#status("IMPLEMENTED", [For directory `sol check`, the bootstrap recursively discovers regular `.sol` files in deterministic bytewise path order as one dependency-free package. Each file declares its module, multiple files may contribute to one module, and private declarations are visible throughout that module. File-scoped `use module.path.Symbol` imports resolve one public declaration and feed package-wide type, generic-bound, trait, effect, and contract checking. Import cycles are allowed because the subset has no top-level initialization. Direct file checking retains the earlier ignored-import compatibility behavior. Top-level semantic IDs survive source ordering and file placement changes; explicit public stable tokens support package-local rename/move identity. Manifests, external dependencies and dependency-qualified IDs, aliases, grouped/wildcard/relative imports, re-exports, separate private/module/package visibility, and imported extension-method search remain future work.])
 
 = Type System and Data Modeling
 
@@ -430,7 +452,7 @@ The target uses a layered static type system. A decidable base provides nominal 
 
 #callout([USABILITY DECISION], [Routine syntax does not expose unrestricted full-spectrum dependent typing. Value-dependent constraints are admitted where obligations and tooling remain clear; advanced propositions stay in the proof sublanguage.])
 
-#status("IMPLEMENTED", [The bootstrap implements first-order type parameters on records, enums, and free functions plus one trailing effect-row parameter on free functions. Parameters are rigid declaration-owned identities while templates are checked. Built-in and user applications are invariant and canonically interned by constructor identity plus ordered exact arguments; `Option<T>` and `Result<T, E>` retain their exact one- and two-argument identities. Type positions require complete explicit application. Function calls use either all explicit type arguments or argument-only recursive structural inference; callback arguments infer the bounded effect parameter. Free-function type parameters may carry one inline trait bound, checked after inference and forwarded symbolically through bounded generic calls, including across modules in one checked directory package. Defaults, variance, higher-kinded/lifetime/const parameters, multiple bounds, general effect constraints, generic capabilities/members, polymorphic recursion, separately compiled dependency instantiation, and execution/monomorphization are future work.])
+#status("IMPLEMENTED", [The bootstrap implements first-order type parameters on records, enums, distinct/refined declarations, and free functions plus one trailing effect-row parameter on free functions. Parameters are rigid declaration-owned identities while templates are checked. Built-in and user applications are invariant and canonically interned by constructor identity plus ordered exact arguments; `Option<T>` and `Result<T, E>` retain their exact one- and two-argument identities. Type positions require complete explicit application. Function calls use either all explicit type arguments or argument-only recursive structural inference; callback arguments infer the bounded effect parameter. Free-function type parameters may carry one inline trait bound, checked after inference and forwarded symbolically through bounded generic calls across modules. Reference execution carries substitutions and evidence; P2.2/P2.3 separately plan and materialize canonical monomorphic instances within the frozen finite closure. Defaults, variance, higher-kinded/lifetime/const parameters, multiple bounds, general effect constraints, generic capabilities/members, polymorphic recursion, and separately compiled dependency instantiation remain future work.])
 
 == Primitive Types
 
@@ -508,7 +530,7 @@ match nickname {
 
 == Generics, Traits, and Constraints
 
-Generics are reified in the semantic graph and normally monomorphized natively. Backends MAY use dictionaries or shared instantiations for ABI/code-size policy. Conformance is explicit and coherent: a package implements a trait for a type only if it owns the trait or type.
+Generics are reified in semantic metadata; the frozen production path plans canonical monomorphic instances before the first Wasm backend. Dictionaries or shared instantiations for other ABI/code-size policies remain longer-term options. Conformance is explicit and coherent; the broader package design proposes that a package implement a trait for a type only if it owns the trait or type.
 
 #listing([Trait-bounded generic function.], ```sol
 trait Display {
@@ -612,7 +634,7 @@ effects { pure } {
   (1fr, 2fr),
   ([Form], [Meaning]),
   (
-    ([`borrow T` parameter], [Bootstrap shared callable access; any number coexist and the operand is a direct local.]),
+    ([`borrow T` parameter], [Bootstrap shared callable access to a local-rooted local, record-field, or tuple-projection place; compatible shared loans coexist.]),
     ([`inout T` parameter], [Call-scoped exclusive access to a writable local-rooted record-field or tuple-projection place; supported source callables copy in and write back on success.]),
     ([`Owned T`], [Callee receives responsibility for destruction or transfer.]),
     ([`shared T`], [Explicit reference-counted/runtime ownership; traits govern task safety.]),
@@ -645,9 +667,8 @@ This `Drop`/`close` model is target design. Bootstrap cleanup is only internal i
 
 Interior mutability uses explicit synchronization/cell types with visible effects. Safe cross-task sharing requires `Share`; transfer requires `Send`. Compiler-governed primitive ownership traits may be manually implemented only with proof or `unsafe`.
 
-#listing([Synchronization represented as authority and effect.], ```sol
-let cache: shared RwLock<Map<Key, Value>> = RwLock.new({})
-function lookup(key: Key) -> Option<Value>
+#listing([Target synchronization provider passed as explicit authority.], ```sol
+function lookup(cache: capability Cache, key: Key) -> Option<Value>
 effects { sync.lock<cache> } {
     using read = cache.read()
     return read.get(key).copied()
@@ -697,12 +718,18 @@ Pure functions are the simplest case. An effectful function declares a normalize
 #listing([Pure and effectful target function types.], ```sol
 function calculate_total(cart: Cart, rules: PricingRules) -> Money<USD>
 effects { pure }
-function submit_order(order: PendingOrder) -> Result<OrderId, SubmitError>
+function submit_order(
+    order: PendingOrder,
+    orders: capability Orders,
+    gateway: capability PaymentGateway,
+    clock: capability Clock,
+    entropy: capability SecureRandom,
+) -> Result<OrderId, SubmitError>
 effects {
-    database.transaction<Orders>
-    network.call<PaymentGateway>
-    clock.read
-    random.secure
+    database.transaction<orders>
+    network.call<gateway>
+    clock.read<clock>
+    random.secure<entropy>
 }
 ```)
 
@@ -714,15 +741,16 @@ The target design has open, normalized, row-polymorphic effects. Ordering is can
 function map<T, U, effects E>(
     values: View<T>,
     transform: function(T) -> U effects E,
+    allocator: capability Allocator,
 ) -> Vector<U>
-effects { E memory.allocate }
+effects { E memory.allocate<allocator> }
 ```)
 
 #status("IMPLEMENTED", [The bootstrap implements closed normalized rows plus a bounded, rank-1 row-polymorphic subset. A free function may declare one trailing `effects E` parameter, use it in structural callback parameter types, and include it in its explicit row. Calls infer the least closed authority-free argument from callbacks, currently containing only `panic` and `diverge`, union constraints across occurrences, and publish a deterministic instantiated call row. `pure` and `{}` are empty; private omitted rows still use SCC least-fixed-point inference. Explicit or multiple row arguments, all result-position row parameters, authority-dependent row capture, recursive row polymorphism, generic function callback coercion, and handler transformation of unresolved rows remain unsupported.])
 
 Recursive private inference computes a least fixed point over call-graph strongly connected components. Formal capability arguments and `Self` effects substitute at calls, including aliases and mutual/self recursion. Explicit rows are modular boundaries but are checked against every performed effect.
 
-The bootstrap normal form distinguishes authority-free atoms, capability-parameter atoms, and member-relative `Self` atoms. Effect rows disclose behavior but do not grant permission. Exact unparameterized `panic` and `diverge` are the only compiler-defined authority-free atoms. Every other non-pure executable atom requires a lexical capability parameter, or `Self` on a capability member. Unparameterized resource effects and static-path authorities are rejected because the bootstrap has no package-global or runtime static authority root; importing a name never adds authority. Closed structural callback rows and inferred row arguments may contain only authority-free atoms because callback types cannot capture lexical capability provenance. This closes ambient static authority in the checked subset, but host wiring, unsafe/FFI gates, package policy, and runtime sandbox enforcement remain future work.
+The bootstrap normal form distinguishes authority-free atoms, capability-parameter atoms, and member-relative `Self` atoms. Effect rows disclose behavior but do not grant permission. Exact unparameterized `panic` and `diverge` are the only compiler-defined authority-free atoms. Every other non-pure executable atom requires a lexical capability parameter, or `Self` on a capability member. Unparameterized resource effects and static-path authorities are rejected because the bootstrap has no package-global or runtime static authority root; importing a name never adds authority. Closed structural callback rows and inferred row arguments may contain only authority-free atoms because callback types cannot capture lexical capability provenance. E3 hosting implements exact root/member grants and preflight for its bounded profiles. Broader host wiring, allocator APIs, unsafe/FFI gates, package policy, and production sandbox enforcement remain future work; the target listings above assume those providers.
 
 == Capabilities
 
@@ -797,15 +825,16 @@ The compiler-internal reference interpreter implements this exact deep lexical i
 Recoverable failure uses `Result<T, E>`. Error types are algebraic and public. `?` is type-checked early return, not hidden unwinding. Conversion requires a declared function or variant relationship.
 
 #listing([Typed error propagation.], ```sol
-function load_config(path: Path) -> Result<Config, ConfigError>
-effects { filesystem.read<path.root> } {
+function load_config(filesystem: capability FileSystem, path: Path)
+    -> Result<Config, ConfigError>
+effects { filesystem.read<filesystem> } {
     let bytes = filesystem.read(path).map_error(ConfigError.read_failed)?
     let syntax = config.parse(bytes).map_error(ConfigError.invalid_syntax)?
     return config.validate(syntax)?
 }
 ```)
 
-The bootstrap represents exact `Result` applications, bounded user generic instantiation, and basic `ok`/`err` propagation, but does not execute or monomorphize programs.
+The bootstrap types and executes exact `Result` applications and `ok`/`err` propagation with cleanup. Separate P2 owners plan/materialize bounded monomorphic programs and representation-aware propagation. This target filesystem/configuration listing additionally needs unimplemented hosting and library APIs; arbitrary interpreter programs are not all accepted by the finite production closure.
 
 == Panic and Unreachable States
 
@@ -886,7 +915,7 @@ Conditions are newline- or comma-separated and clauses occur in canonical order:
 
 Contract calls are allowed only after their exact target effects are finalized and pure. This includes pure functions, pure capability operations, and closed pure callbacks. Effectful calls, `return`, `?`, and handlers are rejected in predicates.
 
-For this bootstrap rule, pure means an empty finalized observable-effect row. It does not yet prove termination, determinism, absence of mutation, or mathematical referential transparency.
+For this bootstrap rule, `pure` means an empty finalized observable-effect row, not totality, absence of runtime failure, or automatic proof eligibility. The predicate firewall additionally rejects mutation and forbidden control forms. Even accepted pure predicates may fail checked arithmetic or exhaust deterministic limits; proof eligibility would also require a supported logical fragment, termination reasoning, and explicit trusted assumptions. Contract and guard propagation remain rejected with `SOL-CONTRACT-002`; P2.6 adds no new source behavior.
 
 In ordinary postconditions, `result` has the declared return type. Outcome prefixes are available only on declarations returning `Result<T, E>`: a `success =>` condition binds `result: T`, while `failure =>` has no result binding. A prefixed condition on any other return type is rejected with `SOL-CONTRACT-005`. Each syntactic `old(expression)` creates its own typed entry-state snapshot, even if operands repeat. `old` is limited to postconditions; nested `old` and `old(result)` are rejected.
 
@@ -945,7 +974,18 @@ lemma transfer_preserves_total(
   ),
 )
 
-Only front-end checking and semantic template construction exist today; these proof modes are target design.
+These proof modes are target design, not current selectable verification profiles. Current `sol check` performs static checking and builds templates; `sol run` and `sol test` execute supported callable contracts under CHECK. Neither constitutes SMT proof discharge.
+
+#spec-table(
+  (1fr, 2fr),
+  ([Evidence label], [Meaning and boundary]),
+  (
+    ([Declared], [Source states intent or a predicate; typed acceptance alone does not prove it.]),
+    ([Runtime-checked], [A supported predicate was evaluated in a particular execution under the selected policy. Tests cover tested cases, not all inputs.]),
+    ([Proved-under-assumptions], [A proof establishes a property only inside an explicit model and trusted assumptions. The bootstrap has no solver discharge; an obligation alone does not qualify.]),
+    ([Unknown], [Unresolved, unsupported, omitted, or outside the checked/proved boundary. Unknown is not success or an empty dependency set.]),
+  ),
+)
 
 == Runtime Contract Fallback
 
@@ -957,7 +997,7 @@ let email: EmailAddress = validate EmailAddress(input)
 let packet_length: PacketLength = unsafe assume_refined(raw_length)
 ```)
 
-Runtime checks are not yet generated.
+Callable runtime checks and direct refined construction are implemented in the reference interpreter, and P2.6 closes bounded predicate bodies for later backend input. The proposed recoverable `validate` API, safe base projection, `assume_refined`, and proof-directed fallback above are not implemented. Direct construction can report a runtime refinement failure; it is not a `Result`-returning validation API.
 
 == Specifications and Generated Tests
 
@@ -1022,13 +1062,19 @@ cost {
 Tasks are lexically scoped. A parent cannot complete while children remain live unless ownership transfers to a supervisor. Errors and cancellation propagate by declared policy. Safe application code has no detached fire-and-forget task.
 
 #listing([Structured concurrent fan-out.], ```sol
-function load_dashboard(user: UserId) -> Result<Dashboard, DashboardError>
+function load_dashboard(
+    user: UserId,
+    profile_service: capability ProfileService,
+    message_service: capability MessageService,
+    alert_service: capability AlertService,
+    tasks: capability TaskScope,
+) -> Result<Dashboard, DashboardError>
 effects {
-    network.call<ProfileService>
-    network.call<MessageService>
-    network.call<AlertService>
-    task.spawn
-    task.suspend
+    network.call<profile_service>
+    network.call<message_service>
+    network.call<alert_service>
+    task.spawn<tasks>
+    task.suspend<tasks>
 } {
     concurrent cancel_on_error {
         profile = profile_service.load(user)
@@ -1044,6 +1090,8 @@ effects {
 ```)
 
 A `concurrent` block creates a task scope and binds result handles. Policies include `cancel_on_error`, `collect_all`, and `supervise`. All results and resources must be consumed before exit.
+
+This sketch assumes a supplied task-scope provider and explicit service capabilities. Task authority, suspension effects, cancellation, and ownership across suspension still need design decisions; the listing does not add an intrinsic or ambient effect to the bootstrap.
 
 == Race Safety
 
@@ -1088,14 +1136,15 @@ protocol Connection {
 
 #listing([Transaction policy as part of the declaration.], ```sol
 public transaction transfer_funds(
+    database: capability AccountsDb,
+    clock: capability Clock,
     source_id: AccountId,
     destination_id: AccountId,
     amount: Money<USD>,
 ) -> Result<TransferReceipt, TransferError>
-using database = AccountsDb
 isolation = serializable
 retry = safe_if_conflict
-effects { database.transaction<AccountsDb> clock.read } {
+effects { database.transaction<database> clock.read<clock> } {
     ...
 }
 ```)
@@ -1155,9 +1204,9 @@ Every exported declaration receives a stable semantic ID, derived by default fro
 public function transfer(...) -> ... { ... }
 ```)
 
-Stable IDs anchor patches, API history, proof caches, documentation links, telemetry schemas, and deprecations. Reusing an ID incompatibly is rejected.
+In the full target, stable IDs would anchor patches, API history, proof caches, documentation links, telemetry schemas, and deprecations, with incompatible-reuse checks. The bootstrap currently validates identity collisions, not general compatibility of reuse.
 
-#status("IMPLEMENTED", [The bootstrap assigns every top-level declaration a versioned 128-bit ID separate from its dense session handle. The default hashes normalized module path, declaration kind, and name, so source ordering and file placement do not affect it. A named public declaration may instead retain a validated package-local `@stable` token across module movement and rename. Collisions and malformed/private/implementation uses are rejected. HIR occurrence records cover declarations, imports, resolved expression/type names, implementation trait heads, and trait bounds. Manifests and dependency identities, member/local identity, incompatible-reuse analysis beyond collisions, serialized schema guarantees, and public IR remain future work.])
+#status("IMPLEMENTED", [The bootstrap assigns every top-level declaration a versioned 128-bit ID separate from its dense session handle. The default hashes normalized module path, declaration kind, and name, so source ordering and file placement do not affect it. A named public declaration may instead retain a validated package-local `@stable` token across module movement and rename. Collisions and malformed/private/implementation uses are rejected. HIR occurrence records cover declarations, imports, resolved expression/type names, implementation trait heads, and trait bounds. Selected inspection schemas expose these IDs with their own versioning contract. Manifests and dependency-qualified identities, member/local identity, incompatible-reuse analysis beyond collisions, and a full public serialized IR remain future work.])
 
 == Application Entrypoint
 
@@ -1199,7 +1248,8 @@ Argument/configuration text returned by callbacks is validated, cloned, and char
 The bounded application command is:
 
 ```text
-sol run [--diagnostic-format=human|json] [--config=KEY=VALUE] <file.sol|package-directory> [-- arguments...]
+sol run [--diagnostic-format=human|json] [--config=KEY=VALUE]
+        <file.sol|package-directory> [-- arguments...]
 ```
 
 Exactly one source/package operand is required. Application arguments begin only after `--`; index zero is the first following argument. At most 256 arguments and 1 MiB of aggregate argument bytes are accepted. Configuration uses repeated `--config=KEY=VALUE`, splits at the first `=`, rejects empty or duplicate keys, accepts empty values, and is bounded to 256 entries and 1 MiB of aggregate key/value bytes. Neither arguments nor configuration include implicit process, executable, source-path, or environment values.
@@ -1284,9 +1334,11 @@ effects { ffi.call<zlib> unsafe }
 
 == WebAssembly Components
 
-WebAssembly components provide interface-driven composition and capability-oriented hosting. Sol maps records, enums, results, options, resources, and worlds to canonical interfaces. Effects become host imports, enabling deployment capability checks.
+The longer-term Component Model proposal would provide interface-driven composition and capability-oriented hosting, mapping records, enums, results, options, resources, and worlds to canonical interfaces. The first production track instead targets core Wasm over the frozen E6 profile, with a bounded host adapter. Neither backend nor Component Model integration exists at this baseline; effects disclose requirements, while explicit host grants supply authority.
 
 == Runtime Profiles
+
+The following profiles are long-term candidates, not implemented runtime modes or the order of delivery. The reference interpreter is retained as a semantic reference, not a new VM commitment; the initial production target is Wasm.
 
 #spec-table(
   (1fr, 2fr),
@@ -1302,9 +1354,9 @@ WebAssembly components provide interface-driven composition and capability-orien
 
 == ABI and Layout
 
-Internal layout is unstable by default. `@repr(C)`, `@repr(transparent)`, and versioned stable ABI annotations opt into guarantees. Public native ABI packages freeze layout, calling convention, panic policy, and allocator ownership; the compiler emits an ABI manifest.
+Internal P2 layout is experimental and unstable. The target `@repr(C)`, `@repr(transparent)`, and stable ABI annotations would opt into guarantees; these are not current source features. Future public native ABI packages would freeze layout, calling convention, panic policy, and allocator ownership and emit an ABI manifest.
 
-#status("FUTURE WORK", [Package manifests and dependencies, stable cross-build IDs, schema tooling, compatibility reports, FFI, WebAssembly, runtime profiles, executable IR, and ABI generation are not implemented in the bootstrap.])
+#status("FUTURE WORK", [Package manifests/dependencies and dependency-qualified identity, schema evolution tooling, compatibility reports, FFI, Wasm emission, production runtime profiles/ABI, and ABI manifests remain absent. Executable owning IR, package-local stable top-level IDs, selected versioned inspection schemas, and experimental P2 representation/layout are already implemented; internal layouts do not establish a public ABI.])
 
 = AI-Native Development and Semantic Editing
 
@@ -1313,6 +1365,8 @@ Internal layout is unstable by default. `@repr(C)`, `@repr(transparent)`, and ve
 AI assistance is a consumer of compiler APIs, not a privileged bypass. A model proposes intent, code, proof, or patches; the compiler decides semantic validity. IDEs, refactoring tools, CI, and human automation use the same interfaces.
 
 Text remains human-readable source of record, but edits can target declarations, parameters, effects, control-flow nodes, contracts, and schema fields by stable identity. Formatting materializes canonical source.
+
+#status("TARGET DESIGN", [The full intent/patch/graph workflow below is a long-term proposal. The smaller M experiment starts with selected existing inspection projections, source excerpts, ordinary edits, interpreter checks, and human approval, without waiting for full public IR or SMT. No M feature is built by this refresh. Stable top-level IDs have package-local scope; dense IDs are snapshot-local and inspection bytes are not guaranteed semantic cache keys. Unchanged signatures/effects do not establish unchanged behavior.])
 
 == Intent Blocks
 
@@ -1416,7 +1470,7 @@ Trust does not depend on human versus AI authorship. It derives from review poli
 
 == Canonical Intermediate Representation
 
-The supported semantic IR is readable, serializable, and versioned, representing resolved identities, types, effects, contracts, regions, control flow, and obligations in compact binary or canonical text. Source and IR are not isomorphic: comments/presentation remain metadata, while inferred types/effects become explicit.
+The proposed full public semantic IR would be readable, serializable, and versioned, representing resolved identities, types, effects, contracts, regions, control flow, and obligations in compact binary or canonical text. Source and IR need not be isomorphic: comments/presentation remain metadata, while inferred types/effects become explicit. This is not the compatibility contract of current inspection projections or internal owning IR/MIR.
 
 #listing([Human-readable Sol semantic IR sketch.], ```text
 function billing.transfer.transfer {
@@ -1434,7 +1488,7 @@ function billing.transfer.transfer {
 }
 ```)
 
-#status("FUTURE WORK", [Intent declarations, patches, context bundles, change reports, policy gates, and canonical serialized Sol IR are target design. Current internal syntax/HIR/type/effect/contract tables establish executable semantics but are not a stable public IR.])
+#status("FUTURE WORK", [Intent declarations, patches, context bundles, change reports, policy gates, and full canonical serialized Sol IR are target design. Selected versioned syntax/HIR/type/effect/contract/diagnostic projections are implemented, but exclude raw owning IR, MIR, deserialization, complete fact coverage, and cache-key suitability. Small proposed tools can use these projections with explicit omissions rather than making the full graph a prerequisite.])
 
 = Compiler Architecture, Toolchain, and Developer Experience
 
@@ -1445,7 +1499,7 @@ The target compiler consists of deterministic cacheable stages. Parsing produces
 #figure(
   kind: "Figure",
   supplement: "Figure",
-  caption: [Target compiler and verification architecture; shaded bootstrap stages are partly executable.],
+  caption: [Implemented execution and experimental lowering, followed by the planned production boundary.],
   block(width: 100%, inset: 10pt, fill: rgb("f8fafb"), stroke: 0.5pt + rule, radius: 4pt)[
     #set align(center)
     #text(size: 9pt, weight: "bold", fill: navy)[SOL COMPILER AND VERIFICATION PIPELINE]
@@ -1455,19 +1509,19 @@ The target compiler consists of deterministic cacheable stages. Parsing produces
       block(inset: 7pt, fill: pale-green, radius: 3pt)[Source + Specs], [->],
       block(inset: 7pt, fill: pale-green, radius: 3pt)[Parser + HIR], [->],
       block(inset: 7pt, fill: pale-green, radius: 3pt)[Types + Effects], [->],
-      block(inset: 7pt, fill: pale-green, radius: 3pt)[Contract Templates],
+      block(inset: 7pt, fill: pale-green, radius: 3pt)[Owning IR + Interpreter Checks],
     )
     #v(10pt)
     [down]
     #v(6pt)
     #grid(
       columns: (1fr, auto, 1fr, auto, 1fr), align: center,
-      block(inset: 7pt, fill: pale-blue, radius: 3pt)[Canonical Sol IR], [->],
-      block(inset: 7pt, fill: pale-blue, radius: 3pt)[Ownership MIR + Optimization], [->],
-      block(inset: 7pt, fill: pale-blue, radius: 3pt)[Native / Wasm / VM / C],
+      block(inset: 7pt, fill: pale-green, radius: 3pt)[P1 MIR + P2.1-P2.6 Owners], [->],
+      block(inset: 7pt, fill: pale-blue, radius: 3pt)[Linkage + Freeze + Runtime ABI], [->],
+      block(inset: 7pt, fill: pale-blue, radius: 3pt)[First Wasm Backend + Build],
     )
     #v(7pt)
-    #text(size: 7.5pt, fill: blue)[Verification workers consume normalized obligations beside the IR path; green denotes implemented bootstrap foundations, blue target stages.]
+    #text(size: 7.5pt, fill: blue)[Green: implemented bounded owners; blue: future production stages. P1/P2 are separate from CLI execution. Full public IR and solver workers remain future work.]
   ],
 )
 
@@ -1501,15 +1555,15 @@ An MLIR-inspired multilevel approach can preserve Sol operations until semantics
   (1fr, 2fr),
   ([Backend], [Role]),
   (
-    ([LLVM], [Primary optimizing native AOT and link-time optimization.]),
-    ([Cranelift], [Fast development, JIT/REPL, and simpler early code generation.]),
-    ([WebAssembly], [Sandboxed components with capability imports and canonical interfaces.]),
-    ([C], [Bootstrap/debug/integration path, not preferred performance/semantics reference.]),
-    ([Sol VM], [Tests, compile-time execution, migration validation, deterministic sandboxing.]),
+    ([WebAssembly], [First planned production target, frozen E6 core and exact host adapter; no Component Model dependency. Toolchain selection/pinning remains open.]),
+    ([LLVM], [Possible later optimizing native AOT and link-time optimization; not selected as the first delivered backend.]),
+    ([Cranelift], [Possible later fast development/JIT option; not an active parallel backend track.]),
+    ([C], [Possible later debug/integration output; the compiler's C17 implementation is not a C-emitting backend.]),
+    ([Sol VM], [Deferred possible bytecode/REPL design, not the existing reference interpreter.]),
   ),
 )
 
-The current C17 program is only a front end and emits no executable backend output.
+The current C17 compiler executes its bounded core through a reference interpreter and has experimental MIR/P2 owners, but emits no executable backend artifact. P3.W1 is an early timeboxed ABI experiment after relevant conventions are tested, not production backend completion.
 
 == Incremental Compilation
 
@@ -1533,7 +1587,11 @@ sol audit --unsafe --capabilities --proofs
 sol patch apply change.solpatch
 ```)
 
-The bootstrap currently implements `sol check`, `sol test`, `sol effects`, `sol inspect`, and `sol fmt`. Testing accepts one file or recursively discovered directory package and executes authored Boolean units deterministically. Formatting accepts one file or package; `--check` reports noncanonical files and `--stdout` formats one file without writing. Effect inspection compiles the same bounded package, then deterministically reports normalized callable rows, lexical authority, and source-ordered direct, capability, method, and callback call sites from owning typed IR. Dynamic callbacks and forwarded generic method evidence remain explicitly unresolved; this bounded command result is not a stable serialization of compiler schemas or internal IR. `sol inspect` instead emits one compact outer `sol.inspection` version-3 object after successful compilation. Syntax and types are artifact version 3, while HIR, effects, contracts, and diagnostics remain version 1. Syntax v3 exposes explicit recursive pattern and match-arm catalogs plus match ownership; types v3 exposes per-pattern types and explicit variant, field, tuple-ordinal, and child relationships, backed by snapshot-local variant and field catalogs. The artifacts preserve original source bytes through base64, package-relative paths and file-local byte spans, stable top-level semantic IDs, tagged semantic facts, and explicitly snapshot-local dense references without exposing C layouts, pointers, capacities, native sentinels, enumeration numbers, or internal IR. The unchanged version-1 and version-2 schemas remain historical, while the self-contained version-3 schema and checked-in documentation govern current compatibility. Compilation and load failures retain the established diagnostic and CLI-error JSON envelopes. Inspection construction failures write no partial successful envelope; output transport can truncate a constructed envelope and returns status 1.
+The target commands above are illustrative, not a supported CLI inventory or frozen target-option syntax. The implemented commands are `check`, `test`, `run`, `effects`, `inspect`, and `fmt`; `run` uses the reference interpreter with exact hosting and CHECK contracts. Native and component build spellings describe deferred ambitions, not the first Wasm artifact interface.
+
+The bootstrap currently implements `sol check`, `sol test`, `sol run`, `sol effects`, `sol inspect`, and `sol fmt`. Testing accepts one file or recursively discovered directory package and executes authored Boolean units deterministically. Application execution uses the exact hosting and CHECK policy in Section 8. Formatting accepts one file or package; `--check` reports noncanonical files and `--stdout` formats one file without writing. Effect inspection compiles the same bounded package, then deterministically reports normalized callable rows, lexical authority, and source-ordered direct, capability, method, and callback call sites from owning typed IR. Dynamic callbacks and forwarded generic method evidence remain explicitly unresolved; this bounded command result is not a stable serialization of compiler schemas or internal IR.
+
+`sol inspect` emits one compact outer `sol.inspection` version-3 object after successful compilation. Syntax and types are artifact version 3, while HIR, effects, contracts, and diagnostics remain version 1. Syntax v3 exposes recursive pattern and match-arm catalogs plus match ownership; types v3 exposes per-pattern types and variant, field, tuple-ordinal, and child relationships, backed by snapshot-local variant and field catalogs. Artifacts preserve original source bytes through base64, package-relative paths and file-local byte spans, package-local stable top-level semantic IDs, tagged facts, and explicitly snapshot-local dense references. They exclude C layouts, pointers, capacities, native sentinels, enumeration numbers, and internal IR. Versions 1 and 2 remain historical; version 3's schema and documentation govern current compatibility. Failures retain the diagnostic and CLI-error JSON envelopes. Inspection construction failures write no partial successful envelope; output transport can truncate a constructed envelope and returns status 1.
 
 == Language Server and IDE
 
@@ -1626,7 +1684,7 @@ Sol combines memory safety, capability authority, visible effects, package sandb
 
 Runtime reflection is opt-in package metadata and cannot bypass invariants. Deserialization is a validation boundary with typed errors; refinements are validated or carry trusted schema proofs. Standard serialization excludes arbitrary object graphs and executable constructors.
 
-#status("FUTURE WORK", [The standard library, registry, supply-chain enforcement, ownership security model, sandboxed builds, reflection, and serialization are target design. The bootstrap's capability and effect checks are executable foundations, not a complete security boundary.])
+#status("FUTURE WORK", [The broader standard library, registry, supply-chain enforcement, sandboxed builds, reflection, and serialization are target design. Bootstrap affine ownership, lexical loans, effect/capability checking, deterministic resource limits, and exact hosted grants are implemented foundations, not a complete application security model. Permission does not prove per-request authorization, tenant isolation, or information-flow safety.])
 
 = Implementation Roadmap, Risks, and Open Questions
 
@@ -1634,27 +1692,25 @@ Runtime reflection is opt-in package metadata and cannot bypass invariants. Dese
 
 Begin with a deliberately small core proving interactions among canonical syntax, algebraic types, ownership, effects, contracts, semantic identities, and diagnostics. Simultaneously building full proof automation, workflows, native targets, and an ecosystem would obscure core coherence.
 
-The bounded frontend/interpreter core is now sufficiently complete to pause language breadth. The active critical path is:
+E1-E6 established the bounded frontend/interpreter application core, and P1 through P2.6 are complete at `6ec4ba9`. Language breadth remains frozen. The live #link("TODO.md")[execution cursor] is:
 
 ```text
-shared compilation session and compiler hardening
--> explicit entrypoint and application ABI
--> minimal trusted interpreter host profile
--> interpreter-based sol run
--> executable core contracts and refinements
--> representative multi-file conformance application
+P2.7 symbols and whole-program linkage (next overall and production)
+-> M1 first-user workload and experiment charter
+-> P2.8 concrete-program freeze and census
+-> P3 runtime ABI -> P4 Wasm backend/adapter -> P5 build artifacts
 ```
 
-This ordering deliberately splits the application-facing parts of package, runtime, entrypoint, and contract work from their larger backend scopes. It resolves authority injection, process behavior, cleanup, diagnostics, and contract policy using the existing owning IR before those decisions are encoded in MIR or a target ABI. Closures, collections, broad numerics, unsafe, FFI, public IR, and concurrency remain off the immediate path unless one of these milestones requires their smallest coherent subset.
+P2 is still open. M1 publishes subsequent interleaving; if infeasible, it records the blocker and work continues to P2.8 without inventing prerequisites. After P2.8, the M2-M5 experiment may proceed independently alongside P3, subject to its own gates, staffing, and exclusive file ownership. One coordinator maintains the sole next-overall cursor. Closures, collections, user resources/allocators, unsafe, C FFI, manifests/dependencies, full public IR, concurrency, and broader handlers are not implicit P2-P5 requirements.
 
 == Executable Bootstrap Baseline
 
-The current C17 bootstrap provides:
+The September 9, 2026 snapshot of `6ec4ba9` provides the following. This is a documentation summary, not a fresh validation report; detailed compatibility boundaries are in #link("docs/compiler-status.md")[compiler status].
 
 - Lossless lexing, recovering parsing for core declarations/contracts/body expressions, arena syntax, deterministic package-session definition IDs, lexical and explicit multi-file module/import HIR resolution, and source-aware human/JSON diagnostics.
 - Token-preserving syntax formatting with canonical whitespace, checked parse/token preservation, byte idempotence, and transactional package rewrites.
 - Primitive types; exact variable-arity interned built-in/user/structural-tuple applications; bounded generic records, enums, and free functions; constructors; recursive patterns and pure guards; nested usefulness/exhaustiveness for `Bool`, records, tuples, and closed/open generic enums; expression/call/return checking.
-- Nominal generic distinct declarations and explicit construction; refined declarations with representation-typed `self`, `Bool`/purity checking, and deterministic unresolved predicate templates.
+- Nominal generic distinct declarations and explicit construction; refined declarations with representation-typed `self`, `Bool`/purity checking, obligation templates, and direct runtime predicate evaluation before nominal construction.
 - Nongeneric coherent traits; exact closed implementations; one inline free-function bound; symbolic bound forwarding; immediate type-directed method calls; checked method-resolution metadata and exact closed method effects.
 - Closed structural function types and bounded declaration-owned callback row parameters; exact function and bound-operation effects; callback subset checking; local and per-call row inference.
 - Least-fixed-point recursive inference over call-graph SCCs, including parameter and `Self` substitution.
@@ -1663,7 +1719,7 @@ The current C17 bootstrap provides:
 - Deterministic inspection of normalized callable rows, lexical authority, and statically represented call edges through `sol effects`.
 - Exact authority-preserving returns and nominal checked single-source wrappers.
 - Exact capability-backed handlers with syntax, source/provider matching, scoped root-sensitive subtraction, residual/provider effects, runtime metadata, and singleton target limitation.
-- Structured contracts resolved in fresh signature scopes; generic template typing; `Bool` typing; finalized purity; `Result` outcome-specific `result`; distinct `old` snapshots; deterministic obligation templates.
+- Structured contracts resolved in fresh signature scopes; generic template typing; `Bool` typing; finalized purity; `Result` outcome-specific `result`; distinct `old` snapshots; deterministic obligation templates and runtime callable CHECK, including approved hosted members. `sol run` and `sol test` enable CHECK.
 - Versioned 128-bit top-level semantic IDs, package-local explicit evolution tokens, collision validation, and resolved declaration/import/expression/type/trait occurrence records.
 - Structural bootstrap copies, path-sensitive affine moves, prefix-overlap projected loans, use-after-move/conflict/escape diagnostics, structured control-flow joins, validated access/local-use IR metadata, and ownership-aware interpretation.
 - Statement-only nested lexical regions; exact block-let and match-binding cleanup metadata; affine region-escape diagnostics; and reverse deterministic interpreter storage cleanup on every flow.
@@ -1673,53 +1729,86 @@ The current C17 bootstrap provides:
 - Successful source-call copy-in/copy-out for writable local-rooted `inout` places, including callbacks, recursion, and implementation methods; host/top-level exclusive deferral remains explicit.
 - Explicitly typed authority-free uninitialized locals; reachable-path definite-initialization joins; checked atomic `Int64` compound assignment; and lexical whole-local owned `modify` scopes.
 - Statement-only `loop`/`while`, nearest payloadless `break`/`continue`, bounded ownership fixed points, and exact per-edge/per-iteration cleanup.
-- Pure typed loop invariants and `decreases`, concrete `diverge` totality policy, deterministic entry/preservation/nonnegative/strict-decrease templates, owning-IR retention, and runtime erasure.
+- Pure typed loop invariants and `decreases`, concrete `diverge` backedge policy, deterministic unresolved entry/preservation/nonnegative/strict-decrease templates, owning-IR retention, and runtime erasure; no termination proof is implied.
 - Statement-form `panic Text`, pure proof-backed `unreachable`, and `require Bool else Never`, with explicit IR, isolated ownership flow, deterministic cleanup, unresolved obligations, and structured interpreter failures.
 - Structural tuple expressions, types, and recursive patterns of arity 2 through 16; static numeric projection places; recursive equality, Copy/affine ownership, partial moves, authority provenance, owning IR, interpreter values, and inspection-v3 projections.
 - One canonical three-module executable-core conformance application that passes formatter check, compilation, authored tests, effect inspection, inspection-v3 projection, and hosted execution while jointly exercising imports, stable identity, data types, generics/traits, recursive matching, ownership/mutation/cleanup, typed errors, configured runtime failure/unwind, contracts/refinements, and standard capabilities.
-- Separate P1a.1-P1a.3b3 callable-scoped target-neutral CFG MIR checkpoints for validated nongeneric free/test functions, with deterministic blocks, SSA instruction values/block parameters over explicit local storage, scalar and whole-local operations, conditional cleanup/storage death, `if`, short-circuit Boolean control, return, panic, lexical regions, `require`, proof-backed unreachable, and statement-form `loop`/`while` with nearest-loop break/continue. Nongeneric direct function calls retain ordered owned and call-scoped whole-local shared/exclusive operands in abstract invoke terminators with distinct normal/failure-cleanup edges and normal-only exclusive writeback. Loop metadata binds preheaders, condition/body/exit edges, natural backedges, nested transfer identity, cleanup boundaries, and erased proof-obligation slices. Authority-free infallible records, tuples, enum variants, Option/Result cases, and non-refined distinct wrappers use semantic construction instructions with exact tags and source-ordered operand metadata, without layout commitments. Typed reusable temporary slots stage multiple owned call/construction operands, consume exact pending suffixes, preserve outer values across loop transfers, and clean abandoned operands in interpreter order; exact-stack validation and source-bound block-result aliases avoid requiring P1b dominance. Checked refined construction retains the exact type-owned predicate obligation in an abstract two-edge terminator, consumes the staged representation on either outcome, transports the nominal result only on success, and performs pending/local/region cleanup before resuming failure, without selecting predicate execution or runtime ABI policy. Transactional unsupported lowering and independent arena, edge, source/type/control-event, invoke/construction/refinement provenance, temporary/local initialization and consumption, lexical cleanup-order, region-stack, and cyclic loop-CFG validation are operational. It is not yet a complete executable-core MIR or a compilation-session/backend input.
 
-- P1a.3b4-P1a.3b14 complete structured executable-core CFG lowering with recursive matches and guards, typed Option/Result propagation, projected and partial-move places, callback/method/capability invokes, exact handler scopes, bounded callable contracts, generic/effect metadata and trait evidence, checked compound updates, and authority-bearing aggregate and derived-capability construction. Every bodyful E6 callable now lowers and validates deterministically; bodyless requirements and hosted capability members remain explicitly non-runtime. P1b still owns backend-facing dominance/SSA and ownership invariants, canonical rendering, and bounded evaluator/trace semantics.
-- P1b.1 computes deterministic reverse-postorder immediate dominators over compact predecessor slices and validates ordinary instruction, terminator, and edge-argument SSA uses. Instruction and block-parameter definitions may cross blocks exactly when they dominate the use; local definition order remains strict and semantic terminator results remain edge-scoped.
-- P1b.2 shares the owning IR's greatest-fixed-point structural Copy classification and validates affine SSA availability path-sensitively. Consuming instruction and terminator uses make values unavailable; edge transport consumes each ordinary source at most once per edge and defines fresh target parameters; alternative edges remain independent; and may-unavailable joins converge over branches and loop backedges. Canonical internal rendering and bounded differential MIR evaluation remain later P1b checkpoints.
-- P1b.3 emits one validated, overflow-checked, deterministic versionless internal MIR text form. Fixed ASCII spellings and escaping, explicit sentinel IDs, source-owned relations, ascending semantic block order, and arena-ordered values, instructions, places, edges, temporaries, loops, invokes, constructions, contracts, and proof metadata make independently lowered equivalent MIR byte-identical. Output is buffered before transport and is explicitly not a stable serialization schema. Bounded differential MIR evaluation remains the final P1b checkpoint.
-- P1b.4 completes P1b with an independent bounded evaluator over an explicit entry MIR and trusted immutable callable-indexed MIR provider. It executes the frozen CFG vocabulary with deterministic MIR-local step, call-depth, value, text, host-call, and trace limits; emits structured call, block, instruction, terminator, edge, host, cleanup, return, and failure events; and uses the unstable interpreter value tree and raw host hooks without invoking owning-IR control evaluation. A separate bounded pure owning-IR evaluator executes source-owned contract and refinement obligations. Preflight rejects unavailable bodyful capability closures and callable-producing dynamic closures before effects. Differential tests compare results or failure categories/spans, host behavior, and exact owned-local cleanup with the reference interpreter. This selects no data layout, runtime ABI, or stable execution interface.
-- P2.1 adds an unstable symbolic `SolMirProgram` owner borrowing one validated owning IR. Deterministic entry/test/internal-fixture roots cache one MIR template per reachable lowerable bodyful callable, retain exact approved safe bodyless capability imports, propagate forwarded evidence only through compatible concrete incoming invocation contexts, record full typed concrete trait specialization demands, and preserve path-free invoke/static/handler/predicate provenance under local callable, reference, and discovery-work limits. Trait-bounded generic roots are rejected independently rather than borrowing evidence from another root. Each callback site accepts only an exact direct definition or bound-operation callee; current P1 lowering cannot materialize an ordinary first-class static callback form, so ordinary body callbacks and dynamic, conditional, or aliased forms reject. Static callable-value provenance can still occur in source-owned pure predicates. Input deduplication, prerequisite owning-IR validation, and nested public MIR lowering/validation are explicitly outside the local discovery meter. This is a trusted mutable compiler-internal owner, not a hostile arbitrary-pointer format: validation rejects noncanonical null-empty headers and detectable top-level/nested owned-range overlap before rebuilding the authentic closure, while teardown requires original builder allocation bases. Portable C cannot prove allocator provenance for arbitrary adjacent/interior pointers. The owner performs no monomorphization, substitution, representation/layout, ABI, symbol, linkage, or backend work.
-- P2.2 adds a separate unstable `SolMirPlan` owner borrowing one validated `SolMirProgram`. It recursively substitutes callable and nominal parameters and `Self`; structurally interns closed primitive, nominal, Option/Result, tuple, exact/structural function, and effect-row types; closes instance environments; resolves and composes forwarded trait dictionaries; and records deterministic root, invoke, static callable-value, predicate, handler, and typed-import demands. Callable and import effects use callee receiver/formal coordinates; callback-formal inference reconstructs closed authority-independent tail substitutions before fixed-prefix union. Canonical per-instance overlays census signatures, accesses, locals, source and synthetic places/projections, MIR values/result instructions/temporaries, source expressions/patterns/operands, snapshots, contracts, refinements, and erased proof types without cloning or mutating template CFG arenas. Identical recursive keys deduplicate to cycle edges; one strict same-callable argument growth is allowed, while repeated strict growth on one direct or mutual demand ancestry is expanding recursion. Instance, concrete-type, demand, and typed-use cardinalities, substitution depth, and a narrowly documented interner/substitution/key-probe work meter fail transactionally. Other loops are bounded by those dimensions and validated source domains. Every owned arena records an allocation capacity and every effect atom records a bounded string length before validation traverses logical counts. Validation checks canonical headers and detectable allocation overlap, validates the borrowed program identity, rebuilds the expected plan, and compares canonical fields without padding assumptions. Contextless generic, receiver, and effect-polymorphic fixture roots reject because this checkpoint deliberately has no explicit root-context API. The E6 entry plan contains 8 instances and 4 typed imports; entry plus tests contains exactly one instance of each of its 14 bodyful callables and 4 typed imports. Specialized CFG materialization remains P2.3.
+=== Current Production Internals: P1 through P2.6
 
-It is not a production compiler. In particular, general row constraints and explicit/multiple/recursive or authority-capturing effect parameters, refinement assumptions and refined patterns, richer traits and constrained or higher-order generics, first-class or escaping borrows, index/dereference mutation, general field-by-field initialization, loop labels/values and runtime obligation checking, first-class/allocator regions, lifetime generics, user-defined Drop/destructors/finalizers/close protocols, unsafe/FFI authority gates, general algebraic handlers, static/unparameterized or runtime-dynamic handler matching, call-site proof use, logical normalization, SMT/proof discharge, concurrency, package manifests/host wiring/dependencies, member/local stable identities, width-based and declaration-reordering formatting, stable public schemas/IR, semantic patches, backend cleanup behavior, and code generation are not implemented.
+#status("IMPLEMENTED", [These separate unstable owners cover the frozen E6 closure, not every form executable by the reference interpreter. They are compiler-internal, not the production compilation session/CLI, public serialization, a runtime ABI, or a backend. All builds are bounded and transactional, with independent validation and buffered deterministic rendering.])
+
+#spec-table(
+  (0.65fr, 2.65fr),
+  ([Complete], [Current boundary]),
+  (
+    ([P1], [Callable-scoped target-neutral CFG MIR for every bodyful E6 callable: SSA/block parameters, explicit storage and affine moves/borrows, projected/partial-move paths, calls and normal-only writeback, loops, propagation, constructors/refinements, matches/guards, contracts, exact handlers, generic/effect/evidence metadata, and cleanup on every exit. Independent dominance/SSA and affine-value validation, canonical internal rendering, and a bounded evaluator/trace are present.]),
+    ([P2.1], [A symbolic program owner discovers deterministic entry/test/fixture closures, caches bodyful MIR templates, and records approved bodyless capability imports, specialization demands, and callable/provider references. It does not itself specialize or choose layout.]),
+    ([P2.2], [Canonical monomorphic plans intern callable instances, concrete types/effects, receiver/type arguments, dispatch evidence, typed imports, and complete substitutions. Identical recursion deduplicates; expanding generic recursion and exhausted budgets reject transactionally.]),
+    ([P2.3], [Concrete materialization owns specialized signatures, types, locals, places, values, blocks, terminators, edges, effects, bindings, and handler frames. Executable dispatch has no generic parameters, effect tails, or forwarded evidence; symbolic clones remain authentication-only. Concrete SSA, affine dataflow, cleanup, contracts, and closure are independently revalidated.]),
+    ([P2.4], [Canonical target-neutral recipes cover primitives, aggregates/sums, distinct/refined wrappers, functions, and capabilities; source-order fields/variants, explicit semantic tags, inhabited/zero-size/Copy/drop classifications, and exact callable producers. Reachable open enums reject. This owner selects no byte layout or ABI.]),
+    ([P2.5], [Explicit target descriptors select checked sizes, alignment, padding, source-order field offsets, u32 sum tags/payloads, projection maps, and text/callable/capability objects. Pointer widths 4/8 are supported; the initial Wasm32 descriptor is little-endian. Nonzero inhabited aggregates use uniform indirect storage; wrappers follow backing layout. Independent layout validation rejects overflow, incomplete reconstruction, and borrowed aliases.]),
+    ([P2.6], [Representation-aware plans close accesses, construction and capability inheritance, recursive pattern tests/extractions, Option/Result propagation, checked arithmetic/equality, snapshots, callable producers, and handler bindings. Synthetic predicate CFGs and approved import-contract envelopes complete the source-independent executable boundary; source IDs are authenticated provenance only. Loop proof obligations remain runtime-erased.]),
+  ),
+)
+
+=== Predicate Bodies and Finite Closure
+
+P2.6b2 completes rich immutable predicate CFGs, replacing the earlier scalar-only checkpoint. Bodies support scalar/Text/Unit constants, direct contextual inputs, checked operations, short-circuit and conditional control, exact calls and function/bound-operation values under purity and finite-closure rules, aggregate/tuple/sum/wrapper/refined construction, recursive matches/guards/bindings, immutable blocks/locals, and nested refinement body references. There is no `UNRESOLVED_BODY` state. Instance and approved import contexts share this bounded vocabulary; import-owned requires/snapshots/ensures use envelope-local snapshot slots, not fake callable CFG coordinates. Contract/guard propagation remains rejected by `SOL-CONTRACT-002`; malformed propagation records are validated and rejected, not a newly lowerable source form.
+
+Ordinary and predicate callback sites require a direct static definition or bound-operation callee. Current P1 cannot materialize ordinary first-class static callback forms, so ordinary body callbacks and dynamic, conditional, or aliased producers reject at the program boundary. Static callable-value references in pure predicates are supported within the finite plan. Contextless generic, receiver, and effect-polymorphic roots reject; trait evidence must come from compatible concrete incoming contexts. Reachable bodyful capability closures are not made production-lowerable merely because the interpreter executes them.
+
+Callable MIR contract envelopes remain bounded: contracted generic/effect-parameter and exclusive forms, plus fallible/projected snapshots, reject transactionally. Supported snapshots are direct unprojected `Int64`, `Bool`, or Unit locals. Approved bodyless import contracts are separately closed by P2.6 and are not globally unsupported. The independent P1 evaluator still uses a bounded pure source-obligation evaluator; it is not the P2.6 source-independent operation owner. Its MIR-vs-owning-IR comparisons cover results/failure spans, host behavior, and cleanup, not future interpreter/Wasm conformance.
+
+The lifetime chain is operations -> layout -> representation -> materialization -> plan -> program -> owning IR. Borrowed upstream owners must remain alive and immutable. Validators authenticate executable fields, CFG/SSA/type/ownership relations, provenance, and resource censuses; trusted mutable C owners are not arbitrary-pointer recovery APIs or public formats.
+
+Baseline evidence includes all 14 bodyful E6 callables and four approved imports in the all-roots closure. The layout census has 21 types, 11 fields, nine variants, and five projections. E6's four single-block predicate bodies describe that fixture, not a restriction on P2.6b2 or a count of the compiler suite. E6 conformance is not usability evidence or proof of maintenance advantage; no compiler tests were rerun for this manual refresh.
+
+=== Remaining Boundary
+
+Symbols/linkage (P2.7), whole-program freeze/census (P2.8), production runtime ABI, backend cleanup policy, Wasm emission, reproducible `sol build`, and interpreter/Wasm differential execution remain open. Full public IR, semantic patch tooling, logical call-site substitution/normalization, SMT discharge, refinement projection/reasoning, and unresolved loop/decreases/unreachable proof obligations remain outside the delivered boundary. Broader traits, closures, resources, lifetime/reference values, collections, unsafe/FFI, manifests/dependencies, member/local IDs, concurrency, general handlers, and the rest of the feature vision remain separately gated target work.
 
 == Phased Roadmap
+
+This snapshot mirrors #link("TODO.md")[the live ledger], not a second queue. Completion of P2.1-P2.6 does not complete P2.
 
 #spec-table(
   (1fr, 2fr),
   ([Phase], [Scope and exit criteria]),
   (
-    ([0 - Executable core], [Current front-end semantics plus formalized core interactions; continue resolving contradictions with tests.]),
-    ([1 - Front end/interpreter], [Formatter, modules, richer generics, traits, pattern matching, typed errors, effects, effect/authority inspection, canonical graph, VM.]),
-    ([2 - Application execution], [Shared compilation session, entrypoint and host profiles, interpreter `sol run`, runtime contracts, and a versioned executable-core conformance application.]),
-    ([3 - MIR/WebAssembly], [Ownership-explicit CFG/MIR, monomorphization, layout/runtime ABI, WebAssembly backend, reproducible artifacts, and differential execution.]),
-    ([4 - Contracts/SMT], [Normalized obligations, invariants/refinements, solvers, counterexamples, proof cache, and generated properties.]),
-    ([5 - Concurrency/capabilities], [Structured async, actors/channels, `Send`/`Share`, cancellation, broader handlers, and sandbox hosts.]),
-    ([6 - Schemas/tooling], [Schema compiler, migrations, public semantic graph, patches, context bundles, change reports, compatibility, and IDE/agent APIs.]),
-    ([7 - Stabilization], [Editions, registry, library hardening, security audit, performance, additional backends, and the 1.0 RFC process.]),
+    ([E1-E6 / complete], [Bounded shared compilation, hardened input/host boundaries, explicit entrypoint, trusted interpreter profiles, `sol run`, runtime contracts/refinements, and E6 conformance.]),
+    ([P1 / complete], [Frozen-E6 callable CFG MIR, dominance/affine validation, rendering, and bounded reference differential evaluation.]),
+    ([P2 / open], [P2.1-P2.6 complete. P2.7 symbols/linkage is next overall and production; then M1; then P2.8 complete concrete-program freeze, rendering, and census. No runtime ABI or Wasm emission at this exit.]),
+    ([P3 / open], [Target-independent call/result/failure ABI, allocation and owned operations, panic/cleanup, exact trusted hosting and handlers, then validated runtime-lowered closure. P3.W1 is a gated timeboxed integration experiment.]),
+    ([P4 / open], [Select/pin an established Wasm toolchain; emit the frozen represented CFG; implement checks, cleanup, exact host adapter, and E6 Wasm execution. No implicit Component Model scope.]),
+    ([P5 / open], [Immutable build API/artifacts, deterministic `sol build` writes, artifact execution, interpreter/Wasm differential tests, and byte-identical release/reproducibility acceptance.]),
+    ([M1-M5 / proposed], [Workload charter, bounded context packets, conservative deltas, ordinary-edit validation/approval, and protected held-out evaluation. Optional M4E is only a basic editor slice. No M feature is implemented.]),
+    ([Deferred breadth], [Proof/SMT, schemas, full public IR and patch language, richer libraries/numerics, resources, concurrency/workflows, general handlers, reflection, real-time profiles, native/VM targets, and ecosystem/stabilization work require explicit workload gates.]),
   ),
 )
 
 == Minimum Viable Sol
 
-The minimum useful language must be more than “Rust with nicer syntax.” Its differentiating vertical slice includes explicit public effects, executable contracts, stable graph, structured diagnostics, and semantic change reports. Required scope remains:
+Distinguish the minimum viable *experiment* from the long-term full-feature target. A small test of the thesis can use the existing language, interpreter, diagnostics, and selected projections to support ordinary source edits and protected review. It does not wait for full public IR, SMT, a backend, or a patch DSL. M1 first determines whether the projections suffice and records unknowns or blockers rather than silently activating those larger systems.
 
-- Canonical formatter and editioned parser.
-- Records, enums, generics, traits, `Option`, `Result`, exhaustive match.
-- Affine ownership and common lexical borrowing.
-- Parameterized effects, capability injection, and a decided handler subset.
-- `requires`, `ensures`, `invariant`, `old`, `result`, and runtime/proof policies.
-- Canonical semantic IR and stable IDs.
-- JSON diagnostics and basic patch API.
-- Native or WebAssembly executable output.
+#spec-table(
+  (0.65fr, 2.65fr),
+  ([Proposal], [Gate and evidence]),
+  (
+    ([M1], [After P2.7, select one capability-restricted hosted business-logic/validation workload, user, host boundary, protected baseline, held-out tasks/tests, timebox, metrics, stop/go thresholds, projection gaps, and subsequent interleaving. If infeasible, record the blocker and continue P2.8.]),
+    ([M2], [After M1 feasibility and P2.8, build declaration-centered packets from source, signatures, effects, contracts, and available references. Record snapshot hash, compiler/schema/options/selection metadata and omissions; unavailable is not empty. Task 58 slice only.]),
+    ([M3], [After M2, compare checked snapshots conservatively, validate identities/base hashes, reject stale or ambiguous comparisons, and expose body edits and unknowns. A changed predicate does not establish weakening. Task 57 slice only.]),
+    ([M4], [After M2/M3, exercise ordinary edit/check/test/delta/human approval with protected tests and policy. Contract or authority changes require explicit approval; no silent repair weakening. Only task 56's validation/approval slice, not patch syntax or proof of correctness.]),
+    ([M4E], [Optional timeboxed diagnostics/navigation/packet presentation after M1/M2 projection feasibility; not full LSP and not an M5 prerequisite. Task 55 slice only.]),
+    ([M5], [After M4, compare against source-only work on protected held-out tasks with equal compiler/test access and matched model/budgets where relevant. Measure correctness, regressions, review time, context, iterations, diagnostic usefulness, and false confidence. Report negative/inconclusive results and decide continue, narrow, or stop.]),
+  ),
+)
 
-Several front-end parts are now implemented, but the complete minimum vertical slice has not shipped.
+After P2.8 these experiments may run independently alongside P3, but their internal dependencies still apply. No charter or tool is delivered by this refresh. Recoverable refinement validation/projection, small data facilities, test ergonomics, editor/latency/installation improvements, and finer effect families require separately bounded decisions driven by workload evidence.
+
+P3.W1 is timeboxed after P3.1 has tested call/result/failure conventions: record candidate tool versions and validate/execute a minimal scalar module to expose ABI/tool mismatches. Allocation, cleanup, or host imports enter only after relevant P3.2-P3.4 conventions are tested. This informs, but does not complete, toolchain selection, P4 backend integration, component support, E6 Wasm execution, or build tooling.
+
+The fuller target still includes stable semantic graph interfaces, intent metadata, semantic patches/change reports, progressive proof, and mature deployment tooling. Larger workflows/transactions should first gain library/host-provider experience; broad numerics/units, general resumptive handlers, reflection, and real-time certification remain proposed. None is required merely to test whether bounded semantic context helps maintenance.
 
 == Major Risks
 
@@ -1727,6 +1816,8 @@ Several front-end parts are now implemented, but the complete minimum vertical s
   (1fr, 2fr),
   ([Risk], [Mitigation]),
   (
+    ([Unmeasured product thesis], [Use M1/M5 workload and held-out maintenance evidence; backend success and E6 conformance do not establish user benefit.]),
+    ([False confidence], [Distinguish declared, runtime-checked, proved-under-assumptions, and unknown; never infer behavior preservation from unchanged metadata.]),
     ([Feature interaction complexity], [Small formal core; every surface feature lowers into it; RFC interaction matrices.]),
     ([Verification brittleness], [Modular contracts, stable IDs, proof caching, deterministic budgets, proof-health metrics.]),
     ([Ownership ergonomics], [Explainable region inference, persistent collections, scoped mutation, targeted sharing.]),
@@ -1744,7 +1835,7 @@ Some v0.1 questions now have partial executable decisions:
 
 - *Handlers:* 1.0 policy is still open, but the bootstrap has chosen exact capability-backed singleton-target handlers as a safe experimental subset. Broader resumptive/general handlers await ownership interaction work.
 - *Mixed authority:* representation is decided for the bootstrap as normalized finite lexical may-origin sets with conservative expansion; runtime dynamic authority matching and long-term IR/ABI representation remain open.
-- *Contract front end:* syntax, signature-scope resolution, `Bool` typing, purity, `Result`-only outcomes, snapshots, and deterministic template shape are decided. Enforcement mode, runtime fallback, logical IR, and proof discharge remain open.
+- *Contracts:* syntax, signature-scope resolution, `Bool` typing, purity, `Result`-only outcomes, snapshots, deterministic templates, reference CHECK/IGNORE policy, and always-checked direct refined construction are implemented. Recoverable validation/projection APIs, proof-directed policy, logical IR, and proof discharge remain open.
 - *Recursive effects:* the bootstrap decision is least-fixed-point SCC inference for omitted private closed rows. The target design of row variables and polymorphic recursive effects remains open.
 
 Genuinely open target-design questions are:
@@ -1759,14 +1850,16 @@ Genuinely open target-design questions are:
 8. Can registries enforce transitive capability policy without making legitimate platform abstractions unusable?
 9. What evidence permits an AI repair to be labeled safe, behavior-preserving, or proof-preserving?
 10. Should general handlers enter 1.0 after ownership is proven, or remain a later extension beyond exact capability-backed handlers?
+11. Should named arguments retain formal-parameter evaluation order long term? The current interpreter executes in canonical formal order, not written operand order; reordering a signature can change effects even when named call syntax is unchanged. Alternatives need an explicit decision and tests, not a documentation change.
+12. Is mandatory global declaration sorting worth lost locality and review churn? The current formatter preserves source order.
 
 == Success Criteria
 
-Sol succeeds if it measurably reduces maintenance defects and review effort on change-heavy systems. Evaluation includes semantic-diff accuracy, effect-leak prevention, contract coverage, repair success, proof stability, refactor reliability, onboarding, and repository context required for a correct change, not only speed or line count.
+Sol's maintenance thesis succeeds only if it measurably reduces defects or review effort without weakening constraints. Evaluation includes correctness, regressions, effect-leak prevention, review effort, onboarding, edit-loop latency, and context required for a correct change, not only speed or line count. E6 conformance, compiler regression tests, application usefulness, and maintenance outcomes are separate evidence categories. A negative or inconclusive M5 result is useful evidence, not a reason to move the success criteria.
 
 = Worked Reference Examples
 
-These examples preserve the v0.1 reference corpus. Unless explicitly stated, they express target design and are not complete bootstrap conformance tests.
+These examples revise the v0.1 reference corpus. Unless explicitly stated, they express target design and are not bootstrap conformance tests, executable demonstrations, or formal proofs. Provider APIs, domain types, collections, serialization, transaction state views, resource policies, and host wiring must be designed separately. Effect names do not grant ambient authority: snippet-local resources must be supplied by explicit capabilities or an enclosing provider scope.
 
 == HTTP Handler with Explicit Authority
 
@@ -1778,11 +1871,12 @@ public function get_account(
     request: Request,
     repository: capability AccountRepository,
     authorization: capability Authorization,
+    tracing: capability TraceSink,
 ) -> Result<Response, HandlerError>
 effects {
     database.read<repository>
     authorization.check<authorization>
-    tracing.emit
+    tracing.emit<tracing>
 } {
     let account_id = request.path.parameter("account_id")
         .parse<AccountId>().map_error(HandlerError.invalid_account_id)?
@@ -1797,31 +1891,47 @@ effects {
 }
 ```)
 
-The signature discovers operational authority. Tests replace both capabilities. Policy can reject network or write effects. A cache wrapper can require proof that authorization precedes protected cached data.
+The signature exposes operational authority; target tests can replace the providers. Permission to invoke a capability does not itself establish business authorization, tenant isolation, or information-flow safety. Those require host policy, domain checks, framing, and explicitly scoped evidence. A cache wrapper could require evidence that authorization precedes protected cached data, not infer it from an effect row.
 
 == Idempotent Inventory Reservation
 
-#listing([Transaction, idempotency intent, postconditions, and property.], ```sol
+#status("TARGET DESIGN", [Formal transaction pseudocode, not executable bootstrap Sol or a proof. The provider must supply serializable isolation, rollback, entry-state views, and commit-coupled events. State projections below are logical views of the explicitly supplied database, not ambient mutable globals or effectful bootstrap contract reads. The retry branch covers only the same order/item/quantity; conflicting-quantity retry policy remains open.])
+
+#listing([Target reservation: creation consumes stock; a same-request replay preserves it.], ```text
 intent reserve_inventory {
     preserve:
         - available stock never becomes negative
         - retries do not reserve twice
         - stock update and reservation record commit atomically
 }
-public transaction reserve(order: OrderId, item: ItemId, quantity: Quantity)
-    -> Result<Reservation, ReservationError>
-using database = InventoryDb
+public transaction reserve(
+    database: capability InventoryDb, clock: capability Clock,
+    order: OrderId, item: ItemId, quantity: Quantity,
+) -> Result<Reservation, ReservationError>
 isolation = serializable
-effects { database.transaction<InventoryDb> clock.read }
+effects { database.transaction<database> clock.read<clock> }
+// inventory/reservations are this provider's logical transaction views.
+// Domain: quantity > 0, nonnegative stock, consistent reservation keys;
+// an existing order/item has the same quantity.
 ensures {
     success => reservations.contains(order, item)
-    success => inventory[item].available
-        == old(inventory[item].available) - quantity
-    failure => inventory[item].available == old(inventory[item].available)
+    success => result == reservations[order, item]
+    success => if old(reservations.contains(order, item)) {
+        result == old(reservations[order, item])
+        and inventory[item].available == old(inventory[item].available)
+    } else {
+        result.order == order and result.item == item
+        and result.quantity == quantity
+        and inventory[item].available
+            == old(inventory[item].available) - quantity
+    }
+    failure => inventory == old(inventory)
+    failure => reservations == old(reservations)
+    preserves unrelated stock and reservation entries
 } {
     match reservations.find(order, item) {
         some(existing) => return existing
-        none => continue
+        none => proceed with creation below
     }
     let stock = inventory.lock(item)?
     require stock.available >= quantity else {
@@ -1830,20 +1940,18 @@ ensures {
         )
     }
     stock.available -= quantity
-    let reservation = Reservation { order, item, quantity, created_at = clock.now() }
+    let reservation = Reservation {
+        order, item, quantity, created_at = clock.now(),
+    }
     reservations.insert(reservation)
     emit commit InventoryReserved(reservation)
     return reservation
 }
-spec reserve {
-    property "retry is idempotent" for all valid request {
-        let first = reserve(request)
-        let second = reserve(request)
-        expect second == first
-        expect inventory_change(second_call) == 0
-    }
-}
 ```)
+
+Here `old(...)` denotes a logical pre-state observation; the guarded reservation lookup is defined only when the pre-state contains that key. It is not the bootstrap's eager per-occurrence snapshot evaluation. For a new successful reservation with stock 10 and quantity 3, stock becomes 7 and one matching record/event is committed. Replaying the same request returns that record with stock still 7 and no new event. Failure rolls back both state views. The provider's atomicity and state framing are assumptions awaiting design and validation, not proved properties.
+
+Required target tests cover creation, same-quantity retry, insufficient stock/rollback, unrelated-state preservation, and concurrent duplicate requests under the chosen isolation policy. A retry with a different quantity is deliberately outside this example's domain until an explicit conflict policy and tests are approved; no shipped behavior is invented here.
 
 == Embedded Controller
 
@@ -1923,6 +2031,8 @@ patch package inventory-service {
 
 This appendix is illustrative, not parser-complete normative grammar. The authoritative edition grammar should be generated from compiler source. The sketch establishes regularity and reveals syntax interactions. It is updated with executable-core handler and authority forms.
 
+#[
+#show figure: set block(breakable: true)
 #listing([Condensed grammar sketch.], ```text
 source_file := module_decl edition_decl? use_decl* declaration*
 module_decl := "module" module_path NEWLINE
@@ -1992,6 +2102,7 @@ option_type := "Option" "<" type ">"
 function_type := "function" "(" type_list? ")" "->" type
     (effect_clause | "effects" TYPE_NAME)
 ```)
+]
 
 In canonical bootstrap source, `authority` precedes `effects`, followed by `requires` and `ensures`; each clause occurs at most once. Newlines or commas separate contract conditions. `success` and `failure` are valid only in `ensures` on declarations returning `Result<T, E>`; `result` and `old` are contextual contract forms, and `old` is valid only in postconditions. A free-function authority source names a direct capability parameter, while a capability member uses `Self`. The bounded bootstrap permits one inline trait bound per free-function type parameter and one trailing `effects E` parameter; callback types use `effects E`, while the declaration row names `E` inside braces. Trait and implementation methods begin with `self: Self`, require explicit closed effects, and do not admit authority or contract clauses. Exact handlers always have an explicitly parameterized target and cannot transform an unresolved row. In expressions, a balanced `<...>` is recognized as type arguments only on a path/field-like head when it closes before `(`, `.`, or `{`; ordinary comparisons remain binary expressions. A zero-arm match is accepted semantically only for an empty finite/uninhabited closed enum and has type `Never`. Bare payloadless variants are accepted only as top-level arm patterns; nested payloadless variants require `variant()`.
 
@@ -2003,7 +2114,7 @@ Concrete effects are parameterized by capabilities, resources, or roots. Aliases
   (1.1fr, 2fr),
   ([Effect], [Meaning and notes]),
   (
-    ([`pure`], [Empty observable row; deterministic for equal inputs; total unless `diverge`.]),
+    ([`pure`], [An empty row alone does not establish totality, absence of runtime failure, determinism, or proof eligibility; predicates have additional restrictions.]),
     ([`diverge`], [May not terminate; excluded from proofs/compile-time evaluation.]),
     ([`panic`], [Abnormal termination due to violated invariant.]),
     ([`memory.allocate`], [Allocation through a specified allocator/region.]),
@@ -2094,7 +2205,7 @@ Sol is intentionally synthetic. No current language provides the complete combin
     ([Dafny], [Contracts, ghost code, automated verification, familiar imperative syntax.], [Ownership, general effects, native execution, capabilities, patch protocols.]),
     ([Rust], [Ownership, borrowing, enums, exhaustive matching, typed errors, systems ecosystem.], [Native effects/contracts, proofs, protocols, schemas, semantic interfaces.]),
     ([Koka], [Precise effect inference, algebraic handlers, effect polymorphism.], [Ownership, nominal systems types, contracts, transactions, schemas, deployment profiles.]),
-    ([Idris 2], [Dependent/quantitative types, linear resources, protocol examples.], [SMT-first routine contracts, effects, maintenance tooling, less-dependent everyday language.]),
+    ([Idris 2], [Dependent/quantitative types, linear resources, protocol examples.], [Runtime contracts with proposed progressive SMT proof, effects, maintenance tooling, less-dependent everyday language.]),
     ([SPARK], [Contracts, type predicates, absence-of-runtime-error proof, assurance discipline.], [ADTs, ownership ergonomics, effect/capability rows, modern concurrency, agent tooling.]),
     ([Pony], [Actors and reference capabilities for race-safe sharing.], [General ownership, proofs, typed errors, transactions, schemas, broader backends.]),
     ([MLIR], [Multilevel IR, textual/in-memory/serialized forms, reusable transforms.], [Language-specific stable graph with contracts, effects, ownership, and patch identity.]),
@@ -2130,7 +2241,7 @@ Sol is a proposal for a new interface between intent, implementation, verificati
 
 The most important experiment is not whether Sol compiles a benchmark. It is whether a human or model can modify a nontrivial system with less hidden context, receive bounded meaningful obligations, and demonstrate mechanically or operationally that requested behavior changed while unrelated behavior did not.
 
-#callout([RECOMMENDED NEXT ARTIFACTS], [Continue decomposing this specification into focused RFCs: Core Syntax and ADTs; Closed Effects and Capability Provenance; Exact Handlers; Ownership and Regions; Contracts and Obligation IR; Semantic Graph and Stable IDs; Structured Diagnostics; and Semantic Patch Protocol. Each RFC should identify target semantics, executable bootstrap behavior, and deliberate future work.])
+#callout([NEXT WORK], [Follow #link("TODO.md")[the sole live queue]: P2.7 -> M1 -> P2.8. M1 selects a workload and publishes interleaving; the bounded experiment does not require full IR, SMT, or patch syntax. Consult #link("docs/compiler-status.md")[the implementation snapshot] for compatibility boundaries and #link("docs/project-analysis.md")[the analysis] for findings and evaluation rationale. Future RFCs should separate target semantics, implemented behavior, and unresolved decisions without creating competing priorities.])
 
 #v(1em)
 #align(center)[#text(size: 8pt, fill: blue)[End of Design Specification v0.2]]
