@@ -2402,10 +2402,15 @@ static bool validate_semantic_sites(const SolMirMaterialization *o) {
                     && site->instruction == SOL_MIR_MATERIALIZED_NONE;
             } else if (valid && site->producer_kind
                     == SOL_MIR_MATERIALIZED_PRODUCER_PREDICATE) {
-                valid = in(o->images[site->parent].blocks, site->block)
-                    && site->instruction == SOL_MIR_MATERIALIZED_NONE
-                    && site->source_obligation != SOL_IR_NONE;
-                if (valid) {
+                bool nested = site->context < o->context_count
+                    && o->contexts[site->context].kind
+                        == SOL_MIR_PLAN_CONTEXT_REFINEMENT
+                    && o->contexts[site->context].source_block == SOL_MIR_NONE;
+                valid = site->instruction == SOL_MIR_MATERIALIZED_NONE
+                    && site->source_obligation != SOL_IR_NONE
+                    && (nested ? site->block == SOL_MIR_MATERIALIZED_NONE
+                        : in(o->images[site->parent].blocks, site->block));
+                if (valid && !nested) {
                     const SolMirMaterializedTerminator *term
                         = &o->blocks[site->block].terminator;
                     valid = (term->kind == SOL_MIR_TERM_CHECK_CONTRACT
@@ -2727,15 +2732,21 @@ bool sol_mir_materialization_validate_concrete(
         overlays += im->overlays.count;
         contexts += im->contexts.count;
     }
-    valid = valid && blocks == owner->block_count && values == owner->value_count
-        && instructions == owner->instruction_count && locals == owner->local_count
-        && places == owner->place_count && temporaries == owner->temporary_count
-        && operands == owner->construct_operand_count
-        && arguments == owner->call_argument_count && loops == owner->loop_count
-        && handlers == owner->handler_count && overlays == owner->overlay_count
-        && contexts == owner->context_count && validate_arena_closure(owner)
-        && validate_semantic_sites(owner) && validate_handlers(owner)
-        && validate_closure(owner);
-    return valid || error(diagnostics,
-        "independent concrete MIR dataflow or closure validation failed");
+    if (!valid || blocks != owner->block_count || values != owner->value_count
+        || instructions != owner->instruction_count || locals != owner->local_count
+        || places != owner->place_count || temporaries != owner->temporary_count
+        || operands != owner->construct_operand_count
+        || arguments != owner->call_argument_count || loops != owner->loop_count
+        || handlers != owner->handler_count || overlays != owner->overlay_count
+        || contexts != owner->context_count)
+        return error(diagnostics, "concrete MIR image arena partition is malformed");
+    if (!validate_arena_closure(owner))
+        return error(diagnostics, "concrete MIR arena closure is malformed");
+    if (!validate_semantic_sites(owner))
+        return error(diagnostics, "concrete MIR semantic sites are malformed");
+    if (!validate_handlers(owner))
+        return error(diagnostics, "concrete MIR handlers are malformed");
+    if (!validate_closure(owner))
+        return error(diagnostics, "concrete MIR executable closure is malformed");
+    return true;
 }

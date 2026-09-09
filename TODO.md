@@ -88,10 +88,11 @@ deferred until a concrete core API requires their smallest coherent subset.
 
 ## End-to-End and Production Track
 
-E1-E6 and P1 are complete. P2 is the next production milestone. Deferred language
-breadth is not a prerequisite for P2-P5 unless a milestone explicitly activates a
-bounded numbered-task slice. Existing numbered capability IDs remain stable; named
-slices such as `48A` account for completed portions without renumbering the backlog.
+E1-E6 and P1 through P2.6 are complete. P2 remains the current production milestone,
+with P2.7 next. Deferred language breadth is not a prerequisite for P2-P5 unless a
+milestone explicitly activates a bounded numbered-task slice. Existing numbered
+capability IDs remain stable; named slices such as `48A` account for completed portions
+without renumbering the backlog.
 
 | Done | Order | Milestone | Exit criteria | Source tasks |
 | --- | ---: | --- | --- | --- |
@@ -111,8 +112,8 @@ raw-IR, MIR-lowering, MIR-evaluator, and raw-interpreter tests retain direct int
 access for malformed IR/MIR mutation, phase-corruption assertions, differential
 evaluation, and trusted host-callback coverage.
 
-The production track is underway. P1 through P2.6b1 are complete for the frozen E6
-profile; P2.6b2 is the next open checkpoint:
+The production track is underway. P1 through P2.6 are complete for the frozen E6
+profile; P2.7 is the next open checkpoint:
 
 | Done | Order | Milestone | Dependency and numbered-backlog scope |
 | --- | ---: | --- | --- |
@@ -180,11 +181,11 @@ external dependencies, public IR, concurrency, or broader handlers.
 | [x] | P2.5 | Compute target-parameterized layouts and access maps | Define checked layout parameterized by pointer width, integer alignment, endianness, and object-size bounds; provide the initial Wasm32 descriptor; compute size/alignment/padding, field and tuple offsets, sum tag/payload locations, projected-place maps, and callable/capability handle layouts; reject overflow and incomplete layouts structurally |
 | [x] | P2.5a | Build usable target-parameterized layouts and access maps | A separate bounded owner borrows a validated representation; validates explicit pointer-4/8 target descriptors and the initial little-endian Wasm32 profile; assigns same-ID type, field, and variant layouts plus one map per materialized projection; uses checked `uint64_t` packing for uniform indirect aggregates, explicit-u32 sums, transparent nominal wrappers, and text/callable/capability objects; rejects unsupported projections, overflow, object bounds, cycles, aliases, and malformed reconstruction transactionally; and validates/renders without partial output |
 | [x] | P2.5b | Independently validate and census target layouts | A separate validator derives every type/object, source-packed field/variant, projected-place map, arena-consumption proof, and exact resource dimension without construction helpers or a second owner; it rejects transitive borrowed aliases before layout-record traversal, and the complete E6 Wasm32 layout and mutation censuses are frozen. |
-| [ ] | P2.6 | Close source-owned semantic operations | Convert constructors, projected accesses, pattern tests/bindings, propagation, checked arithmetic, contract/refinement predicates, snapshots, and handler-provider references into concrete representation-aware plans or synthetic monomorphic bodies so backend input no longer evaluates owning-IR expressions or source-owned obligations |
+| [x] | P2.6 | Close source-owned semantic operations | Convert constructors, projected accesses, pattern tests/bindings, propagation, checked arithmetic, contract/refinement predicates, snapshots, and handler-provider references into concrete representation-aware plans or synthetic monomorphic bodies so backend input no longer evaluates owning-IR expressions or source-owned obligations |
 | [x] | P2.6a | Build and independently validate concrete operation plans | A separate bounded owner borrowing one validated target layout closes projected accesses, constructors and capability inheritance, recursive pattern tests/extractions, Option/Result propagation, normalized checked arithmetic and recipe-directed equality, concrete snapshot capture, materialized callable producers, and handler bindings/root matching. Executable records use only concrete IDs, recipes, layouts, offsets, tags, and backend-neutral opcodes; source IDs are segregated authenticated provenance. P2.6a handed each contract/refinement check to P2.6b as an unresolved body envelope, and loop proof obligations remain runtime-erased. |
-| [ ] | P2.6b | Materialize predicate and import-contract bodies | Complete P2.6b1 and P2.6b2, then independently validate the combined source-independent predicate and import-contract boundary; retain runtime-erased loop proof obligations. |
+| [x] | P2.6b | Materialize predicate and import-contract bodies | P2.6b1 and P2.6b2 materialize the combined source-independent predicate and import-contract boundary and independently validate its complete executable anatomy and exact resource census; loop proof obligations remain runtime-erased. |
 | [x] | P2.6b1 | Close scalar single-block predicates and import contract ownership | Remove `UNRESOLVED_BODY`; lower only scalar/Text/Unit constants, direct unprojected contextual inputs, checked non-short-circuit unary/binary arithmetic/comparison/equality, and one Bool return. Reject every richer form transactionally. Retain exact instance/import context ownership, import-owned helper demands without fake CFG coordinates, envelope-local snapshot slots with segregated source provenance, and ordered requires/snapshots/ensures. Independently authenticate every executable field and exact arena/resource census. |
-| [ ] | P2.6b2 | Complete rich predicate CFG bodies | Add short-circuit and conditional CFG, calls with exact arguments and normal/failure edges, function/bound values, aggregate/wrapper/refined construction, recursive match/guards/bindings, immutable blocks/locals, Option/Result propagation, nested refinement body references, cycle-safe interning, and their full malformed/limit census before closing P2.6b and parent P2.6. |
+| [x] | P2.6b2 | Complete rich predicate CFG bodies | Lower short-circuit and conditional control, exact calls and function/bound values within the frozen purity and finite-closure rules, aggregate/tuple/sum/wrapper/refined construction, recursive matches/guards/bindings, immutable blocks/locals, and nested refinement body references into bounded immutable CFGs shared by instance and import contexts. Contract expression propagation remains semantically rejected under `SOL-CONTRACT-002`, while malformed propagation records are validated and rejected. Canonical interning is cycle-safe; independent reconstructive validation covers complete executable fields, SSA/CFG/type/call/body-reference/provenance invariants, and the exact resource census, with source IDs confined to authenticated provenance. |
 | [ ] | P2.7 | Freeze symbols and whole-program linkage | Derive collision-checked ASCII symbols from semantic identity and canonical instance keys; assign deterministic internal-callable, entry-export, and function-table identities; resolve every ordinary callable internally; retain only typed symbolic runtime and approved-host requirements for P3; and make ordering independent of addresses and filesystem roots |
 | [ ] | P2.8 | Freeze and census the concrete-program contract | Exhaustively validate and canonically render the complete concrete owner; add malformed-input and repeated-lowering equality tests; require the E6 entry closure to be finite and concrete, including generic/trait instances, contracts/refinements, hosted imports, and all reachable failure/cleanup paths; do not select a runtime ABI or emit Wasm |
 

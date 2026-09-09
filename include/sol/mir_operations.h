@@ -9,6 +9,10 @@ typedef size_t SolMirPredicateBlockId;
 typedef size_t SolMirPredicateInputId;
 typedef size_t SolMirPredicateValueId;
 typedef size_t SolMirPredicateInstructionId;
+typedef size_t SolMirPredicateEdgeId;
+typedef size_t SolMirPredicateOperandId;
+typedef size_t SolMirPredicatePathStepId;
+typedef size_t SolMirPredicatePatternNodeId;
 #define SOL_MIR_OPERATION_NONE SIZE_MAX
 
 typedef struct {
@@ -295,7 +299,9 @@ typedef struct {
 
 typedef enum {
     SOL_MIR_PREDICATE_VALUE_INPUT,
+    SOL_MIR_PREDICATE_VALUE_BLOCK_PARAMETER,
     SOL_MIR_PREDICATE_VALUE_INSTRUCTION,
+    SOL_MIR_PREDICATE_VALUE_TERMINATOR,
 } SolMirPredicateValueKind;
 
 typedef struct {
@@ -312,7 +318,41 @@ typedef enum {
     SOL_MIR_PREDICATE_INST_UNIT,
     SOL_MIR_PREDICATE_INST_UNARY,
     SOL_MIR_PREDICATE_INST_BINARY,
+    SOL_MIR_PREDICATE_INST_PROJECT,
+    SOL_MIR_PREDICATE_INST_FUNCTION,
+    SOL_MIR_PREDICATE_INST_BOUND_OPERATION,
+    SOL_MIR_PREDICATE_INST_CONSTRUCT,
+    SOL_MIR_PREDICATE_INST_PATTERN_TEST,
+    SOL_MIR_PREDICATE_INST_PATTERN_EXTRACT,
 } SolMirPredicateInstructionKind;
+
+typedef enum {
+    SOL_MIR_PREDICATE_CONSTRUCT_RECORD,
+    SOL_MIR_PREDICATE_CONSTRUCT_TUPLE,
+    SOL_MIR_PREDICATE_CONSTRUCT_SUM,
+    SOL_MIR_PREDICATE_CONSTRUCT_WRAPPER,
+} SolMirPredicateConstructKind;
+
+typedef struct {
+    SolMirPredicateValueId value;
+    size_t formal_ordinal;
+    SolAccessMode access;
+    size_t field_layout;
+} SolMirPredicateOperand;
+
+typedef struct {
+    SolMirRecipeId base_recipe;
+    SolMirRecipeId result_recipe;
+    size_t field_layout;
+} SolMirPredicatePathStep;
+
+typedef struct {
+    SolMirOperationPatternKind kind;
+    SolMirRecipeId recipe;
+    SolMirPlanSlice path;
+    uint32_t semantic_tag;
+    bool boolean;
+} SolMirPredicatePatternNode;
 
 typedef struct {
     SolMirPredicateInstructionKind kind;
@@ -326,19 +366,70 @@ typedef struct {
     bool boolean;
     SolMirPlanSlice bytes;
     unsigned failures;
+    SolMirPlanSlice operands;
+    SolMirPlanSlice path;
+    SolMirPlanSlice pattern;
+    SolMirPredicateConstructKind construct_kind;
+    size_t variant_layout;
+    uint32_t semantic_tag;
+    SolMirMaterializedBindingId binding;
 } SolMirPredicateInstruction;
 
-typedef enum { SOL_MIR_PREDICATE_TERM_RETURN } SolMirPredicateTerminatorKind;
+typedef enum {
+    SOL_MIR_PREDICATE_TERM_RETURN,
+    SOL_MIR_PREDICATE_TERM_JUMP,
+    SOL_MIR_PREDICATE_TERM_BRANCH,
+    SOL_MIR_PREDICATE_TERM_INVOKE,
+    SOL_MIR_PREDICATE_TERM_PROPAGATE,
+    SOL_MIR_PREDICATE_TERM_CHECK_REFINED,
+    SOL_MIR_PREDICATE_TERM_FAILURE,
+} SolMirPredicateTerminatorKind;
+
+typedef enum {
+    SOL_MIR_PREDICATE_FAILURE_CALL,
+    SOL_MIR_PREDICATE_FAILURE_PROPAGATION,
+    SOL_MIR_PREDICATE_FAILURE_REFINEMENT,
+    SOL_MIR_PREDICATE_FAILURE_NO_MATCH,
+} SolMirPredicateFailureKind;
+
 typedef struct {
     SolMirPredicateTerminatorKind kind;
     SolMirPredicateValueId value;
+    SolMirPredicateValueId condition;
+    SolMirPredicateValueId callee;
+    SolMirPredicateValueId receiver;
+    SolAccessMode receiver_access;
+    SolMirPlanSlice arguments;
+    SolIrCallKind call_kind;
+    SolMirMaterializedBindingId binding;
+    SolMirMaterializedEffectRowId effects;
+    SolMirPredicateValueId result;
+    SolMirPredicateEdgeId edge;
+    SolMirPredicateEdgeId true_edge;
+    SolMirPredicateEdgeId false_edge;
+    SolMirPredicateEdgeId normal_edge;
+    SolMirPredicateEdgeId failure_edge;
+    SolIrPropagationKind propagation_kind;
+    size_t success_variant_layout;
+    size_t residual_variant_layout;
+    size_t success_field_layout;
+    SolMirPredicateBodyId nested_body;
+    SolMirRecipeId result_recipe;
+    SolMirPredicateFailureKind failure_kind;
 } SolMirPredicateTerminator;
 
 typedef struct {
     SolMirPredicateBodyId body;
+    SolMirPlanSlice parameters;
     SolMirPlanSlice instructions;
     SolMirPredicateTerminator terminator;
 } SolMirPredicateBlock;
+
+typedef struct {
+    SolMirPredicateBlockId source;
+    SolMirPredicateBlockId target;
+    SolMirPlanSlice arguments;
+} SolMirPredicateEdge;
 
 typedef enum {
     SOL_MIR_PREDICATE_OWNER_INSTANCE,
@@ -357,6 +448,7 @@ typedef struct {
     SolMirPlanSlice values;
     SolMirPredicateBlockId entry;
     SolMirRecipeId output_recipe;
+    SolMirRecipeId refinement_self_recipe;
 } SolMirPredicateBody;
 
 typedef struct {
@@ -395,6 +487,7 @@ typedef enum {
     SOL_MIR_OPERATION_PROVENANCE_HANDLER,
     SOL_MIR_OPERATION_PROVENANCE_CALLABLE,
     SOL_MIR_OPERATION_PROVENANCE_IMPORT_SNAPSHOT,
+    SOL_MIR_OPERATION_PROVENANCE_PREDICATE_BODY,
 } SolMirOperationProvenanceKind;
 
 typedef struct {
@@ -406,6 +499,7 @@ typedef struct {
     size_t source_variant;
     size_t source_obligation;
     size_t source_snapshot;
+    size_t source_definition;
 } SolMirOperationProvenance;
 
 typedef struct {
@@ -419,6 +513,9 @@ typedef struct {
     size_t max_predicates, max_recipe_ids, max_roots, max_provenance;
     size_t max_predicate_bodies, max_predicate_blocks, max_predicate_inputs;
     size_t max_predicate_values, max_predicate_instructions;
+    size_t max_predicate_edges, max_predicate_edge_values;
+    size_t max_predicate_operands, max_predicate_path_steps;
+    size_t max_predicate_pattern_nodes;
     size_t max_import_envelopes, max_import_contract_references;
     size_t max_import_snapshots;
     size_t max_literal_bytes;
@@ -434,6 +531,8 @@ typedef struct {
     size_t handlers, predicates, recipe_ids, roots, provenance;
     size_t predicate_bodies, predicate_blocks, predicate_inputs;
     size_t predicate_values, predicate_instructions;
+    size_t predicate_edges, predicate_edge_values, predicate_operands;
+    size_t predicate_path_steps, predicate_pattern_nodes;
     size_t import_envelopes, import_contract_references, literal_bytes;
     size_t import_snapshots;
     size_t owned_bytes, build_scratch_bytes, build_work;
@@ -462,6 +561,11 @@ typedef struct {
     X(predicate_inputs, SolMirPredicateInput, predicate_input) \
     X(predicate_values, SolMirPredicateValue, predicate_value) \
     X(predicate_instructions, SolMirPredicateInstruction, predicate_instruction) \
+    X(predicate_edges, SolMirPredicateEdge, predicate_edge) \
+    X(predicate_edge_values, SolMirPredicateValueId, predicate_edge_value) \
+    X(predicate_operands, SolMirPredicateOperand, predicate_operand) \
+    X(predicate_path_steps, SolMirPredicatePathStep, predicate_path_step) \
+    X(predicate_pattern_nodes, SolMirPredicatePatternNode, predicate_pattern_node) \
     X(import_envelopes, SolMirImportContractEnvelope, import_envelope) \
     X(import_contract_references, SolMirPredicateBodyId, import_contract_reference) \
     X(import_snapshots, SolMirImportSnapshotCapture, import_snapshot) \

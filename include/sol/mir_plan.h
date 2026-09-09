@@ -119,6 +119,8 @@ typedef struct {
     SolMirProgramSource source;
     SolMirPlanTargetKind target_kind;
     SolMirPlanImportId import;
+    /* Concrete nominal type, including arguments, for refinement contexts. */
+    SolMirPlanTypeId refinement_type;
 } SolMirPlanContext;
 
 typedef struct {
