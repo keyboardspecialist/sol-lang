@@ -239,7 +239,7 @@ external dependencies, public IR, concurrency, or broader handlers.
 | [ ] | P5.5 | Freeze reproducibility and release acceptance | Require byte-identical artifacts across repeated builds, checkout/output roots, mtimes, locale/timezone, discovery order, and supported CI hosts using pinned dependencies; verify package-relative metadata, stable import/export order, both profiles, clean-tree rebuilding, warning-clean tests, and ASan/UBSan; complete task 49C and P5 |
 
 Tasks 28-42, 44, 46, the allocation/resource/FFI extensions of task 48, the
-remaining verification scope of task 50, and tasks 51-61 remain deferred except
+remaining verification scope of task 50, and tasks 51-62 remain deferred except
 for the proposed M2-M4E slices below or a separately approved workload-gated slice.
 Tasks 43 and 47-50 retain explicitly partial production scope below; task 45 is
 complete through P1. P3.W1 is a bounded integration experiment, not completion of
@@ -254,16 +254,24 @@ quietly adding those systems as prerequisites. The Execution Cursor governs orde
 
 | Done | Order | Experiment | Bounded exit criteria |
 | --- | --- | --- | --- |
-| [ ] | M1 | First-user workload and experiment charter | Select one capability-restricted hosted business-logic/validation workload, user, and host boundary. Protect a baseline and held-out tasks/tests; publish a timebox, metrics, stop/go thresholds, existing-projection sufficiency and gaps, and subsequent cursor/interleaving. If infeasible, record the blocker and continue P2.8. |
-| [ ] | M2 | Declaration-centered context packets (58 slice) | After M1 feasibility and P2.8, produce bounded deterministic packets of source, signatures, effects, contracts, and available references. Include source snapshot hash, compiler/schema/options and selection metadata, and explicit omissions. Unavailable is not empty; use existing IDs only within their supported scope. Inspection bytes are not a guaranteed semantic cache key. |
-| [ ] | M3 | Conservative checked-snapshot deltas (57 slice) | After M2, report declaration, signature, effect, and contract edits between checked snapshots; validate stable IDs and reject stale, ambiguous, or unsupported comparisons. Keep body edits and unknowns visible: a changed predicate is not established weakening, and an unchanged interface does not establish preserved behavior. |
-| [ ] | M4 | Ordinary-edit validation and approval loop (56 slice) | After M2/M3, exercise edit/check/test/delta/human approval against the protected baseline. Tests and policy cannot silently weaken; authority or contract changes require explicit approval. This is a validation/approval slice, not full patch language, architectural auto-repair, or proof of correctness. |
+| [ ] | M1 | First-user workload and experiment charter | Select one capability-restricted hosted business-logic/validation workload, user, and host boundary. Publish a protected external change contract/intent and threat model; protect the base snapshot, held-out tasks/tests, acceptance policy, and verifier. Separate builder authority from verifier control and name an independent adjudicator for `approve`, `reject`, or `escalate`. Publish a timebox, stop/go thresholds, projection sufficiency/gaps, subsequent interleaving, and metrics including false accepts/rejects, implementation-view request rate, and decision time. If infeasible, record the blocker and continue P2.8. |
+| [ ] | M2 | Declaration-centered context packets (58 slice) | After M1 feasibility and P2.8, produce bounded deterministic packets of source, signatures, effects, contracts, known available callers/callees, and checked lexical authority roots. Include source snapshot hash, compiler/schema/options, selection metadata, provenance, inclusion reasons, heuristic candidate test associations, omissions, and explicit unknowns. Unavailable is not empty; use existing IDs only within their supported scope. Do not claim complete reachability, global minimality, authoritative test relevance, or business authorization. Inspection bytes are not a guaranteed semantic cache key. |
+| [ ] | M3 | Conservative checked-snapshot deltas (57 slice) | After M2, report declaration, signature, effect, contract, known call-edge, and checked lexical-authority edits between checked snapshots; validate stable IDs and reject stale, ambiguous, or unsupported comparisons. Report contract direction only for a precisely defined and tested structural subset; otherwise report changed or unknown. Keep body edits and unknowns visible: a changed predicate is not established weakening, and an unchanged interface does not establish preserved behavior. |
+| [ ] | M4 | Ordinary-edit validation and approval loop (56 and bounded 62 slices) | After M2/M3, exercise ordinary edit/check/test/delta/independent human adjudication against the protected change intent, base snapshot, tests, policy, and verifier. The builder cannot modify those inputs. An independently controlled verifier evaluates checked base/candidate snapshots and emits the bounded unsigned local task-62 evidence record defined below. Authority or contract changes require explicit adjudication. This is not patch syntax, architectural auto-repair, or proof of correctness. |
 | [ ] | M4E | Optional basic editor slice (55 slice) | Only after M1/M2 establish projection feasibility, timebox diagnostics, navigation, and packet presentation. Not full LSP and not a prerequisite for M5. |
-| [ ] | M5 | Held-out workflow comparison | After M4, compare against source-only on protected held-out tasks with the same compiler/test access and, where relevant, model and budget. Measure correctness, regressions, review time, context size, iterations, diagnostic usefulness, and false confidence. Report negative/inconclusive results as well as gains; decide continue, narrow, or stop. |
+| [ ] | M5 | Held-out workflow comparison | After M4, compare against source-only on protected held-out tasks with the same compiler/test access and, where relevant, model and budget. The independent adjudicator emits `approve`, `reject`, or `escalate`; on escalation, the adjudicator may inspect precisely scoped additional source and records its reason and scope rather than silently granting the builder broader context. Measure decision quality, false accepts/rejects, implementation-view request rate, decision time, correctness, regressions, context size, iterations, and diagnostic usefulness. Protected tests are evidence, not complete ground truth. Report negative/inconclusive results and decide continue, narrow, or stop. |
 
-M2 maps to 58, M3 to 57, M4 only to the validation/approval slice of 56, and M4E
-to 55. These proposals do not earn `[~]` status; full scopes of 54-58 remain in
-the numbered backlog. No M1 charter or tool feature is implemented by this refresh.
+M2 maps to 58, M3 to 57, M4 to the validation/approval slice of 56 and a bounded
+unsigned local evidence-record slice of 62, and M4E to 55. For M4, the independently
+controlled verifier records base and candidate source identities and
+compiler/schema/options, protected change-intent/baseline/test/policy/verifier identities, the M3
+semantic delta, evaluations and results, failures or incomplete states, omissions,
+and explicit unknowns. The deterministic record is content-addressed but unsigned:
+hashing supplies integrity and addressing, not producer authentication or deployment
+provenance. These proposals do not earn `[~]` status; full scopes of 54-58 and 62
+remain in the numbered backlog. No M1 charter or tool feature is implemented by this
+refresh. The M1 protected external change contract is an experiment artifact, not
+the future Sol intent or semantic-patch syntax proposed by tasks 54/56.
 
 ## Workload-Gated Decisions
 
@@ -279,11 +287,17 @@ retain the existing behavior and deferrals.
 | Developer workflow | Measure editor, latency, installation, and debugging friction; use M4E or another explicit slice only where justified, not full LSP by default. |
 | Evaluation and contract semantics | Preserve current formal-parameter evaluation order for named arguments. Pure does not mean total, and an accepted typed contract is not a proof. Any alternatives require a separate decision and tests. |
 | Formatter policy (53) | Reconsider whether broader mandatory sorting is warranted; this refresh neither enacts a new sorting policy nor permits semantic reordering. |
+| Fine-grained semantic anchors | Consider member/local/expression persistent IDs only if M2/M3 show that supported top-level identities and checked provenance cannot identify required context or deltas. First define stability, stale-target rejection, and migration costs; otherwise defer fine-grained persistent IDs. |
+| Executable architecture policy | Consider a machine-executable policy only after M4/M5 identify repeated decisions that cannot be represented by the protected external policy and independent adjudication. First define policy ownership, versioning, conflict handling, and failure behavior; otherwise defer an architecture DSL. |
+| Automated risk lanes and signing | Consider calibrated automatic lanes only after M5 provides enough adjudicated approve/reject/escalate outcomes to measure false accepts/rejects by class. Consider signatures or deployment attestations only after task 62 has a stable envelope plus an explicit identity, key, trust, and deployment-provenance model; otherwise retain unsigned local records and human adjudication. |
+| Runtime effect/outcome evidence | Consider execution evidence only after P5 provides reproducible artifacts, stable runtime event identities, and interpreter/Wasm comparison, followed by explicit privacy, retention, sampling, and budget policy. Otherwise defer production telemetry and do not infer runtime outcomes from static effects. |
 
 General handlers, additional backends or a VM, workflows/transactions, broad
 numerics and units, real-time features, and reflection remain deferred until
 concrete evidence justifies a bounded decision. Future alternatives are not
-implemented language guarantees.
+implemented language guarantees. Full semantic patch syntax, an architecture DSL,
+generalized risk scoring, signed or deployment attestations, fine-grained persistent
+IDs, production telemetry, and proof remain outside the bounded M experiment.
 
 ## Numbered Capability Backlog
 
@@ -357,6 +371,7 @@ or renumber stable capability IDs.
 | [ ] | 59 | Stage structured async/concurrency, `Send`/`Share`, cancellation, actors/channels, protocol-state patterns and `emit`, transactions, and workflows | 5 | 5 | Closures (28-29), resources (36-38), completed P1/task 45 MIR, and P3 runtime ABI |
 | [ ] | 60 | Stage typed derives, sandboxed build transforms, and opt-in reflection without unrestricted macros | 3 | 5 | Package sandboxing and public IR |
 | [ ] | 61 | Generalize handlers after defining ownership across suspension and resumptions, multiple operations, dynamic authority matching, and row transformation | 5 | 5 | Effect polymorphism, concurrency, and runtime |
+| [ ] | 62 | Define a versioned canonical change-evidence envelope and later optional attestations. The envelope references or embeds, and records execution of, outputs from tasks 54, 56, 57, 58 and later P5; it must not implement a second semantic graph, delta engine, context packet, patch format, or reproducible-build system. M4 activates only the unsigned deterministic content-addressed local evidence-record slice with independently controlled verification; signatures, producer authentication, and deployment provenance remain later gated scope. | 4 | 4 | M2/M3 and protected M1 inputs for the M4 slice; tasks 54/56-58 and P5 for the full envelope |
 
 ## Milestone Discipline
 

@@ -191,11 +191,13 @@ enter only after the relevant P3.2-P3.4 conventions are tested. It informs the
 backend choice; it does not complete P4, component support, E6 Wasm execution, or
 build tooling. One coordinator maintains the sole next-overall cursor in TODO.
 
-The M track uses existing inspection, interpreter execution, ordinary edits, and
-protected tests/approval. It does not wait for full public IR, SMT, or patch syntax.
-Its evaluation must report negative and inconclusive results as well as gains.
-Broader language work stays deferred unless a separately approved, workload-gated
-slice demonstrates a need.
+The M track uses a protected external experiment contract, existing inspection,
+ordinary edits, independent verification, and `approve`/`reject`/`escalate`
+adjudication. Its bounded local evidence record is deterministic, unsigned, and
+content-addressed: hashing supports integrity and addressing, not producer
+authentication or deployment provenance. It does not wait for full public IR, SMT,
+or patch syntax, and it must report negative and inconclusive results as well as
+gains. Detailed gates and task boundaries remain solely in TODO.
 
 ## Documentation
 
@@ -204,7 +206,8 @@ slice demonstrates a need.
 | [TODO](TODO.md) | Sole live work status, dependencies, acceptance criteria, and execution cursor |
 | [Compiler status](docs/compiler-status.md) | Detailed `6ec4ba9` snapshot: APIs, packages, ownership, effects, inspection, MIR, materialization, representation, layout, operations, and limitations |
 | [Project analysis](docs/project-analysis.md) | Dated document-based assessment and proposed maintenance-workflow evaluation, not a fresh implementation audit |
-| [Design Specification v0.2 PDF](Sol_Programming_Language_Design_Specification_v0.2.pdf) / [Typst source](docs/specification.typ) | September 9, 2026 revision, implementation baseline `6ec4ba9` through P2.6; target-language design with explicit implementation boundaries, not all examples executable |
+| [AI-native workflow review notes](sol_ai_native_workflow_notes.pdf) | Advisory external review input incorporated into the live roadmap; not a status, execution-order, specification, or implementation authority |
+| [Design Specification v0.2 PDF](Sol_Programming_Language_Design_Specification_v0.2.pdf) / [Typst source](docs/specification.typ) | September 25, 2026 documentation revision; September 9, 2026 implementation baseline `6ec4ba9` through P2.6; target-language design with explicit implementation boundaries, not all examples executable |
 | [Current-State Audit PDF](Sol_Current_State_Audit.pdf) / [Typst source](docs/current-state-audit.typ) | September 9, 2026 document-based assessment of `6ec4ba9` through P2.6, replacing the August 25 assessment; not a fresh full-suite test report |
 
 Both documents' authoritative editable sources are Typst; generated PDFs are

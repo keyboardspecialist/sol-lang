@@ -5,6 +5,23 @@ best suited for it, and preserve a written handoff between agents.
 
 ## Agent Roles
 
+### Luna: Search and Discovery
+
+Spawn Luna for simple, read-only searches when the target and scope are known:
+
+- Locating files, symbols, tests, fixtures, or configuration
+- Finding references, call sites, definitions, and naming patterns
+- Identifying the small set of files relevant to a bounded question
+- Reporting existing commands, conventions, or implementations with file and
+  line references
+
+Give Luna the exact search target, repository scope, desired thoroughness, and
+expected result format. Luna must not edit files, make design decisions, or
+infer behavior beyond the evidence it finds. It should return concise findings
+with paths and line references, note searches that produced no results, and
+escalate to Sol High when the question requires architectural interpretation,
+root-cause analysis, or an expanded investigation.
+
 ### Sol High: Planning
 
 Spawn Sol High to investigate, make design decisions, and define coding tasks:
@@ -85,16 +102,18 @@ when documentation requires unresolved architectural or product decisions.
 
 ## Routing Rules
 
-1. Use Sol High to analyze and document every non-trivial coding task before
+1. Use Luna for bounded search and discovery when no design judgment or code
+   modification is required.
+2. Use Sol High to analyze and document every non-trivial coding task before
    implementation.
-2. Give the completed task brief to Terra High for implementation.
-3. Use a separate Sol agent to review every Terra High implementation.
-4. Return review findings to Terra High for correction, then review again.
-5. Route documentation and PDF work to Terra after the underlying design or
+3. Give the completed task brief to Terra High for implementation.
+4. Use a separate Sol agent to review every Terra High implementation.
+5. Return review findings to Terra High for correction, then review again.
+6. Route documentation and PDF work to Terra after the underlying design or
    behavior is approved.
-6. Keep dependent work sequential. Parallelize only tasks with independent file
+7. Keep dependent work sequential. Parallelize only tasks with independent file
    scopes and no unresolved shared decisions.
-7. Do not spawn an agent for trivial work when coordination would cost more than
+8. Do not spawn an agent for trivial work when coordination would cost more than
    completing it directly.
 
 ## Delegation Contract
@@ -102,7 +121,7 @@ when documentation requires unresolved architectural or product decisions.
 Every spawned agent must receive:
 
 - A single, explicit objective
-- Its assigned role: planning, implementation, review, or documentation
+- Its assigned role: discovery, planning, implementation, review, or documentation
 - The exact scope and relevant file paths
 - Known constraints and behavior that must remain unchanged
 - The expected deliverable
@@ -116,10 +135,11 @@ running final verification.
 
 ## Default Workflow
 
-1. Sol High investigates and writes the task brief.
-2. Terra High implements the brief and runs focused validation.
-3. Sol reviews the diff, tests, and validation results.
-4. Terra High resolves findings and requests another review.
-5. Terra updates documentation and generated PDFs when required.
-6. The coordinating agent runs final relevant verification and reports the
+1. Luna performs bounded discovery when it can reduce the planning search space.
+2. Sol High investigates and writes the task brief.
+3. Terra High implements the brief and runs focused validation.
+4. Sol reviews the diff, tests, and validation results.
+5. Terra High resolves findings and requests another review.
+6. Terra updates documentation and generated PDFs when required.
+7. The coordinating agent runs final relevant verification and reports the
    outcome.

@@ -11,8 +11,8 @@
 #set document(
   title: "Sol Programming Language - Language and Toolchain Design Specification v0.2",
   author: "The Sol Project",
-  date: datetime(year: 2026, month: 9, day: 9, hour: 12, minute: 0, second: 0),
-  keywords: ("Sol", "programming language", "design specification", "effects", "contracts", "6ec4ba9", "P2.6", "September 2026 revision"),
+  date: datetime(year: 2026, month: 9, day: 25, hour: 12, minute: 0, second: 0),
+  keywords: ("Sol", "programming language", "design specification", "effects", "contracts", "6ec4ba9", "P2.6", "September 25, 2026 documentation revision"),
 )
 #set page(
   paper: "us-letter",
@@ -36,7 +36,7 @@
       set text(size: 7.5pt, fill: blue)
       grid(
         columns: (1fr, auto),
-        [v0.2 / 6ec4ba9 / P2.6 - September 9, 2026],
+        [v0.2 / Doc revision: September 25, 2026 / Baseline: 6ec4ba9 (September 9, 2026)],
         [#counter(page).display("1")],
       )
     }
@@ -124,9 +124,9 @@
     #text(size: 14pt, weight: "bold", fill: navy)[Concept Design v0.2]
   ]
   #v(0.25in)
-  #text(size: 12pt)[September 9, 2026]
+  #text(size: 12pt)[Documentation revision: September 25, 2026]
   #linebreak()
-  #text(size: 9pt, fill: blue)[Implementation baseline 6ec4ba9 / through P2.6]
+  #text(size: 9pt, fill: blue)[Implementation baseline: September 9, 2026 / 6ec4ba9 / through P2.6]
   #v(0.6in)
   #text(size: 10pt, weight: "bold", fill: blue)[A LANGUAGE OPTIMIZED FOR HUMAN-AI CO-DEVELOPMENT]
   #v(1fr)
@@ -147,10 +147,10 @@
   ([Field], [Value]),
   (
     ([Document], [Sol Programming Language - Language and Toolchain Design Specification]),
-    ([Version], [0.2 Concept Draft; September 2026 documentation revision]),
-    ([Date], [September 9, 2026]),
+    ([Version], [0.2 Concept Draft; September 25, 2026 documentation revision]),
+    ([Date], [Documentation revision: September 25, 2026]),
     ([Status], [Concept Draft with Executable-Core Decisions]),
-    ([Baseline], [Implementation `6ec4ba9`; E1-E6, P1, P2.1-P2.6 complete; P2 remains open.]),
+    ([Baseline], [September 9, 2026 implementation baseline `6ec4ba9`; E1-E6, P1, P2.1-P2.6 complete; P2 remains open.]),
     ([Primary objective], [Define a language whose semantics, tooling, and source representation optimize safe maintenance by humans and AI systems.]),
     ([Normative vocabulary], [MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY distinguish required, recommended, and optional behavior.]),
     ([Authority], [`docs/specification.typ` is the editable manual source. The root v0.2 PDF is generated; `TODO.md` alone owns live status and order.]),
@@ -165,6 +165,7 @@ Current references, linked relative to the root PDF:
 - #link("README.md")[README.md: project orientation]
 - #link("docs/compiler-status.md")[docs/compiler-status.md: detailed implementation snapshot]
 - #link("docs/project-analysis.md")[docs/project-analysis.md: dated findings and experiment rationale]
+- #link("sol_ai_native_workflow_notes.pdf")[sol_ai_native_workflow_notes.pdf: advisory review input incorporated into the September 25, 2026 documentation revision; not status, implementation-baseline, or design authority]
 
 The current #link("Sol_Current_State_Audit.pdf")[Current-State Audit] is a September 9, 2026 dated assessment of the same `6ec4ba9` baseline, not a live status authority. Its August 25 version is retained in git history; the v0.1 manual remains a historical artifact.
 
@@ -1366,7 +1367,7 @@ AI assistance is a consumer of compiler APIs, not a privileged bypass. A model p
 
 Text remains human-readable source of record, but edits can target declarations, parameters, effects, control-flow nodes, contracts, and schema fields by stable identity. Formatting materializes canonical source.
 
-#status("TARGET DESIGN", [The full intent/patch/graph workflow below is a long-term proposal. The smaller M experiment starts with selected existing inspection projections, source excerpts, ordinary edits, interpreter checks, and human approval, without waiting for full public IR or SMT. No M feature is built by this refresh. Stable top-level IDs have package-local scope; dense IDs are snapshot-local and inspection bytes are not guaranteed semantic cache keys. Unchanged signatures/effects do not establish unchanged behavior.])
+#status("TARGET DESIGN", [The full intent/patch/graph workflow below is a long-term proposal. The smaller M experiment starts with a protected external change contract/intent, selected existing inspection projections, source excerpts, ordinary edits, independent verification, and human adjudication, without waiting for full public IR or SMT. That external experiment artifact is not Sol intent-block or semantic-patch syntax. No M feature is built by this refresh. Stable top-level IDs have package-local scope; dense IDs are snapshot-local and inspection bytes are not guaranteed semantic cache keys. Unchanged signatures/effects do not establish unchanged behavior.])
 
 == Intent Blocks
 
@@ -1464,6 +1465,31 @@ A tool requests a bounded bundle of declarations, signatures, intent, contracts,
 - Omitted context is recorded so unsupported assumptions are visible.
 - Generated edits cite subjects/base hashes for safe replay or rejection.
 
+For the bounded M2 proposal, callers/callees mean only known available checked edges,
+authority means checked lexical authority roots, and candidate test associations are
+heuristics. Packets record provenance, inclusion reasons, omissions, and explicit
+unknowns; they do not claim complete reachability, global minimality, authoritative
+test relevance, or business authorization. M3 likewise reports only conservative
+known call-edge and authority deltas. It assigns stronger/weaker contract direction
+only to a precisely supported structural subset and otherwise reports changed or
+unknown.
+
+== Change-Evidence Records
+
+The proposed canonical change-evidence envelope is a versioned container around
+existing semantic graph, patch, delta, context, and later reproducible-build outputs.
+It references or embeds those outputs and records their execution; it is not a second
+semantic graph, delta engine, context packet, patch format, or build system.
+
+The bounded M4 slice is narrower: an independently controlled verifier evaluates
+checked base and candidate snapshots against protected external change intent,
+baseline, tests, policy, and verifier inputs that the builder cannot modify. It emits
+an unsigned deterministic content-addressed local record containing source identities,
+compiler/schema/options, protected-input identities, the semantic delta, evaluations
+and results, failures or incomplete states, omissions, and explicit unknowns. Hashing
+provides integrity and addressing, not producer authentication or deployment
+provenance. Optional signatures and deployment attestations remain future gated work.
+
 == Trust and Approval Model
 
 Trust does not depend on human versus AI authorship. It derives from review policy, verified properties, tests, unsafe assumptions, provenance, and signers. Policy may require approval for new capabilities, weakened contracts, unsafe blocks, schema changes, or resource changes.
@@ -1488,7 +1514,7 @@ function billing.transfer.transfer {
 }
 ```)
 
-#status("FUTURE WORK", [Intent declarations, patches, context bundles, change reports, policy gates, and full canonical serialized Sol IR are target design. Selected versioned syntax/HIR/type/effect/contract/diagnostic projections are implemented, but exclude raw owning IR, MIR, deserialization, complete fact coverage, and cache-key suitability. Small proposed tools can use these projections with explicit omissions rather than making the full graph a prerequisite.])
+#status("FUTURE WORK", [Intent declarations, patches, context bundles, change reports, change-evidence envelopes/attestations, policy gates, and full canonical serialized Sol IR are target design. Selected versioned syntax/HIR/type/effect/contract/diagnostic projections are implemented, but exclude raw owning IR, MIR, deserialization, complete fact coverage, and cache-key suitability. Small proposed tools can use these projections with explicit omissions rather than making the full graph a prerequisite.])
 
 = Compiler Architecture, Toolchain, and Developer Experience
 
@@ -1782,7 +1808,7 @@ This snapshot mirrors #link("TODO.md")[the live ledger], not a second queue. Com
     ([P3 / open], [Target-independent call/result/failure ABI, allocation and owned operations, panic/cleanup, exact trusted hosting and handlers, then validated runtime-lowered closure. P3.W1 is a gated timeboxed integration experiment.]),
     ([P4 / open], [Select/pin an established Wasm toolchain; emit the frozen represented CFG; implement checks, cleanup, exact host adapter, and E6 Wasm execution. No implicit Component Model scope.]),
     ([P5 / open], [Immutable build API/artifacts, deterministic `sol build` writes, artifact execution, interpreter/Wasm differential tests, and byte-identical release/reproducibility acceptance.]),
-    ([M1-M5 / proposed], [Workload charter, bounded context packets, conservative deltas, ordinary-edit validation/approval, and protected held-out evaluation. Optional M4E is only a basic editor slice. No M feature is implemented.]),
+    ([M1-M5 / proposed], [Protected external experiment contract and threat model, bounded context packets, conservative deltas, independently verified local evidence records, approve/reject/escalate adjudication, and protected held-out evaluation. Optional M4E is only a basic editor slice. No M feature is implemented.]),
     ([Deferred breadth], [Proof/SMT, schemas, full public IR and patch language, richer libraries/numerics, resources, concurrency/workflows, general handlers, reflection, real-time profiles, native/VM targets, and ecosystem/stabilization work require explicit workload gates.]),
   ),
 )
@@ -1795,16 +1821,28 @@ Distinguish the minimum viable *experiment* from the long-term full-feature targ
   (0.65fr, 2.65fr),
   ([Proposal], [Gate and evidence]),
   (
-    ([M1], [After P2.7, select one capability-restricted hosted business-logic/validation workload, user, host boundary, protected baseline, held-out tasks/tests, timebox, metrics, stop/go thresholds, projection gaps, and subsequent interleaving. If infeasible, record the blocker and continue P2.8.]),
-    ([M2], [After M1 feasibility and P2.8, build declaration-centered packets from source, signatures, effects, contracts, and available references. Record snapshot hash, compiler/schema/options/selection metadata and omissions; unavailable is not empty. Task 58 slice only.]),
-    ([M3], [After M2, compare checked snapshots conservatively, validate identities/base hashes, reject stale or ambiguous comparisons, and expose body edits and unknowns. A changed predicate does not establish weakening. Task 57 slice only.]),
-    ([M4], [After M2/M3, exercise ordinary edit/check/test/delta/human approval with protected tests and policy. Contract or authority changes require explicit approval; no silent repair weakening. Only task 56's validation/approval slice, not patch syntax or proof of correctness.]),
+    ([M1], [After P2.7, select one capability-restricted hosted workload, user, and host boundary. Publish a protected external change contract/intent and threat model; protect the base, held-out tasks/tests, policy, and verifier; split builder/verifier authority; and define independent approve/reject/escalate adjudication. Set timebox, stop/go thresholds, projection gaps, interleaving, false-accept/reject, implementation-view request-rate, and decision-time metrics. If infeasible, record the blocker and continue P2.8.]),
+    ([M2], [After M1 feasibility and P2.8, build declaration-centered packets with known available callers/callees, checked lexical authority roots, heuristic candidate tests, provenance, inclusion reasons, omissions, and explicit unknowns. Do not claim complete reachability, global minimality, authoritative test relevance, or business authorization. Task 58 slice only.]),
+    ([M3], [After M2, compare checked snapshots conservatively, including known call-edge and authority deltas; validate identities/base hashes and reject stale or ambiguous comparisons. Assign contract direction only within a precisely supported structural subset; otherwise report changed or unknown. Task 57 slice only.]),
+    ([M4], [After M2/M3, a builder unable to modify protected intent, base, tests, policy, or verifier makes an ordinary edit. An independently controlled verifier checks base/candidate snapshots and emits the unsigned deterministic local evidence record described above for independent adjudication. This is bounded task 56 validation/approval plus task 62 evidence, not patch syntax or proof.]),
     ([M4E], [Optional timeboxed diagnostics/navigation/packet presentation after M1/M2 projection feasibility; not full LSP and not an M5 prerequisite. Task 55 slice only.]),
-    ([M5], [After M4, compare against source-only work on protected held-out tasks with equal compiler/test access and matched model/budgets where relevant. Measure correctness, regressions, review time, context, iterations, diagnostic usefulness, and false confidence. Report negative/inconclusive results and decide continue, narrow, or stop.]),
+    ([M5], [After M4, compare against source-only work on protected held-out tasks with matched access and budgets. The adjudicator records approve/reject/escalate; on escalation, that adjudicator may inspect precisely scoped additional source and records the reason and scope rather than expanding builder context. Measure decision quality, false accepts/rejects, implementation-view request rate, decision time, correctness, regressions, context, iterations, and diagnostic usefulness. Protected tests are evidence, not complete ground truth.]),
   ),
 )
 
 After P2.8 these experiments may run independently alongside P3, but their internal dependencies still apply. No charter or tool is delivered by this refresh. Recoverable refinement validation/projection, small data facilities, test ergonomics, editor/latency/installation improvements, and finer effect families require separately bounded decisions driven by workload evidence.
+
+Fine-grained semantic anchors remain deferred unless M2/M3 show that supported
+top-level identities and provenance are inadequate, after which stability and
+#box[stale-target] behavior require a separate design. Executable architecture policy remains
+deferred unless M4/M5 expose repeated decisions that protected external policy cannot
+represent. Automated risk lanes require enough adjudicated M5 outcomes to calibrate
+false accepts/rejects; signing additionally requires a stable task-62 envelope and an
+explicit identity/key/trust/provenance model. Runtime effect/outcome evidence waits
+for P5 reproducible artifacts and stable event identities plus privacy, retention,
+sampling, and budget policy. Full semantic patch syntax, an architecture DSL,
+generalized risk scoring, signed/deployment attestations, fine-grained persistent IDs,
+production telemetry, and proof are outside the bounded experiment.
 
 P3.W1 is timeboxed after P3.1 has tested call/result/failure conventions: record candidate tool versions and validate/execute a minimal scalar module to expose ABI/tool mismatches. Allocation, cleanup, or host imports enter only after relevant P3.2-P3.4 conventions are tested. This informs, but does not complete, toolchain selection, P4 backend integration, component support, E6 Wasm execution, or build tooling.
 
