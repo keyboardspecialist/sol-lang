@@ -613,7 +613,9 @@ SolMirRepresentationBuildOutcome sol_mir_representation_build(
         return SOL_MIR_REPRESENTATION_BUILD_INVALID_ARGUMENT;
     }
     if (!sol_mir_materialization_validate(request->materialization, diagnostics))
-        return SOL_MIR_REPRESENTATION_BUILD_INVALID_MATERIALIZATION;
+        return diagnostics->allocation_failed
+            ? SOL_MIR_REPRESENTATION_BUILD_ALLOCATION_FAILED
+            : SOL_MIR_REPRESENTATION_BUILD_INVALID_MATERIALIZATION;
     SolMirRepresentation scratch;
     sol_mir_representation_init(&scratch);
     scratch.materialization = request->materialization;

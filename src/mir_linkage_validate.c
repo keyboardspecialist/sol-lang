@@ -1936,9 +1936,10 @@ static bool validate(const SolMirLinkage *linkage, SolDiagnostics *diagnostics,
 }
 
 bool sol_mir_linkage_internal_validation_requirements(
-    const SolMirLinkage *linkage, size_t *work, size_t *scratch) {
+    const SolMirLinkage *linkage, size_t *work, size_t *scratch,
+    SolDiagnostics *diagnostics) {
     return work != NULL && scratch != NULL
-        && validate(linkage, NULL, false, work, scratch);
+        && validate(linkage, diagnostics, false, work, scratch);
 }
 
 bool sol_mir_linkage_validate(const SolMirLinkage *linkage,

@@ -57,6 +57,12 @@ static bool mir_error(SolDiagnostics *diagnostics, SolSpan span,
     return false;
 }
 
+static bool mir_allocation_error(SolDiagnostics *diagnostics, SolSpan span,
+    const char *message) {
+    if (diagnostics != NULL) diagnostics->allocation_failed = true;
+    return mir_error(diagnostics, span, message);
+}
+
 static bool mir_unsupported(MirLowerer *lowerer, SolSpan span,
     const char *message) {
     if (!lowerer->unsupported && !lowerer->failed && lowerer->diagnostics != NULL) {
@@ -3276,7 +3282,7 @@ static bool mir_validate_arena_ownership(const SolMir *mir,
         free(edges);
         free(arguments);
         free(constructs);
-        return mir_error(diagnostics, span,
+        return mir_allocation_error(diagnostics, span,
             "MIR ownership validation allocation failed");
     }
     bool valid = true;
@@ -3424,7 +3430,8 @@ static bool mir_validate_storage(const SolIr *ir, const SolMir *mir,
         free(incoming);
         free(known);
         free(state);
-        return mir_error(diagnostics, ir->callables[mir->callable].span,
+        return mir_allocation_error(diagnostics,
+            ir->callables[mir->callable].span,
             "MIR storage validation allocation failed");
     }
     known[mir->entry] = true;
@@ -3638,7 +3645,8 @@ static bool mir_validate_paths(const SolIr *ir, const SolMir *mir,
         free(incoming);
         free(state);
         free(known);
-        return mir_error(diagnostics, ir->callables[mir->callable].span,
+        return mir_allocation_error(diagnostics,
+            ir->callables[mir->callable].span,
             "MIR path-state validation allocation failed");
     }
     known[mir->entry] = true;
@@ -3815,7 +3823,8 @@ static bool mir_validate_regions(const SolIr *ir, const SolMir *mir,
         free(depths);
         free(known);
         free(queue);
-        return mir_error(diagnostics, ir->callables[mir->callable].span,
+        return mir_allocation_error(diagnostics,
+            ir->callables[mir->callable].span,
             "MIR region validation allocation failed");
     }
     size_t first = 0;
@@ -4048,7 +4057,8 @@ static bool mir_validate_handlers(const SolIr *ir, const SolMir *mir,
         || depths == NULL || known == NULL || queue == NULL) {
         free(incoming); free(working); free(expected); free(parents);
         free(seen_expressions); free(depths); free(known); free(queue);
-        return mir_error(diagnostics, ir->callables[mir->callable].span,
+        return mir_allocation_error(diagnostics,
+            ir->callables[mir->callable].span,
             "MIR handler validation allocation failed");
     }
     if (!mir_collect_handler_parents(ir, ir->callables[mir->callable].body,
@@ -4203,7 +4213,8 @@ static bool mir_validate_storage_order(const SolIr *ir, const SolMir *mir,
         free(depths);
         free(known);
         free(queue);
-        return mir_error(diagnostics, ir->callables[mir->callable].span,
+        return mir_allocation_error(diagnostics,
+            ir->callables[mir->callable].span,
             "MIR lifetime-order validation allocation failed");
     }
     size_t first = 0;
@@ -4353,7 +4364,8 @@ static bool mir_validate_temporaries(const SolIr *ir, const SolMir *mir,
         free(known);
         free(queue);
         free(initializers);
-        return mir_error(diagnostics, ir->callables[mir->callable].span,
+        return mir_allocation_error(diagnostics,
+            ir->callables[mir->callable].span,
             "MIR temporary validation allocation failed");
     }
     bool valid = true;
@@ -4560,7 +4572,8 @@ static bool mir_validate_source_events(const SolIr *ir, const SolMir *mir,
     if ((ir->statement_count != 0 && statements == NULL) || orders == NULL) {
         free(statements);
         free(orders);
-        return mir_error(diagnostics, ir->callables[mir->callable].span,
+        return mir_allocation_error(diagnostics,
+            ir->callables[mir->callable].span,
             "MIR source-event validation allocation failed");
     }
     size_t statement_count = 0;
@@ -4986,10 +4999,13 @@ static SolMirBlockId mir_intersect_idom(SolMirBlockId left,
     return left;
 }
 
-static SolMirBlockId *mir_compute_idom(const SolMir *mir) {
+static SolMirBlockId *mir_compute_idom(const SolMir *mir,
+    SolDiagnostics *diagnostics) {
     size_t count = mir->block_count;
     if (count == 0 || count > SIZE_MAX / 3) return NULL;
     size_t *predecessor_counts = calloc(count, sizeof(*predecessor_counts));
+    if (predecessor_counts == NULL && diagnostics != NULL)
+        diagnostics->allocation_failed = true;
     bool valid = predecessor_counts != NULL;
     for (SolMirBlockId block = 0; valid && block < count; ++block) {
         SolMirBlockId targets[3];
@@ -5001,6 +5017,8 @@ static SolMirBlockId *mir_compute_idom(const SolMir *mir) {
     }
     size_t *predecessor_offsets = calloc(count + 1,
         sizeof(*predecessor_offsets));
+    if (predecessor_offsets == NULL && diagnostics != NULL)
+        diagnostics->allocation_failed = true;
     valid = valid && predecessor_offsets != NULL;
     for (size_t block = 0; valid && block < count; ++block) {
         if (predecessor_offsets[block] > SIZE_MAX - predecessor_counts[block]) {
@@ -5015,6 +5033,9 @@ static SolMirBlockId *mir_compute_idom(const SolMir *mir) {
     SolMirBlockId *predecessors = !valid || edge_count == 0 ? NULL
         : malloc(edge_count * sizeof(*predecessors));
     size_t *predecessor_cursors = calloc(count, sizeof(*predecessor_cursors));
+    if (((valid && edge_count != 0 && predecessors == NULL)
+            || predecessor_cursors == NULL) && diagnostics != NULL)
+        diagnostics->allocation_failed = true;
     valid = valid && (edge_count == 0 || predecessors != NULL)
         && predecessor_cursors != NULL;
     for (SolMirBlockId block = 0; valid && block < count; ++block) {
@@ -5032,6 +5053,9 @@ static SolMirBlockId *mir_compute_idom(const SolMir *mir) {
     SolMirBlockId *stack = malloc(count * sizeof(*stack));
     size_t *next_successor = calloc(count, sizeof(*next_successor));
     SolMirBlockId *postorder = malloc(count * sizeof(*postorder));
+    if ((seen == NULL || stack == NULL || next_successor == NULL
+            || postorder == NULL) && diagnostics != NULL)
+        diagnostics->allocation_failed = true;
     valid = valid && seen != NULL && stack != NULL && next_successor != NULL
         && postorder != NULL;
     size_t depth = 0;
@@ -5061,6 +5085,8 @@ static SolMirBlockId *mir_compute_idom(const SolMir *mir) {
         && postorder_count == count;
     size_t *rpo_index = malloc(count * sizeof(*rpo_index));
     SolMirBlockId *idom = malloc(count * sizeof(*idom));
+    if ((rpo_index == NULL || idom == NULL) && diagnostics != NULL)
+        diagnostics->allocation_failed = true;
     valid = valid && rpo_index != NULL && idom != NULL;
     for (size_t order = 0; valid && order < count; ++order) {
         SolMirBlockId block = postorder[count - order - 1];
@@ -5153,7 +5179,7 @@ static bool mir_ssa_edge_uses_available(const SolMir *mir,
 
 static bool mir_validate_ssa_dominance(const SolIr *ir, const SolMir *mir,
     SolDiagnostics *diagnostics) {
-    SolMirBlockId *idom = mir_compute_idom(mir);
+    SolMirBlockId *idom = mir_compute_idom(mir, diagnostics);
     if (idom == NULL) {
         return mir_error(diagnostics, ir->callables[mir->callable].span,
             "MIR CFG dominance computation failed");
@@ -5422,11 +5448,13 @@ static bool mir_validate_ssa_ownership(const SolIr *ir, const SolMir *mir,
     bool *known = calloc(mir->block_count, sizeof(*known));
     bool *queued = calloc(mir->block_count, sizeof(*queued));
     SolMirBlockId *queue = malloc(mir->block_count * sizeof(*queue));
-    bool valid = (ir->type_count == 0 || copyable != NULL)
+    bool allocated = (ir->type_count == 0 || copyable != NULL)
         && (state_count == 0 || incoming != NULL)
         && (mir->value_count == 0
             || (working != NULL && successor != NULL && seen != NULL))
-        && known != NULL && queued != NULL && queue != NULL
+        && known != NULL && queued != NULL && queue != NULL;
+    if (!allocated && diagnostics != NULL) diagnostics->allocation_failed = true;
+    bool valid = allocated
         && sol_ir_compute_copyability(ir, copyable, ir->type_count);
     if (valid && state_count != 0) memset(incoming, 1, state_count);
     size_t queue_count = valid ? 1u : 0u;
@@ -5668,7 +5696,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         || (mir->parameter_value_count != 0 && parameter_owners == NULL)) {
         free(instruction_owners);
         free(parameter_owners);
-        return mir_error(diagnostics, callable->span,
+        return mir_allocation_error(diagnostics, callable->span,
             "MIR validation allocation failed");
     }
     for (size_t block_id = 0; block_id < mir->block_count; ++block_id) {
@@ -7296,7 +7324,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         free(predecessors);
         free(reachable);
         free(queue);
-        return mir_error(diagnostics, callable->span,
+        return mir_allocation_error(diagnostics, callable->span,
             "MIR validation allocation failed");
     }
     for (size_t block = 0; block < mir->block_count; ++block) {

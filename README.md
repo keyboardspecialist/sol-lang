@@ -10,13 +10,15 @@ them from conventions and repository history.
 
 **Status, September 25, 2026:** the September 9 baseline at `6ec4ba9` has an
 executable reference interpreter and CLI, not a production-ready compiler or stable
-toolchain. The current worktree completes E1-E6, P1, and P2.1-P2.7; P2 remains open
-for P2.8. There is no backend, production runtime ABI, `sol build`, full public IR,
-or SMT proof discharge.
+toolchain. The current worktree completes E1-E6, P1, and P2 for the frozen E6
+profile; P3.1 is the next overall item and production checkpoint. M1 evaluated an
+unvalidated candidate and stopped as infeasible because independent governance and
+protected evaluation material are unavailable. There is no backend, production
+runtime ABI, `sol build`, full public IR, or SMT proof discharge.
 
 [TODO.md](TODO.md) is the sole live status and execution-order ledger.
 [Compiler status](docs/compiler-status.md) records the detailed baseline,
-current-worktree P2.7 addendum, and compatibility limits;
+current-worktree P2.7-P2.8 addenda, and compatibility limits;
 [project analysis](docs/project-analysis.md) explains the product hypothesis,
 risks, and proposed experiments.
 
@@ -39,10 +41,12 @@ been empirically established** that Sol makes human or AI maintenance safer,
 faster, or cheaper. Generated code faces the same compiler and host boundaries as
 human-written code; unchanged interfaces do not establish unchanged behavior.
 
-The proposed first-domain direction is a **capability-restricted hosted
-business-logic or validation component**. M1 must still select the concrete user,
-workload, host boundary, and evaluation charter. No workload has been chosen by
-this documentation, and Sol is not yet a complete service ecosystem.
+The evaluated first-domain candidate is a **capability-restricted hosted expense
+policy component** with six read-only inputs, one output publication, and pure
+decision logic. It is unvalidated: no actual user or policy owner adopted it, and
+no protected held-out material, externally controlled verifier, or independent
+adjudicator exists. The [M1 report](experiments/m1/README.md) records the resulting
+governance hard stop; Sol is not yet a complete service ecosystem.
 
 ## Try It
 
@@ -122,7 +126,7 @@ The current edition-2027 subset is deliberately bounded. See the
 | Execution | `check`, `test`, `run`, `effects`, `inspect`, `fmt`; deterministic resource limits and bounded explicit hosting |
 | Contracts | Typed pure templates, runtime callable CHECK policy, entry-state `old`, applicable `ensures`, and executable direct refined construction |
 | Tool interfaces | Structured diagnostics, package-local stable top-level identities, selected versioned inspection projections |
-| Experimental internals | Full frozen-E6 callable CFG MIR; concrete specialization, representation, target layout, semantic-operation plans, and a separate whole-program linkage owner through P2.7 |
+| Experimental internals | Full frozen-E6 callable CFG MIR and complete P2 `SolMirConcreteProgram`, owning concrete specialization, representation, target layout, semantic-operation plans, and whole-program linkage with independent validation and canonical rendering |
 
 Important boundaries are part of the behavior, not incidental missing polish:
 
@@ -170,22 +174,21 @@ The reference interpreter is retained as a semantic reference, not a new VM plan
 
 This orientation mirrors the [live execution cursor](TODO.md#execution-cursor),
 not a second checklist. E1-E6 established bounded application execution; P1
-completed frozen-core CFG MIR; P2.1-P2.7 supplied concrete planning through
-source-independent predicate/import-contract bodies and whole-program linkage.
-**P2 is still open for P2.8.**
+completed frozen-core CFG MIR; P2 completed concrete planning through the
+validated, canonically rendered whole-program owner for the frozen E6 profile.
 
-1. **M1:** next overall, select a first-user workload and publish the experiment charter and subsequent interleaving. If infeasible, record the blocker and continue P2.8 without inventing prerequisites.
-2. **P2.8:** next production checkpoint after M1 unless M1 publishes a different approved interleaving; freeze, render, and census the complete concrete-program contract without selecting a runtime ABI or emitting Wasm.
-3. **P3:** define the target-independent runtime ABI, owned-value operations, failure/cleanup policy, host boundary, and exact handler ABI.
+1. **M1 (completed as infeasible):** evaluated an unvalidated expense-policy candidate and stopped because no independent participant, protected held-out material, externally controlled verifier, or independent adjudicator exists.
+2. **P2 (complete):** P2.8 froze, validated, rendered, and censused the complete concrete-program contract without selecting a runtime ABI or emitting Wasm.
+3. **P3.1 (next overall and production checkpoint):** freeze target-independent call, result, and failure conventions before the remaining runtime ABI work.
 4. **P4-P5:** integrate a pinned Wasm backend/host adapter, then reproducible `sol build` artifacts and interpreter/Wasm differential conformance.
 
-After P2.8, **M2-M5 may proceed independently alongside P3**, subject to their
-experiment dependencies, staffing, and exclusive file ownership. All M rows are
-open proposals: M2 creates declaration-centered context packets after M1
-feasibility; M3 depends on M2 for conservative checked-snapshot deltas; M4 depends
-on M2/M3 for ordinary-edit validation and human approval; M5 follows M4 with a
-protected held-out comparison against source-only work. M4E is an optional basic
-editor slice after M1/M2 projection feasibility, not full LSP or an M5 prerequisite.
+**M2-M5 remain gated** unless M1 is reopened and completed feasibly with independent
+governance and protected evaluation inputs. If that occurs, M2 would create
+declaration-centered context packets after P2.8; M3 would depend on M2 for
+conservative checked-snapshot deltas; M4 would depend on M2/M3 for ordinary-edit
+validation and human approval; and M5 would follow M4 with a protected held-out
+comparison against source-only work. M4E would remain an optional basic editor
+slice after M1/M2 projection feasibility, not full LSP or an M5 prerequisite.
 
 The early **P3.W1** Wasm ABI integration experiment is timeboxed after P3.1 has
 tested call/result/failure conventions. Allocation, cleanup, and host imports
@@ -193,23 +196,24 @@ enter only after the relevant P3.2-P3.4 conventions are tested. It informs the
 backend choice; it does not complete P4, component support, E6 Wasm execution, or
 build tooling. One coordinator maintains the sole next-overall cursor in TODO.
 
-The M track uses a protected external experiment contract, existing inspection,
-ordinary edits, independent verification, and `approve`/`reject`/`escalate`
-adjudication. Its bounded local evidence record is deterministic, unsigned, and
-content-addressed: hashing supports integrity and addressing, not producer
-authentication or deployment provenance. It does not wait for full public IR, SMT,
-or patch syntax, and it must report negative and inconclusive results as well as
-gains. Detailed gates and task boundaries remain solely in TODO.
+A feasibly reopened M track would require a protected external experiment contract,
+existing inspection, ordinary edits, independent verification, and
+`approve`/`reject`/`escalate` adjudication. Its bounded local evidence record would
+be deterministic, unsigned, and content-addressed: hashing supports integrity and
+addressing, not producer authentication, authority separation, or deployment
+provenance. It would not wait for full public IR, SMT, or patch syntax, and it would
+report negative and inconclusive results as well as gains. Detailed gates and task
+boundaries remain solely in TODO.
 
 ## Documentation
 
 | Document | How to use it |
 | --- | --- |
 | [TODO](TODO.md) | Sole live work status, dependencies, acceptance criteria, and execution cursor |
-| [Compiler status](docs/compiler-status.md) | Detailed `6ec4ba9` snapshot plus current-worktree P2.7 addendum: APIs, packages, ownership, effects, inspection, MIR, materialization, representation, layout, operations, linkage, and limitations |
+| [Compiler status](docs/compiler-status.md) | Detailed `6ec4ba9` snapshot plus current-worktree P2.7-P2.8 addenda: APIs, packages, ownership, effects, inspection, MIR, complete concrete-program ownership/validation/rendering, and limitations |
 | [Project analysis](docs/project-analysis.md) | Dated document-based assessment and proposed maintenance-workflow evaluation, not a fresh implementation audit |
 | [AI-native workflow review notes](sol_ai_native_workflow_notes.pdf) | Advisory external review input incorporated into the live roadmap; not a status, execution-order, specification, or implementation authority |
-| [Design Specification v0.2 PDF](Sol_Programming_Language_Design_Specification_v0.2.pdf) / [Typst source](docs/specification.typ) | September 25, 2026 documentation revision; September 9, 2026 implementation baseline `6ec4ba9` through P2.6 plus a clearly marked current-worktree P2.7 addendum; target-language design with explicit implementation boundaries, not all examples executable |
+| [Design Specification v0.2 PDF](Sol_Programming_Language_Design_Specification_v0.2.pdf) / [Typst source](docs/specification.typ) | September 25, 2026 documentation revision; September 9, 2026 implementation baseline `6ec4ba9` through P2.6. The source has clearly marked current-worktree P2.7-P2.8 addenda; the checked PDF remains pre-P2.8 until Typst 0.15.1 is available to regenerate it. Target-language design with explicit implementation boundaries; not all examples are executable. |
 | [Current-State Audit PDF](Sol_Current_State_Audit.pdf) / [Typst source](docs/current-state-audit.typ) | September 9, 2026 document-based assessment of `6ec4ba9` through P2.6, replacing the August 25 assessment; not a fresh full-suite test report |
 
 Both documents' authoritative editable sources are Typst; generated PDFs are

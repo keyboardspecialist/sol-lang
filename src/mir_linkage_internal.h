@@ -66,7 +66,8 @@ bool sol_mir_linkage_internal_expected_usage(
 bool sol_mir_linkage_internal_validation_scratch(
     const SolMirLinkage *linkage, size_t *bytes);
 bool sol_mir_linkage_internal_validation_requirements(
-    const SolMirLinkage *linkage, size_t *work, size_t *scratch);
+    const SolMirLinkage *linkage, size_t *work, size_t *scratch,
+    SolDiagnostics *diagnostics);
 
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
 void sol_mir_linkage_test_force_instance_digest_collision(bool force);

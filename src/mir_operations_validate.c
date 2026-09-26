@@ -16,6 +16,10 @@ static bool invalid(SolDiagnostics *d, const char *message) {
     return false;
 }
 
+static void mark_allocation_failed(SolDiagnostics *diagnostics) {
+    if (diagnostics != NULL) diagnostics->allocation_failed = true;
+}
+
 static bool add_size(size_t *v, size_t n) {
     if (n > SIZE_MAX - *v) return false;
     *v += n; return true;
@@ -1477,7 +1481,8 @@ static bool predicate_helper_work(const SolMirOperations *o, size_t *result) {
     *result = work * 2; return true;
 }
 
-static bool expected_build_work(const SolMirOperations *o, size_t *result) {
+static bool expected_build_work(const SolMirOperations *o, size_t *result,
+    SolDiagnostics *diagnostics) {
     ExpectedBuild b = {0};
     ExpectedBuildCounts c;
     const SolMirLayout *layout = o->layout;
@@ -1506,7 +1511,9 @@ static bool expected_build_work(const SolMirOperations *o, size_t *result) {
     if (r->recipe_count != 0) {
         if (!BUILD_ALLOCATE(&b)) return false;
         b.equality_seen = calloc(r->recipe_count, 1);
-        if (b.equality_seen == NULL) return false;
+        if (b.equality_seen == NULL) {
+            mark_allocation_failed(diagnostics); return false;
+        }
     }
 #define EXPECT_ALLOCATION(count) \
     do { if ((count) != 0 && !BUILD_ALLOCATE(&b)) goto failed; } while (0)
@@ -1739,11 +1746,14 @@ static bool validate_provenance_shapes(const SolMirOperations *o) {
     return true;
 }
 
-static bool validate_provenance_uniqueness(const SolMirOperations *o) {
+static bool validate_provenance_uniqueness(const SolMirOperations *o,
+    SolDiagnostics *diagnostics) {
     if (o->provenance_count != 0 && !tick(1)) return false;
     unsigned char *seen = o->provenance_count == 0 ? NULL
         : calloc(o->provenance_count, 1);
-    if (o->provenance_count != 0 && seen == NULL) return false;
+    if (o->provenance_count != 0 && seen == NULL) {
+        mark_allocation_failed(diagnostics); return false;
+    }
     bool valid = true;
     for (size_t i = 0; valid && i < o->provenance_count; ++i) {
         if (!tick(1)) { valid = false; break; }
@@ -2157,7 +2167,8 @@ static bool validate_patterns(const SolMirOperations *o, size_t *prov) {
         && node_at == o->pattern_node_count;
 }
 
-static bool validate_arithmetic(const SolMirOperations *o, size_t *prov) {
+static bool validate_arithmetic(const SolMirOperations *o, size_t *prov,
+    SolDiagnostics *diagnostics) {
     const SolMirRepresentation *r = o->layout->representation;
     const SolMirMaterialization *m = r->materialization;
     size_t at = 0, equality = 0, children = 0;
@@ -2193,7 +2204,9 @@ static bool validate_arithmetic(const SolMirOperations *o, size_t *prov) {
             if (r->recipe_count != 0 && !tick(1)) return false;
             unsigned char *seen = r->recipe_count == 0 ? NULL
                 : calloc(r->recipe_count, 1);
-            if (r->recipe_count != 0 && seen == NULL) return false;
+            if (r->recipe_count != 0 && seen == NULL) {
+                mark_allocation_failed(diagnostics); return false;
+            }
             size_t node_end = equality + p->equality.count;
             bool valid = validate_equality_recipe(o, operand, seen, node_end,
                 &equality, &children) && equality == node_end;
@@ -2472,7 +2485,8 @@ static bool predicate_terminator_shape(
     return true;
 }
 
-static bool validate_predicate_cfg(const SolMirOperations *o) {
+static bool validate_predicate_cfg(const SolMirOperations *o,
+    SolDiagnostics *diagnostics) {
 #define PFAIL(tag) do { goto predicate_failed; } while (0)
     const SolMirRepresentation *r = o->layout->representation;
     const SolMirMaterialization *m = r->materialization;
@@ -2558,8 +2572,10 @@ static bool validate_predicate_cfg(const SolMirOperations *o) {
             && (reachable == NULL || indegree == NULL || queue == NULL))
         || (o->predicate_operand_count != 0 && operand_seen == NULL)
         || (o->predicate_path_step_count != 0 && path_seen == NULL)
-        || (o->predicate_pattern_node_count != 0 && pattern_seen == NULL))
+        || (o->predicate_pattern_node_count != 0 && pattern_seen == NULL)) {
+        mark_allocation_failed(diagnostics);
         PFAIL("allocation");
+    }
     for (size_t i = 0; i < o->predicate_block_count; ++i) {
         if (!tick(1)) PFAIL("work");
         const SolMirPredicateBlock *block = &o->predicate_blocks[i];
@@ -4785,7 +4801,8 @@ static bool authenticate_rich_predicate_body(const SolMirOperations *o,
     return valid;
 }
 
-static bool authenticate_predicates(const SolMirOperations *o) {
+static bool authenticate_predicates(const SolMirOperations *o,
+    SolDiagnostics *diagnostics) {
     const SolMirMaterialization *m = o->layout->representation->materialization;
     const SolIr *ir = m->plan->program->ir;
     for (size_t i = 0; i < o->predicate_count; ++i) {
@@ -4820,6 +4837,7 @@ static bool authenticate_predicates(const SolMirOperations *o) {
         : calloc(ir->pattern_count, sizeof(*path_stack));
     if ((ir->local_count != 0 && (locals == NULL || local_bound == NULL))
         || (ir->pattern_count != 0 && path_stack == NULL)) {
+        mark_allocation_failed(diagnostics);
         free(locals); free(local_bound); free(path_stack); return false;
     }
     PredicateAuthenticationCursor cursor = {0};
@@ -5484,7 +5502,8 @@ static bool validate(const SolMirOperations *o, SolDiagnostics *diagnostics,
     if ((dry_scratch > scratch_expected
             ? dry_scratch : scratch_expected) != o->usage.build_scratch_bytes)
         return invalid(diagnostics, "operations scratch accounting is malformed");
-    if (!validate_provenance_shapes(o) || !validate_provenance_uniqueness(o))
+    if (!validate_provenance_shapes(o)
+        || !validate_provenance_uniqueness(o, diagnostics))
         return invalid(diagnostics, "operation provenance is malformed");
     if (!validate_access(o))
         return invalid(diagnostics, "operation access plans are malformed");
@@ -5493,18 +5512,18 @@ static bool validate(const SolMirOperations *o, SolDiagnostics *diagnostics,
         return invalid(diagnostics, "operation constructors are malformed");
     if (!validate_patterns(o, &prov))
         return invalid(diagnostics, "operation patterns are malformed");
-    if (!validate_arithmetic(o, &prov))
+    if (!validate_arithmetic(o, &prov, diagnostics))
         return invalid(diagnostics, "operation arithmetic is malformed");
     if (!validate_snapshots(o, &prov) || !validate_path_consumption(o))
         return invalid(diagnostics, "operation snapshots or paths are malformed");
     if (!validate_propagations_predicates(o, &prov))
         return invalid(diagnostics, "operation predicate envelopes are malformed");
-    if (!validate_predicate_cfg(o))
+    if (!validate_predicate_cfg(o, diagnostics))
         return invalid(diagnostics, "operation predicate CFG is malformed");
-    if (!authenticate_predicates(o))
+    if (!authenticate_predicates(o, diagnostics))
         return invalid(diagnostics, "operation predicate source authentication failed");
     size_t expected_work;
-    if (!expected_build_work(o, &expected_work)
+    if (!expected_build_work(o, &expected_work, diagnostics)
         || o->usage.build_work != expected_work)
         return invalid(diagnostics, "operations build work is malformed");
     if (!add_size(&prov, o->predicate_body_count)
@@ -5521,9 +5540,10 @@ static bool validate(const SolMirOperations *o, SolDiagnostics *diagnostics,
 }
 
 bool sol_mir_operations_internal_validation_requirements(
-    const SolMirOperations *o, size_t *work, size_t *scratch) {
+    const SolMirOperations *o, size_t *work, size_t *scratch,
+    SolDiagnostics *diagnostics) {
     return work != NULL && scratch != NULL
-        && validate(o, NULL, false, work, scratch);
+        && validate(o, diagnostics, false, work, scratch);
 }
 
 bool sol_mir_operations_internal_expected_build_work(const SolMirOperations *o,
@@ -5531,7 +5551,7 @@ bool sol_mir_operations_internal_expected_build_work(const SolMirOperations *o,
     if (o == NULL || o->layout == NULL || result == NULL) return false;
     metered_work = 0;
     metered_limit = SIZE_MAX;
-    return expected_build_work(o, result);
+    return expected_build_work(o, result, NULL);
 }
 
 bool sol_mir_operations_validate(const SolMirOperations *o,

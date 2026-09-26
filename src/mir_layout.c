@@ -542,7 +542,9 @@ static SolMirLayoutBuildOutcome build_internal(
     }
     if (validate_source
         && !sol_mir_representation_validate(request->representation, diagnostics))
-        return SOL_MIR_LAYOUT_BUILD_INVALID_REPRESENTATION;
+        return diagnostics != NULL && diagnostics->allocation_failed
+            ? SOL_MIR_LAYOUT_BUILD_ALLOCATION_FAILED
+            : SOL_MIR_LAYOUT_BUILD_INVALID_REPRESENTATION;
     const SolMirRepresentation *r = request->representation;
     const SolMirMaterialization *m = r->materialization;
     SolMirLayout scratch; sol_mir_layout_init(&scratch);

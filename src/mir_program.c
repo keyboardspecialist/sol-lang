@@ -1266,6 +1266,8 @@ static bool add_owned_range(OwnedRanges *ranges, const void *pointer,
     if (ranges->count == SIZE_MAX
         || !grow_array((void **)&ranges->items, &ranges->capacity,
             ranges->count + 1, sizeof(*ranges->items))) {
+        if (ranges->count != SIZE_MAX && diagnostics != NULL)
+            diagnostics->allocation_failed = true;
         return owner_error(diagnostics,
             "allocation failed while validating symbolic MIR program ownership");
     }
@@ -1379,6 +1381,8 @@ bool sol_mir_program_validate(const SolMirProgram *program,
     sol_mir_program_init(&expected);
     SolMirProgramBuildOutcome outcome
         = build_scratch(&request, &expected, diagnostics);
+    if (outcome == SOL_MIR_PROGRAM_BUILD_ALLOCATION_FAILED
+        && diagnostics != NULL) diagnostics->allocation_failed = true;
     bool valid = outcome == SOL_MIR_PROGRAM_BUILD_SUCCEEDED
         && program->root_count == expected.root_count
         && program->approved_import_count == expected.approved_import_count

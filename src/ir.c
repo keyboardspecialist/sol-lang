@@ -56,6 +56,12 @@ static bool sol_ir_error(SolDiagnostics *diagnostics, const char *message) {
     return false;
 }
 
+static bool sol_ir_allocation_error(SolDiagnostics *diagnostics,
+    const char *message) {
+    if (diagnostics != NULL) diagnostics->allocation_failed = true;
+    return sol_ir_error(diagnostics, message);
+}
+
 static bool sol_ir_indexed_error(SolDiagnostics *diagnostics, const char *message,
     size_t index, int kind) {
     char formatted[192];
@@ -3687,7 +3693,8 @@ static bool sol_ir_executable_expression(
     SolIrCallableId *local_callables,
     bool *introduced,
     size_t loop_depth,
-    bool *loop_break
+    bool *loop_break,
+    SolDiagnostics *diagnostics
 ) {
     if (id >= ir->expression_count || states[id] != 0) return false;
     states[id] = 1;
@@ -3712,7 +3719,7 @@ static bool sol_ir_executable_expression(
     do { if (!sol_ir_executable_expression( \
         ir, (child), owner, callable_id, callable_result, states, \
         statement_callables, local_callables, introduced, \
-        loop_depth, loop_break)) \
+        loop_depth, loop_break, diagnostics)) \
         return false; } while (0)
     switch (expression->kind) {
         case SOL_IR_EXPR_REFINEMENT_SELF:
@@ -3855,6 +3862,8 @@ static bool sol_ir_executable_expression(
                         && (proof_states == NULL || proof_callables == NULL)) {
                         free(proof_states);
                         free(proof_callables);
+                        if (diagnostics != NULL)
+                            diagnostics->allocation_failed = true;
                         return false;
                     }
                     for (size_t proof = 0; proof < ir->expression_count; ++proof) {
@@ -3880,12 +3889,12 @@ static bool sol_ir_executable_expression(
                         if (!sol_ir_executable_expression(ir, statement->condition,
                             owner, callable_id, callable_result, states,
                             statement_callables, local_callables, introduced,
-                            loop_depth + 1, &saw_break)) return false;
+                            loop_depth + 1, &saw_break, diagnostics)) return false;
                     }
                         if (!sol_ir_executable_expression(ir, statement->expression,
                             owner, callable_id, callable_result, states,
                             statement_callables, local_callables, introduced,
-                            loop_depth + 1, &saw_break)) return false;
+                            loop_depth + 1, &saw_break, diagnostics)) return false;
                 } else if (statement->kind == SOL_IR_STATEMENT_UNREACHABLE) {
                     SolIrSlice obligations = statement->unreachable_obligations;
                     if (obligations.count != 1) return false;
@@ -3898,6 +3907,8 @@ static bool sol_ir_executable_expression(
                         && (proof_states == NULL || proof_callables == NULL)) {
                         free(proof_states);
                         free(proof_callables);
+                        if (diagnostics != NULL)
+                            diagnostics->allocation_failed = true;
                         return false;
                     }
                     for (size_t proof = 0; proof < ir->expression_count; ++proof) {
@@ -4060,7 +4071,8 @@ static bool sol_ir_validate_arena_ownership(
         || (ir->operand_count != 0 && operands == NULL)) {
         free(statement_slots); free(statements); free(arm_slots); free(arms);
         free(cleanups); free(places); free(projections); free(operands);
-        return sol_ir_error(diagnostics, "IR arena ownership allocation failed");
+        return sol_ir_allocation_error(diagnostics,
+            "IR arena ownership allocation failed");
     }
     for (size_t index = 0; index < ir->expression_count; ++index) {
         const SolIrExpression *expression = &ir->expressions[index];
@@ -4631,7 +4643,8 @@ static bool sol_ir_validate_pattern_ownership(
         || (ir->local_count != 0 && local_owners == NULL)
         || (ir->pattern_child_count != 0 && edge_owners == NULL)) {
         free(states); free(local_owners); free(edge_owners);
-        return sol_ir_error(diagnostics, "IR pattern ownership allocation failed");
+        return sol_ir_allocation_error(diagnostics,
+            "IR pattern ownership allocation failed");
     }
     bool valid = true;
     for (size_t index = 0; valid && index < ir->arm_count; ++index) {
@@ -6832,7 +6845,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                 && (contract_states == NULL || proof_states == NULL)) {
                 free(contract_states);
                 free(proof_states);
-                return sol_ir_error(diagnostics,
+                return sol_ir_allocation_error(diagnostics,
                     "IR unreachable proof validation allocation failed");
             }
             bool shared = sol_ir_expression_reaches(ir,
@@ -6902,7 +6915,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                     && (predicate_states == NULL || loop_states == NULL)) {
                     free(predicate_states);
                     free(loop_states);
-                    return sol_ir_error(diagnostics,
+                    return sol_ir_allocation_error(diagnostics,
                         "IR contract proof validation allocation failed");
                 }
                 bool shared = sol_ir_expression_reaches(ir,
@@ -6960,7 +6973,8 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
         free(statement_callables);
         free(local_callables);
         free(introduced);
-        return sol_ir_error(diagnostics, "IR executable validation allocation failed");
+        return sol_ir_allocation_error(diagnostics,
+            "IR executable validation allocation failed");
     }
     for (size_t index = 0; index < ir->statement_count; ++index) {
         statement_callables[index] = SOL_IR_NONE;
@@ -7010,7 +7024,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                         callable->result, (SolIrSlice){0}, (SolIrSlice){0}, SOL_IR_NONE)
                     || !sol_ir_executable_expression(ir, body, callable->owner,
                         index, callable->result, states, statement_callables,
-                        local_callables, introduced, 0, NULL))) {
+                        local_callables, introduced, 0, NULL, diagnostics))) {
                 free(states);
                 free(statement_callables);
                 free(local_callables);
@@ -7037,7 +7051,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
         free(statement_callables);
         free(local_callables);
         free(introduced);
-        return sol_ir_error(diagnostics,
+        return sol_ir_allocation_error(diagnostics,
             "IR proof-expression validation allocation failed");
     }
     for (size_t index = 0; index < ir->expression_count; ++index) {

@@ -2078,8 +2078,11 @@ bool sol_mir_materialization_validate(const SolMirMaterialization *owner,
         max_ranges += string_ranges[i];
     }
     Range *ranges = calloc(max_ranges, sizeof(*ranges));
-    if (ranges == NULL) return validation_error(diagnostics,
-        "allocation failed while validating materialized MIR ranges");
+    if (ranges == NULL) {
+        if (diagnostics != NULL) diagnostics->allocation_failed = true;
+        return validation_error(diagnostics,
+            "allocation failed while validating materialized MIR ranges");
+    }
     size_t range_count = 0;
     const SolMirPlan *plan = owner->plan;
     const SolMirProgram *program = plan->program;
@@ -2204,7 +2207,11 @@ bool sol_mir_materialization_validate(const SolMirMaterialization *owner,
     sol_mir_materialization_init(&expected);
     expected.plan = owner->plan; expected.limits = owner->limits;
     Builder builder = {&expected, NULL, SOL_MIR_MATERIALIZE_BUILD_INTERNAL_FAILED};
-    if (!build_scratch(&builder)) { sol_mir_materialization_free(&expected); goto malformed; }
+    if (!build_scratch(&builder)) {
+        if (builder.outcome == SOL_MIR_MATERIALIZE_BUILD_ALLOCATION_FAILED
+            && diagnostics != NULL) diagnostics->allocation_failed = true;
+        sol_mir_materialization_free(&expected); goto malformed;
+    }
     bool equal = arrays_equal(owner, &expected);
     sol_mir_materialization_free(&expected);
     if (!equal) goto malformed;

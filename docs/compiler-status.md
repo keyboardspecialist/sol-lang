@@ -7,11 +7,12 @@ This relocates the detailed baseline README documentation, reconciled with the
 approved ledger. It is not a second checklist, a new test report, or a stable ABI
 specification. [TODO.md](../TODO.md) alone owns live work status and order.
 
-**Current-worktree addendum, September 25, 2026:** P2.7 is independently approved
-and complete in the current worktree. The baseline hash above remains the historical
-September 9 snapshot; no post-baseline commit hash is asserted here. P2.8 remains
-open, M1 is next overall, and P2.8 is the next production checkpoint after M1 unless
-M1 publishes a different approved interleaving.
+**Current-worktree addendum, September 25, 2026:** P2.7 and P2.8 are independently
+approved and complete in the current worktree, completing P2 for the frozen E6
+profile. The baseline hash above remains the historical September 9 snapshot; no
+post-baseline commit hash is asserted here. M1 completed as infeasible and M2-M5
+remain gated unless it is reopened feasibly. P3.1 is next overall and the next
+production checkpoint.
 
 Use the [README](../README.md) for onboarding and runnable examples, and
 [project analysis](project-analysis.md) for the dated product assessment. The
@@ -865,13 +866,59 @@ linkage test passed, all three deterministic stress hashes matched, and
 `git diff --check` passed. At validation time, Typst 0.15.1 regenerated the checked
 PDF byte-for-byte identically.
 
+## Complete Concrete Program (P2.8 Current-Worktree Addendum)
+
+The unstable compiler-internal
+[SolMirConcreteProgram](../include/sol/mir_concrete.h) embeds and owns the symbolic
+program, monomorphic plan, materialization, representation, target layout,
+source-independent operations, and linkage. Only its source `SolIr` is borrowed
+and must remain alive and immutable. Because every embedded stage borrows its
+embedded predecessor, a successfully built owner is address-stable and non-copyable;
+callers initialize, build, validate/render in place, and free it through the
+`sol_mir_concrete_program_*` API.
+
+`sol_mir_concrete_program_build` accepts roots, approved imports, a target, and
+either defaults or one complete set of nested stage limits. Successful transactional
+publication requires an initialized empty destination. The function builds all stages
+in scratch storage, validates the result, and publishes it only on complete success.
+Failures leave an initially empty destination empty; a non-empty destination is
+rejected unchanged. Invalid arguments/IR/target, unsupported closure, expanding
+recursion, symbol collision, resource exhaustion, allocation failure, and internal
+failure map to distinct `SolMirConcreteBuildOutcome` values.
+
+The separate concrete validator authenticates exact embedded predecessor links,
+invokes transitive stage validation, rejects symbolic residue, proves dense and
+unique demand resolution, closes invoke sites and executable blocks, reconstructs
+instruction/terminator-to-operation counts, checks cross-stage owner censuses, and
+inherits each stage's exact arena-consumption and transitive anti-aliasing checks.
+The versionless renderer first validates and buffers one canonical form containing
+all seven stages plus complete materialization, representation, layout, operations,
+and linkage supplements, then performs one caller-visible output write. It excludes
+source paths, pointer values, capacities, and allocator artifacts.
+
+The E6 all-roots test freezes complete counts and resource usages for every stage,
+including concrete generic and trait instances, three contract predicates plus one
+refinement predicate, four hosted imports, all 14 bodyful callables, and complete
+instruction, terminator, failure, and cleanup closure. Focused tests cover repeated
+independent lowering, reversed roots and approvals, relocated paths, differing
+sufficient limits, malformed owners/embedded links/aliases/slices, exact resource
+outcomes, unsupported closure, and symbol collision. Deterministic allocator fault
+injection and an aggregate expanding-recursion fixture remain test gaps; they are
+not statements that those outcomes are unsupported.
+
+Approved P2.8 validation reported the full Werror suite and the full AppleClang
+ASan/UBSan suite each passing 48/48 on macOS. `git diff --check` also passed. This
+evidence does not claim leak detection, allocator fault injection, or an aggregate
+expanding-recursion fixture.
+
 ## Remaining Boundary
 
-P2.8's final complete-program freeze, validation, rendering, and census remain open;
-runtime ABI, Wasm linkage/integration, concrete table indices, external ABI names,
-wrappers/adapters, reproducible artifacts, and interpreter/Wasm
-differential execution remain later tracks. No internal census is an empirical
-maintenance advantage, user-facing performance guarantee, or proof of application
-behavior. The proposed M experiment is not implemented by these compiler owners.
+P2 is complete for the frozen E6 profile. P2.8 selects no runtime ABI, concrete
+table indices, external ABI names, wrappers/adapters, Wasm linkage/emission or
+execution, build artifact, or public format. Those boundaries, reproducible
+artifacts, and interpreter/Wasm differential execution remain later tracks. No
+internal census is an empirical maintenance advantage, user-facing performance
+guarantee, or proof of application behavior. The proposed M experiment is not
+implemented by these compiler owners. P3.1 is the next production checkpoint.
 Consult [TODO.md](../TODO.md#execution-cursor) for the single active cursor and
 [the analysis](project-analysis.md) for the experiment rationale.

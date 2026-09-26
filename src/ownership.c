@@ -60,6 +60,13 @@ static bool ownership_internal(Ownership *analysis, SolSpan span,
     return false;
 }
 
+static bool ownership_allocation_error(Ownership *analysis, SolSpan span,
+    const char *message) {
+    if (analysis->diagnostics != NULL)
+        analysis->diagnostics->allocation_failed = true;
+    return ownership_internal(analysis, span, message);
+}
+
 static bool type_is_copy(Ownership *analysis, SolIrTypeId id) {
     return id < analysis->ir->type_count && analysis->copy_states[id];
 }
@@ -537,7 +544,7 @@ static bool analyze_loop(Ownership *analysis, const SolIrStatement *statement,
         free(entry_initialized); free(header_initialized); free(next_initialized);
         free(break_initialized); free(back_initialized); free(false_initialized);
         free(entry_introduced); free(entry_depths);
-        return ownership_internal(analysis, statement->span,
+        return ownership_allocation_error(analysis, statement->span,
             "ownership loop allocation failed");
     }
     if (place_count != 0) {
@@ -726,7 +733,7 @@ static bool analyze_branches(Ownership *analysis, SolIrExpressionId left_id,
         free(left);
         free(right);
         free(left_initialized); free(right_initialized);
-        return ownership_internal(analysis, (SolSpan){0},
+        return ownership_allocation_error(analysis, (SolSpan){0},
             "ownership branch allocation failed");
     }
     if (local_count != 0) memcpy(left_initialized, analysis->initialized,
@@ -785,7 +792,7 @@ static bool analyze_match(Ownership *analysis, const SolIrExpression *expression
             || joined_initialized == NULL))) {
         free(baseline); free(branch); free(joined);
         free(baseline_initialized); free(joined_initialized);
-        return ownership_internal(analysis, expression->span,
+        return ownership_allocation_error(analysis, expression->span,
             "ownership match allocation failed");
     }
     if (count != 0) memcpy(baseline, available, count * sizeof(*baseline));
@@ -947,7 +954,7 @@ static bool analyze_expression_inner(Ownership *analysis, SolIrExpressionId id,
                 if ((count != 0 && skipped == NULL)
                     || (local_count != 0 && skipped_initialized == NULL)) {
                     free(skipped); free(skipped_initialized);
-                    return ownership_internal(
+                    return ownership_allocation_error(
                     analysis, expression->span, "ownership join allocation failed");
                 }
                 if (count != 0) memcpy(skipped, unavailable, count * sizeof(*skipped));
@@ -1109,7 +1116,8 @@ call_complete:
                             free(saved_initialized);
                             free(saved_introduced);
                             free(saved_depths);
-                            return ownership_internal(analysis, statement->span,
+                            return ownership_allocation_error(analysis,
+                                statement->span,
                                 "ownership require branch allocation failed");
                         }
                         if (place_count != 0) memcpy(fallback_unavailable,
@@ -1239,8 +1247,9 @@ static bool run_ownership(Ownership *analysis) {
     size_t place_count = analysis->ir->place_count;
     bool *unavailable = place_count == 0 ? NULL
         : calloc(place_count, sizeof(*unavailable));
-    if (place_count != 0 && unavailable == NULL) return ownership_internal(
-        analysis, (SolSpan){0}, "ownership state allocation failed");
+    if (place_count != 0 && unavailable == NULL)
+        return ownership_allocation_error(analysis, (SolSpan){0},
+            "ownership state allocation failed");
     bool valid = validate_borrow_places(analysis);
     for (size_t index = 0; valid && index < analysis->ir->callable_count; ++index) {
         const SolIrCallable *callable = &analysis->ir->callables[index];
@@ -1314,7 +1323,7 @@ static bool ownership_prepare(const SolIr *ir, SolDiagnostics *diagnostics,
         free(analysis->initialized);
         free(analysis->modify_depths);
         free(analysis->introduction_depths);
-        return ownership_internal(analysis, (SolSpan){0},
+        return ownership_allocation_error(analysis, (SolSpan){0},
             "ownership metadata allocation failed");
     }
     if (!sol_ir_compute_copyability(ir, analysis->copy_states,

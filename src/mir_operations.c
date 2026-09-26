@@ -7,7 +7,8 @@
 #include <string.h>
 
 bool sol_mir_operations_internal_validation_requirements(
-    const SolMirOperations *o, size_t *work, size_t *scratch);
+    const SolMirOperations *o, size_t *work, size_t *scratch,
+    SolDiagnostics *diagnostics);
 
 typedef struct {
     SolMirOperations *out;
@@ -2529,7 +2530,9 @@ SolMirOperationsBuildOutcome sol_mir_operations_build(
         return SOL_MIR_OPERATIONS_BUILD_INVALID_ARGUMENT;
     }
     if (!sol_mir_layout_validate(request->layout, diagnostics))
-        return SOL_MIR_OPERATIONS_BUILD_INVALID_LAYOUT;
+        return diagnostics != NULL && diagnostics->allocation_failed
+            ? SOL_MIR_OPERATIONS_BUILD_ALLOCATION_FAILED
+            : SOL_MIR_OPERATIONS_BUILD_INVALID_LAYOUT;
     SolMirOperations scratch; sol_mir_operations_init(&scratch);
     scratch.layout = request->layout;
     scratch.limits = request->limits == NULL || limits_zero(*request->limits)
@@ -2709,12 +2712,17 @@ SolMirOperationsBuildOutcome sol_mir_operations_build(
     scratch.usage.build_work = b.actual_work;
     size_t measured_validation_scratch;
     if (!sol_mir_operations_internal_validation_requirements(&scratch,
-            &scratch.usage.validation_work, &measured_validation_scratch)
+            &scratch.usage.validation_work, &measured_validation_scratch,
+            diagnostics)
         || measured_validation_scratch
             != scratch.usage.validation_scratch_bytes
         || scratch.usage.validation_work > scratch.limits.max_validation_work) {
-        fail(&b, SOL_MIR_OPERATIONS_BUILD_RESOURCE_EXHAUSTED,
-            "operations validation resource limit exceeded"); goto failed;
+        SolMirOperationsBuildOutcome outcome = diagnostics != NULL
+                && diagnostics->allocation_failed
+            ? SOL_MIR_OPERATIONS_BUILD_ALLOCATION_FAILED
+            : SOL_MIR_OPERATIONS_BUILD_RESOURCE_EXHAUSTED;
+        fail(&b, outcome, "operations validation resource limit exceeded");
+        goto failed;
     }
     free(b.path_stack); free(b.predicate_locals);
     free(b.predicate_local_bound); free(b.equality_state);

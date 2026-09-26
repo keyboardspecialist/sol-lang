@@ -153,6 +153,10 @@ static bool error(SolDiagnostics *diagnostics, const char *message) {
     return false;
 }
 
+static void mark_allocation_failed(SolDiagnostics *diagnostics) {
+    if (diagnostics != NULL) diagnostics->allocation_failed = true;
+}
+
 static bool slice(SolMirPlanSlice value, size_t count) {
     return value.offset <= count && value.count <= count - value.offset;
 }
@@ -511,7 +515,8 @@ static bool concrete_types(const View *view) {
     return true;
 }
 
-static bool validate_type_and_effect_arenas(const SolMirMaterialization *o) {
+static bool validate_type_and_effect_arenas(const SolMirMaterialization *o,
+    SolDiagnostics *diagnostics) {
     unsigned char *copy = o->type_count == 0 ? NULL : malloc(o->type_count);
     unsigned char *fields = o->shape_field_count == 0 ? NULL
         : calloc(o->shape_field_count, 1);
@@ -520,6 +525,7 @@ static bool validate_type_and_effect_arenas(const SolMirMaterialization *o) {
     if ((o->type_count != 0 && copy == NULL)
         || (o->shape_field_count != 0 && fields == NULL)
         || (o->shape_variant_count != 0 && variants == NULL)) {
+        mark_allocation_failed(diagnostics);
         free(copy); free(fields); free(variants); return false;
     }
     bool valid = true;
@@ -1164,7 +1170,7 @@ static bool terminator_semantics(const View *view, size_t block_id) {
     return true;
 }
 
-static size_t *compute_idom(const View *view) {
+static size_t *compute_idom(const View *view, SolDiagnostics *diagnostics) {
     size_t n = view->block_count;
     if (n == 0 || n > SIZE_MAX / sizeof(size_t)) return NULL;
     size_t *pred_count = calloc(n, sizeof(*pred_count));
@@ -1178,6 +1184,7 @@ static size_t *compute_idom(const View *view) {
     unsigned char *seen = calloc(n, 1);
     bool valid = pred_count && offset && cursor && stack && next && post && rpo
         && idom && seen;
+    if (!valid) mark_allocation_failed(diagnostics);
     for (size_t b = 0; valid && b < n; ++b) {
         SolMirMaterializedEdgeId edges[3]; size_t count;
         valid = block_edges(view, b, edges, &count);
@@ -1195,6 +1202,8 @@ static size_t *compute_idom(const View *view) {
     size_t total = valid ? offset[n] : 0;
     if (valid && total > SIZE_MAX / sizeof(size_t)) valid = false;
     size_t *pred = !valid || total == 0 ? NULL : malloc(total * sizeof(*pred));
+    if (valid && total != 0 && pred == NULL)
+        mark_allocation_failed(diagnostics);
     valid = valid && (total == 0 || pred != NULL);
     for (size_t b = 0; valid && b < n; ++b) {
         SolMirMaterializedEdgeId edges[3]; size_t count;
@@ -1251,13 +1260,15 @@ static size_t *compute_idom(const View *view) {
     return idom;
 }
 
-static bool validate_ssa(const View *view) {
+static bool validate_ssa(const View *view, SolDiagnostics *diagnostics) {
     const SolMirMaterialization *o = view->owner;
-    size_t *idom = compute_idom(view);
+    size_t *idom = compute_idom(view, diagnostics);
     if (idom == NULL) return false;
     bool valid = true;
     unsigned char *defined = calloc(view->value_count, 1);
-    if (view->value_count != 0 && defined == NULL) valid = false;
+    if (view->value_count != 0 && defined == NULL) {
+        mark_allocation_failed(diagnostics); valid = false;
+    }
     for (size_t value = 0; valid && value < view->value_count; ++value) {
         valid = o->values[view->image->values.offset + value].type < o->type_count;
     }
@@ -1442,7 +1453,8 @@ static bool merge_storage(Storage *target, const Storage *source, size_t count,
     return true;
 }
 
-static bool validate_storage_paths(const View *v) {
+static bool validate_storage_paths(const View *v,
+    SolDiagnostics *diagnostics) {
     const SolMirMaterialization *o = v->owner;
     if ((v->local_count && v->block_count > SIZE_MAX / v->local_count)
         || (v->place_count && v->block_count > SIZE_MAX / v->place_count)) return false;
@@ -1455,6 +1467,7 @@ static bool validate_storage_paths(const View *v) {
     bool valid = (sc == 0 || incoming) && (hc == 0 || holes)
         && (v->place_count == 0 || work_holes) && (v->local_count == 0 || work)
         && known;
+    if (!valid) mark_allocation_failed(diagnostics);
     size_t entry = v->image->entry - v->image->blocks.offset;
     if (valid) known[entry] = 1;
     bool changed = valid; size_t passes = 0;
@@ -1597,7 +1610,7 @@ static bool validate_storage_paths(const View *v) {
     return valid;
 }
 
-static bool stack_flow(const View *v, int kind) {
+static bool stack_flow(const View *v, int kind, SolDiagnostics *diagnostics) {
     const SolMirMaterialization *o = v->owner;
     size_t width = kind == 0 ? v->image->temporaries.count
         : kind == 1 ? v->image->instructions.count : v->image->handlers.count;
@@ -1611,6 +1624,7 @@ static bool stack_flow(const View *v, int kind) {
     size_t *queue = malloc(v->block_count * sizeof(*queue));
     bool valid = (total == 0 || incoming) && (width == 0 || working)
         && depths && known && queue;
+    if (!valid) mark_allocation_failed(diagnostics);
     size_t first = 0, count = valid ? 1 : 0;
     if (valid) { queue[0] = v->image->entry - v->image->blocks.offset;
         known[queue[0]] = 1; }
@@ -1772,7 +1786,7 @@ static bool affine_block(const View *v, size_t b, unsigned char *state,
     return true;
 }
 
-static bool validate_affine(const View *v) {
+static bool validate_affine(const View *v, SolDiagnostics *diagnostics) {
     if (v->value_count && v->block_count > SIZE_MAX / v->value_count) return false;
     size_t total = v->value_count * v->block_count;
     unsigned char *incoming = total ? malloc(total) : NULL;
@@ -1783,6 +1797,7 @@ static bool validate_affine(const View *v) {
     size_t *queue = malloc(v->block_count * sizeof(*queue));
     bool valid = (total == 0 || incoming) && (v->value_count == 0
         || (work && successor && edge_seen)) && known && queued && queue;
+    if (!valid) mark_allocation_failed(diagnostics);
     if (valid && total) memset(incoming, 1, total);
     size_t count = valid ? 1 : 0, entry = v->image->entry - v->image->blocks.offset;
     if (valid) { queue[0] = entry; known[entry] = queued[entry] = 1; }
@@ -2114,7 +2129,8 @@ static bool validate_loops(const View *v) {
     return true;
 }
 
-static bool validate_closure(const SolMirMaterialization *o) {
+static bool validate_closure(const SolMirMaterialization *o,
+    SolDiagnostics *diagnostics) {
     unsigned char *images = calloc(o->image_count, 1), *imports = calloc(o->import_count, 1);
     unsigned char *bindings = calloc(o->binding_count, 1), *queued = calloc(o->image_count, 1);
     unsigned char *demands = calloc(o->binding_count, 1);
@@ -2122,6 +2138,7 @@ static bool validate_closure(const SolMirMaterialization *o) {
     bool valid = (o->image_count == 0 || (images && queued && queue))
         && (o->import_count == 0 || imports)
         && (o->binding_count == 0 || (bindings && demands));
+    if (!valid) mark_allocation_failed(diagnostics);
     size_t first = 0, count = 0;
     for (size_t b = 0; valid && b < o->binding_count; ++b) {
         const SolMirMaterializedBinding *binding = &o->bindings[b];
@@ -2209,11 +2226,14 @@ static bool validate_closure(const SolMirMaterialization *o) {
     free(queue); return valid;
 }
 
-static bool validate_semantic_sites(const SolMirMaterialization *o) {
+static bool validate_semantic_sites(const SolMirMaterialization *o,
+    SolDiagnostics *diagnostics) {
     if (o->semantic_site_count != o->binding_count) return false;
     unsigned char *seen = o->binding_count == 0 ? NULL
         : calloc(o->binding_count, 1);
-    if (o->binding_count != 0 && seen == NULL) return false;
+    if (o->binding_count != 0 && seen == NULL) {
+        mark_allocation_failed(diagnostics); return false;
+    }
     bool valid = true;
     for (size_t i = 0; valid && i < o->semantic_site_count; ++i) {
         const SolMirMaterializedSemanticSite *site = &o->semantic_sites[i];
@@ -2527,7 +2547,8 @@ static bool validate_handlers(const SolMirMaterialization *o) {
     return true;
 }
 
-static bool validate_arena_closure(const SolMirMaterialization *o) {
+static bool validate_arena_closure(const SolMirMaterialization *o,
+    SolDiagnostics *diagnostics) {
 #define COUNTERS(name, count) unsigned char *name = (count) == 0 ? NULL : calloc((count), 1)
     COUNTERS(edges, o->edge_count); COUNTERS(edge_values, o->edge_value_count);
     COUNTERS(parameters, o->parameter_value_count);
@@ -2547,6 +2568,7 @@ static bool validate_arena_closure(const SolMirMaterialization *o) {
         && (o->receiver_root_count == 0 || receiver_roots)
         && (o->handler_count == 0 || (handler_enters && handler_exits))
         && (o->temporary_count == 0 || temp_initializers);
+    if (!valid) mark_allocation_failed(diagnostics);
     for (size_t b = 0; valid && b < o->block_count; ++b) {
         const SolMirMaterializedBlock *block = &o->blocks[b];
         for (size_t p = 0; p < block->parameters.count; ++p) {
@@ -2653,7 +2675,7 @@ bool sol_mir_materialization_validate_concrete(
         || validation_work > owner->limits.max_validation_work) {
         return error(diagnostics, "concrete MIR validation work is inconsistent");
     }
-    if (!validate_type_and_effect_arenas(owner)) return error(diagnostics,
+    if (!validate_type_and_effect_arenas(owner, diagnostics)) return error(diagnostics,
         "concrete MIR type or closed effect arena is malformed");
     bool valid = true;
     size_t blocks = 0, values = 0, instructions = 0, locals = 0, places = 0;
@@ -2675,19 +2697,19 @@ bool sol_mir_materialization_validate_concrete(
             im->locals.count, im->places.count};
         if (!concrete_types(&view)) return error(diagnostics,
             "concrete MIR type/place validation failed");
-        if (!validate_ssa(&view)) return error(diagnostics,
+        if (!validate_ssa(&view, diagnostics)) return error(diagnostics,
             "concrete MIR SSA dominance validation failed");
-        if (!validate_affine(&view)) return error(diagnostics,
+        if (!validate_affine(&view, diagnostics)) return error(diagnostics,
             "concrete MIR affine value validation failed");
         if (!validate_activation(&view)) return error(diagnostics,
             "concrete MIR parameter activation validation failed");
-        if (!validate_storage_paths(&view)) return error(diagnostics,
+        if (!validate_storage_paths(&view, diagnostics)) return error(diagnostics,
             "concrete MIR storage/path validation failed");
-        if (!stack_flow(&view, 0)) return error(diagnostics,
+        if (!stack_flow(&view, 0, diagnostics)) return error(diagnostics,
             "concrete MIR temporary validation failed");
-        if (!stack_flow(&view, 1)) return error(diagnostics,
+        if (!stack_flow(&view, 1, diagnostics)) return error(diagnostics,
             "concrete MIR region validation failed");
-        if (!stack_flow(&view, 2)) return error(diagnostics,
+        if (!stack_flow(&view, 2, diagnostics)) return error(diagnostics,
             "concrete MIR handler validation failed");
         if (!validate_contracts(&view)) return error(diagnostics,
             "concrete MIR contract validation failed");
@@ -2740,13 +2762,13 @@ bool sol_mir_materialization_validate_concrete(
         || handlers != owner->handler_count || overlays != owner->overlay_count
         || contexts != owner->context_count)
         return error(diagnostics, "concrete MIR image arena partition is malformed");
-    if (!validate_arena_closure(owner))
+    if (!validate_arena_closure(owner, diagnostics))
         return error(diagnostics, "concrete MIR arena closure is malformed");
-    if (!validate_semantic_sites(owner))
+    if (!validate_semantic_sites(owner, diagnostics))
         return error(diagnostics, "concrete MIR semantic sites are malformed");
     if (!validate_handlers(owner))
         return error(diagnostics, "concrete MIR handlers are malformed");
-    if (!validate_closure(owner))
+    if (!validate_closure(owner, diagnostics))
         return error(diagnostics, "concrete MIR executable closure is malformed");
     return true;
 }

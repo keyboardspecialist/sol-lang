@@ -1022,9 +1022,11 @@ bool sol_mir_representation_validate(const SolMirRepresentation *r,
     if (!checked_mul(r->recipe_count, 3, &fact_bytes)
         || fact_bytes > r->usage.validation_scratch_bytes) goto malformed;
     unsigned char *facts = fact_bytes == 0 ? NULL : calloc(fact_bytes, 1);
-    if (fact_bytes != 0 && facts == NULL)
+    if (fact_bytes != 0 && facts == NULL) {
+        if (diagnostics != NULL) diagnostics->allocation_failed = true;
         return validation_error(diagnostics,
             "representation validation allocation failed");
+    }
     unsigned char *inhabited = facts;
     unsigned char *zero = facts == NULL ? NULL : facts + r->recipe_count;
     unsigned char *copy = zero == NULL ? NULL : zero + r->recipe_count;

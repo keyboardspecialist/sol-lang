@@ -12,16 +12,16 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 
 ## Execution Cursor
 
-- **Next overall: M1.** **Next production checkpoint: P2.8 after M1, unless M1
-  publishes a different approved interleaving.**
-- M1 publishes subsequent interleaving. If infeasible, record the blocker and
-  continue P2.8 without inventing prerequisites.
-- After P2.8, M2-M5 may proceed independently in parallel with P3, subject to
-  experiment dependencies, staffing, and exclusive file ownership. M4E is optional.
+- **Next overall and next production checkpoint: P3.1.**
+- M1 is resolved through its infeasibility path: the
+  [September 25 report](experiments/m1/README.md) records the missing independent
+  governance and protected evaluation boundary.
+- M2-M5 remain gated unless M1 is reopened and completed feasibly. M4E remains
+  optional within that gated track.
 - One coordinator maintains this single next-overall cursor; parallel tracks do
   not create competing priority lists.
 
-## Completed Foundation Through E6 and P1
+## Completed Foundation Through E6, P1, and P2
 
 - [x] Closed normalized effect rows, recursive SCC inference, higher-order calls,
       callback checking, and exact function and bound-operation effects.
@@ -91,7 +91,7 @@ surface form requires either a prioritized row below or an explicit deferral her
 | Expressions | Bootstrap primitive/unit/path literals; structural tuple literals and numeric projections; unary/binary operators; calls and type applications; fields/method calls; records/variants; direct checked distinct/refined construction; `if`; `match`; blocks; `?`; exact handlers; contract `result`/`old`; canonical local/computed-root places with flattened field/tuple projections | Operational arrays/indexing (34); lifetime-bearing views and safe reference relationships (35, 38); raw-pointer dereference and unsafe pointer operations (44); closures/method values (28-29); refinement projection and pattern reasoning (50); unsafe assumptions/establishments (44); async/protocol expressions (59); general resumptive handlers (61) |
 | Patterns | Recursive wildcard, Boolean, binding, positional enum-variant, nominal-record, and structural-tuple patterns; pure guards; nested usefulness/exhaustiveness for `Bool`, records, tuples, and closed/open generic enums | Refined patterns (50); protocol-state patterns (59) |
 | Types and callable structure | `Int64`, `Bool`, `Text`, `Unit`, and `Never`; structural tuples of arity 2 through 16; nominal applications; `Option`/`Result`; capability and structural function types; bounded type/effect parameters; one trait bound; `borrow`/`inout` parameters | Richer traits/generic methods and required associated items (30); constants and constrained const parameters (31, 33); remaining numeric/byte/rune primitives and units/dimensions (32); arrays/collections (34, 38); lifetime relationships/views (35); resource/allocator and cost types/clauses (36-38); general effect rows/aliases (42); raw pointers/ABI types (44, 46); concurrency traits/types (59) |
-| Cross-cutting representation | Every successful-program AST statement/expression/pattern kind is parsed, structurally traversed, semantically analyzed, relocated, lowered through owning IR, and executable or explicitly non-runtime; discriminants, spans, linked-arena ownership, current executable type relations, callable context, canonical place/projection ownership, per-kind censuses, and composite relocation fixtures are independently validated. Separately, P1 lowers and validates every bodyful E6 callable into unstable target-neutral CFG MIR, with canonical rendering and bounded evaluation. Concrete monomorphic planning/materialization, representation, target layout, source-independent operation plans, and whole-program symbols/linkage are complete through P2.7 for the frozen E6 profile. | Per-form cross-phase acceptance coverage (43); complete concrete-program contract freeze/census (P2.8); executable-core runtime ABI and WebAssembly lowering/adapters (P3-P4 and tasks 47-48); reproducible artifacts and interpreter/Wasm differential testing (P5 and task 49) |
+| Cross-cutting representation | Every successful-program AST statement/expression/pattern kind is parsed, structurally traversed, semantically analyzed, relocated, lowered through owning IR, and executable or explicitly non-runtime; discriminants, spans, linked-arena ownership, current executable type relations, callable context, canonical place/projection ownership, per-kind censuses, and composite relocation fixtures are independently validated. Separately, P1 lowers and validates every bodyful E6 callable into unstable target-neutral CFG MIR, with canonical rendering and bounded evaluation. P2 completes concrete monomorphic planning/materialization, representation, target layout, source-independent operation plans, whole-program symbols/linkage, and the validated/rendered complete concrete-program owner for the frozen E6 profile. | Per-form cross-phase acceptance coverage (43); executable-core runtime ABI and WebAssembly lowering/adapters (P3-P4 and tasks 47-48); reproducible artifacts and interpreter/Wasm differential testing (P5 and task 49) |
 
 Unchecked exceptions and `throw`/`catch` are not planned; recoverable failure remains
 typed through `Result`, and cancellation remains typed. Unrestricted token/text macros
@@ -105,8 +105,8 @@ deferred until a concrete core API requires their smallest coherent subset.
 
 ## End-to-End and Production Track
 
-E1-E6 and P1 through P2.7 are complete. P2 remains the current production milestone,
-with P2.8 next after M1 unless M1 publishes a different approved interleaving.
+E1-E6, P1, and P2 are complete for the frozen E6 profile. P3 is the current
+production milestone, with P3.1 next overall and as the next production checkpoint.
 Deferred language breadth is not a prerequisite for P2-P5 unless a
 milestone explicitly activates a bounded numbered-task slice. Existing numbered
 capability IDs remain stable; named slices such as `48A` account for completed portions
@@ -130,14 +130,13 @@ raw-IR, MIR-lowering, MIR-evaluator, and raw-interpreter tests retain direct int
 access for malformed IR/MIR mutation, phase-corruption assertions, differential
 evaluation, and trusted host-callback coverage.
 
-The production track is underway. P1 through P2.7 are complete for the frozen E6
-profile; P2.8 is the next production checkpoint after M1 unless M1 publishes a
-different approved interleaving:
+The production track is underway. P1 and P2 are complete for the frozen E6 profile;
+P3.1 is the next overall item and next production checkpoint:
 
 | Done | Order | Milestone | Dependency and numbered-backlog scope |
 | --- | ---: | --- | --- |
 | [x] | P1 | Introduce ownership-explicit target-neutral CFG/MIR for the frozen executable core | E6; task 45 |
-| [ ] | P2 | Define monomorphization, representation, target layout, symbols, and linkage | P1; P2.1-P2.7 complete, P2.8 open |
+| [x] | P2 | Define monomorphization, representation, target layout, symbols, and linkage | P1; P2.1-P2.8 complete for the frozen E6 profile |
 | [ ] | P3 | Define the target-independent runtime ABI and production panic/cleanup policy | P1, P2; task 48B |
 | [ ] | P4 | Integrate a WebAssembly backend and host adapter | P2, P3; task 47W and task 48C |
 | [ ] | P5 | Implement reproducible `sol build` artifacts and interpreter/Wasm differential tests | P4; task 49C |
@@ -207,7 +206,7 @@ external dependencies, public IR, concurrency, or broader handlers.
 | [x] | P2.6b1 | Close scalar single-block predicates and import contract ownership | Remove `UNRESOLVED_BODY`; lower only scalar/Text/Unit constants, direct unprojected contextual inputs, checked non-short-circuit unary/binary arithmetic/comparison/equality, and one Bool return. Reject every richer form transactionally. Retain exact instance/import context ownership, import-owned helper demands without fake CFG coordinates, envelope-local snapshot slots with segregated source provenance, and ordered requires/snapshots/ensures. Independently authenticate every executable field and exact arena/resource census. |
 | [x] | P2.6b2 | Complete rich predicate CFG bodies | Lower short-circuit and conditional control, exact calls and function/bound values within the frozen purity and finite-closure rules, aggregate/tuple/sum/wrapper/refined construction, recursive matches/guards/bindings, immutable blocks/locals, and nested refinement body references into bounded immutable CFGs shared by instance and import contexts. Contract expression propagation remains semantically rejected under `SOL-CONTRACT-002`, while malformed propagation records are validated and rejected. Canonical interning is cycle-safe; independent reconstructive validation covers complete executable fields, SSA/CFG/type/call/body-reference/provenance invariants, and the exact resource census, with source IDs confined to authenticated provenance. |
 | [x] | P2.7 | Freeze symbols and whole-program linkage | A separate `SolMirLinkage` owner derives collision-checked versioned ASCII `sol.i1` internal and `sol.e1` entry symbols from semantic identity plus full SHA-256 canonical structural instance keys; resolves all bindings to internal callables or approved host requirements; assigns abstract whole-program function-table identities; retains typed symbolic ABI-neutral runtime requirements; and validates canonical ordering/rendering independently of paths, pointers, source ordinals, and unstable dense IDs |
-| [ ] | P2.8 | Freeze and census the concrete-program contract | Exhaustively validate and canonically render the complete concrete owner; add malformed-input and repeated-lowering equality tests; require the E6 entry closure to be finite and concrete, including generic/trait instances, contracts/refinements, hosted imports, and all reachable failure/cleanup paths; do not select a runtime ABI or emit Wasm |
+| [x] | P2.8 | Freeze and census the concrete-program contract | The unstable address-stable `SolMirConcreteProgram` owns the program, plan, materialization, representation, layout, operations, and linkage stages while borrowing immutable `SolIr`; builds transactionally with nested stage limits and exact outcome mapping; independently validates predecessor links, transitive stages, finite concrete and executable closure, cross-stage censuses, and anti-aliasing; and renders one canonical versionless buffered form. The E6 all-roots fixture freezes every stage count/usage and complete generic, trait, predicate, import, callable, instruction, terminator, failure, and cleanup closure without selecting a runtime ABI or emitting Wasm. |
 
 ### P3 - Target-Independent Runtime ABI
 
@@ -250,18 +249,19 @@ the broader backend track.
 
 ## Bounded Maintenance-Workflow Experiment
 
-All rows are OPEN proposals, not implemented features. This experiment does not
-wait for full public IR (54), SMT (52), a production backend, or patch syntax (56).
-M1 checks whether existing projections suffice and records gaps rather than
-quietly adding those systems as prerequisites. The Execution Cursor governs order.
+M1 is completed through its documented infeasibility path; the remaining rows are
+OPEN proposals, not implemented features. This experiment does not wait for full
+public IR (54), SMT (52), a production backend, or patch syntax (56). The M1 report
+records projection gaps without adding those systems as prerequisites. The
+Execution Cursor governs order.
 
 | Done | Order | Experiment | Bounded exit criteria |
 | --- | --- | --- | --- |
-| [ ] | M1 | First-user workload and experiment charter | Select one capability-restricted hosted business-logic/validation workload, user, and host boundary. Publish a protected external change contract/intent and threat model; protect the base snapshot, held-out tasks/tests, acceptance policy, and verifier. Separate builder authority from verifier control and name an independent adjudicator for `approve`, `reject`, or `escalate`. Publish a timebox, stop/go thresholds, projection sufficiency/gaps, subsequent interleaving, and metrics including false accepts/rejects, implementation-view request rate, and decision time. If infeasible, record the blocker and continue P2.8. |
-| [ ] | M2 | Declaration-centered context packets (58 slice) | After M1 feasibility and P2.8, produce bounded deterministic packets of source, signatures, effects, contracts, known available callers/callees, and checked lexical authority roots. Include source snapshot hash, compiler/schema/options, selection metadata, provenance, inclusion reasons, heuristic candidate test associations, omissions, and explicit unknowns. Unavailable is not empty; use existing IDs only within their supported scope. Do not claim complete reachability, global minimality, authoritative test relevance, or business authorization. Inspection bytes are not a guaranteed semantic cache key. |
+| [x] | M1 | First-user workload and experiment charter (completed as infeasible) | The [infeasibility report](experiments/m1/README.md) evaluates an unvalidated expense-policy candidate and records the governance hard stop: no actual user or policy owner, protected held-out material, externally controlled verifier, or independent adjudicator exists. Repository visibility and hashes do not provide authority separation. P2.8 has since completed; this closure implements no experiment feature. |
+| [ ] | M2 | Declaration-centered context packets (58 slice) | Only after M1 is reopened and completed feasibly, and after P2.8, produce bounded deterministic packets of source, signatures, effects, contracts, known available callers/callees, and checked lexical authority roots. Include source snapshot hash, compiler/schema/options, selection metadata, provenance, inclusion reasons, heuristic candidate test associations, omissions, and explicit unknowns. Unavailable is not empty; use existing IDs only within their supported scope. Do not claim complete reachability, global minimality, authoritative test relevance, or business authorization. Inspection bytes are not a guaranteed semantic cache key. |
 | [ ] | M3 | Conservative checked-snapshot deltas (57 slice) | After M2, report declaration, signature, effect, contract, known call-edge, and checked lexical-authority edits between checked snapshots; validate stable IDs and reject stale, ambiguous, or unsupported comparisons. Report contract direction only for a precisely defined and tested structural subset; otherwise report changed or unknown. Keep body edits and unknowns visible: a changed predicate is not established weakening, and an unchanged interface does not establish preserved behavior. |
 | [ ] | M4 | Ordinary-edit validation and approval loop (56 and bounded 62 slices) | After M2/M3, exercise ordinary edit/check/test/delta/independent human adjudication against the protected change intent, base snapshot, tests, policy, and verifier. The builder cannot modify those inputs. An independently controlled verifier evaluates checked base/candidate snapshots and emits the bounded unsigned local task-62 evidence record defined below. Authority or contract changes require explicit adjudication. This is not patch syntax, architectural auto-repair, or proof of correctness. |
-| [ ] | M4E | Optional basic editor slice (55 slice) | Only after M1/M2 establish projection feasibility, timebox diagnostics, navigation, and packet presentation. Not full LSP and not a prerequisite for M5. |
+| [ ] | M4E | Optional basic editor slice (55 slice) | Only after a feasibly reopened M1 and M2 establish projection feasibility, timebox diagnostics, navigation, and packet presentation. Not full LSP and not a prerequisite for M5. |
 | [ ] | M5 | Held-out workflow comparison | After M4, compare against source-only on protected held-out tasks with the same compiler/test access and, where relevant, model and budget. The independent adjudicator emits `approve`, `reject`, or `escalate`; on escalation, the adjudicator may inspect precisely scoped additional source and records its reason and scope rather than silently granting the builder broader context. Measure decision quality, false accepts/rejects, implementation-view request rate, decision time, correctness, regressions, context size, iterations, and diagnostic usefulness. Protected tests are evidence, not complete ground truth. Report negative/inconclusive results and decide continue, narrow, or stop. |
 
 M2 maps to 58, M3 to 57, M4 to the validation/approval slice of 56 and a bounded
@@ -272,15 +272,16 @@ semantic delta, evaluations and results, failures or incomplete states, omission
 and explicit unknowns. The deterministic record is content-addressed but unsigned:
 hashing supplies integrity and addressing, not producer authentication or deployment
 provenance. These proposals do not earn `[~]` status; full scopes of 54-58 and 62
-remain in the numbered backlog. No M1 charter or tool feature is implemented by this
-refresh. The M1 protected external change contract is an experiment artifact, not
-the future Sol intent or semantic-patch syntax proposed by tasks 54/56.
+remain in the numbered backlog. M1's completed-as-infeasible status records a
+governance blocker, not a charter or tool feature. A protected external change
+contract would be an experiment artifact if M1 were reopened, not the future Sol
+intent or semantic-patch syntax proposed by tasks 54/56.
 
 ## Workload-Gated Decisions
 
 These are evidence-driven decisions, not implicit P2-P5 requirements or newly
-implemented semantics. M1/M5 may justify a separately bounded task; otherwise
-retain the existing behavior and deferrals.
+implemented semantics. A feasibly reopened M track may justify a separately bounded
+task; otherwise retain the existing behavior and deferrals.
 
 | Decision | Evidence and boundary |
 | --- | --- |
@@ -367,14 +368,14 @@ or renumber stable capability IDs.
 | [ ] | 52 | Integrate SMT proof policies, isolated solver execution, deterministic caching, counterexamples, cost proofs, and proof diagnostics | 4 | 5 | Logical obligation IR |
 | [ ] | 53 | Complete formatter width reflow, trailing-comma policy, sorting, comment reflow, and syntax-category fixtures without semantic reordering | 3 | 3 | Current parser/token-preserving formatter; each later syntax task owns its formatter integration |
 | [ ] | 54 | Define the versioned public semantic graph and canonical serialized Sol IR separately from internal interpreter IR and MIR | 5 | 5 | Stable IDs and mature semantics |
-| [ ] | 55 | Expose semantic information through a language server; M4E proposes only an optional basic editor slice | 4 | 5 | Public schemas and graph for full scope; M1/M2 projection feasibility for M4E |
+| [ ] | 55 | Expose semantic information through a language server; M4E proposes only an optional basic editor slice | 4 | 5 | Public schemas and graph for full scope; feasibly reopened M1 and M2 projection feasibility for M4E |
 | [ ] | 56 | Implement intent/semantic patch declarations and patch validation; M4 proposes only ordinary-edit validation and human approval, not patch syntax | 4 | 5 | Public IR for full scope; M2/M3 for M4 |
 | [ ] | 57 | Produce schema/API compatibility and semantic change reports, including migration requirements; M3 proposes only conservative checked-snapshot deltas | 4 | 5 | Public IR, schemas, and patches for full scope; M2 for M3 |
-| [ ] | 58 | Generate bounded context bundles for editor and agent workflows; M2 proposes declaration-centered packets from available projections | 3 | 4 | Semantic graph for full scope; M1 feasibility and P2.8 for M2 |
+| [ ] | 58 | Generate bounded context bundles for editor and agent workflows; M2 proposes declaration-centered packets from available projections | 3 | 4 | Semantic graph for full scope; feasibly reopened M1 and P2.8 for M2 |
 | [ ] | 59 | Stage structured async/concurrency, `Send`/`Share`, cancellation, actors/channels, protocol-state patterns and `emit`, transactions, and workflows | 5 | 5 | Closures (28-29), resources (36-38), completed P1/task 45 MIR, and P3 runtime ABI |
 | [ ] | 60 | Stage typed derives, sandboxed build transforms, and opt-in reflection without unrestricted macros | 3 | 5 | Package sandboxing and public IR |
 | [ ] | 61 | Generalize handlers after defining ownership across suspension and resumptions, multiple operations, dynamic authority matching, and row transformation | 5 | 5 | Effect polymorphism, concurrency, and runtime |
-| [ ] | 62 | Define a versioned canonical change-evidence envelope and later optional attestations. The envelope references or embeds, and records execution of, outputs from tasks 54, 56, 57, 58 and later P5; it must not implement a second semantic graph, delta engine, context packet, patch format, or reproducible-build system. M4 activates only the unsigned deterministic content-addressed local evidence-record slice with independently controlled verification; signatures, producer authentication, and deployment provenance remain later gated scope. | 4 | 4 | M2/M3 and protected M1 inputs for the M4 slice; tasks 54/56-58 and P5 for the full envelope |
+| [ ] | 62 | Define a versioned canonical change-evidence envelope and later optional attestations. The envelope references or embeds, and records execution of, outputs from tasks 54, 56, 57, 58 and later P5; it must not implement a second semantic graph, delta engine, context packet, patch format, or reproducible-build system. M4 activates only the unsigned deterministic content-addressed local evidence-record slice with independently controlled verification; signatures, producer authentication, and deployment provenance remain later gated scope. | 4 | 4 | M2/M3 and protected inputs from a feasibly reopened M1 for the M4 slice; tasks 54/56-58 and P5 for the full envelope |
 
 ## Milestone Discipline
 

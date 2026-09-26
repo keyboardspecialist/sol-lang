@@ -743,7 +743,9 @@ SolMirLinkageBuildOutcome sol_mir_linkage_build(
     }
     if (!sol_mir_operations_validate(request->operations, diagnostics)) {
         report(diagnostics, "invalid borrowed operations owner");
-        return SOL_MIR_LINKAGE_BUILD_INVALID_OPERATIONS;
+        return diagnostics != NULL && diagnostics->allocation_failed
+            ? SOL_MIR_LINKAGE_BUILD_ALLOCATION_FAILED
+            : SOL_MIR_LINKAGE_BUILD_INVALID_OPERATIONS;
     }
     SolMirLinkage scratch; sol_mir_linkage_init(&scratch);
     scratch.operations = request->operations;
@@ -823,8 +825,12 @@ SolMirLinkageBuildOutcome sol_mir_linkage_build(
     scratch.usage = expected;
     size_t validation_work, validation_scratch;
     if (!sol_mir_linkage_internal_validation_requirements(&scratch,
-            &validation_work, &validation_scratch)) {
-        fail(&builder, SOL_MIR_LINKAGE_BUILD_RESOURCE_EXHAUSTED,
+            &validation_work, &validation_scratch, diagnostics)) {
+        SolMirLinkageBuildOutcome outcome = diagnostics != NULL
+                && diagnostics->allocation_failed
+            ? SOL_MIR_LINKAGE_BUILD_ALLOCATION_FAILED
+            : SOL_MIR_LINKAGE_BUILD_RESOURCE_EXHAUSTED;
+        fail(&builder, outcome,
             "linkage validation work limit exceeded"); goto failed;
     }
     scratch.usage.validation_work = validation_work;

@@ -3054,6 +3054,7 @@ static bool add_range(PlanRanges *ranges, const void *pointer, size_t count,
     }
     if (!grow((void **)&ranges->items, &ranges->capacity, ranges->count + 1,
             sizeof(*ranges->items))) {
+        if (diagnostics != NULL) diagnostics->allocation_failed = true;
         return validation_error(diagnostics,
             "allocation failed while checking monomorphic plan ranges");
     }
@@ -3573,6 +3574,8 @@ bool sol_mir_plan_validate(const SolMirPlan *plan, SolDiagnostics *diagnostics) 
     SolMirPlan expected;
     sol_mir_plan_init(&expected);
     SolMirPlanBuildOutcome outcome = build_scratch(&request, &expected, diagnostics);
+    if (outcome == SOL_MIR_PLAN_BUILD_ALLOCATION_FAILED
+        && diagnostics != NULL) diagnostics->allocation_failed = true;
     bool valid = outcome == SOL_MIR_PLAN_BUILD_SUCCEEDED
         && plans_equal(plan, &expected);
     sol_mir_plan_free(&expected);
