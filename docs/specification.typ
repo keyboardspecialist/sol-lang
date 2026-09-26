@@ -157,7 +157,7 @@
   ),
 )
 
-#callout([SCOPE], [This document records the target design and bounded implemented decisions. Unless explicitly marked *IMPLEMENTED* or described as current bootstrap behavior, passages and examples are proposals, not delivered guarantees. Open alternatives remain open. This documentation-only refresh adds no compiler or M-track feature and reports no fresh compiler test run.])
+#callout([SCOPE], [This document records the target design and bounded implemented decisions. Unless explicitly marked *IMPLEMENTED* or described as current bootstrap behavior, passages and examples are proposals, not delivered guarantees. Open alternatives remain open. The September 9 implementation baseline remains `6ec4ba9` through P2.6; current-worktree addenda explicitly identify the independently approved P2.7 implementation. No M-track feature is implemented.])
 
 Current references, linked relative to the root PDF:
 
@@ -181,7 +181,7 @@ The compiler is intended to expose a canonical typed semantic graph, stable decl
 
 #status("IMPLEMENTED", [At `6ec4ba9`, the C17 edition-2027 bootstrap has bounded reference execution over owning typed IR, explicit trusted hosting, `sol run` and authored Boolean `sol test`, runtime callable CHECK policy, direct checked refined construction, deterministic cleanup, package-local stable top-level IDs, structured diagnostics, and selected versioned inspection projections. E1-E6 and P1 are complete. Separate experimental owners provide frozen-E6 callable CFG MIR, monomorphic planning and concrete materialization, representation recipes, target layout, and source-independent semantic operations/predicate bodies through P2.6. These owners are not the CLI execution pipeline and impose finite callable-closure restrictions beyond interpreter support.])
 
-P2 remains open: symbols/linkage (P2.7) precede the first-user charter (M1), then the concrete-program freeze (P2.8). Production runtime ABI, backend emission, `sol build`, full public IR, SMT discharge, and semantic patch tooling remain absent. Loop/decreases templates are runtime-erased and unresolved; unreachable obligations are not proved. No M proposal is implemented by this refresh.
+The current worktree additionally completes symbols and whole-program linkage (P2.7). P2 remains open for the concrete-program freeze (P2.8): M1 is next overall, and P2.8 is the next production checkpoint after M1 unless M1 publishes a different approved interleaving. Production runtime ABI, backend emission, `sol build`, full public IR, SMT discharge, and semantic patch tooling remain absent. Loop/decreases templates are runtime-erased and unresolved; unreachable obligations are not proved. No M proposal is implemented by this refresh.
 
 The proposed first focus is capability-restricted hosted business logic or validation; M1 still selects the user, workload, and host boundary. Existing projections and interpreter checks can support a small maintenance experiment without full IR or SMT. Safer or cheaper human/AI maintenance remains an unmeasured hypothesis, not a delivered benefit.
 
@@ -1542,8 +1542,8 @@ The target compiler consists of deterministic cacheable stages. Parsing produces
     #v(6pt)
     #grid(
       columns: (1fr, auto, 1fr, auto, 1fr), align: center,
-      block(inset: 7pt, fill: pale-green, radius: 3pt)[P1 MIR + P2.1-P2.6 Owners], [->],
-      block(inset: 7pt, fill: pale-blue, radius: 3pt)[Linkage + Freeze + Runtime ABI], [->],
+      block(inset: 7pt, fill: pale-green, radius: 3pt)[P1 MIR + P2.1-P2.7 Owners], [->],
+      block(inset: 7pt, fill: pale-blue, radius: 3pt)[P2.8 Freeze + P3 Runtime ABI], [->],
       block(inset: 7pt, fill: pale-blue, radius: 3pt)[First Wasm Backend + Build],
     )
     #v(7pt)
@@ -1718,12 +1718,12 @@ Runtime reflection is opt-in package metadata and cannot bypass invariants. Dese
 
 Begin with a deliberately small core proving interactions among canonical syntax, algebraic types, ownership, effects, contracts, semantic identities, and diagnostics. Simultaneously building full proof automation, workflows, native targets, and an ecosystem would obscure core coherence.
 
-E1-E6 established the bounded frontend/interpreter application core, and P1 through P2.6 are complete at `6ec4ba9`. Language breadth remains frozen. The live #link("TODO.md")[execution cursor] is:
+E1-E6 established the bounded frontend/interpreter application core, and P1 through P2.6 are complete at the September 9 baseline `6ec4ba9`. The current worktree additionally completes P2.7. Language breadth remains frozen. The live #link("TODO.md")[execution cursor] is:
 
 ```text
-P2.7 symbols and whole-program linkage (next overall and production)
--> M1 first-user workload and experiment charter
--> P2.8 concrete-program freeze and census
+M1 first-user workload and experiment charter (next overall)
+-> P2.8 concrete-program freeze and census (next production checkpoint
+   after M1 unless M1 publishes a different approved interleaving)
 -> P3 runtime ABI -> P4 Wasm backend/adapter -> P5 build artifacts
 ```
 
@@ -1760,7 +1760,7 @@ The September 9, 2026 snapshot of `6ec4ba9` provides the following. This is a do
 - Structural tuple expressions, types, and recursive patterns of arity 2 through 16; static numeric projection places; recursive equality, Copy/affine ownership, partial moves, authority provenance, owning IR, interpreter values, and inspection-v3 projections.
 - One canonical three-module executable-core conformance application that passes formatter check, compilation, authored tests, effect inspection, inspection-v3 projection, and hosted execution while jointly exercising imports, stable identity, data types, generics/traits, recursive matching, ownership/mutation/cleanup, typed errors, configured runtime failure/unwind, contracts/refinements, and standard capabilities.
 
-=== Current Production Internals: P1 through P2.6
+=== Current Production Internals: P1 through P2.7
 
 #status("IMPLEMENTED", [These separate unstable owners cover the frozen E6 closure, not every form executable by the reference interpreter. They are compiler-internal, not the production compilation session/CLI, public serialization, a runtime ABI, or a backend. All builds are bounded and transactional, with independent validation and buffered deterministic rendering.])
 
@@ -1775,6 +1775,7 @@ The September 9, 2026 snapshot of `6ec4ba9` provides the following. This is a do
     ([P2.4], [Canonical target-neutral recipes cover primitives, aggregates/sums, distinct/refined wrappers, functions, and capabilities; source-order fields/variants, explicit semantic tags, inhabited/zero-size/Copy/drop classifications, and exact callable producers. Reachable open enums reject. This owner selects no byte layout or ABI.]),
     ([P2.5], [Explicit target descriptors select checked sizes, alignment, padding, source-order field offsets, u32 sum tags/payloads, projection maps, and text/callable/capability objects. Pointer widths 4/8 are supported; the initial Wasm32 descriptor is little-endian. Nonzero inhabited aggregates use uniform indirect storage; wrappers follow backing layout. Independent layout validation rejects overflow, incomplete reconstruction, and borrowed aliases.]),
     ([P2.6], [Representation-aware plans close accesses, construction and capability inheritance, recursive pattern tests/extractions, Option/Result propagation, checked arithmetic/equality, snapshots, callable producers, and handler bindings. Synthetic predicate CFGs and approved import-contract envelopes complete the source-independent executable boundary; source IDs are authenticated provenance only. Loop proof obligations remain runtime-erased.]),
+    ([P2.7], [A separate `SolMirLinkage` owner follows operations. Stable versioned ASCII `sol.i1` internal and `sol.e1` entry symbols derive from semantic identity plus full SHA-256 canonical structural instance keys. It resolves every binding internally or to an approved typed host requirement, assigns abstract whole-program function-table identities, records typed symbolic ABI-neutral runtime recipe requirements, rejects collisions, and independently validates bounded transactional canonical output. It does not select runtime ABI, Wasm names/indices/encoding, wrappers/adapters, or the P2.8 final freeze.]),
   ),
 )
 
@@ -1786,17 +1787,17 @@ Ordinary and predicate callback sites require a direct static definition or boun
 
 Callable MIR contract envelopes remain bounded: contracted generic/effect-parameter and exclusive forms, plus fallible/projected snapshots, reject transactionally. Supported snapshots are direct unprojected `Int64`, `Bool`, or Unit locals. Approved bodyless import contracts are separately closed by P2.6 and are not globally unsupported. The independent P1 evaluator still uses a bounded pure source-obligation evaluator; it is not the P2.6 source-independent operation owner. Its MIR-vs-owning-IR comparisons cover results/failure spans, host behavior, and cleanup, not future interpreter/Wasm conformance.
 
-The lifetime chain is operations -> layout -> representation -> materialization -> plan -> program -> owning IR. Borrowed upstream owners must remain alive and immutable. Validators authenticate executable fields, CFG/SSA/type/ownership relations, provenance, and resource censuses; trusted mutable C owners are not arbitrary-pointer recovery APIs or public formats.
+The lifetime chain is linkage -> operations -> layout -> representation -> materialization -> plan -> program -> owning IR. Borrowed upstream owners must remain alive and immutable. `SolMirLinkage` exposes `sol_mir_linkage_init`, `sol_mir_linkage_free`, `sol_mir_linkage_default_limits`, `sol_mir_linkage_build`, `sol_mir_linkage_validate`, and `sol_mir_linkage_render`. Its symbols and canonical rendering exclude paths, pointers, source ordinals, and unstable dense IDs; table IDs are abstract whole-program identities, and host/runtime requirements are typed, symbolic, and ABI-neutral. Validators authenticate executable fields, CFG/SSA/type/ownership relations, provenance, and resource censuses; trusted mutable C owners are not arbitrary-pointer recovery APIs or public formats.
 
-Baseline evidence includes all 14 bodyful E6 callables and four approved imports in the all-roots closure. The layout census has 21 types, 11 fields, nine variants, and five projections. E6's four single-block predicate bodies describe that fixture, not a restriction on P2.6b2 or a count of the compiler suite. E6 conformance is not usability evidence or proof of maintenance advantage; no compiler tests were rerun for this manual refresh.
+Baseline evidence includes all 14 bodyful E6 callables and four approved imports in the all-roots closure. The layout census has 21 types, 11 fields, nine variants, and five projections. E6's four single-block predicate bodies describe that fixture, not a restriction on P2.6b2 or a count of the compiler suite. For the current-worktree P2.7 addendum, the E6 linkage census is 14 internal callables, 23 bindings, one entry export, four approved host requirements, no callable values/table entries, and 17 runtime requirements. Approved validation reported the Debug Werror suite passing 47/47 and the AppleClang ASan/UBSan Werror suite passing 47/47 on macOS. Leak detection was disabled because Apple ASan reports it unsupported, so leak checking did not run. The focused linkage test passed, all three deterministic stress hashes matched, and `git diff --check` passed. At validation time, Typst 0.15.1 regenerated the checked PDF byte-for-byte identically. E6 conformance is not usability evidence or proof of maintenance advantage.
 
 === Remaining Boundary
 
-Symbols/linkage (P2.7), whole-program freeze/census (P2.8), production runtime ABI, backend cleanup policy, Wasm emission, reproducible `sol build`, and interpreter/Wasm differential execution remain open. Full public IR, semantic patch tooling, logical call-site substitution/normalization, SMT discharge, refinement projection/reasoning, and unresolved loop/decreases/unreachable proof obligations remain outside the delivered boundary. Broader traits, closures, resources, lifetime/reference values, collections, unsafe/FFI, manifests/dependencies, member/local IDs, concurrency, general handlers, and the rest of the feature vision remain separately gated target work.
+The P2.8 final complete-program freeze/census, production runtime ABI, concrete table indices, external ABI names, wrappers/adapters, Wasm linkage/emission, reproducible `sol build`, and interpreter/Wasm differential execution remain open. Full public IR, semantic patch tooling, logical call-site substitution/normalization, SMT discharge, refinement projection/reasoning, and unresolved loop/decreases/unreachable proof obligations remain outside the delivered boundary. Broader traits, closures, resources, lifetime/reference values, collections, unsafe/FFI, manifests/dependencies, member/local IDs, concurrency, general handlers, and the rest of the feature vision remain separately gated target work.
 
 == Phased Roadmap
 
-This snapshot mirrors #link("TODO.md")[the live ledger], not a second queue. Completion of P2.1-P2.6 does not complete P2.
+This orientation mirrors #link("TODO.md")[the live ledger], not a second queue. Completion of P2.1-P2.7 does not complete P2.
 
 #spec-table(
   (1fr, 2fr),
@@ -1804,7 +1805,7 @@ This snapshot mirrors #link("TODO.md")[the live ledger], not a second queue. Com
   (
     ([E1-E6 / complete], [Bounded shared compilation, hardened input/host boundaries, explicit entrypoint, trusted interpreter profiles, `sol run`, runtime contracts/refinements, and E6 conformance.]),
     ([P1 / complete], [Frozen-E6 callable CFG MIR, dominance/affine validation, rendering, and bounded reference differential evaluation.]),
-    ([P2 / open], [P2.1-P2.6 complete. P2.7 symbols/linkage is next overall and production; then M1; then P2.8 complete concrete-program freeze, rendering, and census. No runtime ABI or Wasm emission at this exit.]),
+    ([P2 / open], [P2.1-P2.7 complete. M1 is next overall; P2.8 is the next production checkpoint after M1 unless M1 publishes a different approved interleaving. P2.8 completes concrete-program freeze, rendering, and census without selecting a runtime ABI or emitting Wasm.]),
     ([P3 / open], [Target-independent call/result/failure ABI, allocation and owned operations, panic/cleanup, exact trusted hosting and handlers, then validated runtime-lowered closure. P3.W1 is a gated timeboxed integration experiment.]),
     ([P4 / open], [Select/pin an established Wasm toolchain; emit the frozen represented CFG; implement checks, cleanup, exact host adapter, and E6 Wasm execution. No implicit Component Model scope.]),
     ([P5 / open], [Immutable build API/artifacts, deterministic `sol build` writes, artifact execution, interpreter/Wasm differential tests, and byte-identical release/reproducibility acceptance.]),
@@ -2279,7 +2280,7 @@ Sol is a proposal for a new interface between intent, implementation, verificati
 
 The most important experiment is not whether Sol compiles a benchmark. It is whether a human or model can modify a nontrivial system with less hidden context, receive bounded meaningful obligations, and demonstrate mechanically or operationally that requested behavior changed while unrelated behavior did not.
 
-#callout([NEXT WORK], [Follow #link("TODO.md")[the sole live queue]: P2.7 -> M1 -> P2.8. M1 selects a workload and publishes interleaving; the bounded experiment does not require full IR, SMT, or patch syntax. Consult #link("docs/compiler-status.md")[the implementation snapshot] for compatibility boundaries and #link("docs/project-analysis.md")[the analysis] for findings and evaluation rationale. Future RFCs should separate target semantics, implemented behavior, and unresolved decisions without creating competing priorities.])
+#callout([NEXT WORK], [Follow #link("TODO.md")[the sole live queue]: M1 is next overall; P2.8 is the next production checkpoint after M1 unless M1 publishes a different approved interleaving. M1 selects a workload and publishes interleaving; the bounded experiment does not require full IR, SMT, or patch syntax. Consult #link("docs/compiler-status.md")[the implementation snapshot and current-worktree addendum] for compatibility boundaries and #link("docs/project-analysis.md")[the analysis] for findings and evaluation rationale. Future RFCs should separate target semantics, implemented behavior, and unresolved decisions without creating competing priorities.])
 
 #v(1em)
 #align(center)[#text(size: 8pt, fill: blue)[End of Design Specification v0.2]]

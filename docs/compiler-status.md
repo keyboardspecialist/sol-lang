@@ -7,6 +7,12 @@ This relocates the detailed baseline README documentation, reconciled with the
 approved ledger. It is not a second checklist, a new test report, or a stable ABI
 specification. [TODO.md](../TODO.md) alone owns live work status and order.
 
+**Current-worktree addendum, September 25, 2026:** P2.7 is independently approved
+and complete in the current worktree. The baseline hash above remains the historical
+September 9 snapshot; no post-baseline commit hash is asserted here. P2.8 remains
+open, M1 is next overall, and P2.8 is the next production checkpoint after M1 unless
+M1 publishes a different approved interleaving.
+
 Use the [README](../README.md) for onboarding and runnable examples, and
 [project analysis](project-analysis.md) for the dated product assessment. The
 design specification is a target-language manual with implementation boundaries;
@@ -804,10 +810,66 @@ CMake project configures CTest; use `cmake --build build --target test` from the
 repository root with a configured testing build. Test discovery must be evaluated
 in the actual build directory, not inferred from a source-directory invocation.
 
+## Whole-Program Linkage (P2.7 Current-Worktree Addendum)
+
+The separate unstable [SolMirLinkage](../include/sol/mir_linkage.h) owner follows
+operations and borrows one validated `SolMirOperations`, which must remain alive and
+immutable. The complete lifetime chain is linkage -> operations -> layout ->
+representation -> materialization -> plan -> program -> owning IR. The public
+compiler-internal API comprises `sol_mir_linkage_init`, `sol_mir_linkage_free`,
+`sol_mir_linkage_default_limits`, `sol_mir_linkage_build`,
+`sol_mir_linkage_validate`, and `sol_mir_linkage_render`.
+
+Each materialized image has one canonical internal callable. Its stable, versioned,
+lowercase ASCII `sol.i1` symbol combines the callable's 128-bit semantic identity
+with the full 256-bit SHA-256 digest of its canonical structural instance key; an
+entry root receives the corresponding `sol.e1` export symbol. Structural keys cover
+the complete concrete callable identity rather than arena positions. Symbols,
+identities, ordering, and rendering exclude source paths, pointers, source ordinals,
+and unstable dense IDs. Distinct structural values that collide at any instance,
+host-requirement, table, runtime-recipe, or exported-symbol identity are rejected
+rather than silently deduplicated.
+
+The owner resolves every materialized binding to exactly one internal callable or
+approved host requirement and exports each entry binding to its internal callable.
+Approved-host requirements retain typed receiver recipe/access, ordered parameter
+recipes/accesses, result recipe, and closed effect row. Function and bound-operation
+values map to deduplicated abstract whole-program table identities; `SolMirLinkageTableId`
+values are not concrete target table indices. Recipe requirements symbolically name
+the typed create, copy, drop, equality, and bound-environment operations needed by
+the reachable closure. Host and runtime requirements are ABI-neutral: linkage does
+not choose calling conventions, external ABI names, wrappers/adapters, Wasm names,
+indices, sections, or encoding.
+
+Construction is transactional into an all-zero destination. Limits and live usage
+cover callable, binding, entry-export, table-entry, callable-value, host-requirement,
+and runtime-requirement counts; persistent owned bytes; peak build/validation scratch
+bytes; and incrementally charged build/validation work. Canonical sorting is charged.
+Validation lives in a separate translation unit, reconstructs identities, bindings,
+requirements, canonical order, exact arena consumption, successful-build work, and
+the E6 census without invoking construction helpers. It preflights counts, capacities,
+usage, and disjoint owned ranges, then rejects overlap with all transitive borrowed
+owners before typed traversal. Rendering independently validates and buffers the
+complete canonical text before one output write.
+
+The all-roots E6 linkage census is 14 internal callables, 23 resolved bindings, one
+entry export, four approved host requirements, no callable values or table entries,
+and 17 typed runtime requirements. Focused coverage also exercises internal and host
+table identities, generic/trait/recursive closure, import-contract helpers, path/root/
+dense-ID independence, exact limit boundaries, collision injection, malformed owner
+records, transactional failure, SHA-256 known answers, and deterministic repeated
+rendering. Approved validation reported the Debug Werror suite passing 47/47 and the
+AppleClang ASan/UBSan Werror suite passing 47/47 on macOS. Leak detection was disabled
+because Apple ASan reports it unsupported, so leak checking did not run. The focused
+linkage test passed, all three deterministic stress hashes matched, and
+`git diff --check` passed. At validation time, Typst 0.15.1 regenerated the checked
+PDF byte-for-byte identically.
+
 ## Remaining Boundary
 
-Symbols/linkage and the complete concrete-program freeze remain P2.7/P2.8 work;
-runtime ABI, Wasm integration, reproducible artifacts, and interpreter/Wasm
+P2.8's final complete-program freeze, validation, rendering, and census remain open;
+runtime ABI, Wasm linkage/integration, concrete table indices, external ABI names,
+wrappers/adapters, reproducible artifacts, and interpreter/Wasm
 differential execution remain later tracks. No internal census is an empirical
 maintenance advantage, user-facing performance guarantee, or proof of application
 behavior. The proposed M experiment is not implemented by these compiler owners.

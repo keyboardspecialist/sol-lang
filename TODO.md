@@ -1,18 +1,19 @@
 # Sol Compiler TODO
 
-This list is the sole live authority for work status and execution order, audited
-September 9, 2026 against baseline `6ec4ba9`. The broader language and toolchain
-phases remain documented in the [README](README.md#roadmap).
+This list is the sole live authority for work status and execution order. The
+foundation was audited September 9, 2026 against baseline `6ec4ba9`; live status
+and the cursor were revised September 25, 2026 for the current worktree. The
+broader language and toolchain phases remain documented in the [README](README.md#roadmap).
 [Project analysis](docs/project-analysis.md) is an analysis snapshot;
 [Compiler status](docs/compiler-status.md) is the detailed implementation snapshot
-dated September 9, 2026, not a competing queue. Impact and complexity use a 1-5
-scale, where 5 is foundational or architectural.
+with a current-worktree addendum, not a competing queue. Impact and complexity
+use a 1-5 scale, where 5 is foundational or architectural.
 Ordering accounts for dependencies rather than only the impact/complexity ratio.
 
 ## Execution Cursor
 
-- **Next overall: P2.7.** **Next production: P2.7.**
-- Then M1: first-user workload and experiment charter; then P2.8.
+- **Next overall: M1.** **Next production checkpoint: P2.8 after M1, unless M1
+  publishes a different approved interleaving.**
 - M1 publishes subsequent interleaving. If infeasible, record the blocker and
   continue P2.8 without inventing prerequisites.
 - After P2.8, M2-M5 may proceed independently in parallel with P3, subject to
@@ -90,7 +91,7 @@ surface form requires either a prioritized row below or an explicit deferral her
 | Expressions | Bootstrap primitive/unit/path literals; structural tuple literals and numeric projections; unary/binary operators; calls and type applications; fields/method calls; records/variants; direct checked distinct/refined construction; `if`; `match`; blocks; `?`; exact handlers; contract `result`/`old`; canonical local/computed-root places with flattened field/tuple projections | Operational arrays/indexing (34); lifetime-bearing views and safe reference relationships (35, 38); raw-pointer dereference and unsafe pointer operations (44); closures/method values (28-29); refinement projection and pattern reasoning (50); unsafe assumptions/establishments (44); async/protocol expressions (59); general resumptive handlers (61) |
 | Patterns | Recursive wildcard, Boolean, binding, positional enum-variant, nominal-record, and structural-tuple patterns; pure guards; nested usefulness/exhaustiveness for `Bool`, records, tuples, and closed/open generic enums | Refined patterns (50); protocol-state patterns (59) |
 | Types and callable structure | `Int64`, `Bool`, `Text`, `Unit`, and `Never`; structural tuples of arity 2 through 16; nominal applications; `Option`/`Result`; capability and structural function types; bounded type/effect parameters; one trait bound; `borrow`/`inout` parameters | Richer traits/generic methods and required associated items (30); constants and constrained const parameters (31, 33); remaining numeric/byte/rune primitives and units/dimensions (32); arrays/collections (34, 38); lifetime relationships/views (35); resource/allocator and cost types/clauses (36-38); general effect rows/aliases (42); raw pointers/ABI types (44, 46); concurrency traits/types (59) |
-| Cross-cutting representation | Every successful-program AST statement/expression/pattern kind is parsed, structurally traversed, semantically analyzed, relocated, lowered through owning IR, and executable or explicitly non-runtime; discriminants, spans, linked-arena ownership, current executable type relations, callable context, canonical place/projection ownership, per-kind censuses, and composite relocation fixtures are independently validated. Separately, P1 lowers and validates every bodyful E6 callable into unstable target-neutral CFG MIR, with canonical rendering and bounded evaluation. Concrete monomorphic planning/materialization, representation, target layout, and source-independent operation plans are complete through P2.6 for the frozen E6 profile. | Per-form cross-phase acceptance coverage (43); symbols/linkage and whole-program contract freeze/census (P2.7-P2.8); executable-core runtime ABI and WebAssembly lowering/adapters (P3-P4 and tasks 47-48); reproducible artifacts and interpreter/Wasm differential testing (P5 and task 49) |
+| Cross-cutting representation | Every successful-program AST statement/expression/pattern kind is parsed, structurally traversed, semantically analyzed, relocated, lowered through owning IR, and executable or explicitly non-runtime; discriminants, spans, linked-arena ownership, current executable type relations, callable context, canonical place/projection ownership, per-kind censuses, and composite relocation fixtures are independently validated. Separately, P1 lowers and validates every bodyful E6 callable into unstable target-neutral CFG MIR, with canonical rendering and bounded evaluation. Concrete monomorphic planning/materialization, representation, target layout, source-independent operation plans, and whole-program symbols/linkage are complete through P2.7 for the frozen E6 profile. | Per-form cross-phase acceptance coverage (43); complete concrete-program contract freeze/census (P2.8); executable-core runtime ABI and WebAssembly lowering/adapters (P3-P4 and tasks 47-48); reproducible artifacts and interpreter/Wasm differential testing (P5 and task 49) |
 
 Unchecked exceptions and `throw`/`catch` are not planned; recoverable failure remains
 typed through `Result`, and cancellation remains typed. Unrestricted token/text macros
@@ -104,8 +105,9 @@ deferred until a concrete core API requires their smallest coherent subset.
 
 ## End-to-End and Production Track
 
-E1-E6 and P1 through P2.6 are complete. P2 remains the current production milestone,
-with P2.7 next. Deferred language breadth is not a prerequisite for P2-P5 unless a
+E1-E6 and P1 through P2.7 are complete. P2 remains the current production milestone,
+with P2.8 next after M1 unless M1 publishes a different approved interleaving.
+Deferred language breadth is not a prerequisite for P2-P5 unless a
 milestone explicitly activates a bounded numbered-task slice. Existing numbered
 capability IDs remain stable; named slices such as `48A` account for completed portions
 without renumbering the backlog.
@@ -128,13 +130,14 @@ raw-IR, MIR-lowering, MIR-evaluator, and raw-interpreter tests retain direct int
 access for malformed IR/MIR mutation, phase-corruption assertions, differential
 evaluation, and trusted host-callback coverage.
 
-The production track is underway. P1 through P2.6 are complete for the frozen E6
-profile; P2.7 is the next open checkpoint:
+The production track is underway. P1 through P2.7 are complete for the frozen E6
+profile; P2.8 is the next production checkpoint after M1 unless M1 publishes a
+different approved interleaving:
 
 | Done | Order | Milestone | Dependency and numbered-backlog scope |
 | --- | ---: | --- | --- |
 | [x] | P1 | Introduce ownership-explicit target-neutral CFG/MIR for the frozen executable core | E6; task 45 |
-| [ ] | P2 | Define monomorphization, representation, target layout, symbols, and linkage | P1 |
+| [ ] | P2 | Define monomorphization, representation, target layout, symbols, and linkage | P1; P2.1-P2.7 complete, P2.8 open |
 | [ ] | P3 | Define the target-independent runtime ABI and production panic/cleanup policy | P1, P2; task 48B |
 | [ ] | P4 | Integrate a WebAssembly backend and host adapter | P2, P3; task 47W and task 48C |
 | [ ] | P5 | Implement reproducible `sol build` artifacts and interpreter/Wasm differential tests | P4; task 49C |
@@ -203,7 +206,7 @@ external dependencies, public IR, concurrency, or broader handlers.
 | [x] | P2.6b | Materialize predicate and import-contract bodies | P2.6b1 and P2.6b2 materialize the combined source-independent predicate and import-contract boundary and independently validate its complete executable anatomy and exact resource census; loop proof obligations remain runtime-erased. |
 | [x] | P2.6b1 | Close scalar single-block predicates and import contract ownership | Remove `UNRESOLVED_BODY`; lower only scalar/Text/Unit constants, direct unprojected contextual inputs, checked non-short-circuit unary/binary arithmetic/comparison/equality, and one Bool return. Reject every richer form transactionally. Retain exact instance/import context ownership, import-owned helper demands without fake CFG coordinates, envelope-local snapshot slots with segregated source provenance, and ordered requires/snapshots/ensures. Independently authenticate every executable field and exact arena/resource census. |
 | [x] | P2.6b2 | Complete rich predicate CFG bodies | Lower short-circuit and conditional control, exact calls and function/bound values within the frozen purity and finite-closure rules, aggregate/tuple/sum/wrapper/refined construction, recursive matches/guards/bindings, immutable blocks/locals, and nested refinement body references into bounded immutable CFGs shared by instance and import contexts. Contract expression propagation remains semantically rejected under `SOL-CONTRACT-002`, while malformed propagation records are validated and rejected. Canonical interning is cycle-safe; independent reconstructive validation covers complete executable fields, SSA/CFG/type/call/body-reference/provenance invariants, and the exact resource census, with source IDs confined to authenticated provenance. |
-| [ ] | P2.7 | Freeze symbols and whole-program linkage | Derive collision-checked ASCII symbols from semantic identity and canonical instance keys; assign deterministic internal-callable, entry-export, and function-table identities; resolve every ordinary callable internally; retain only typed symbolic runtime and approved-host requirements for P3; and make ordering independent of addresses and filesystem roots |
+| [x] | P2.7 | Freeze symbols and whole-program linkage | A separate `SolMirLinkage` owner derives collision-checked versioned ASCII `sol.i1` internal and `sol.e1` entry symbols from semantic identity plus full SHA-256 canonical structural instance keys; resolves all bindings to internal callables or approved host requirements; assigns abstract whole-program function-table identities; retains typed symbolic ABI-neutral runtime requirements; and validates canonical ordering/rendering independently of paths, pointers, source ordinals, and unstable dense IDs |
 | [ ] | P2.8 | Freeze and census the concrete-program contract | Exhaustively validate and canonically render the complete concrete owner; add malformed-input and repeated-lowering equality tests; require the E6 entry closure to be finite and concrete, including generic/trait instances, contracts/refinements, hosted imports, and all reachable failure/cleanup paths; do not select a runtime ABI or emit Wasm |
 
 ### P3 - Target-Independent Runtime ABI
