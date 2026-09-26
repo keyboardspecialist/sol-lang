@@ -63,6 +63,10 @@ bool sol_mir_concrete_program_validate(
     const SolMirConcreteProgram *program,
     SolDiagnostics *diagnostics
 );
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+void sol_mir_concrete_test_force_validation_allocation_failure(bool force);
+size_t sol_mir_concrete_test_validation_allocation_attempts(void);
+#endif
 /* Unstable versionless diagnostics. Validation and buffering finish before
    the single caller-visible write. */
 bool sol_mir_concrete_program_render(

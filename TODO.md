@@ -2,7 +2,7 @@
 
 This list is the sole live authority for work status and execution order. The
 foundation was audited September 9, 2026 against baseline `6ec4ba9`; live status
-and the cursor were revised September 25, 2026 for the current worktree. The
+and the cursor were revised September 26, 2026 for the current worktree. The
 broader language and toolchain phases remain documented in the [README](README.md#roadmap).
 [Project analysis](docs/project-analysis.md) is an analysis snapshot;
 [Compiler status](docs/compiler-status.md) is the detailed implementation snapshot
@@ -12,7 +12,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 
 ## Execution Cursor
 
-- **Next overall and next production checkpoint: P3.1.**
+- **Next overall and next production checkpoint: P3.2.**
 - M1 is resolved through its infeasibility path: the
   [September 25 report](experiments/m1/README.md) records the missing independent
   governance and protected evaluation boundary.
@@ -21,7 +21,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 - One coordinator maintains this single next-overall cursor; parallel tracks do
   not create competing priority lists.
 
-## Completed Foundation Through E6, P1, and P2
+## Completed Foundation Through E6, P1, P2, and P3.1
 
 - [x] Closed normalized effect rows, recursive SCC inference, higher-order calls,
       callback checking, and exact function and bound-operation effects.
@@ -77,6 +77,10 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
       rendering, and bounded MIR-vs-owning-IR differential evaluation. At the P1
       handoff, representation moved to P2; runtime ABI, backend integration, and
       production-pipeline use remain later-track work.
+- [x] Separate target-independent runtime-conventions ownership over the immutable
+      completed P2 concrete program, with frozen call/result/failure signatures,
+      stable runtime-import identities, canonical failure provenance and E2 exit
+      mapping, exact bounded resources, independent validation, and rendering.
 
 ## Construct Coverage
 
@@ -91,7 +95,7 @@ surface form requires either a prioritized row below or an explicit deferral her
 | Expressions | Bootstrap primitive/unit/path literals; structural tuple literals and numeric projections; unary/binary operators; calls and type applications; fields/method calls; records/variants; direct checked distinct/refined construction; `if`; `match`; blocks; `?`; exact handlers; contract `result`/`old`; canonical local/computed-root places with flattened field/tuple projections | Operational arrays/indexing (34); lifetime-bearing views and safe reference relationships (35, 38); raw-pointer dereference and unsafe pointer operations (44); closures/method values (28-29); refinement projection and pattern reasoning (50); unsafe assumptions/establishments (44); async/protocol expressions (59); general resumptive handlers (61) |
 | Patterns | Recursive wildcard, Boolean, binding, positional enum-variant, nominal-record, and structural-tuple patterns; pure guards; nested usefulness/exhaustiveness for `Bool`, records, tuples, and closed/open generic enums | Refined patterns (50); protocol-state patterns (59) |
 | Types and callable structure | `Int64`, `Bool`, `Text`, `Unit`, and `Never`; structural tuples of arity 2 through 16; nominal applications; `Option`/`Result`; capability and structural function types; bounded type/effect parameters; one trait bound; `borrow`/`inout` parameters | Richer traits/generic methods and required associated items (30); constants and constrained const parameters (31, 33); remaining numeric/byte/rune primitives and units/dimensions (32); arrays/collections (34, 38); lifetime relationships/views (35); resource/allocator and cost types/clauses (36-38); general effect rows/aliases (42); raw pointers/ABI types (44, 46); concurrency traits/types (59) |
-| Cross-cutting representation | Every successful-program AST statement/expression/pattern kind is parsed, structurally traversed, semantically analyzed, relocated, lowered through owning IR, and executable or explicitly non-runtime; discriminants, spans, linked-arena ownership, current executable type relations, callable context, canonical place/projection ownership, per-kind censuses, and composite relocation fixtures are independently validated. Separately, P1 lowers and validates every bodyful E6 callable into unstable target-neutral CFG MIR, with canonical rendering and bounded evaluation. P2 completes concrete monomorphic planning/materialization, representation, target layout, source-independent operation plans, whole-program symbols/linkage, and the validated/rendered complete concrete-program owner for the frozen E6 profile. | Per-form cross-phase acceptance coverage (43); executable-core runtime ABI and WebAssembly lowering/adapters (P3-P4 and tasks 47-48); reproducible artifacts and interpreter/Wasm differential testing (P5 and task 49) |
+| Cross-cutting representation | Every successful-program AST statement/expression/pattern kind is parsed, structurally traversed, semantically analyzed, relocated, lowered through owning IR, and executable or explicitly non-runtime; discriminants, spans, linked-arena ownership, current executable type relations, callable context, canonical place/projection ownership, per-kind censuses, and composite relocation fixtures are independently validated. Separately, P1 lowers and validates every bodyful E6 callable into unstable target-neutral CFG MIR, with canonical rendering and bounded evaluation. P2 completes concrete monomorphic planning/materialization, representation, target layout, source-independent operation plans, whole-program symbols/linkage, and the validated/rendered complete concrete-program owner for the frozen E6 profile. P3.1 freezes a separate target-independent call/result/failure conventions owner over that immutable P2 program. | Per-form cross-phase acceptance coverage (43); allocation, cleanup/unwind, trusted-host/handler ABI, complete runtime lowering, and WebAssembly lowering/adapters (P3.2-P4 and tasks 47-48); reproducible artifacts and interpreter/Wasm differential testing (P5 and task 49) |
 
 Unchecked exceptions and `throw`/`catch` are not planned; recoverable failure remains
 typed through `Result`, and cancellation remains typed. Unrestricted token/text macros
@@ -105,8 +109,8 @@ deferred until a concrete core API requires their smallest coherent subset.
 
 ## End-to-End and Production Track
 
-E1-E6, P1, and P2 are complete for the frozen E6 profile. P3 is the current
-production milestone, with P3.1 next overall and as the next production checkpoint.
+E1-E6, P1, P2, and P3.1 are complete for the frozen E6 profile. P3 is the current
+production milestone, with P3.2 next overall and as the next production checkpoint.
 Deferred language breadth is not a prerequisite for P2-P5 unless a
 milestone explicitly activates a bounded numbered-task slice. Existing numbered
 capability IDs remain stable; named slices such as `48A` account for completed portions
@@ -130,14 +134,14 @@ raw-IR, MIR-lowering, MIR-evaluator, and raw-interpreter tests retain direct int
 access for malformed IR/MIR mutation, phase-corruption assertions, differential
 evaluation, and trusted host-callback coverage.
 
-The production track is underway. P1 and P2 are complete for the frozen E6 profile;
-P3.1 is the next overall item and next production checkpoint:
+The production track is underway. P1, P2, and P3.1 are complete for the frozen E6
+profile; P3.2 is the next overall item and next production checkpoint:
 
 | Done | Order | Milestone | Dependency and numbered-backlog scope |
 | --- | ---: | --- | --- |
 | [x] | P1 | Introduce ownership-explicit target-neutral CFG/MIR for the frozen executable core | E6; task 45 |
 | [x] | P2 | Define monomorphization, representation, target layout, symbols, and linkage | P1; P2.1-P2.8 complete for the frozen E6 profile |
-| [ ] | P3 | Define the target-independent runtime ABI and production panic/cleanup policy | P1, P2; task 48B |
+| [ ] | P3 | Define the target-independent runtime ABI and production panic/cleanup policy | P1, P2; P3.1 complete and P3.2 next; task 48B |
 | [ ] | P4 | Integrate a WebAssembly backend and host adapter | P2, P3; task 47W and task 48C |
 | [ ] | P5 | Implement reproducible `sol build` artifacts and interpreter/Wasm differential tests | P4; task 49C |
 
@@ -212,13 +216,44 @@ external dependencies, public IR, concurrency, or broader handlers.
 
 | Done | Order | Checkpoint | Exit criteria |
 | --- | ---: | --- | --- |
-| [ ] | P3.1 | Freeze call, result, and failure conventions | Define backend-neutral operations and signatures for direct/indirect calls, receiver-first methods, owned/shared/exclusive arguments, normal/failure returns, normal-only writeback, entry invocation, E2 exit mapping, stable runtime-import symbol IDs derived from P2 typed requirements, and structured source-aware failure records |
+| [x] | P3.1 | Freeze call, result, and failure conventions | A separate bounded `SolMirRuntimeConventions` owner borrows the immutable completed P2 concrete program; freezes receiver-first internal, host, and indirect-table signatures and calls with owned/shared/exclusive access, VALUE/UNIT/NEVER outcomes, failure edges, and normal-only exclusive writeback; maps entry results to E2 exits; derives collision-checked SHA-256 `sol.h1` host and `sol.r1` recipe-operation identities/symbols from exact P2 requirements; owns canonical source-aware failure sites and code masks; independently validates exact resources and aliases; and renders one canonical buffered form without choosing a physical ABI or Wasm index. |
 | [ ] | P3.W1 | Bounded Wasm ABI Integration Experiment | Timebox after P3.1 has tested conventions: record candidate tool versions, validate and execute a minimal scalar call/result/failure module, and report ABI/tool mismatches. Add allocation, cleanup, or host imports only after the relevant P3.2-P3.4 conventions are tested. Inform, but do not complete, P4.1, 47W, 48C, component support, E6 Wasm execution, backend integration, or build tooling. |
 | [ ] | P3.2 | Define bounded allocation and owned-value operations | Specify compiler-owned allocation for current `Text` and aggregate representations, including checked sizing, zero-length behavior, quotas, copying, moving, equality, recursive destruction, allocation failure, and host-result ownership transfer without introducing the user allocator/resource model from tasks 36-38 |
 | [ ] | P3.3 | Freeze cleanup, panic, and failure policy | Lower local/place/temporary/snapshot destruction and region exits into exact cleanup actions on return, propagation, panic, host/arithmetic/allocation failure, no-match, contract/refinement violation, and reached-unreachable; preserve failure writeback/postcondition rules and deterministic failure precedence |
 | [ ] | P3.4 | Define capability and trusted-host ABI | Use the P2 capability representation to preserve root identity and derived private source across ABI calls; assign exact host operation and import IDs; encode E3 data-only argument/result forms; preflight every authority/import; and define bounded host success/failure transfer without exposing raw IR, arbitrary pointers/functions, or private sources across the safe adapter boundary |
 | [ ] | P3.5 | Define exact handler ABI | Specify handler frames containing source operation, root, provider operation/value, and parent; intercept only exact operation/root/effect matches; hide the current frame during provider invocation; preserve nested LIFO behavior; and remove frames on every normal, transfer, and failure path |
 | [ ] | P3.6 | Freeze the runtime-lowered program | Validate and canonically render every runtime operation, import, call signature, allocation, cleanup action, failure edge, capability grant, and handler frame; add table-driven ABI conformance and malformed-program tests over the complete P2 graph; retain backend-independent types and symbols; complete task 48B |
+
+P3.1 owns its arenas independently and borrows one authenticated, immutable
+`SolMirConcreteProgram` that must outlive it. Transactional construction is bounded
+by exact counts, owned bytes, scratch, and work; a separate reconstructive validator
+authenticates predecessor data, complete arena consumption, ownership and non-aliasing,
+calls, signatures, imports, failure sites, and usage. After full owner authentication,
+failure-record validation and E2 exit mapping are allocation-free and do not revalidate
+the predecessor chain. Unit maps to application status 0; `Int64` 0 through 255 maps
+identically; out-of-range values map to driver status 1 with `SOL-RUN-002`; authenticated
+runtime failures map to driver status 1 with their structured code.
+
+The E6 all-roots census is exactly 18 signatures, 19 signature slots, 18 calls,
+24 operands, one writeback, one entry, 52 imports, and 29 failure sites. In field
+order `(signatures, signature slots, calls, operands, writebacks, entries, imports,
+failure sites, owned bytes, build scratch bytes, build work, validation scratch bytes,
+validation work)`, exact usage is
+`(18, 19, 18, 24, 1, 1, 52, 29, 16328, 21, 9427, 584692564, 73649839)`.
+The corresponding default maxima are
+`(4000000, 16000000, 16000000, 64000000, 32000000, 1, 4000000, 32000000,
+1073741824, 268435456, 4000000000, 1073741824, 4000000000)`.
+Approved validation reported 49/49 normal and 49/49 AppleClang ASan/UBSan tests.
+Ordinary callback execution still rejects at the upstream P2 unsupported-closure
+boundary, and source-level `Never` callables still fail with `SOL-TYPE-009`; boundary
+tests cover both while directly exercising reachable direct/host and indirect-table
+target logic, access classes, result classes, failure masks, provenance, and exits.
+
+This checkpoint defines no physical backend ABI or Wasm indices and adds no allocation
+operations, cleanup/unwind lowering, host marshalling or adapters, handler ABI,
+complete runtime-lowered program, compiled `sol build`, or backend-backed `sol run`.
+Failure names reserved for P3.2/P3.3 policy do not claim those deferred failure
+producers. The P3.W1 experiment remains bounded and does not replace the P3.2 cursor.
 
 ### P4 - WebAssembly Backend and Host Adapter
 
@@ -361,7 +396,7 @@ or renumber stable capability IDs.
 | [x] | 45 | Introduce target-neutral ownership-explicit callable-scoped CFG MIR for the frozen E6 core, including blocks/SSA, moves, call-scoped borrows/writeback, abstract cleanup/storage lifetimes, regions, panic/failure control flow, generic/effect/evidence metadata, independent validation, canonical rendering, and bounded evaluator/trace semantics without selecting representation or ABI | 5 | 5 | E6 and completed executable-core semantics |
 | [ ] | 46 | Define C ABI layouts and FFI declarations with ownership, nullability, threading, blocking, error, and effect metadata | 5 | 5 | Unsafe boundaries (44), package policy (40), and P2 representation/target layout |
 | [~] | 47 | 47A selects WebAssembly as the first production target; 47W integrates a pinned established WebAssembly backend for the frozen executable core; native/additional backends remain deferred | 5 | 5 | 47A complete; P2 representation/layout and P3 runtime ABI for 47W |
-| [~] | 48 | Complete compiled-runtime support after 48A/E3: 48B defines target-independent executable-core value, allocation, cleanup, panic, capability, and handler ABI policy; 48C supplies the WebAssembly adapter; user resource/allocation and FFI extensions remain deferred with tasks 36-37 and 46 | 5 | 5 | E3 and P2 for 48B; P3 and task 47W for 48C |
+| [~] | 48 | Complete compiled-runtime support after 48A/E3 and P3.1 call/result/failure conventions: 48B continues with target-independent executable-core allocation, cleanup, panic, capability, and handler ABI policy; 48C supplies the WebAssembly adapter; user resource/allocation and FFI extensions remain deferred with tasks 36-37 and 46 | 5 | 5 | E3, P2, and P3.1 for the completed slices; remaining P3 and task 47W for 48C |
 | [~] | 49 | Complete application tooling after 49A/E2 and 49B/E4: 49C adds WebAssembly `sol build`, artifact execution, target/profile selection, linkage metadata, reproducibility, and interpreter/Wasm differential tests over the bounded existing package model | 5 | 4 | P4 and existing package resolution; task 40 only if separately activated |
 | [~] | 50 | Complete verification beyond 50A/E5 and P1 runtime-preserving lowering: normalized obligations and call-site substitution; refinement projection, destructuring, and exhaustiveness; cost/resource obligations only when tasks 36-37 activate them | 5 | 5 | E5 and P1; tasks 36-37 only for cost/resource checks |
 | [ ] | 51 | Add `spec`/example declarations, authored and generated properties, boundary generation, shrinking, reproducible seeds, and ghost state | 4 | 4 | `sol test`, interpreter, and 50A runtime checks |

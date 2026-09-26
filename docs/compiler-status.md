@@ -7,12 +7,12 @@ This relocates the detailed baseline README documentation, reconciled with the
 approved ledger. It is not a second checklist, a new test report, or a stable ABI
 specification. [TODO.md](../TODO.md) alone owns live work status and order.
 
-**Current-worktree addendum, September 25, 2026:** P2.7 and P2.8 are independently
-approved and complete in the current worktree, completing P2 for the frozen E6
-profile. The baseline hash above remains the historical September 9 snapshot; no
-post-baseline commit hash is asserted here. M1 completed as infeasible and M2-M5
-remain gated unless it is reopened feasibly. P3.1 is next overall and the next
-production checkpoint.
+**Current-worktree addendum, September 26, 2026:** P2.7, P2.8, and P3.1 are
+independently approved and complete in the current worktree, completing P2 and the
+first P3 checkpoint for the frozen E6 profile. The baseline hash above remains the
+historical September 9 snapshot; no post-baseline commit hash is asserted here. M1
+completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. P3.2
+is next overall and the next production checkpoint.
 
 Use the [README](../README.md) for onboarding and runnable examples, and
 [project analysis](project-analysis.md) for the dated product assessment. The
@@ -26,8 +26,10 @@ every target-language form is executable or that a fresh full suite was rerun.
 
 The implemented CLI provides `check`, `test`, `run`, `effects`, `inspect`, and
 `fmt`. Reference execution uses owning typed IR, not the separate experimental
-MIR/P2 owners. There is no backend, production runtime ABI, `sol build`, full
-public IR, or SMT discharge. Wasm is the first planned production target; native
+MIR/P2/P3.1 owners. There is no backend, complete production runtime ABI,
+`sol build`, full public IR, or SMT discharge. P3.1 supplies only target-independent
+call/result/failure conventions: there is no physical ABI or complete runtime
+lowering. Wasm is the first planned production target; native
 output is deferred and Component Model integration is not implemented.
 
 Compilation sessions use configurable deterministic ceilings for per-file and package source bytes, source files, directory depth and entries, tokens, persistent arena entries, diagnostics, cumulative allocation bytes, and allocation requests. Disk packages are discovered relative to verified open directory descriptors; source reads reject symbolic links, non-regular or duplicate identities, growth, truncation, replacement, and metadata changes. Raw interpreter host failures are copied through interpreter-owned length-delimited storage rather than borrowed C strings.
@@ -911,14 +913,92 @@ ASan/UBSan suite each passing 48/48 on macOS. `git diff --check` also passed. Th
 evidence does not claim leak detection, allocator fault injection, or an aggregate
 expanding-recursion fixture.
 
+## Runtime Call, Result, and Failure Conventions (P3.1 Current-Worktree Addendum)
+
+The separate unstable compiler-internal
+[SolMirRuntimeConventions](../include/sol/mir_runtime_conventions.h) owner borrows
+one completed, validated `SolMirConcreteProgram`, which must remain alive and
+immutable. Its owned arenas are disjoint from the owner, from each other, and from
+the complete borrowed predecessor chain. Construction into an initialized empty
+destination is transactional and bounded; failure leaves it empty, while a nonempty
+destination is rejected unchanged. The API initializes/frees the owner, supplies
+default limits, builds, independently validates, canonically renders, validates
+structured failure records, and maps authenticated entry outcomes to E2 exits.
+
+Signatures cover exact P2 internal callables, approved host requirements, and each
+reachable function recipe needed by an indirect call. A receiver, when present, is
+always the first slot, followed by formal parameters. Every slot retains its concrete
+recipe and owned, shared, or exclusive access. Calls distinguish direct internal,
+direct host, and indirect abstract-table targets and retain exact normal and failure
+edges. Owned values are consumed on either outcome, shared borrows end on either
+outcome, and exclusive values use copy-in with receiver/formal-order writeback only
+on normal completion. Results are classified as VALUE (normal payload), UNIT
+(normal without a payload), or NEVER (no normal edge). These are compiler-internal
+executable conventions, not new source-language types or semantics.
+
+Entries retain the P2 export symbol, binding, callable, source provenance, signature,
+and result class. E2 Unit returns map to application/driver status 0; `Int64` values
+from 0 through 255 map identically; other integers map to driver status 1 and
+`SOL-RUN-002`; authenticated runtime failures map to driver status 1 with their
+structured failure code. The owner derives stable full SHA-256 identities from each
+exact P2 host requirement or recipe-plus-operation requirement. Canonical host symbols
+use `sol.h1.<semantic-id>.<digest>`; create/copy/drop/equal/bound-environment recipe
+symbols use `sol.r1.<operation>.<digest>`. Construction and the separate validator
+independently reject distinct descriptors that collide by identity or symbol. These
+identities do not assign physical ABI layouts, machine addresses, or Wasm function/
+table indices.
+
+P3.1 owns canonical source-file/offset failure sites for materialized and predicate
+arithmetic, calls, panic, no-match, reached-unreachable, and predicate result checks.
+Each site has an independently reconstructed code-compatible mask. Failure records
+must match one owned site and its allowed code; panic text and host bytes are bounded
+to 191 non-NUL bytes, while other codes carry no detail. After full owner
+authentication, failure-record validation and exit mapping are allocation-free and
+do not revalidate predecessors. The complete symbolic failure taxonomy is frozen,
+but allocation/resource and cleanup-policy producers assigned to P3.2/P3.3 remain
+deferred rather than becoming executable merely because their codes have names.
+
+The validator is in a separate translation unit and reconstructs signatures, calls,
+operands, writebacks, entries, imports, failure sites, collision checks, exact arena
+consumption, successful-build work, validation work/scratch, and ownership/alias
+guarantees without invoking construction helpers. Rendering validates first, derives
+stable references from P2 identities rather than paths or unstable dense IDs, sorts
+complete lines canonically, buffers the whole versionless form, and performs one
+caller-visible write.
+
+The E6 all-roots census is exactly 18 signatures, 19 signature slots, 18 calls,
+24 operands, one writeback, one entry, 52 imports, and 29 failure sites. In field
+order `(signatures, signature slots, calls, operands, writebacks, entries, imports,
+failure sites, owned bytes, build scratch bytes, build work, validation scratch bytes,
+validation work)`, exact usage is
+`(18, 19, 18, 24, 1, 1, 52, 29, 16328, 21, 9427, 584692564, 73649839)`.
+The default maximum tuple in the same order is
+`(4000000, 16000000, 16000000, 64000000, 32000000, 1, 4000000, 32000000,
+1073741824, 268435456, 4000000000, 1073741824, 4000000000)`.
+
+Focused tests cover direct internal/host and indirect internal/host table target
+logic, receiver-first ordering, every access class, VALUE/UNIT classification,
+normal-only ordered writeback, import identity/symbol known answers and collision
+injection, failure masks/provenance/details, exact limits and usage, transactional
+failure, malformed owners and aliases, stable rendering, allocation-free failure
+validation/exits, and E2 Unit/Int64/runtime mappings. Callback execution remains the
+upstream P2 unsupported-closure boundary, and source-level `Never` callables remain
+rejected with `SOL-TYPE-009`; explicit boundary tests retain those limitations while
+classification tests exercise the reachable NEVER production logic. Approved P3.1
+validation reported 49/49 normal and 49/49 AppleClang ASan/UBSan tests on macOS.
+
+P3.1 provides no backend or physical ABI, allocation operations, cleanup/unwind
+lowering, host marshalling/adapters, handler ABI, complete runtime-lowered program,
+compiled `sol build`, or backend-backed `sol run`. Those remain P3.2-P5 work.
+
 ## Remaining Boundary
 
-P2 is complete for the frozen E6 profile. P2.8 selects no runtime ABI, concrete
-table indices, external ABI names, wrappers/adapters, Wasm linkage/emission or
-execution, build artifact, or public format. Those boundaries, reproducible
+P2 and P3.1 are complete for the frozen E6 profile. P3.1 selects no physical ABI,
+concrete table indices, wrappers/adapters, Wasm linkage/emission or execution,
+allocation or cleanup operations, build artifact, or public format. Those boundaries, reproducible
 artifacts, and interpreter/Wasm differential execution remain later tracks. No
 internal census is an empirical maintenance advantage, user-facing performance
 guarantee, or proof of application behavior. The proposed M experiment is not
-implemented by these compiler owners. P3.1 is the next production checkpoint.
+implemented by these compiler owners. P3.2 is the next production checkpoint.
 Consult [TODO.md](../TODO.md#execution-cursor) for the single active cursor and
 [the analysis](project-analysis.md) for the experiment rationale.

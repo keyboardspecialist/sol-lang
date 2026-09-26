@@ -155,8 +155,8 @@ assessment closed on September 25, 2026, before an experimental timebox began.
 The candidate remains as unprotected source evidence, but it does not validate
 Sol's maintenance thesis and does not activate M2-M5.
 
-The sole live execution cursor remains in `TODO.md`: P2.8 has since completed, and
-P3.1 is now both the next overall item and next production checkpoint. M2-M5 remain
+The sole live execution cursor remains in `TODO.md`: P3.1 has since completed, and
+P3.2 is now both the next overall item and next production checkpoint. M2-M5 remain
 gated unless M1 is reopened and completed feasibly. This report records that
 decision; it does not create a competing work queue.
 

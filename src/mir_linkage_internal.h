@@ -68,6 +68,14 @@ bool sol_mir_linkage_internal_validation_scratch(
 bool sol_mir_linkage_internal_validation_requirements(
     const SolMirLinkage *linkage, size_t *work, size_t *scratch,
     SolDiagnostics *diagnostics);
+bool sol_mir_linkage_internal_validate_measured(
+    const SolMirLinkage *linkage,
+    SolDiagnostics *diagnostics,
+    size_t exact_work_limit,
+    size_t exact_scratch_limit,
+    size_t *measured_work,
+    size_t *measured_scratch
+);
 
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
 void sol_mir_linkage_test_force_instance_digest_collision(bool force);

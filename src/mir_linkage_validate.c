@@ -1540,10 +1540,10 @@ static bool usage_equal(SolMirLinkageUsage left, SolMirLinkageUsage right) {
 }
 
 static bool validate(const SolMirLinkage *linkage, SolDiagnostics *diagnostics,
-    bool authenticate_resources, size_t *measured_work,
-    size_t *measured_scratch) {
+    bool authenticate_resources, size_t work_limit, size_t scratch_limit,
+    size_t *measured_work, size_t *measured_scratch) {
     metered_work = 0;
-    metered_limit = linkage == NULL ? 0 : linkage->limits.max_validation_work;
+    metered_limit = work_limit;
     if (linkage == NULL || linkage->operations == NULL
         || !limits_complete(linkage->limits))
         return invalid(diagnostics, "malformed linkage owner header");
@@ -1855,8 +1855,9 @@ static bool validate(const SolMirLinkage *linkage, SolDiagnostics *diagnostics,
     size_t required_scratch = linkage->operations->usage.validation_scratch_bytes
             > local_scratch
         ? linkage->operations->usage.validation_scratch_bytes : local_scratch;
-    if (authenticate_resources
-        && required_scratch != linkage->usage.validation_scratch_bytes)
+    if (required_scratch > scratch_limit
+        || (authenticate_resources
+            && required_scratch != linkage->usage.validation_scratch_bytes))
         return invalid(diagnostics, "linkage validation scratch is malformed");
     unsigned char *scratch = local_scratch == 0 ? NULL : malloc(local_scratch);
     if (local_scratch != 0 && scratch == NULL) {
@@ -1939,10 +1940,30 @@ bool sol_mir_linkage_internal_validation_requirements(
     const SolMirLinkage *linkage, size_t *work, size_t *scratch,
     SolDiagnostics *diagnostics) {
     return work != NULL && scratch != NULL
-        && validate(linkage, diagnostics, false, work, scratch);
+        && validate(linkage, diagnostics, false,
+            linkage == NULL ? 0 : linkage->limits.max_validation_work,
+            linkage == NULL ? 0 : linkage->limits.max_validation_scratch_bytes,
+            work, scratch);
+}
+
+bool sol_mir_linkage_internal_validate_measured(
+    const SolMirLinkage *linkage, SolDiagnostics *diagnostics,
+    size_t exact_work_limit, size_t exact_scratch_limit,
+    size_t *measured_work, size_t *measured_scratch) {
+    if (linkage == NULL || measured_work == NULL || measured_scratch == NULL
+        || exact_work_limit != linkage->usage.validation_work
+        || exact_scratch_limit != linkage->usage.validation_scratch_bytes)
+        return invalid(diagnostics, "linkage exact validation limits mismatch");
+    return validate(linkage, diagnostics, true, exact_work_limit,
+        exact_scratch_limit, measured_work, measured_scratch)
+        && *measured_work == exact_work_limit
+        && *measured_scratch == exact_scratch_limit;
 }
 
 bool sol_mir_linkage_validate(const SolMirLinkage *linkage,
     SolDiagnostics *diagnostics) {
-    return validate(linkage, diagnostics, true, NULL, NULL);
+    return validate(linkage, diagnostics, true,
+        linkage == NULL ? 0 : linkage->limits.max_validation_work,
+        linkage == NULL ? 0 : linkage->limits.max_validation_scratch_bytes,
+        NULL, NULL);
 }
