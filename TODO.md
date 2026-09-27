@@ -12,7 +12,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 
 ## Execution Cursor
 
-- **Next overall and next production checkpoint: P3.2e.**
+- **Next overall and next production checkpoint: P3.2f.**
 - M1 is resolved through its infeasibility path: the
   [September 25 report](experiments/m1/README.md) records the missing independent
   governance and protected evaluation boundary.
@@ -21,7 +21,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 - One coordinator maintains this single next-overall cursor; parallel tracks do
   not create competing priority lists.
 
-## Completed Foundation Through E6, P1, P2, P3.1, and P3.2a-P3.2d
+## Completed Foundation Through E6, P1, P2, P3.1, and P3.2a-P3.2e
 
 - [x] Closed normalized effect rows, recursive SCC inference, higher-order calls,
       callback checking, and exact function and bound-operation effects.
@@ -115,8 +115,8 @@ deferred until a concrete core API requires their smallest coherent subset.
 
 ## End-to-End and Production Track
 
-E1-E6, P1, P2, P3.1, and P3.2a-P3.2d are complete for the frozen E6 profile. P3 is the
-current production milestone, with P3.2e next overall and as the next production checkpoint.
+E1-E6, P1, P2, P3.1, and P3.2a-P3.2e are complete for the frozen E6 profile. P3 is the
+current production milestone, with P3.2f next overall and as the next production checkpoint.
 Deferred language breadth is not a prerequisite for P2-P5 unless a
 milestone explicitly activates a bounded numbered-task slice. Existing numbered
 capability IDs remain stable; named slices such as `48A` account for completed portions
@@ -141,13 +141,13 @@ access for malformed IR/MIR mutation, phase-corruption assertions, differential
 evaluation, and trusted host-callback coverage.
 
 The production track is underway. P1, P2, and P3.1 are complete for the frozen E6
-profile; P3.2a-P3.2d are complete, and P3.2e is the next overall item and next production checkpoint:
+profile; P3.2a-P3.2e are complete, and P3.2f is the next overall item and next production checkpoint:
 
 | Done | Order | Milestone | Dependency and numbered-backlog scope |
 | --- | ---: | --- | --- |
 | [x] | P1 | Introduce ownership-explicit target-neutral CFG/MIR for the frozen executable core | E6; task 45 |
 | [x] | P2 | Define monomorphization, representation, target layout, symbols, and linkage | P1; P2.1-P2.8 complete for the frozen E6 profile |
-| [ ] | P3 | Define the target-independent runtime ABI and production panic/cleanup policy | P1, P2; P3.1 and P3.2a-P3.2d complete, P3.2e next; task 48B |
+| [ ] | P3 | Define the target-independent runtime ABI and production panic/cleanup policy | P1, P2; P3.1 and P3.2a-P3.2e complete, P3.2f next; task 48B |
 | [ ] | P4 | Integrate a WebAssembly backend and host adapter | P2, P3; task 47W and task 48C |
 | [ ] | P5 | Implement reproducible `sol build` artifacts and interpreter/Wasm differential tests | P4; task 49C |
 
@@ -224,12 +224,12 @@ external dependencies, public IR, concurrency, or broader handlers.
 | --- | ---: | --- | --- |
 | [x] | P3.1 | Freeze call, result, and failure conventions | A separate bounded `SolMirRuntimeConventions` owner borrows the immutable completed P2 concrete program; freezes receiver-first internal, host, and indirect-table signatures and calls with owned/shared/exclusive access, VALUE/UNIT/NEVER outcomes, failure edges, and normal-only exclusive writeback; maps entry results to E2 exits; derives collision-checked SHA-256 `sol.h1` host and `sol.r1` recipe-operation identities/symbols from exact P2 requirements; owns canonical source-aware failure sites and code masks; independently validates exact resources and aliases; and renders one canonical buffered form without choosing a physical ABI or Wasm index. |
 | [ ] | P3.W1 | Bounded Wasm ABI Integration Experiment | Timebox after P3.1 has tested conventions: record candidate tool versions, validate and execute a minimal scalar call/result/failure module, and report ABI/tool mismatches. Add allocation, cleanup, or host imports only after the relevant P3.2-P3.4 conventions are tested. Inform, but do not complete, P4.1, 47W, 48C, component support, E6 Wasm execution, backend integration, or build tooling. |
-| [ ] | P3.2 | Define bounded allocation and owned-value operations | P3.2a-P3.2d are complete; P3.2e-P3.2f remain required before this parent checkpoint is complete. Specify compiler-owned allocation for current `Text` and aggregate representations without introducing the user allocator/resource model from tasks 36-38. |
+| [ ] | P3.2 | Define bounded allocation and owned-value operations | P3.2a-P3.2e are complete; P3.2f remains required before this parent checkpoint is complete. Specify compiler-owned allocation for current `Text` and aggregate representations without introducing the user allocator/resource model from tasks 36-38. |
 | [x] | P3.2a | Inventory recipe operation demands | A separate bounded `SolMirRuntimeValues` owner borrows authenticated immutable P3.1 conventions and owns one same-ID record per concrete recipe. It strips bound-environment from linkage requirements and pairs every demanded create/copy/drop/equal bit with exactly one existing P3.1 import, while absent bits remain `NONE`; independent validation reconstructs masks, IDs, exact resources, complete arena consumption, and transitive anti-aliasing. This inventory defines no executable operations or allocation plans. |
 | [x] | P3.2b | Define checked allocation and quota plans | One same-ID target-parameterized plan per recipe classifies NONE, fixed aggregate outer objects, and Text headers; checked preflight covers zero-length Text, target/object bounds, cumulative request/byte quotas, and allocation-limit/failure outcomes. Independent validation and canonical rendering retain no physical allocation execution. |
 | [x] | P3.2c | Define the ownership graph, move, and drop | `SolMirRuntimeValues` owns static descriptive same-ID ownership plans, sum-variant descriptors, and 12 owned edges, with producer-specific captured-receiver edges where applicable. It freezes the exclusive ownership graph, zero-allocation root/projected move and hole/repair semantics, and deterministic depth-first postorder drop semantics; construction/validation are bounded, transactional, independently reconstructive, and fully anti-aliased, with canonical producer-sensitive rendering. No physical runtime values, executor, storage, allocation, or new failure sites are introduced. |
 | [x] | P3.2d | Define transactional deep copy | `SolMirRuntimeValues` owns static same-ID copy plans. Test-modeled bounded preflight, private staging, single publication, and postorder rollback specify no partially published destination; successful allocation quota charges are not refunded on rollback. No production copy executor, storage, allocator, or new failure sites are introduced. |
-| [ ] | P3.2e | Define allocation-free equality | Specify recursive represented-value equality without allocation and with bounded work/depth policy. |
+| [x] | P3.2e | Define allocation-free equality | `SolMirRuntimeValues` owns static same-ID recursive equality plans; complete independent validation precedes any test-modeled bounded compare, which allocates nothing and introduces no production executor or failure sites. |
 | [ ] | P3.2f | Define host-result transfer and closure | Specify checked host-result ownership transfer and close the P3.2 value-operation contract over the frozen profile. |
 | [ ] | P3.3 | Freeze cleanup, panic, and failure policy | Lower local/place/temporary/snapshot destruction and region exits into exact cleanup actions on return, propagation, panic, host/arithmetic/allocation failure, no-match, contract/refinement violation, and reached-unreachable; preserve failure writeback/postcondition rules and deterministic failure precedence |
 | [ ] | P3.4 | Define capability and trusted-host ABI | Use the P2 capability representation to preserve root identity and derived private source across ABI calls; assign exact host operation and import IDs; encode E3 data-only argument/result forms; preflight every authority/import; and define bounded host success/failure transfer without exposing raw IR, arbitrary pointers/functions, or private sources across the safe adapter boundary |
@@ -252,7 +252,7 @@ each of the 21 E6 recipes, and records 17 recipes with demands: 16 create, 10 co
 17 drop, and 5 equal. The four host imports are not recipe plans, and
 bound-environment imports are intentionally excluded. The owner reuses P3.1 symbols
 and recipe digests in canonical output and duplicates no predecessor symbols,
-digests, layouts, recipes, or records. P3.2d is complete; P3.2e-P3.2f remain open; therefore P3.2 and
+digests, layouts, recipes, or records. P3.2e is complete; P3.2f remains open; therefore P3.2 and
 P3 remain incomplete. P3.2b adds allocation plans and pure quota checking only;
 runtime allocation, move/drop, deep-copy, equality execution, and host-result
 transfer remain unimplemented.
@@ -269,6 +269,15 @@ to the existing P3.1 failure codes. It performs no allocation or value execution
 P3.2c extends the same owner with 21 static descriptive ownership plans, nine sum-variant descriptors, and 12 owned edges, with producer-specific captured-receiver edges where applicable. It freezes the exclusive ownership graph; zero-allocation root and projected moves with exact holes and repair; and deterministic depth-first postorder drop semantics. Construction and independent reconstruction are bounded, transactional, and fully anti-aliased; canonical rendering is stable and producer-sensitive without paths or raw IDs. The exact E6 usage is 3,360 owned bytes, build work 253, and validation work 73,654,894. The existing 21 recipes, 17 demanded drop imports, and P3.2b allocation census are unchanged. Test-only modeling verifies move/hole/repair and recursive postorder behavior; the full Debug suite and focused ASan passed. This adds no physical runtime values, executor, storage, allocation, copy/equality/host transfer, cleanup-edge lowering, or failure sites.
 
 P3.2d adds 21 static same-ID copy plans: unreachable 1, forbidden 7, trivial 3, Text 1, product 3, sum 5, and wrapper 1. Test-modeled bounded preflight, private staging, single publication, and postorder rollback specify transactional deep copy with no partially published destination. Cumulative successful allocation quota charges are not refunded on rollback. The exact E6 usage is 3,696 owned bytes, build work 275, and validation work 73,654,915; 10 copy imports are demanded, and prior censuses are unchanged. The full Debug suite passed 50/50 and focused ASan passed. This adds no production copy executor, storage, allocator, or new failure sites.
+
+P3.2e adds 21 static same-ID equality plans: unreachable 1, forbidden 7, trivial 3,
+Text 1, product 3, sum 5, and wrapper 1. Independent validation completely
+authenticates the plans before a compare; the bounded test model recursively compares
+represented values without allocation. The five demanded equal imports are unchanged.
+The exact E6 usage is 4,032 owned bytes, build scratch 73, build work 309,
+validation scratch 584,692,564, and validation work 73,654,948. The full Debug
+suite passed 50/50 and focused ASan passed. This defines no production equality
+executor, storage, allocator, or new failure sites.
 
 The E6 all-roots census is exactly 18 signatures, 19 signature slots, 18 calls,
 24 operands, one writeback, one entry, 52 imports, and 29 failure sites. In field
@@ -289,7 +298,7 @@ These completed checkpoints define no physical backend ABI or Wasm indices and a
 executable allocation/value operations, cleanup/unwind lowering, host marshalling or adapters, handler ABI,
 complete runtime-lowered program, compiled `sol build`, or backend-backed `sol run`.
 Failure names reserved for P3.2/P3.3 policy do not claim those deferred failure
-producers. The P3.W1 experiment remains bounded and does not replace the P3.2e cursor.
+producers. The P3.W1 experiment remains bounded and does not replace the P3.2f cursor.
 
 ### P4 - WebAssembly Backend and Host Adapter
 

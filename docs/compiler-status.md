@@ -7,11 +7,11 @@ This relocates the detailed baseline README documentation, reconciled with the
 approved ledger. It is not a second checklist, a new test report, or a stable ABI
 specification. [TODO.md](../TODO.md) alone owns live work status and order.
 
-**Current-worktree addendum, September 26, 2026:** P2.7, P2.8, P3.1, and P3.2a-P3.2d are
+**Current-worktree addendum, September 26, 2026:** P2.7, P2.8, P3.1, and P3.2a-P3.2e are
 independently approved and complete in the current worktree, completing P2 and the
-first four runtime-value checkpoints for the frozen E6 profile. The baseline hash above remains the
+first five runtime-value checkpoints for the frozen E6 profile. The baseline hash above remains the
 historical September 9 snapshot; no post-baseline commit hash is asserted here. M1
-completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. P3.2e
+completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. P3.2f
 is next overall and the next production checkpoint.
 
 Use the [README](../README.md) for onboarding and runnable examples, and
@@ -28,7 +28,7 @@ The implemented CLI provides `check`, `test`, `run`, `effects`, `inspect`, and
 `fmt`. Reference execution uses owning typed IR, not the separate experimental
 MIR/P2/P3 owners. There is no backend, complete production runtime ABI,
 `sol build`, full public IR, or SMT discharge. P3.1 supplies target-independent
-call/result/failure conventions, P3.2a adds a recipe operation-demand inventory, P3.2b adds independently validated allocation plans and pure quota checking, P3.2c adds static ownership plans, and P3.2d adds static copy plans: there is no physical ABI, allocation execution, executable value operation, or complete runtime lowering. Wasm is the first planned production target; native
+call/result/failure conventions, P3.2a adds a recipe operation-demand inventory, P3.2b adds independently validated allocation plans and pure quota checking, P3.2c adds static ownership plans, P3.2d adds static copy plans, and P3.2e adds static equality plans with allocation-free bounded test modeling: there is no physical ABI, allocation execution, production value-operation executor, or complete runtime lowering. Wasm is the first planned production target; native
 output is deferred and Component Model integration is not implemented.
 
 Compilation sessions use configurable deterministic ceilings for per-file and package source bytes, source files, directory depth and entries, tokens, persistent arena entries, diagnostics, cumulative allocation bytes, and allocation requests. Disk packages are discovered relative to verified open directory descriptors; source reads reject symbolic links, non-regular or duplicate identities, growth, truncation, replacement, and metadata changes. Raw interpreter host failures are copied through interpreter-owned length-delimited storage rather than borrowed C strings.
@@ -990,7 +990,7 @@ P3.1 provides no backend or physical ABI, allocation operations, cleanup/unwind
 lowering, host marshalling/adapters, handler ABI, complete runtime-lowered program,
 compiled `sol build`, or backend-backed `sol run`. Those remain P3.2-P5 work.
 
-## Runtime Value Plans (P3.2a-P3.2d Current-Worktree Addendum)
+## Runtime Value Plans (P3.2a-P3.2e Current-Worktree Addendum)
 
 The separate unstable compiler-internal
 [SolMirRuntimeValues](../include/sol/mir_runtime_values.h) owner borrows one
@@ -1045,16 +1045,18 @@ It performs no physical allocation or value operation.
 
 P3.2c adds one same-ID static descriptive ownership plan per recipe, nine sum-variant descriptors, and 12 owned edges, with producer-specific captured-receiver edges where applicable. It freezes the exclusive ownership graph, zero-allocation root/projected move with exact hole/repair semantics, and deterministic depth-first postorder drop semantics. Construction and validation are bounded, transactional, independently reconstructive, and fully anti-aliased; canonical rendering is stable and producer-sensitive without paths or raw IDs. The exact E6 census is 21 ownership plans, 9 ownership variants, 12 owned edges, 3,360 owned bytes, build work 253, and validation work 73,654,894. The existing 21 recipes, 17 demanded drop imports, and P3.2b allocation census are unchanged. Test-only modeling verifies move/hole/repair and recursive postorder behavior; the full Debug suite and focused ASan passed.
 
-P3.2d adds 21 static same-ID copy plans: unreachable 1, forbidden 7, trivial 3, Text 1, product 3, sum 5, and wrapper 1. Test-modeled bounded preflight, private staging, single publication, and postorder rollback specify transactional deep copy with no partially published destination. Cumulative successful allocation quota charges are not refunded on rollback. The exact E6 census is 3,696 owned bytes, build work 275, validation work 73,654,915, and 10 demanded copy imports; prior censuses are unchanged. The full Debug suite passed 50/50 and focused ASan passed. This defines no production copy executor, storage, allocator, or new failure sites. P3.2e-P3.2f remain open, so parent P3.2 and P3 remain incomplete.
+P3.2d adds 21 static same-ID copy plans: unreachable 1, forbidden 7, trivial 3, Text 1, product 3, sum 5, and wrapper 1. Test-modeled bounded preflight, private staging, single publication, and postorder rollback specify transactional deep copy with no partially published destination. Cumulative successful allocation quota charges are not refunded on rollback. The exact E6 census is 3,696 owned bytes, build work 275, validation work 73,654,915, and 10 demanded copy imports; prior censuses are unchanged. The full Debug suite passed 50/50 and focused ASan passed. This defines no production copy executor, storage, allocator, or new failure sites.
+
+P3.2e adds 21 static same-ID equality plans: unreachable 1, forbidden 7, trivial 3, Text 1, product 3, sum 5, and wrapper 1. The independent validator completes plan authentication before a comparison is permitted. The bounded test model recursively compares represented values without allocation; the five demanded equal imports are unchanged. The exact E6 census is 4,032 owned bytes, build scratch 73, build work 309, validation scratch 584,692,564, and validation work 73,654,948. The full Debug suite passed 50/50 and focused ASan passed. This defines no production equality executor, storage, allocator, or new failure sites. P3.2f remains open, so parent P3.2 and P3 remain incomplete.
 
 ## Remaining Boundary
 
-P2, P3.1, and P3.2a-P3.2d are complete for the frozen E6 profile. They select no physical ABI,
+P2, P3.1, and P3.2a-P3.2e are complete for the frozen E6 profile. They select no physical ABI,
 concrete table indices, wrappers/adapters, Wasm linkage/emission or execution,
 allocation or cleanup operations, build artifact, or public format. Those boundaries, reproducible
 artifacts, and interpreter/Wasm differential execution remain later tracks. No
 internal census is an empirical maintenance advantage, user-facing performance
 guarantee, or proof of application behavior. The proposed M experiment is not
-implemented by these compiler owners. P3.2e is the next production checkpoint.
+implemented by these compiler owners. P3.2f is the next production checkpoint.
 Consult [TODO.md](../TODO.md#execution-cursor) for the single active cursor and
 [the analysis](project-analysis.md) for the experiment rationale.

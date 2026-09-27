@@ -39,6 +39,23 @@ typedef struct {
     SolMirRuntimeCopyClass classification;
 } SolMirRuntimeCopyPlan;
 
+/* One same-ID static represented-value equality eligibility description per
+   concrete recipe. It is descriptive only: P3.2e adds no equality executor. */
+typedef enum {
+    SOL_MIR_RUNTIME_EQUALITY_UNREACHABLE,
+    SOL_MIR_RUNTIME_EQUALITY_FORBIDDEN,
+    SOL_MIR_RUNTIME_EQUALITY_TRIVIAL,
+    SOL_MIR_RUNTIME_EQUALITY_TEXT,
+    SOL_MIR_RUNTIME_EQUALITY_PRODUCT,
+    SOL_MIR_RUNTIME_EQUALITY_SUM,
+    SOL_MIR_RUNTIME_EQUALITY_WRAPPER,
+} SolMirRuntimeEqualityClass;
+
+typedef struct {
+    SolMirRecipeId recipe;
+    SolMirRuntimeEqualityClass classification;
+} SolMirRuntimeEqualityPlan;
+
 typedef struct {
     SolMirRecipeId recipe;
     SolMirRuntimeAllocationPlanKind kind;
@@ -122,6 +139,7 @@ typedef struct {
     size_t max_records;
     size_t max_allocation_plans;
     size_t max_copy_plans;
+    size_t max_equality_plans;
     size_t max_ownership_plans;
     size_t max_ownership_variants;
     size_t max_owned_edges;
@@ -136,6 +154,7 @@ typedef struct {
     size_t records;
     size_t allocation_plans;
     size_t copy_plans;
+    size_t equality_plans;
     size_t ownership_plans;
     size_t ownership_variants;
     size_t owned_edges;
@@ -160,6 +179,9 @@ typedef struct {
     SolMirRuntimeCopyPlan *copy_plans;
     size_t copy_plan_count;
     size_t copy_plan_capacity;
+    SolMirRuntimeEqualityPlan *equality_plans;
+    size_t equality_plan_count;
+    size_t equality_plan_capacity;
     SolMirRuntimeOwnershipPlan *ownership_plans;
     size_t ownership_plan_count;
     size_t ownership_plan_capacity;
@@ -230,6 +252,10 @@ void sol_mir_runtime_values_test_force_persistent_allocation_failure(
     size_t attempt
 );
 void sol_mir_runtime_values_test_force_validation_allocation_failure(bool force);
+/* One-based validator scratch allocation attempt; zero disables this hook. */
+void sol_mir_runtime_values_test_force_validation_allocation_failure_attempt(
+    size_t attempt
+);
 size_t sol_mir_runtime_values_test_validation_allocation_attempts(void);
 size_t sol_mir_runtime_values_test_ownership_count_scans(void);
 void sol_mir_runtime_values_test_reverse_captured_fragments(bool reverse);

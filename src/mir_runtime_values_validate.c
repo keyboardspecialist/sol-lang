@@ -14,16 +14,35 @@ enum { VALIDATION_HEADER_WORK = 8 };
 
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
 static _Thread_local bool force_validation_allocation_failure;
+static _Thread_local size_t force_validation_allocation_failure_attempt;
 static _Thread_local size_t validation_allocation_attempts;
 
 void sol_mir_runtime_values_test_force_validation_allocation_failure(bool force) {
     force_validation_allocation_failure = force;
 }
 
+void sol_mir_runtime_values_test_force_validation_allocation_failure_attempt(
+    size_t attempt) {
+    force_validation_allocation_failure_attempt = attempt;
+}
+
 size_t sol_mir_runtime_values_test_validation_allocation_attempts(void) {
     return validation_allocation_attempts;
 }
 #endif
+
+/* Every temporary used while authenticating this owner is a declared
+   validator-scratch allocation.  In particular, resource reconstruction must
+   not silently bypass the deterministic scratch-failure hook. */
+static unsigned char *validation_scratch_allocate(size_t bytes) {
+    if (bytes == 0) return NULL;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+    ++validation_allocation_attempts;
+    if (force_validation_allocation_failure || validation_allocation_attempts
+            == force_validation_allocation_failure_attempt) return NULL;
+#endif
+    return calloc(bytes, 1);
+}
 
 static bool invalid(SolDiagnostics *diagnostics, const char *message) {
     if (diagnostics != NULL) sol_diagnostics_add(diagnostics,
@@ -55,7 +74,7 @@ static bool mul_size(size_t left, size_t right, size_t *result) {
 
 static bool limits_complete(SolMirRuntimeValuesLimits value) {
     return value.max_records != 0 && value.max_allocation_plans != 0
-        && value.max_copy_plans != 0
+        && value.max_copy_plans != 0 && value.max_equality_plans != 0
         && value.max_ownership_plans != 0 && value.max_ownership_variants != 0
         && value.max_owned_edges != 0
         && value.max_owned_bytes != 0
@@ -159,6 +178,77 @@ static bool reconstructed_copy_class(const SolMirRecipe *recipe,
     return false;
 }
 
+/* Intentionally separate from construction's classifier. */
+static bool reconstructed_equality_classes(const SolMirRepresentation *r,
+    unsigned char *eligible, size_t *work) {
+    for (size_t i = 0; i < r->recipe_count; ++i) {
+        const SolMirRecipe *recipe = &r->recipes[i];
+        eligible[i] = recipe->inhabited && recipe->kind != SOL_MIR_RECIPE_FUNCTION
+            && recipe->kind != SOL_MIR_RECIPE_CAPABILITY;
+    }
+    bool changed;
+    do {
+        changed = false;
+        for (size_t i = 0; i < r->recipe_count; ++i) {
+            if (*work == SIZE_MAX) return false;
+            ++*work;
+            if (!eligible[i]) continue;
+            const SolMirRecipe *recipe = &r->recipes[i];
+            if (recipe->kind == SOL_MIR_RECIPE_ENUM
+                || recipe->kind == SOL_MIR_RECIPE_OPTION
+                || recipe->kind == SOL_MIR_RECIPE_RESULT) {
+                for (size_t v = 0; v < recipe->variants.count; ++v) {
+                    const SolMirRecipeVariant *variant = &r->variants[
+                        recipe->variants.offset + v];
+                    for (size_t f = 0; f < variant->fields.count; ++f) {
+                        if (*work == SIZE_MAX) return false;
+                        ++*work;
+                        SolMirRecipeId child = r->fields[variant->fields.offset + f].type;
+                        if (child >= r->recipe_count || !eligible[child]) {
+                            eligible[i] = 0; changed = true; goto next_equality_recipe;
+                        }
+                    }
+                }
+            } else if (recipe->kind == SOL_MIR_RECIPE_DISTINCT
+                || recipe->kind == SOL_MIR_RECIPE_REFINED) {
+                if (*work == SIZE_MAX) return false;
+                ++*work;
+                if (recipe->backing >= r->recipe_count || !eligible[recipe->backing]) {
+                    eligible[i] = 0; changed = true;
+                }
+            } else if (recipe->kind == SOL_MIR_RECIPE_TUPLE
+                || recipe->kind == SOL_MIR_RECIPE_RECORD) {
+                for (size_t f = 0; f < recipe->fields.count; ++f) {
+                    if (*work == SIZE_MAX) return false;
+                    ++*work;
+                    SolMirRecipeId child = r->fields[recipe->fields.offset + f].type;
+                    if (child >= r->recipe_count || !eligible[child]) {
+                        eligible[i] = 0; changed = true; break;
+                    }
+                }
+            }
+next_equality_recipe: ;
+        }
+    } while (changed);
+    return true;
+}
+
+static SolMirRuntimeEqualityClass reconstructed_equality_class(
+    const SolMirRecipe *recipe, bool eligible) {
+    if (!recipe->inhabited) return SOL_MIR_RUNTIME_EQUALITY_UNREACHABLE;
+    if (!eligible) return SOL_MIR_RUNTIME_EQUALITY_FORBIDDEN;
+    switch (recipe->kind) {
+        case SOL_MIR_RECIPE_TEXT: return SOL_MIR_RUNTIME_EQUALITY_TEXT;
+        case SOL_MIR_RECIPE_TUPLE: case SOL_MIR_RECIPE_RECORD:
+            return SOL_MIR_RUNTIME_EQUALITY_PRODUCT;
+        case SOL_MIR_RECIPE_ENUM: case SOL_MIR_RECIPE_OPTION:
+        case SOL_MIR_RECIPE_RESULT: return SOL_MIR_RUNTIME_EQUALITY_SUM;
+        case SOL_MIR_RECIPE_DISTINCT: case SOL_MIR_RECIPE_REFINED:
+            return SOL_MIR_RUNTIME_EQUALITY_WRAPPER;
+        default: return SOL_MIR_RUNTIME_EQUALITY_TRIVIAL;
+    }
+}
+
 static bool reconstructed_captured_edge_count(const SolMirRepresentation *r,
     size_t *captured) {
     *captured = 0;
@@ -197,15 +287,19 @@ static bool overlaps(const void *left, size_t left_count, size_t left_size,
 
 static bool reconstruct_usage(const SolMirRuntimeConventions *conventions,
     size_t predecessor_work, size_t predecessor_scratch, size_t alias_work,
-    SolMirRuntimeValuesUsage *usage) {
+    unsigned char *equality_eligible, SolMirRuntimeValuesUsage *usage) {
     const SolMirConcreteProgram *concrete = conventions->concrete;
     size_t records = concrete->representation.recipe_count;
     size_t owned_bytes, build_work = 0, validation_work = 0;
-    size_t plan_bytes, copy_plan_bytes, ownership_plan_bytes, variant_bytes, edge_bytes;
+    size_t plan_bytes, copy_plan_bytes, equality_plan_bytes, ownership_plan_bytes, variant_bytes, edge_bytes, equality_work = 0;
     size_t variants, edges, producer_scans, captured_edges;
-    if (!mul_size(records, sizeof(SolMirRuntimeRecipeOperations), &owned_bytes)
+    bool equality_ok = records == 0 || (equality_eligible != NULL
+        && reconstructed_equality_classes(&concrete->representation,
+            equality_eligible, &equality_work));
+    if (!equality_ok || !mul_size(records, sizeof(SolMirRuntimeRecipeOperations), &owned_bytes)
         || !mul_size(records, sizeof(SolMirRuntimeAllocationPlan), &plan_bytes)
         || !mul_size(records, sizeof(SolMirRuntimeCopyPlan), &copy_plan_bytes)
+        || !mul_size(records, sizeof(SolMirRuntimeEqualityPlan), &equality_plan_bytes)
         || !mul_size(records, sizeof(SolMirRuntimeOwnershipPlan),
             &ownership_plan_bytes)
         || !reconstructed_ownership_counts(&concrete->representation, &variants,
@@ -218,6 +312,7 @@ static bool reconstruct_usage(const SolMirRuntimeConventions *conventions,
         || !mul_size(edges, sizeof(SolMirRuntimeOwnedEdge), &edge_bytes)
         || !add_size(&owned_bytes, plan_bytes)
         || !add_size(&owned_bytes, copy_plan_bytes)
+        || !add_size(&owned_bytes, equality_plan_bytes)
         || !add_size(&owned_bytes, ownership_plan_bytes)
         || !add_size(&owned_bytes, variant_bytes)
         || !add_size(&owned_bytes, edge_bytes)
@@ -227,7 +322,9 @@ static bool reconstruct_usage(const SolMirRuntimeConventions *conventions,
         || !add_size(&build_work, conventions->import_count)
         || (conventions->import_count != 0 && !add_size(&build_work, 1))
         || (records != 0 && (!add_size(&build_work, 1)
-            || !add_size(&build_work, 1) || !add_size(&build_work, 1)))
+            || !add_size(&build_work, 1) || !add_size(&build_work, 1)
+            || !add_size(&build_work, 1)))
+        || !add_size(&build_work, equality_work)
         || !add_size(&build_work, records)
         || !add_size(&build_work, producer_scans)
         || (records != 0 && !add_size(&build_work, 1))
@@ -237,8 +334,11 @@ static bool reconstruct_usage(const SolMirRuntimeConventions *conventions,
         || !add_size(&build_work, edges)
         || (variants != 0 && !add_size(&build_work, 1))
         || (edges != 0 && !add_size(&build_work, 1))) return false;
+    size_t build_scratch = conventions->import_count;
+    if (!add_size(&build_scratch, records)) return false;
     size_t local_validation_scratch = records;
-    if (!add_size(&local_validation_scratch, conventions->import_count))
+    if (!add_size(&local_validation_scratch, conventions->import_count)
+        || !add_size(&local_validation_scratch, records))
         return false;
     size_t validation_scratch = predecessor_scratch;
     if (validation_scratch < local_validation_scratch)
@@ -256,9 +356,10 @@ static bool reconstruct_usage(const SolMirRuntimeConventions *conventions,
         || !add_size(&validation_work, conventions->import_count)
         || !add_size(&validation_work, variants)
         || !add_size(&validation_work, edges - captured_edges)
-        || !add_size(&validation_work, producer_scans)) return false;
-    *usage = (SolMirRuntimeValuesUsage){records, records, records, records,
-        variants, edges, owned_bytes, conventions->import_count, build_work,
+        || !add_size(&validation_work, producer_scans)
+        || !add_size(&validation_work, equality_work)) return false;
+    *usage = (SolMirRuntimeValuesUsage){records, records, records, records, records,
+        variants, edges, owned_bytes, build_scratch, build_work,
         validation_scratch, validation_work};
     return true;
 }
@@ -268,6 +369,7 @@ static bool usage_fits(const SolMirRuntimeValuesUsage *usage,
     return usage->records <= limits->max_records
         && usage->allocation_plans <= limits->max_allocation_plans
         && usage->copy_plans <= limits->max_copy_plans
+        && usage->equality_plans <= limits->max_equality_plans
         && usage->ownership_plans <= limits->max_ownership_plans
         && usage->ownership_variants <= limits->max_ownership_variants
         && usage->owned_edges <= limits->max_owned_edges
@@ -296,6 +398,8 @@ static bool walk_aliases(const SolMirRuntimeValues *values,
     size_t plan_count = check ? values->allocation_plan_capacity : 0;
     const void *copy_plans = check ? values->copy_plans : NULL;
     size_t copy_plan_count = check ? values->copy_plan_capacity : 0;
+    const void *equality_plans = check ? values->equality_plans : NULL;
+    size_t equality_plan_count = check ? values->equality_plan_capacity : 0;
     const void *ownership_plans = check ? values->ownership_plans : NULL;
     size_t ownership_plan_count = check ? values->ownership_plan_capacity : 0;
     const void *variants = check ? values->ownership_variants : NULL;
@@ -306,6 +410,22 @@ static bool walk_aliases(const SolMirRuntimeValues *values,
     if (check && overlaps(records, record_count,
             sizeof(*values->recipe_operations), plans, plan_count,
             sizeof(*values->allocation_plans))) return false;
+    if (check && (overlaps(records, record_count,
+                sizeof(*values->recipe_operations), equality_plans, equality_plan_count,
+                sizeof(*values->equality_plans))
+            || overlaps(plans, plan_count, sizeof(*values->allocation_plans),
+                equality_plans, equality_plan_count, sizeof(*values->equality_plans))
+            || overlaps(copy_plans, copy_plan_count, sizeof(*values->copy_plans),
+                equality_plans, equality_plan_count, sizeof(*values->equality_plans))
+            || overlaps(equality_plans, equality_plan_count,
+                sizeof(*values->equality_plans), ownership_plans,
+                ownership_plan_count, sizeof(*values->ownership_plans))
+            || overlaps(equality_plans, equality_plan_count,
+                sizeof(*values->equality_plans), variants, variant_count,
+                sizeof(*values->ownership_variants))
+            || overlaps(equality_plans, equality_plan_count,
+                sizeof(*values->equality_plans), edges, edge_count,
+                sizeof(*values->owned_edges)))) return false;
     if (check && (overlaps(records, record_count,
                 sizeof(*values->recipe_operations), copy_plans, copy_plan_count,
                 sizeof(*values->copy_plans))
@@ -348,10 +468,12 @@ static bool walk_aliases(const SolMirRuntimeValues *values,
     if (!validation_event(1) || (check && (overlaps(records, record_count, \
             sizeof(*values->recipe_operations), (pointer), (item_count), \
              sizeof(type)) || overlaps(plans, plan_count, \
-             sizeof(*values->allocation_plans), (pointer), (item_count), \
-             sizeof(type)) || overlaps(copy_plans, copy_plan_count, \
-             sizeof(*values->copy_plans), (pointer), (item_count), \
-             sizeof(type)) || overlaps(ownership_plans, ownership_plan_count, \
+              sizeof(*values->allocation_plans), (pointer), (item_count), \
+              sizeof(type)) || overlaps(copy_plans, copy_plan_count, \
+              sizeof(*values->copy_plans), (pointer), (item_count), \
+              sizeof(type)) || overlaps(equality_plans, equality_plan_count, \
+              sizeof(*values->equality_plans), (pointer), (item_count), \
+              sizeof(type)) || overlaps(ownership_plans, ownership_plan_count, \
             sizeof(*values->ownership_plans), (pointer), (item_count), \
             sizeof(type)) || overlaps(variants, variant_count, \
             sizeof(*values->ownership_variants), (pointer), (item_count), \
@@ -690,6 +812,23 @@ static bool validate_copy_plans(const SolMirRuntimeValues *values) {
     return true;
 }
 
+static bool validate_equality_plans(const SolMirRuntimeValues *values,
+    unsigned char *eligible) {
+    const SolMirRepresentation *representation
+        = &values->conventions->concrete->representation;
+    size_t work = 0;
+    if ((representation->recipe_count != 0 && eligible == NULL)
+        || !reconstructed_equality_classes(representation, eligible, &work)
+        || !validation_event(work)) return false;
+    for (size_t recipe = 0; recipe < values->equality_plan_count; ++recipe) {
+        if (values->equality_plans[recipe].recipe != recipe
+            || values->equality_plans[recipe].classification
+                != reconstructed_equality_class(&representation->recipes[recipe],
+                    eligible[recipe] != 0)) return false;
+    }
+    return true;
+}
+
 static bool validate_plans(const SolMirRuntimeValues *values) {
     const SolMirLayout *layout = &values->conventions->concrete->layout;
     for (size_t recipe = 0; recipe < values->allocation_plan_count; ++recipe) {
@@ -855,12 +994,21 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_internal_preflight(
     if (predecessor != SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED)
         return predecessor;
     size_t alias_work;
+    size_t records = conventions->concrete->representation.recipe_count;
+    unsigned char *reconstruction_scratch = validation_scratch_allocate(records);
+    if (records != 0 && reconstruction_scratch == NULL) {
+        if (diagnostics != NULL) diagnostics->allocation_failed = true;
+        invalid(diagnostics, "runtime values validation scratch allocation failed");
+        return SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED;
+    }
     if (!measure_alias_work(conventions, SIZE_MAX, &alias_work)
         || !reconstruct_usage(conventions, predecessor_work,
-            predecessor_scratch, alias_work, usage)) {
+            predecessor_scratch, alias_work, reconstruction_scratch, usage)) {
+        free(reconstruction_scratch);
         invalid(diagnostics, "runtime values resource reconstruction overflowed");
         return SOL_MIR_RUNTIME_VALUES_BUILD_RESOURCE_EXHAUSTED;
     }
+    free(reconstruction_scratch);
     if (!usage_fits(usage, limits)) {
         invalid(diagnostics, "runtime values preflight resource limit exceeded");
         return SOL_MIR_RUNTIME_VALUES_BUILD_RESOURCE_EXHAUSTED;
@@ -906,15 +1054,26 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_internal_validate(
         return SOL_MIR_RUNTIME_VALUES_BUILD_RESOURCE_EXHAUSTED;
     }
     size_t alias_work = metered_validation_work - alias_start;
+    size_t reconstruction_records = values->conventions->concrete->representation
+        .recipe_count;
+    unsigned char *reconstruction_scratch
+        = validation_scratch_allocate(reconstruction_records);
+    if (reconstruction_records != 0 && reconstruction_scratch == NULL) {
+        if (diagnostics != NULL) diagnostics->allocation_failed = true;
+        invalid(diagnostics, "runtime values validation scratch allocation failed");
+        return SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED;
+    }
     SolMirRuntimeValuesUsage expected;
     if (!reconstruct_usage(values->conventions, predecessor_work,
-            predecessor_scratch, alias_work, &expected)
+            predecessor_scratch, alias_work, reconstruction_scratch, &expected)
         || values->recipe_operation_count != expected.records
         || values->recipe_operation_capacity != expected.records
             || values->allocation_plan_count != expected.allocation_plans
             || values->allocation_plan_capacity != expected.allocation_plans
             || values->copy_plan_count != expected.copy_plans
             || values->copy_plan_capacity != expected.copy_plans
+            || values->equality_plan_count != expected.equality_plans
+            || values->equality_plan_capacity != expected.equality_plans
             || values->ownership_plan_count != expected.ownership_plans
             || values->ownership_plan_capacity != expected.ownership_plans
             || values->ownership_variant_count != expected.ownership_variants
@@ -929,6 +1088,8 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_internal_validate(
             sizeof(*values->allocation_plans))
         || !range_valid(values->copy_plans, values->copy_plan_capacity,
             sizeof(*values->copy_plans))
+        || !range_valid(values->equality_plans, values->equality_plan_capacity,
+            sizeof(*values->equality_plans))
         || !range_valid(values->ownership_plans,
             values->ownership_plan_capacity,
             sizeof(*values->ownership_plans))
@@ -939,9 +1100,11 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_internal_validate(
             sizeof(*values->owned_edges))
         || !usage_fits(&expected, &values->limits)
         || memcmp(&expected, &values->usage, sizeof(expected)) != 0) {
+        free(reconstruction_scratch);
         invalid(diagnostics, "runtime values preflight or usage is invalid");
         return SOL_MIR_RUNTIME_VALUES_BUILD_INTERNAL_FAILED;
     }
+    free(reconstruction_scratch);
     if (!walk_aliases(values, values->conventions, true)) {
         invalid(diagnostics, "runtime values owner aliases predecessor data");
         return validation_work_exhausted
@@ -951,7 +1114,7 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_internal_validate(
     size_t recipes = values->recipe_operation_count;
     size_t imports = values->conventions->import_count;
     size_t scratch_bytes = recipes;
-    if (!add_size(&scratch_bytes, imports)) {
+    if (!add_size(&scratch_bytes, imports) || !add_size(&scratch_bytes, recipes)) {
         invalid(diagnostics, "runtime values validation scratch overflow");
         return SOL_MIR_RUNTIME_VALUES_BUILD_RESOURCE_EXHAUSTED;
     }
@@ -961,11 +1124,7 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_internal_validate(
             invalid(diagnostics, "runtime values validation work limit exceeded");
             return SOL_MIR_RUNTIME_VALUES_BUILD_RESOURCE_EXHAUSTED;
         }
-#ifdef SOL_MIR_PLAN_TEST_HOOKS
-        ++validation_allocation_attempts;
-        if (!force_validation_allocation_failure)
-#endif
-            scratch = calloc(scratch_bytes, 1);
+        scratch = validation_scratch_allocate(scratch_bytes);
         if (scratch == NULL) {
             if (diagnostics != NULL) diagnostics->allocation_failed = true;
             invalid(diagnostics,
@@ -974,9 +1133,12 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_internal_validate(
         }
     }
     unsigned char *import_consumed = scratch == NULL ? NULL : scratch + recipes;
+    unsigned char *equality_eligible = import_consumed == NULL ? NULL
+        : import_consumed + imports;
     bool ok = validate_records(values, scratch, import_consumed);
     if (ok) ok = validate_plans(values);
     if (ok) ok = validate_copy_plans(values);
+    if (ok) ok = validate_equality_plans(values, equality_eligible);
     if (ok) ok = validate_ownership_plans(values);
     free(scratch);
     if (!ok) {

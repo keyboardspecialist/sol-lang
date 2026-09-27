@@ -19,6 +19,8 @@ void sol_mir_runtime_values_test_force_allocation_failure(bool force);
 void sol_mir_runtime_values_test_force_persistent_allocation_failure(
     size_t attempt);
 void sol_mir_runtime_values_test_force_validation_allocation_failure(bool force);
+void sol_mir_runtime_values_test_force_validation_allocation_failure_attempt(
+    size_t attempt);
 size_t sol_mir_runtime_values_test_validation_allocation_attempts(void);
 size_t sol_mir_runtime_values_test_ownership_count_scans(void);
 void sol_mir_runtime_values_test_reverse_captured_fragments(bool reverse);
@@ -211,6 +213,7 @@ static SolMirRuntimeValuesLimits exact_limits(const SolMirRuntimeValues *values)
         .max_records = values->usage.records,
         .max_allocation_plans = values->usage.allocation_plans,
         .max_copy_plans = values->usage.copy_plans,
+        .max_equality_plans = values->usage.equality_plans,
         .max_ownership_plans = values->usage.ownership_plans,
         .max_ownership_variants = values->usage.ownership_variants,
         .max_owned_edges = values->usage.owned_edges,
@@ -639,16 +642,35 @@ static void test_inventory(SolMirConcreteProgram *program,
     SolMirRuntimeValues *values) {
     CHECK(values->recipe_operation_count == 21);
     CHECK(values->usage.records == 21 && values->usage.allocation_plans == 21
-        && values->usage.copy_plans == 21 && values->usage.ownership_plans == 21
+        && values->usage.copy_plans == 21 && values->usage.equality_plans == 21
+        && values->usage.ownership_plans == 21
         && values->usage.ownership_variants == 9 && values->usage.owned_edges == 12
-        && values->usage.owned_bytes == 3696
-        && values->usage.build_scratch_bytes == 52
-        && values->usage.build_work == 275
+        && values->usage.owned_bytes == 4032
+        && values->usage.build_scratch_bytes == 73
+        && values->usage.build_work == 309
         && values->usage.validation_scratch_bytes == 584692564
-        && values->usage.validation_work == 73654915);
+        && values->usage.validation_work == 73654948);
     test_allocation_plans(values);
     check_ownership_plans(values);
     CHECK(values->copy_plan_count == 21 && values->copy_plan_capacity == 21);
+    CHECK(values->equality_plan_count == 21 && values->equality_plan_capacity == 21);
+    { size_t classes[7] = {0};
+      for (size_t i = 0; i < values->equality_plan_count; ++i) {
+          const SolMirRuntimeEqualityPlan *plan = &values->equality_plans[i];
+          CHECK(plan->recipe == i && plan->classification
+              <= SOL_MIR_RUNTIME_EQUALITY_WRAPPER);
+          if (plan->classification <= SOL_MIR_RUNTIME_EQUALITY_WRAPPER)
+              ++classes[plan->classification];
+      }
+      /* E6 Wasm32: unreachable, forbidden, trivial, text, product, sum, wrapper. */
+      CHECK(classes[SOL_MIR_RUNTIME_EQUALITY_UNREACHABLE] == 1
+          && classes[SOL_MIR_RUNTIME_EQUALITY_FORBIDDEN] == 7
+          && classes[SOL_MIR_RUNTIME_EQUALITY_TRIVIAL] == 3
+          && classes[SOL_MIR_RUNTIME_EQUALITY_TEXT] == 1
+          && classes[SOL_MIR_RUNTIME_EQUALITY_PRODUCT] == 3
+          && classes[SOL_MIR_RUNTIME_EQUALITY_SUM] == 5
+          && classes[SOL_MIR_RUNTIME_EQUALITY_WRAPPER] == 1);
+    }
     { size_t classes[7] = {0};
       for (size_t i = 0; i < values->copy_plan_count; ++i) {
           const SolMirRuntimeCopyPlan *plan = &values->copy_plans[i];
@@ -726,6 +748,8 @@ static void test_inventory(SolMirConcreteProgram *program,
         && strstr(first, "executable-operations=false") != NULL
         && strstr(first, "ownership-plans=true") != NULL
         && strstr(first, "copy-plans=true") != NULL
+        && strstr(first, "equality-plans=true") != NULL
+        && strstr(first, "equality-execution=false") != NULL
         && strstr(first, "copy-execution=false") != NULL
         && strstr(first, "move-drop-execution=false") != NULL
         && strstr(first, " recipe=") == NULL
@@ -758,6 +782,7 @@ static void test_inventory(SolMirConcreteProgram *program,
     ONE_BELOW(max_records);
     ONE_BELOW(max_allocation_plans);
     ONE_BELOW(max_copy_plans);
+    ONE_BELOW(max_equality_plans);
     ONE_BELOW(max_ownership_plans);
     ONE_BELOW(max_ownership_variants);
     ONE_BELOW(max_owned_edges);
@@ -787,7 +812,7 @@ static void test_inventory(SolMirConcreteProgram *program,
             == SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED
         && limited.conventions == NULL);
     sol_mir_runtime_values_test_force_persistent_allocation_failure(0);
-    for (size_t attempt = 3; attempt <= 6; ++attempt) {
+    for (size_t attempt = 3; attempt <= 7; ++attempt) {
         sol_mir_runtime_values_test_force_persistent_allocation_failure(attempt);
         CHECK(sol_mir_runtime_values_build(&request, &limited, diagnostics)
                 == SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED
@@ -808,6 +833,15 @@ static void test_inventory(SolMirConcreteProgram *program,
         && limited.conventions == NULL);
     sol_mir_runtime_values_test_force_validation_allocation_failure(false);
     diagnostics->allocation_failed = false;
+    for (size_t attempt = 1; attempt <= 2; ++attempt) {
+        sol_mir_runtime_values_test_force_validation_allocation_failure_attempt(attempt);
+        CHECK(!sol_mir_runtime_values_validate(values, diagnostics)
+            && diagnostics->allocation_failed
+            && sol_mir_runtime_values_test_validation_allocation_attempts() == attempt);
+        diagnostics->allocation_failed = false;
+    }
+    sol_mir_runtime_values_test_force_validation_allocation_failure_attempt(0);
+    CHECK(sol_mir_runtime_values_validate(values, NULL));
 
     sol_mir_concrete_test_force_validation_allocation_failure(true);
     CHECK(sol_mir_runtime_values_build(&request, &limited, NULL)
@@ -895,6 +929,35 @@ static void test_inventory(SolMirConcreteProgram *program,
     --values->usage.copy_plans;
     CHECK(!sol_mir_runtime_values_validate(values, NULL));
     values->usage = copy_usage;
+    SolMirRuntimeEqualityPlan saved_equality = values->equality_plans[0];
+    values->equality_plans[0].recipe = 1;
+    check_rejected_without_rendering(values);
+    values->equality_plans[0] = saved_equality;
+    values->equality_plans[0].classification = SOL_MIR_RUNTIME_EQUALITY_FORBIDDEN;
+    check_rejected_without_rendering(values);
+    values->equality_plans[0] = saved_equality;
+    --values->equality_plan_count;
+    check_rejected_without_rendering(values);
+    ++values->equality_plan_count;
+    --values->equality_plan_capacity;
+    check_rejected_without_rendering(values);
+    ++values->equality_plan_capacity;
+    SolMirRuntimeEqualityPlan *equality_plans = values->equality_plans;
+    values->equality_plans = NULL;
+    check_rejected_without_rendering(values);
+    values->equality_plans = (SolMirRuntimeEqualityPlan *)(void *)values;
+    check_rejected_without_rendering(values);
+    values->equality_plans = (SolMirRuntimeEqualityPlan *)(void *)values->recipe_operations;
+    check_rejected_without_rendering(values);
+    values->equality_plans = (SolMirRuntimeEqualityPlan *)(void *)program->representation.recipes;
+    check_rejected_without_rendering(values);
+    values->equality_plans = (SolMirRuntimeEqualityPlan *)(uintptr_t)(UINTPTR_MAX - 1);
+    check_rejected_without_rendering(values);
+    values->equality_plans = equality_plans;
+    SolMirRuntimeValuesUsage equality_usage = values->usage;
+    --values->usage.equality_plans;
+    check_rejected_without_rendering(values);
+    values->usage = equality_usage;
     SolMirRuntimeOwnershipPlan saved_ownership = values->ownership_plans[0];
     values->ownership_plans[0].recipe = 1;
     CHECK(!sol_mir_runtime_values_validate(values, NULL));
@@ -1143,6 +1206,7 @@ static void text_compilation_free(TextCompilation *c) {
 static void test_plan_driven_trace_model(const SolMirRuntimeValues *values);
 static void test_callable_trace_model(const SolMirRuntimeValues *values);
 static void test_copy_transaction_model(const SolMirRuntimeValues *values);
+static void test_equality_model(const SolMirRuntimeValues *values);
 
 static void test_bound_environment_exclusion(void) {
     static const char source[] =
@@ -1287,11 +1351,16 @@ static void test_plan_classification_fixture(void) {
         "type AggregateWrap = distinct Pair\n"
         "capability Gate { function choose(value: Int64) -> Bool effects { pure } }\n"
         "record Locked { gate: capability Gate }\n"
+        "type LockedWrap = distinct Locked\n"
+        "enum Mixed { clean(value: Text), blocked(gate: capability Gate) }\n"
+        "enum List { nil, cons(next: List) }\n"
+        "enum Tree { leaf, branch(left: Tree, right: Tree) }\n"
+        "record Zeros { first: (), second: () }\n"
         "capability DerivedGate derives_from source: capability Gate { "
         "function choose(value: Int64) -> Bool effects { pure } { return true } }\n"
         "function callback(value: Int64) -> Bool effects { pure } { return true }\n"
         "function root(scalar: ScalarWrap, text: TextWrap, aggregate: AggregateWrap, "
-        "empty: Empty, impossible: Void, pair: Pair, eight: Eight, choice: Choice, locked: Locked, gate: capability Gate, "
+        "empty: Empty, unit: (), impossible: Void, pair: Pair, eight: Eight, choice: Choice, locked: Locked, locked_wrap: LockedWrap, mixed: Mixed, list: List, tree: Tree, zeros: Zeros, gate: capability Gate, "
         "derived: capability DerivedGate, "
         "callback: function(Int64) -> Bool effects { pure }) -> Bool effects { pure } "
         "{ return true }\n";
@@ -1324,18 +1393,24 @@ static void test_plan_classification_fixture(void) {
         bool text_wrapper = false, aggregate_wrapper = false;
         bool callable_layout = false, capability_layout = false;
         bool root_capability = false, derived_capability = false;
+        bool locked = false, locked_wrapper = false, mixed = false, recursive = false;
+        bool non_demanded_eligible = false;
         for (size_t i = 0; i < program.representation.recipe_count; ++i) {
             const SolMirRecipe *recipe = &program.representation.recipes[i];
             const SolMirRuntimeAllocationPlan *plan = &values.allocation_plans[i];
+            const SolMirRuntimeEqualityPlan *equality = &values.equality_plans[i];
+            CHECK(equality->recipe == i);
             if (recipe->kind == SOL_MIR_RECIPE_RECORD
-                && recipe->fields.count == 0) {
+                && recipe->fields.count == 0 && recipe->inhabited) {
                 empty = true;
                 CHECK(plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE);
+                CHECK(equality->classification == SOL_MIR_RUNTIME_EQUALITY_PRODUCT);
             }
             if (recipe->kind == SOL_MIR_RECIPE_ENUM
                 && recipe->variants.count == 0) {
                 uninhabited = true;
                 CHECK(plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE);
+                CHECK(equality->classification == SOL_MIR_RUNTIME_EQUALITY_UNREACHABLE);
             }
             if (recipe->kind == SOL_MIR_RECIPE_DISTINCT
                 && recipe->backing < program.representation.recipe_count) {
@@ -1344,11 +1419,14 @@ static void test_plan_classification_fixture(void) {
                 if (backing == SOL_MIR_RECIPE_INT64) {
                     scalar_wrapper = true;
                     CHECK(plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE);
+                    CHECK(equality->classification == SOL_MIR_RUNTIME_EQUALITY_WRAPPER);
                 } else if (backing == SOL_MIR_RECIPE_TEXT) {
                     text_wrapper = true;
                     CHECK(plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_TEXT);
+                    CHECK(equality->classification == SOL_MIR_RUNTIME_EQUALITY_WRAPPER);
                 } else if (backing == SOL_MIR_RECIPE_RECORD) {
-                    aggregate_wrapper = true;
+                    aggregate_wrapper |= equality->classification
+                        == SOL_MIR_RUNTIME_EQUALITY_WRAPPER;
                     CHECK(plan->kind
                         == SOL_MIR_RUNTIME_ALLOCATION_PLAN_FIXED_OBJECT);
                 }
@@ -1356,10 +1434,12 @@ static void test_plan_classification_fixture(void) {
             if (recipe->kind == SOL_MIR_RECIPE_FUNCTION) {
                 callable_layout = true;
                 CHECK(plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE);
+                CHECK(equality->classification == SOL_MIR_RUNTIME_EQUALITY_FORBIDDEN);
             }
             if (recipe->kind == SOL_MIR_RECIPE_CAPABILITY) {
                 capability_layout = true;
                 CHECK(plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE);
+                CHECK(equality->classification == SOL_MIR_RUNTIME_EQUALITY_FORBIDDEN);
                 const SolMirRuntimeOwnershipPlan *ownership
                     = &values.ownership_plans[i];
                 if (recipe->capability_source == SOL_MIR_RECIPE_NONE) {
@@ -1374,12 +1454,31 @@ static void test_plan_classification_fixture(void) {
                             == recipe->capability_source);
                 }
             }
+            if (recipe->kind == SOL_MIR_RECIPE_RECORD && recipe->fields.count == 1
+                && equality->classification == SOL_MIR_RUNTIME_EQUALITY_FORBIDDEN)
+                locked = true;
+            if ((recipe->kind == SOL_MIR_RECIPE_DISTINCT
+                    || recipe->kind == SOL_MIR_RECIPE_REFINED)
+                && equality->classification == SOL_MIR_RUNTIME_EQUALITY_FORBIDDEN)
+                locked_wrapper = true;
+            if (recipe->kind == SOL_MIR_RECIPE_ENUM && recipe->variants.count == 2
+                && equality->classification == SOL_MIR_RUNTIME_EQUALITY_FORBIDDEN)
+                mixed = true;
+            if (recipe->kind == SOL_MIR_RECIPE_ENUM && recipe->variants.count == 2
+                && equality->classification == SOL_MIR_RUNTIME_EQUALITY_SUM)
+                recursive = true;
+            if (values.recipe_operations[i].demanded_operations == 0
+                && equality->classification != SOL_MIR_RUNTIME_EQUALITY_FORBIDDEN
+                && equality->classification != SOL_MIR_RUNTIME_EQUALITY_UNREACHABLE)
+                non_demanded_eligible = true;
         }
         CHECK(empty && uninhabited && scalar_wrapper && text_wrapper && aggregate_wrapper
             && callable_layout && capability_layout
-            && root_capability && derived_capability);
+            && root_capability && derived_capability && locked && locked_wrapper
+            && mixed && recursive && non_demanded_eligible);
         test_plan_driven_trace_model(&values);
         test_copy_transaction_model(&values);
+        test_equality_model(&values);
     }
     sol_mir_runtime_values_free(&values);
     sol_mir_runtime_conventions_free(&conventions);
@@ -1844,6 +1943,9 @@ struct CopyModelNode {
     size_t active_variant;
     size_t semantic_tag;
     uint64_t scalar;
+    /* Test-only bytes standing in for inactive sum representation. Equality
+       must neither validate nor compare them outside the active child slice. */
+    uint64_t inactive_noise;
     uint64_t text_length;
     char text_bytes[16];
     uintptr_t physical_id;
@@ -2724,6 +2826,531 @@ static void test_recursive_copy_transaction_model(void) {
     sol_mir_runtime_conventions_free(&conventions);
     sol_mir_concrete_program_free(&program);
     text_compilation_free(&compilation);
+}
+
+/* Test-only finite exclusive-tree equality model.  It has no production
+   storage, allocation, quota, or executor connection.  Both inputs are fully
+   validated before this model compares either value. */
+typedef enum {
+    EQUALITY_MODEL_EQUAL,
+    EQUALITY_MODEL_NOT_EQUAL,
+    EQUALITY_MODEL_INVALID,
+    EQUALITY_MODEL_LIMIT,
+} EqualityModelOutcome;
+
+typedef struct {
+    const SolMirRuntimeValues *values;
+    const CopyModelNode **nodes;
+    uintptr_t *physical;
+    size_t scratch_capacity;
+    size_t node_count, physical_count, depth, work;
+    size_t max_depth, max_nodes, max_work;
+    EqualityModelOutcome outcome;
+} EqualityModel;
+
+static bool equality_model_tick(EqualityModel *model, size_t amount) {
+    if (amount > SIZE_MAX - model->work || model->work + amount > model->max_work) {
+        model->outcome = EQUALITY_MODEL_LIMIT; return false;
+    }
+    model->work += amount;
+    return true;
+}
+
+static bool equality_model_seen(const EqualityModel *model, const CopyModelNode *node,
+    bool physical) {
+    if (physical) for (size_t i = 0; i < model->physical_count; ++i)
+        if (model->physical[i] == node->physical_id) return true;
+    if (!physical) for (size_t i = 0; i < model->node_count; ++i)
+        if (model->nodes[i] == node) return true;
+    return false;
+}
+
+static bool equality_model_validate(EqualityModel *model, const CopyModelNode *node) {
+    if (node == NULL || !node->live || !node->initialized || !node->available
+        || node->recipe >= model->values->equality_plan_count
+        || model->depth >= model->max_depth || model->node_count >= model->max_nodes) {
+        model->outcome = (model->depth >= model->max_depth
+            || model->node_count >= model->max_nodes) ? EQUALITY_MODEL_LIMIT
+                : EQUALITY_MODEL_INVALID;
+        return false;
+    }
+    if (!equality_model_tick(model, 1)) return false;
+    if (model->node_count == model->scratch_capacity
+        || equality_model_seen(model, node, false)) {
+        model->outcome = model->node_count == model->scratch_capacity
+            ? EQUALITY_MODEL_LIMIT : EQUALITY_MODEL_INVALID;
+        return false;
+    }
+    model->nodes[model->node_count++] = node;
+    const SolMirRuntimeEqualityPlan *plan = &model->values->equality_plans[node->recipe];
+    if (plan->classification == SOL_MIR_RUNTIME_EQUALITY_UNREACHABLE
+        || plan->classification == SOL_MIR_RUNTIME_EQUALITY_FORBIDDEN) {
+        model->outcome = EQUALITY_MODEL_INVALID; return false;
+    }
+    const SolMirRuntimeAllocationPlan *allocation
+        = &model->values->allocation_plans[node->recipe];
+    if (plan->classification != SOL_MIR_RUNTIME_EQUALITY_WRAPPER
+        && allocation->kind != SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE) {
+        if (node->physical_id == 0 || equality_model_seen(model, node, true)
+            || model->physical_count == model->scratch_capacity) {
+            model->outcome = model->physical_count == model->scratch_capacity
+                ? EQUALITY_MODEL_LIMIT : EQUALITY_MODEL_INVALID;
+            return false;
+        }
+        model->physical[model->physical_count++] = node->physical_id;
+    }
+    const SolMirRuntimeOwnershipPlan *ownership = &model->values->ownership_plans[node->recipe];
+    SolMirRuntimeSlice edges = ownership->edges;
+    if (plan->classification == SOL_MIR_RUNTIME_EQUALITY_TRIVIAL) {
+        SolMirRecipeKind kind = model->values->conventions->concrete->representation
+            .recipes[node->recipe].kind;
+        if (node->child_count != 0 || (kind == SOL_MIR_RECIPE_BOOL
+                && node->scalar > 1)) {
+            model->outcome = EQUALITY_MODEL_INVALID; return false;
+        }
+    } else if (plan->classification == SOL_MIR_RUNTIME_EQUALITY_TEXT) {
+        if (node->child_count != 0 || node->text_length > sizeof(node->text_bytes)
+            || !equality_model_tick(model, (size_t)node->text_length)) return false;
+    } else if (plan->classification == SOL_MIR_RUNTIME_EQUALITY_SUM) {
+        if (node->active_variant >= ownership->variants.count) {
+            model->outcome = EQUALITY_MODEL_INVALID; return false;
+        }
+        const SolMirRuntimeOwnershipVariant *variant = &model->values->ownership_variants[
+            ownership->variants.offset + node->active_variant];
+        if (node->semantic_tag != variant->semantic_tag) {
+            model->outcome = EQUALITY_MODEL_INVALID; return false;
+        }
+        edges = variant->edges;
+    } else if (plan->classification == SOL_MIR_RUNTIME_EQUALITY_WRAPPER) {
+        if (ownership->edges.count != 1 || node->child_count != 1 || node->children[0] == NULL
+            || node->children[0]->physical_id != node->physical_id) {
+            model->outcome = EQUALITY_MODEL_INVALID; return false;
+        }
+    }
+    if (plan->classification == SOL_MIR_RUNTIME_EQUALITY_PRODUCT
+        || plan->classification == SOL_MIR_RUNTIME_EQUALITY_SUM
+        || plan->classification == SOL_MIR_RUNTIME_EQUALITY_WRAPPER) {
+        if (node->child_count != edges.count || edges.count > COPY_MODEL_CHILD_CAPACITY) {
+            model->outcome = EQUALITY_MODEL_INVALID; return false;
+        }
+        ++model->depth;
+        for (size_t i = 0; i < edges.count; ++i) {
+            const SolMirRuntimeOwnedEdge *edge = &model->values->owned_edges[edges.offset + i];
+            if (node->children[i] == NULL || node->children[i]->recipe != edge->recipe
+                || !equality_model_validate(model, node->children[i])) {
+                --model->depth; return false;
+            }
+        }
+        --model->depth;
+    }
+    return true;
+}
+
+static bool equality_model_compare(EqualityModel *model, const CopyModelNode *left,
+    const CopyModelNode *right) {
+    if (!equality_model_tick(model, 1) || left->recipe != right->recipe) return false;
+    const SolMirRuntimeEqualityPlan *plan = &model->values->equality_plans[left->recipe];
+    if (plan->classification == SOL_MIR_RUNTIME_EQUALITY_TRIVIAL) {
+        SolMirRecipeKind kind = model->values->conventions->concrete->representation
+            .recipes[left->recipe].kind;
+        return kind != SOL_MIR_RECIPE_INT64 && kind != SOL_MIR_RECIPE_BOOL
+            ? true : left->scalar == right->scalar;
+    }
+    if (plan->classification == SOL_MIR_RUNTIME_EQUALITY_TEXT) {
+        if (left->text_length != right->text_length
+            || !equality_model_tick(model, (size_t)left->text_length)) return false;
+        return memcmp(left->text_bytes, right->text_bytes, (size_t)left->text_length) == 0;
+    }
+    const SolMirRuntimeOwnershipPlan *ownership = &model->values->ownership_plans[left->recipe];
+    SolMirRuntimeSlice edges = ownership->edges;
+    if (plan->classification == SOL_MIR_RUNTIME_EQUALITY_SUM) {
+        if (left->semantic_tag != right->semantic_tag) return false;
+        edges = model->values->ownership_variants[ownership->variants.offset
+            + left->active_variant].edges;
+    }
+    if (plan->classification == SOL_MIR_RUNTIME_EQUALITY_WRAPPER)
+        return equality_model_compare(model, left->children[0], right->children[0]);
+    for (size_t i = 0; i < edges.count; ++i)
+        if (!equality_model_compare(model, left->children[i], right->children[i])) return false;
+    return true;
+}
+
+static EqualityModelOutcome equality_model_run(const SolMirRuntimeValues *values,
+    const CopyModelNode *left, const CopyModelNode *right, size_t depth,
+    size_t nodes, size_t work, const CopyModelNode **node_scratch,
+    uintptr_t *physical_scratch, size_t scratch_capacity) {
+    EqualityModel model = {.values = values, .max_depth = depth, .max_nodes = nodes,
+        .max_work = work, .nodes = node_scratch, .physical = physical_scratch,
+        .scratch_capacity = scratch_capacity, .outcome = EQUALITY_MODEL_INVALID};
+    if (depth > 256 || nodes > 1048576 || work > 4000000)
+        return EQUALITY_MODEL_INVALID;
+    if ((nodes != 0 && (node_scratch == NULL || physical_scratch == NULL))
+        || scratch_capacity == 0) return EQUALITY_MODEL_LIMIT;
+    if (!equality_model_validate(&model, left)) return model.outcome;
+    model.node_count = model.physical_count = 0;
+    if (!equality_model_validate(&model, right)) return model.outcome;
+    if (left->recipe != right->recipe) return EQUALITY_MODEL_INVALID;
+    if (!equality_model_compare(&model, left, right))
+        return model.outcome == EQUALITY_MODEL_LIMIT ? model.outcome : EQUALITY_MODEL_NOT_EQUAL;
+    return EQUALITY_MODEL_EQUAL;
+}
+
+static void test_equality_model(const SolMirRuntimeValues *values) {
+    SolMirRecipeId product = SOL_MIR_RECIPE_NONE, text = SOL_MIR_RECIPE_NONE;
+    for (size_t i = 0; i < values->equality_plan_count; ++i) {
+        if (values->equality_plans[i].classification == SOL_MIR_RUNTIME_EQUALITY_TEXT)
+            text = i;
+        if (values->equality_plans[i].classification == SOL_MIR_RUNTIME_EQUALITY_PRODUCT
+            && is_two_text_field_slice(values, values->ownership_plans[i].edges))
+            product = i;
+    }
+    CHECK(product != SOL_MIR_RECIPE_NONE && text != SOL_MIR_RECIPE_NONE);
+    if (product == SOL_MIR_RECIPE_NONE || text == SOL_MIR_RECIPE_NONE) return;
+    const CopyModelNode *node_scratch[1024];
+    uintptr_t physical_scratch[1024];
+    SolMirRecipeId integer = SOL_MIR_RECIPE_NONE, boolean = SOL_MIR_RECIPE_NONE;
+    SolMirRecipeId unit = SOL_MIR_RECIPE_NONE, empty_product = SOL_MIR_RECIPE_NONE;
+    const SolMirRepresentation *representation
+        = &values->conventions->concrete->representation;
+    for (size_t i = 0; i < values->equality_plan_count; ++i) {
+        if (representation->recipes[i].kind == SOL_MIR_RECIPE_INT64) integer = i;
+        if (representation->recipes[i].kind == SOL_MIR_RECIPE_BOOL) boolean = i;
+        if (representation->recipes[i].kind == SOL_MIR_RECIPE_UNIT) unit = i;
+        if ((representation->recipes[i].kind == SOL_MIR_RECIPE_TUPLE
+                || representation->recipes[i].kind == SOL_MIR_RECIPE_RECORD)
+            && representation->recipes[i].fields.count == 0
+            && values->equality_plans[i].classification
+                == SOL_MIR_RUNTIME_EQUALITY_PRODUCT) empty_product = i;
+    }
+    CHECK(integer != SOL_MIR_RECIPE_NONE && boolean != SOL_MIR_RECIPE_NONE
+        && empty_product != SOL_MIR_RECIPE_NONE);
+    if (integer != SOL_MIR_RECIPE_NONE && boolean != SOL_MIR_RECIPE_NONE
+        && empty_product != SOL_MIR_RECIPE_NONE) {
+        CopyModelNode left_scalar, right_scalar, left_unit, right_unit, left_empty,
+            right_empty;
+        copy_model_node(&left_scalar, integer, 80); copy_model_node(&right_scalar, integer, 81);
+        left_scalar.scalar = right_scalar.scalar = 7;
+        CHECK(equality_model_run(values, &left_scalar, &right_scalar, 256, 1048576,
+            4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_EQUAL);
+        right_scalar.scalar = 8;
+        CHECK(equality_model_run(values, &left_scalar, &right_scalar, 256, 1048576,
+            4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_NOT_EQUAL);
+        copy_model_node(&left_scalar, boolean, 82); copy_model_node(&right_scalar, boolean, 83);
+        left_scalar.scalar = 0; right_scalar.scalar = 1;
+        CHECK(equality_model_run(values, &left_scalar, &right_scalar, 256, 1048576,
+            4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_NOT_EQUAL);
+        right_scalar.scalar = 2;
+        CHECK(equality_model_run(values, &left_scalar, &right_scalar, 256, 1048576,
+            4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_INVALID);
+        if (unit != SOL_MIR_RECIPE_NONE) {
+            copy_model_node(&left_unit, unit, 84); copy_model_node(&right_unit, unit, 85);
+            left_unit.scalar = 1; right_unit.scalar = 2;
+            CHECK(equality_model_run(values, &left_unit, &right_unit, 256, 1048576,
+                4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_EQUAL);
+        }
+        copy_model_node(&left_empty, empty_product, 86);
+        copy_model_node(&right_empty, empty_product, 87);
+        left_empty.scalar = 3; right_empty.scalar = 9;
+        CHECK(equality_model_run(values, &left_empty, &right_empty, 256, 1048576,
+            4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_EQUAL);
+    }
+    CopyModelNode a, b, c, d, left, right;
+    copy_model_node(&a, text, 1); copy_model_node(&b, text, 2);
+    copy_model_node(&c, text, 3); copy_model_node(&d, text, 4);
+    a.text_length = b.text_length = c.text_length = d.text_length = 2;
+    memcpy(a.text_bytes, "a\0", 2); memcpy(b.text_bytes, "b\0", 2);
+    memcpy(c.text_bytes, "a\0", 2); memcpy(d.text_bytes, "b\0", 2);
+    copy_model_node(&left, product, 10); copy_model_node(&right, product, 11);
+    left.children[0] = &a; left.children[1] = &b; left.child_count = 2;
+    right.children[0] = &c; right.children[1] = &d; right.child_count = 2;
+    CopyModelNode zero_text, zero_text_other;
+    copy_model_node(&zero_text, text, 90); copy_model_node(&zero_text_other, text, 91);
+    CHECK(equality_model_run(values, &zero_text, &zero_text_other, 256, 1048576,
+        4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_EQUAL);
+    zero_text_other.text_length = 1; zero_text_other.text_bytes[0] = 'a';
+    CHECK(equality_model_run(values, &zero_text, &zero_text_other, 256, 1048576,
+        4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_NOT_EQUAL);
+    SolMirRecipeId zeros = SOL_MIR_RECIPE_NONE;
+    for (size_t i = 0; i < values->equality_plan_count; ++i) {
+        const SolMirRuntimeOwnershipPlan *ownership = &values->ownership_plans[i];
+        if (values->equality_plans[i].classification == SOL_MIR_RUNTIME_EQUALITY_PRODUCT
+            && ownership->edges.count == 2
+            && values->allocation_plans[i].kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE
+            && values->allocation_plans[values->owned_edges[ownership->edges.offset].recipe]
+                .kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE
+            && values->allocation_plans[values->owned_edges[ownership->edges.offset + 1].recipe]
+                .kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE) { zeros = i; break; }
+    }
+    CHECK(zeros != SOL_MIR_RECIPE_NONE);
+    if (zeros != SOL_MIR_RECIPE_NONE) {
+        const SolMirRuntimeOwnershipPlan *ownership = &values->ownership_plans[zeros];
+        SolMirRecipeId child = values->owned_edges[ownership->edges.offset].recipe;
+        CopyModelNode z0, z1, z2, z3, zl, zr;
+        copy_model_node(&z0, child, 0); copy_model_node(&z1, child, 0);
+        copy_model_node(&z2, child, 0); copy_model_node(&z3, child, 0);
+        z0.scalar = 1; z1.scalar = 2; z2.scalar = 3; z3.scalar = 4;
+        copy_model_node(&zl, zeros, 0); copy_model_node(&zr, zeros, 0);
+        zl.children[0] = &z0; zl.children[1] = &z1;
+        zr.children[0] = &z2; zr.children[1] = &z3;
+        zl.child_count = zr.child_count = 2;
+        CHECK(equality_model_run(values, &zl, &zr, 256, 1048576, 4000000,
+            node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_EQUAL);
+    }
+    CHECK(equality_model_run(values, &left, &right, 256, 1048576, 4000000,
+        node_scratch, physical_scratch, 1024)
+        == EQUALITY_MODEL_EQUAL);
+    CopyModelNode snapshot_left = left, snapshot_right = right, snapshot_a = a,
+        snapshot_b = b, snapshot_c = c, snapshot_d = d;
+    SolMirRuntimeValuesUsage snapshot_values_usage = values->usage;
+    SolMirRuntimeAllocationUsage snapshot_allocation_usage = {17, 29};
+    SolMirRuntimeAllocationQuota snapshot_allocation_quota = {31, 47};
+    CHECK(equality_model_run(values, &left, &right, 256, 1048576, 4000000,
+        node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_EQUAL);
+    CHECK(equality_model_run(values, &left, &left, 256, 1048576, 4000000,
+        node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_EQUAL);
+    CHECK(memcmp(&left, &snapshot_left, sizeof(left)) == 0
+        && memcmp(&right, &snapshot_right, sizeof(right)) == 0
+        && memcmp(&a, &snapshot_a, sizeof(a)) == 0
+        && memcmp(&b, &snapshot_b, sizeof(b)) == 0
+        && memcmp(&c, &snapshot_c, sizeof(c)) == 0
+        && memcmp(&d, &snapshot_d, sizeof(d)) == 0
+        && memcmp(&values->usage, &snapshot_values_usage,
+            sizeof(snapshot_values_usage)) == 0
+        && snapshot_allocation_usage.requests == 17
+        && snapshot_allocation_usage.bytes == 29
+        && snapshot_allocation_quota.max_requests == 31
+        && snapshot_allocation_quota.max_bytes == 47);
+    b.physical_id = a.physical_id;
+    CHECK(equality_model_run(values, &left, &right, 256, 1048576, 4000000,
+        node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_INVALID);
+    b.physical_id = snapshot_b.physical_id;
+    /* Two three-node validations and three paired comparisons: 21 exact work. */
+    CHECK(equality_model_run(values, &left, &right, 256, 1048576, 21,
+        node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_EQUAL);
+    CHECK(equality_model_run(values, &left, &right, 256, 1048576, 20,
+        node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_LIMIT);
+    CHECK(equality_model_run(values, &a, &left, 256, 1048576, 4000000,
+        node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_INVALID);
+    SolMirRecipeId wrapper = SOL_MIR_RECIPE_NONE;
+    for (size_t i = 0; i < values->equality_plan_count; ++i)
+        if (values->equality_plans[i].classification == SOL_MIR_RUNTIME_EQUALITY_WRAPPER
+            && values->owned_edges[values->ownership_plans[i].edges.offset].recipe == text) {
+            wrapper = i; break;
+        }
+    CHECK(wrapper != SOL_MIR_RECIPE_NONE);
+    if (wrapper != SOL_MIR_RECIPE_NONE) {
+        CopyModelNode wrapped_left, wrapped_right, backing_left, backing_right;
+        copy_model_node(&backing_left, text, 300); copy_model_node(&backing_right, text, 301);
+        backing_left.text_length = backing_right.text_length = 1;
+        backing_left.text_bytes[0] = backing_right.text_bytes[0] = 'w';
+        copy_model_node(&wrapped_left, wrapper, 300); copy_model_node(&wrapped_right, wrapper, 301);
+        wrapped_left.children[0] = &backing_left; wrapped_right.children[0] = &backing_right;
+        wrapped_left.child_count = wrapped_right.child_count = 1;
+        CHECK(equality_model_run(values, &wrapped_left, &wrapped_right, 256, 1048576,
+            4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_EQUAL);
+        backing_right.text_bytes[0] = 'x';
+        CHECK(equality_model_run(values, &wrapped_left, &wrapped_right, 256, 1048576,
+            4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_NOT_EQUAL);
+    }
+    SolMirRecipeId callable = SOL_MIR_RECIPE_NONE, capability = SOL_MIR_RECIPE_NONE;
+    SolMirRecipeId forbidden_composite = SOL_MIR_RECIPE_NONE;
+    for (size_t i = 0; i < values->equality_plan_count; ++i) {
+        SolMirRecipeKind kind = representation->recipes[i].kind;
+        if (kind == SOL_MIR_RECIPE_FUNCTION) callable = i;
+        else if (kind == SOL_MIR_RECIPE_CAPABILITY) capability = i;
+        else if (values->equality_plans[i].classification
+                == SOL_MIR_RUNTIME_EQUALITY_FORBIDDEN
+            && (kind == SOL_MIR_RECIPE_RECORD || kind == SOL_MIR_RECIPE_ENUM))
+            forbidden_composite = i;
+    }
+    const SolMirRecipeId forbidden[] = {callable, capability, forbidden_composite};
+    for (size_t i = 0; i < sizeof(forbidden) / sizeof(forbidden[0]); ++i) {
+        CHECK(forbidden[i] != SOL_MIR_RECIPE_NONE);
+        if (forbidden[i] != SOL_MIR_RECIPE_NONE) {
+            CopyModelNode invalid; copy_model_node(&invalid, forbidden[i], 400 + i);
+            CHECK(equality_model_run(values, &invalid, &invalid, 256, 1048576,
+                4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_INVALID);
+        }
+    }
+    SolMirRecipeId sum = SOL_MIR_RECIPE_NONE;
+    size_t active = SOL_MIR_RUNTIME_NONE;
+    for (size_t i = 0; i < values->equality_plan_count; ++i) {
+        const SolMirRuntimeOwnershipPlan *ownership = &values->ownership_plans[i];
+        if (values->equality_plans[i].classification != SOL_MIR_RUNTIME_EQUALITY_SUM)
+            continue;
+        for (size_t variant = 0; variant < ownership->variants.count; ++variant)
+            if (is_two_text_field_slice(values, values->ownership_variants[
+                    ownership->variants.offset + variant].edges)) {
+                sum = i; active = variant; break;
+            }
+        if (sum != SOL_MIR_RECIPE_NONE) break;
+    }
+    CHECK(sum != SOL_MIR_RECIPE_NONE);
+    if (sum != SOL_MIR_RECIPE_NONE) {
+        const SolMirRuntimeOwnershipPlan *ownership = &values->ownership_plans[sum];
+        CopyModelNode sum_left, sum_right;
+        copy_model_node(&sum_left, sum, 500); copy_model_node(&sum_right, sum, 501);
+        sum_left.active_variant = sum_right.active_variant = active;
+        sum_left.semantic_tag = sum_right.semantic_tag = values->ownership_variants[
+            ownership->variants.offset + active].semantic_tag;
+        sum_left.children[0] = &a; sum_left.children[1] = &b;
+        sum_right.children[0] = &c; sum_right.children[1] = &d;
+        sum_left.child_count = sum_right.child_count = 2;
+        sum_left.inactive_noise = UINT64_MAX;
+        sum_right.inactive_noise = 0;
+        CHECK(equality_model_run(values, &sum_left, &sum_right, 256, 1048576,
+            4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_EQUAL);
+        sum_right.children[1] = &a;
+        CHECK(equality_model_run(values, &sum_left, &sum_right, 256, 1048576,
+            4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_NOT_EQUAL);
+        sum_right.children[1] = NULL; sum_right.child_count = 2;
+        CHECK(equality_model_run(values, &sum_left, &sum_right, 256, 1048576,
+            4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_INVALID);
+        sum_right.children[1] = &d;
+        sum_right.semantic_tag = SIZE_MAX;
+        CHECK(equality_model_run(values, &sum_left, &sum_right, 256, 1048576,
+            4000000, node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_INVALID);
+    }
+    d.text_bytes[0] = 'x';
+    CHECK(equality_model_run(values, &left, &right, 256, 1048576, 4000000,
+        node_scratch, physical_scratch, 1024)
+        == EQUALITY_MODEL_NOT_EQUAL);
+    /* A malformed later child still invalidates an otherwise unequal pair. */
+    d.live = false;
+    CHECK(equality_model_run(values, &left, &right, 256, 1048576, 4000000,
+        node_scratch, physical_scratch, 1024)
+        == EQUALITY_MODEL_INVALID);
+    d.live = true; d.text_bytes[0] = 'b';
+    right.children[0] = &a; /* Cross-operand sharing is permitted. */
+    CHECK(equality_model_run(values, &left, &right, 256, 1048576, 4000000,
+        node_scratch, physical_scratch, 1024)
+        == EQUALITY_MODEL_EQUAL);
+    right.children[0] = &c; left.children[1] = &a;
+    CHECK(equality_model_run(values, &left, &right, 256, 1048576, 4000000,
+        node_scratch, physical_scratch, 1024)
+        == EQUALITY_MODEL_INVALID);
+    left.children[1] = &b;
+    CHECK(equality_model_run(values, &left, &right, 1, 1048576, 4000000,
+        node_scratch, physical_scratch, 1024)
+        == EQUALITY_MODEL_LIMIT);
+    CHECK(equality_model_run(values, &left, &right, 256, 1, 4000000,
+        node_scratch, physical_scratch, 1024)
+        == EQUALITY_MODEL_LIMIT);
+    CHECK(equality_model_run(values, &left, &right, 256, 1048576, 1,
+        node_scratch, physical_scratch, 1024)
+        == EQUALITY_MODEL_LIMIT);
+    CHECK(equality_model_run(values, &left, &right, 257, 1048576, 4000000,
+        node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_INVALID);
+    CHECK(equality_model_run(values, &left, &right, 256, 1048577, 4000000,
+        node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_INVALID);
+    CHECK(equality_model_run(values, &left, &right, 256, 1048576, 4000001,
+        node_scratch, physical_scratch, 1024) == EQUALITY_MODEL_INVALID);
+    SolMirRecipeId recursive = SOL_MIR_RECIPE_NONE;
+    size_t leaf = SOL_MIR_RUNTIME_NONE, branch = SOL_MIR_RUNTIME_NONE;
+    for (size_t recipe = 0; recipe < values->equality_plan_count; ++recipe) {
+        const SolMirRuntimeOwnershipPlan *ownership = &values->ownership_plans[recipe];
+        if (values->equality_plans[recipe].classification != SOL_MIR_RUNTIME_EQUALITY_SUM)
+            continue;
+        for (size_t variant = 0; variant < ownership->variants.count; ++variant) {
+            const SolMirRuntimeOwnershipVariant *candidate = &values->ownership_variants[
+                ownership->variants.offset + variant];
+            if (candidate->edges.count == 0) leaf = variant;
+            else if (candidate->edges.count == 2 && values->owned_edges[
+                    candidate->edges.offset].recipe == recipe
+                && values->owned_edges[candidate->edges.offset + 1].recipe == recipe)
+                branch = variant;
+        }
+        if (leaf != SOL_MIR_RUNTIME_NONE && branch != SOL_MIR_RUNTIME_NONE) {
+            recursive = recipe; break;
+        }
+        leaf = branch = SOL_MIR_RUNTIME_NONE;
+    }
+    CHECK(recursive != SOL_MIR_RECIPE_NONE);
+    if (recursive != SOL_MIR_RECIPE_NONE) {
+        enum { EQUALITY_LONG_NODES = 513 };
+        CopyModelNode long_left[EQUALITY_LONG_NODES], long_right[EQUALITY_LONG_NODES];
+        const SolMirRuntimeOwnershipPlan *ownership = &values->ownership_plans[recursive];
+        for (size_t i = 0; i < EQUALITY_LONG_NODES; ++i) {
+            copy_model_node(&long_left[i], recursive, 1000 + i);
+            copy_model_node(&long_right[i], recursive, 2000 + i);
+            long_left[i].active_variant = long_right[i].active_variant
+                = i < 256 ? branch : leaf;
+            long_left[i].semantic_tag = long_right[i].semantic_tag
+                = values->ownership_variants[ownership->variants.offset
+                    + long_left[i].active_variant].semantic_tag;
+            if (i < 256) {
+                long_left[i].children[0] = &long_left[i * 2 + 1];
+                long_left[i].children[1] = &long_left[i * 2 + 2];
+                long_right[i].children[0] = &long_right[i * 2 + 1];
+                long_right[i].children[1] = &long_right[i * 2 + 2];
+                long_left[i].child_count = long_right[i].child_count = 2;
+            }
+        }
+        const CopyModelNode *long_scratch[EQUALITY_LONG_NODES];
+        uintptr_t long_physical[EQUALITY_LONG_NODES];
+        CHECK(equality_model_run(values, &long_left[0], &long_right[0], 256,
+            EQUALITY_LONG_NODES, 4000000, long_scratch, long_physical,
+            EQUALITY_LONG_NODES) == EQUALITY_MODEL_EQUAL);
+        CHECK(equality_model_run(values, &long_left[256], &long_right[256], 256,
+            EQUALITY_LONG_NODES, 4000000, long_scratch, long_physical,
+            EQUALITY_LONG_NODES) == EQUALITY_MODEL_EQUAL);
+        CHECK(equality_model_run(values, &long_left[0], &long_right[256], 256,
+            EQUALITY_LONG_NODES, 4000000, long_scratch, long_physical,
+            EQUALITY_LONG_NODES) == EQUALITY_MODEL_NOT_EQUAL);
+        CHECK(equality_model_run(values, &long_left[0], &long_right[0], 256,
+            EQUALITY_LONG_NODES - 1, 4000000, long_scratch, long_physical,
+            EQUALITY_LONG_NODES) == EQUALITY_MODEL_LIMIT);
+    }
+    SolMirRecipeId chain_recipe = SOL_MIR_RECIPE_NONE;
+    size_t chain_leaf = SOL_MIR_RUNTIME_NONE, chain_next = SOL_MIR_RUNTIME_NONE;
+    for (size_t recipe = 0; recipe < values->equality_plan_count; ++recipe) {
+        const SolMirRuntimeOwnershipPlan *ownership = &values->ownership_plans[recipe];
+        if (values->equality_plans[recipe].classification != SOL_MIR_RUNTIME_EQUALITY_SUM)
+            continue;
+        for (size_t variant = 0; variant < ownership->variants.count; ++variant) {
+            const SolMirRuntimeOwnershipVariant *candidate = &values->ownership_variants[
+                ownership->variants.offset + variant];
+            if (candidate->edges.count == 0) chain_leaf = variant;
+            else if (candidate->edges.count == 1 && values->owned_edges[
+                    candidate->edges.offset].recipe == recipe) chain_next = variant;
+        }
+        if (chain_leaf != SOL_MIR_RUNTIME_NONE && chain_next != SOL_MIR_RUNTIME_NONE) {
+            chain_recipe = recipe; break;
+        }
+        chain_leaf = chain_next = SOL_MIR_RUNTIME_NONE;
+    }
+    CHECK(chain_recipe != SOL_MIR_RECIPE_NONE);
+    if (chain_recipe != SOL_MIR_RECIPE_NONE) {
+        enum { EQUALITY_DEPTH_NODES = 256 };
+        CopyModelNode chain_left[EQUALITY_DEPTH_NODES], chain_right[EQUALITY_DEPTH_NODES];
+        const SolMirRuntimeOwnershipPlan *ownership = &values->ownership_plans[chain_recipe];
+        for (size_t i = 0; i < EQUALITY_DEPTH_NODES; ++i) {
+            copy_model_node(&chain_left[i], chain_recipe, 3000 + i);
+            copy_model_node(&chain_right[i], chain_recipe, 4000 + i);
+            chain_left[i].active_variant = chain_right[i].active_variant
+                = i + 1 == EQUALITY_DEPTH_NODES ? chain_leaf : chain_next;
+            chain_left[i].semantic_tag = chain_right[i].semantic_tag
+                = values->ownership_variants[ownership->variants.offset
+                    + chain_left[i].active_variant].semantic_tag;
+            if (i + 1 < EQUALITY_DEPTH_NODES) {
+                chain_left[i].children[0] = &chain_left[i + 1];
+                chain_right[i].children[0] = &chain_right[i + 1];
+                chain_left[i].child_count = chain_right[i].child_count = 1;
+            }
+        }
+        const CopyModelNode *chain_scratch[EQUALITY_DEPTH_NODES];
+        uintptr_t chain_physical[EQUALITY_DEPTH_NODES];
+        CHECK(equality_model_run(values, &chain_left[0], &chain_right[0], 256,
+            EQUALITY_DEPTH_NODES, 4000000, chain_scratch, chain_physical,
+            EQUALITY_DEPTH_NODES) == EQUALITY_MODEL_EQUAL);
+        CHECK(equality_model_run(values, &chain_left[0], &chain_right[0], 255,
+            EQUALITY_DEPTH_NODES, 4000000, chain_scratch, chain_physical,
+            EQUALITY_DEPTH_NODES) == EQUALITY_MODEL_LIMIT);
+        chain_left[1].children[0] = &chain_left[0];
+        CHECK(equality_model_run(values, &chain_left[0], &chain_right[0], 256,
+            EQUALITY_DEPTH_NODES, 4000000, chain_scratch, chain_physical,
+            EQUALITY_DEPTH_NODES) == EQUALITY_MODEL_INVALID);
+    }
 }
 
 int main(void) {
