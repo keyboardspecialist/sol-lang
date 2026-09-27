@@ -7,11 +7,11 @@ This relocates the detailed baseline README documentation, reconciled with the
 approved ledger. It is not a second checklist, a new test report, or a stable ABI
 specification. [TODO.md](../TODO.md) alone owns live work status and order.
 
-**Current-worktree addendum, September 26, 2026:** P2.7, P2.8, and P3.1 are
+**Current-worktree addendum, September 26, 2026:** P2.7, P2.8, P3.1, and P3.2a are
 independently approved and complete in the current worktree, completing P2 and the
-first P3 checkpoint for the frozen E6 profile. The baseline hash above remains the
+first runtime-value inventory checkpoint for the frozen E6 profile. The baseline hash above remains the
 historical September 9 snapshot; no post-baseline commit hash is asserted here. M1
-completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. P3.2
+completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. P3.2b
 is next overall and the next production checkpoint.
 
 Use the [README](../README.md) for onboarding and runnable examples, and
@@ -26,10 +26,11 @@ every target-language form is executable or that a fresh full suite was rerun.
 
 The implemented CLI provides `check`, `test`, `run`, `effects`, `inspect`, and
 `fmt`. Reference execution uses owning typed IR, not the separate experimental
-MIR/P2/P3.1 owners. There is no backend, complete production runtime ABI,
-`sol build`, full public IR, or SMT discharge. P3.1 supplies only target-independent
-call/result/failure conventions: there is no physical ABI or complete runtime
-lowering. Wasm is the first planned production target; native
+MIR/P2/P3 owners. There is no backend, complete production runtime ABI,
+`sol build`, full public IR, or SMT discharge. P3.1 supplies target-independent
+call/result/failure conventions, and P3.2a adds only a recipe operation-demand
+inventory: there is no physical ABI, executable value operation, allocation plan,
+or complete runtime lowering. Wasm is the first planned production target; native
 output is deferred and Component Model integration is not implemented.
 
 Compilation sessions use configurable deterministic ceilings for per-file and package source bytes, source files, directory depth and entries, tokens, persistent arena entries, diagnostics, cumulative allocation bytes, and allocation requests. Disk packages are discovered relative to verified open directory descriptors; source reads reject symbolic links, non-regular or duplicate identities, growth, truncation, replacement, and metadata changes. Raw interpreter host failures are copied through interpreter-owned length-delimited storage rather than borrowed C strings.
@@ -991,14 +992,63 @@ P3.1 provides no backend or physical ABI, allocation operations, cleanup/unwind
 lowering, host marshalling/adapters, handler ABI, complete runtime-lowered program,
 compiled `sol build`, or backend-backed `sol run`. Those remain P3.2-P5 work.
 
+## Runtime Value Operation-Demand Inventory (P3.2a Current-Worktree Addendum)
+
+The separate unstable compiler-internal
+[SolMirRuntimeValues](../include/sol/mir_runtime_values.h) owner borrows one
+authenticated, address-stable, immutable `SolMirRuntimeConventions` owner, which
+must outlive it. It owns exactly one same-ID `SolMirRuntimeRecipeOperations` record
+for every concrete representation recipe. Each record contains only the recipe ID,
+the create/copy/drop/equal demand mask derived from P2 linkage requirements, and the
+matching existing P3.1 import IDs. Bound-environment is stripped from the mask;
+host and bound-environment imports are not recipe operation plans. Every demanded
+bit has exactly one matching import and every absent bit retains
+`SOL_MIR_RUNTIME_NONE`.
+
+Construction is transactional and rejects a nonempty destination unchanged. Limits
+cover records, persistent bytes, peak build scratch, build work, validation scratch,
+and validation work; null or wholly zero limits select defaults, while partial zero
+is invalid. Preflight authenticates P3.1 and checks dimensions, arithmetic, work,
+and scratch before persistent allocation. Persistent and validator-scratch fault
+injection distinguish allocation failure and leave construction empty or validation
+false.
+
+The validator is a separate translation unit. It validates P3.1 first, preflights
+headers, capacities, arithmetic, resource usage, and raw ranges before record
+traversal, rejects aliases with the owner, P3.1 arenas, the complete P2 predecessor
+chain, nested MIR arenas, owning IR arenas, and borrowed strings, then reconstructs
+expected masks and import IDs directly from linkage and P3.1 imports. It consumes
+the same-ID recipe and relevant-import domains completely and reconstructs exact
+usage without invoking builder helpers or constructing another owner.
+
+Canonical rendering validates and buffers before one caller-visible write. It states
+that the form is an operation-demand inventory rather than executable operations,
+uses stable linkage recipe digests and existing P3.1 import symbols, sorts semantic
+lines, and excludes source paths, pointers, capacities, allocator state, and raw
+dense IDs. It duplicates no predecessor symbols, digests, layouts, recipes, or
+records.
+
+The E6 census is 21 records, of which 17 recipes demand operations: 16 create,
+10 copy, 17 drop, and 5 equal. Four host imports remain host imports rather than
+recipe plans. Focused tests cover exact pair reconstruction, zero-demand records,
+bound-environment exclusion, repeated/reordered-root deterministic builds, exact
+and one-below limits, persistent and validator allocation faults, malformed IDs,
+masks, import IDs, predecessor data, counts, capacities, usage, aliases, and
+zero-write malformed rendering while preserving P3.1 symbols/rendering.
+
+P3.2a is inventory only. It defines no allocation or quota plan, allocated runtime
+value, ownership graph, move/drop execution, transactional deep copy,
+allocation-free equality execution, or host-result transfer. Those are the open
+P3.2b-P3.2f checkpoints, so parent P3.2 and P3 remain incomplete.
+
 ## Remaining Boundary
 
-P2 and P3.1 are complete for the frozen E6 profile. P3.1 selects no physical ABI,
+P2, P3.1, and P3.2a are complete for the frozen E6 profile. They select no physical ABI,
 concrete table indices, wrappers/adapters, Wasm linkage/emission or execution,
 allocation or cleanup operations, build artifact, or public format. Those boundaries, reproducible
 artifacts, and interpreter/Wasm differential execution remain later tracks. No
 internal census is an empirical maintenance advantage, user-facing performance
 guarantee, or proof of application behavior. The proposed M experiment is not
-implemented by these compiler owners. P3.2 is the next production checkpoint.
+implemented by these compiler owners. P3.2b is the next production checkpoint.
 Consult [TODO.md](../TODO.md#execution-cursor) for the single active cursor and
 [the analysis](project-analysis.md) for the experiment rationale.

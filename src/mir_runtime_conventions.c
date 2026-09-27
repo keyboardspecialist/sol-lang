@@ -1,5 +1,6 @@
 #include "sol/mir_runtime_conventions.h"
 #include "mir_linkage_internal.h"
+#include "mir_runtime_conventions_internal.h"
 
 #include <inttypes.h>
 #include <stdarg.h>
@@ -12,9 +13,6 @@ typedef struct {
     SolMirRuntimeConventionsBuildOutcome outcome;
 } Builder;
 
-bool sol_mir_runtime_conventions_internal_validation_requirements(
-    const SolMirRuntimeConventions *owner, size_t *work, size_t *scratch,
-    SolDiagnostics *diagnostics);
 SolMirRuntimeConventionsBuildOutcome sol_mir_runtime_conventions_internal_preflight(
     const SolMirConcreteProgram *concrete,
     const SolMirRuntimeConventionsLimits *limits,

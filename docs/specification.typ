@@ -181,7 +181,7 @@ The compiler is intended to expose a canonical typed semantic graph, stable decl
 
 #status("IMPLEMENTED", [At `6ec4ba9`, the C17 edition-2027 bootstrap has bounded reference execution over owning typed IR, explicit trusted hosting, `sol run` and authored Boolean `sol test`, runtime callable CHECK policy, direct checked refined construction, deterministic cleanup, package-local stable top-level IDs, structured diagnostics, and selected versioned inspection projections. E1-E6 and P1 are complete. Separate experimental owners provide frozen-E6 callable CFG MIR, monomorphic planning and concrete materialization, representation recipes, target layout, and source-independent semantic operations/predicate bodies through P2.6. These owners are not the CLI execution pipeline and impose finite callable-closure restrictions beyond interpreter support.])
 
-The current worktree additionally completes symbols and whole-program linkage (P2.7), the complete concrete-program freeze (P2.8), and target-independent call/result/failure conventions (P3.1) for the frozen E6 profile. M1 completed as infeasible because independent governance and protected evaluation inputs are unavailable; M2-M5 remain gated unless M1 is reopened feasibly. P3.2 is next overall and the next production checkpoint. A physical ABI, complete runtime lowering, backend emission, `sol build`, full public IR, SMT discharge, and semantic patch tooling remain absent. Loop/decreases templates are runtime-erased and unresolved; unreachable obligations are not proved. No M feature is implemented by this refresh.
+The current worktree additionally completes symbols and whole-program linkage (P2.7), the complete concrete-program freeze (P2.8), target-independent call/result/failure conventions (P3.1), and the recipe operation-demand inventory (P3.2a) for the frozen E6 profile. M1 completed as infeasible because independent governance and protected evaluation inputs are unavailable; M2-M5 remain gated unless M1 is reopened feasibly. P3.2b is next overall and the next production checkpoint; parent P3.2 remains incomplete. A physical ABI, complete runtime lowering, backend emission, `sol build`, full public IR, SMT discharge, and semantic patch tooling remain absent. Loop/decreases templates are runtime-erased and unresolved; unreachable obligations are not proved. No M feature is implemented by this refresh.
 
 M1 evaluated an unvalidated capability-restricted hosted expense-policy candidate but could not establish an actual user, policy owner, protected held-out material, externally controlled verifier, or independent adjudicator. Existing projections and interpreter checks could support a feasibly reopened maintenance experiment without full IR or SMT. Safer or cheaper human/AI maintenance remains an unmeasured hypothesis, not a delivered benefit.
 
@@ -1718,10 +1718,10 @@ Runtime reflection is opt-in package metadata and cannot bypass invariants. Dese
 
 Begin with a deliberately small core proving interactions among canonical syntax, algebraic types, ownership, effects, contracts, semantic identities, and diagnostics. Simultaneously building full proof automation, workflows, native targets, and an ecosystem would obscure core coherence.
 
-E1-E6 established the bounded frontend/interpreter application core, and P1 through P2.6 are complete at the September 9 baseline `6ec4ba9`. The current worktree additionally completes P2.7, P2.8, and P3.1, completing P2 and the first P3 checkpoint for the frozen E6 profile. Language breadth remains frozen. The live #link("TODO.md")[execution cursor] is:
+E1-E6 established the bounded frontend/interpreter application core, and P1 through P2.6 are complete at the September 9 baseline `6ec4ba9`. The current worktree additionally completes P2.7, P2.8, P3.1, and P3.2a, completing P2 and the first two P3 checkpoints for the frozen E6 profile. Language breadth remains frozen. The live #link("TODO.md")[execution cursor] is:
 
 ```text
-P3.2 allocation and owned-value operations (next overall and production checkpoint)
+P3.2b checked allocation and quota plans (next overall and production checkpoint)
 -> remaining P3 runtime ABI -> P4 Wasm backend/adapter -> P5 build artifacts
 ```
 
@@ -1807,7 +1807,7 @@ P3.1 chooses no physical ABI, concrete target indices, wrappers/adapters, alloca
 
 == Phased Roadmap
 
-This orientation mirrors #link("TODO.md")[the live ledger], not a second queue. P2 and P3.1 are complete for the frozen E6 profile; P3.2 is next.
+This orientation mirrors #link("TODO.md")[the live ledger], not a second queue. P2, P3.1, and P3.2a are complete for the frozen E6 profile; P3.2b is next, while parent P3.2 remains incomplete.
 
 #spec-table(
   (1fr, 2fr),
@@ -1816,7 +1816,7 @@ This orientation mirrors #link("TODO.md")[the live ledger], not a second queue. 
     ([E1-E6 / complete], [Bounded shared compilation, hardened input/host boundaries, explicit entrypoint, trusted interpreter profiles, `sol run`, runtime contracts/refinements, and E6 conformance.]),
     ([P1 / complete], [Frozen-E6 callable CFG MIR, dominance/affine validation, rendering, and bounded reference differential evaluation.]),
     ([P2 / complete], [P2.1-P2.8 complete for frozen E6, including the address-stable complete concrete owner, independent validation, canonical rendering, and census. P2 selects no runtime ABI, concrete target indices, adapters, Wasm output, artifact, or public format.]),
-    ([P3 / open; P3.1 complete], [P3.1 freezes target-independent call/result/failure conventions. P3.2 next defines allocation and owned operations, followed by panic/cleanup, exact trusted hosting and handlers, then validated runtime-lowered closure. P3.W1 remains a bounded experiment and does not replace the cursor.]),
+    ([P3 / open; P3.2a complete], [P3.1 freezes target-independent call/result/failure conventions, and P3.2a inventories recipe operation demands. P3.2b next defines checked allocation and quota plans; parent P3.2 remains incomplete. Panic/cleanup, exact trusted hosting and handlers, and validated runtime-lowered closure follow. P3.W1 remains a bounded experiment and does not replace the cursor.]),
     ([P4 / open], [Select/pin an established Wasm toolchain; emit the frozen represented CFG; implement checks, cleanup, exact host adapter, and E6 Wasm execution. No implicit Component Model scope.]),
     ([P5 / open], [Immutable build API/artifacts, deterministic `sol build` writes, artifact execution, interpreter/Wasm differential tests, and byte-identical release/reproducibility acceptance.]),
     ([M1 / infeasible; M2-M5 / gated], [M1 stopped because no independent participant, protected evaluation material, externally controlled verifier, or adjudicator exists. M2-M5 require a feasibly reopened M1. Optional M4E remains only a basic editor slice. No M feature is implemented.]),
@@ -2290,7 +2290,7 @@ Sol is a proposal for a new interface between intent, implementation, verificati
 
 The most important experiment is not whether Sol compiles a benchmark. It is whether a human or model can modify a nontrivial system with less hidden context, receive bounded meaningful obligations, and demonstrate mechanically or operationally that requested behavior changed while unrelated behavior did not.
 
-#callout([NEXT WORK], [Follow #link("TODO.md")[the sole live queue]: P2 and P3.1 are complete for the frozen E6 profile, and P3.2 allocation/owned-value conventions are next overall and the next production checkpoint. M1 remains completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. Consult #link("docs/compiler-status.md")[the implementation snapshot and current-worktree addenda] for compatibility boundaries and #link("docs/project-analysis.md")[the dated analysis] for historical findings and evaluation rationale. Future RFCs should separate target semantics, implemented behavior, and unresolved decisions without creating competing priorities.])
+#callout([NEXT WORK], [Follow #link("TODO.md")[the sole live queue]: P2, P3.1, and P3.2a are complete for the frozen E6 profile, and P3.2b checked allocation and quota plans are next overall and the next production checkpoint; parent P3.2 remains incomplete. M1 remains completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. Consult #link("docs/compiler-status.md")[the implementation snapshot and current-worktree addenda] for compatibility boundaries and #link("docs/project-analysis.md")[the dated analysis] for historical findings and evaluation rationale. Future RFCs should separate target semantics, implemented behavior, and unresolved decisions without creating competing priorities.])
 
 #v(1em)
 #align(center)[#text(size: 8pt, fill: blue)[End of Design Specification v0.2]]
