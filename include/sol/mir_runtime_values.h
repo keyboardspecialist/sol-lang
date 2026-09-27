@@ -23,6 +23,22 @@ typedef enum {
 } SolMirRuntimeAllocationPlanKind;
 
 /* One same-ID outer-object allocation description per concrete recipe. */
+typedef enum {
+    SOL_MIR_RUNTIME_COPY_UNREACHABLE,
+    SOL_MIR_RUNTIME_COPY_FORBIDDEN,
+    SOL_MIR_RUNTIME_COPY_TRIVIAL,
+    SOL_MIR_RUNTIME_COPY_TEXT,
+    SOL_MIR_RUNTIME_COPY_PRODUCT,
+    SOL_MIR_RUNTIME_COPY_SUM,
+    SOL_MIR_RUNTIME_COPY_WRAPPER,
+} SolMirRuntimeCopyClass;
+
+/* One same-ID static deep-copy traversal eligibility description per recipe. */
+typedef struct {
+    SolMirRecipeId recipe;
+    SolMirRuntimeCopyClass classification;
+} SolMirRuntimeCopyPlan;
+
 typedef struct {
     SolMirRecipeId recipe;
     SolMirRuntimeAllocationPlanKind kind;
@@ -105,6 +121,7 @@ typedef enum {
 typedef struct {
     size_t max_records;
     size_t max_allocation_plans;
+    size_t max_copy_plans;
     size_t max_ownership_plans;
     size_t max_ownership_variants;
     size_t max_owned_edges;
@@ -118,6 +135,7 @@ typedef struct {
 typedef struct {
     size_t records;
     size_t allocation_plans;
+    size_t copy_plans;
     size_t ownership_plans;
     size_t ownership_variants;
     size_t owned_edges;
@@ -139,6 +157,9 @@ typedef struct {
     SolMirRuntimeAllocationPlan *allocation_plans;
     size_t allocation_plan_count;
     size_t allocation_plan_capacity;
+    SolMirRuntimeCopyPlan *copy_plans;
+    size_t copy_plan_count;
+    size_t copy_plan_capacity;
     SolMirRuntimeOwnershipPlan *ownership_plans;
     size_t ownership_plan_count;
     size_t ownership_plan_capacity;

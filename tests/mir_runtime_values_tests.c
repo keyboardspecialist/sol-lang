@@ -210,6 +210,7 @@ static SolMirRuntimeValuesLimits exact_limits(const SolMirRuntimeValues *values)
     return (SolMirRuntimeValuesLimits){
         .max_records = values->usage.records,
         .max_allocation_plans = values->usage.allocation_plans,
+        .max_copy_plans = values->usage.copy_plans,
         .max_ownership_plans = values->usage.ownership_plans,
         .max_ownership_variants = values->usage.ownership_variants,
         .max_owned_edges = values->usage.owned_edges,
@@ -260,12 +261,29 @@ static SolMirRuntimeOwnershipClass expected_ownership_class(
     }
 }
 
+static SolMirRuntimeCopyClass expected_copy_class(const SolMirRecipe *recipe) {
+    SolMirRuntimeOwnershipClass ownership = expected_ownership_class(recipe);
+    if (!recipe->inhabited) return SOL_MIR_RUNTIME_COPY_UNREACHABLE;
+    if (!recipe->is_copy || recipe->kind == SOL_MIR_RECIPE_FUNCTION
+        || recipe->kind == SOL_MIR_RECIPE_CAPABILITY)
+        return SOL_MIR_RUNTIME_COPY_FORBIDDEN;
+    if (ownership == SOL_MIR_RUNTIME_OWNERSHIP_TEXT) return SOL_MIR_RUNTIME_COPY_TEXT;
+    if (ownership == SOL_MIR_RUNTIME_OWNERSHIP_PRODUCT)
+        return SOL_MIR_RUNTIME_COPY_PRODUCT;
+    if (ownership == SOL_MIR_RUNTIME_OWNERSHIP_SUM) return SOL_MIR_RUNTIME_COPY_SUM;
+    if (ownership == SOL_MIR_RUNTIME_OWNERSHIP_WRAPPER)
+        return SOL_MIR_RUNTIME_COPY_WRAPPER;
+    return SOL_MIR_RUNTIME_COPY_TRIVIAL;
+}
+
 static void check_ownership_plans(const SolMirRuntimeValues *values) {
     const SolMirRepresentation *r = &values->conventions->concrete->representation;
     CHECK(values->ownership_plan_count == r->recipe_count);
     for (size_t i = 0; i < values->ownership_plan_count; ++i) {
         const SolMirRuntimeOwnershipPlan *plan = &values->ownership_plans[i];
         const SolMirRecipe *recipe = &r->recipes[i];
+        CHECK(values->copy_plans[i].recipe == i
+            && values->copy_plans[i].classification == expected_copy_class(recipe));
         CHECK(plan->recipe == i
             && plan->classification == expected_ownership_class(recipe));
         if (plan->classification == SOL_MIR_RUNTIME_OWNERSHIP_WRAPPER) {
@@ -561,6 +579,13 @@ static void test_allocation_plans(SolMirRuntimeValues *values) {
         == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT
         && memcmp(&values->allocation_plans[none_recipe], &plan_before,
             sizeof(plan_before)) == 0);
+    SolMirRuntimeCopyPlan copy_before = values->copy_plans[none_recipe];
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &none_quota,
+            &usage, (SolMirRuntimeAllocationDemand *)(void *)
+                &values->copy_plans[none_recipe])
+        == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT
+        && memcmp(&values->copy_plans[none_recipe], &copy_before,
+            sizeof(copy_before)) == 0);
     request.recipe = text_recipe;
     request.text_length = 17;
     uint64_t saved_object_limit
@@ -614,15 +639,33 @@ static void test_inventory(SolMirConcreteProgram *program,
     SolMirRuntimeValues *values) {
     CHECK(values->recipe_operation_count == 21);
     CHECK(values->usage.records == 21 && values->usage.allocation_plans == 21
-        && values->usage.ownership_plans == 21
+        && values->usage.copy_plans == 21 && values->usage.ownership_plans == 21
         && values->usage.ownership_variants == 9 && values->usage.owned_edges == 12
-        && values->usage.owned_bytes == 3360
+        && values->usage.owned_bytes == 3696
         && values->usage.build_scratch_bytes == 52
-        && values->usage.build_work == 253
+        && values->usage.build_work == 275
         && values->usage.validation_scratch_bytes == 584692564
-        && values->usage.validation_work == 73654894);
+        && values->usage.validation_work == 73654915);
     test_allocation_plans(values);
     check_ownership_plans(values);
+    CHECK(values->copy_plan_count == 21 && values->copy_plan_capacity == 21);
+    { size_t classes[7] = {0};
+      for (size_t i = 0; i < values->copy_plan_count; ++i) {
+          const SolMirRuntimeCopyPlan *plan = &values->copy_plans[i];
+          CHECK(plan->recipe == i && plan->classification
+              <= SOL_MIR_RUNTIME_COPY_WRAPPER);
+          if (plan->classification <= SOL_MIR_RUNTIME_COPY_WRAPPER)
+              ++classes[plan->classification];
+      }
+      /* E6 Wasm32: unreachable, forbidden, trivial, text, product, sum, wrapper. */
+      CHECK(classes[SOL_MIR_RUNTIME_COPY_UNREACHABLE] == 1
+          && classes[SOL_MIR_RUNTIME_COPY_FORBIDDEN] == 7
+          && classes[SOL_MIR_RUNTIME_COPY_TRIVIAL] == 3
+          && classes[SOL_MIR_RUNTIME_COPY_TEXT] == 1
+          && classes[SOL_MIR_RUNTIME_COPY_PRODUCT] == 3
+          && classes[SOL_MIR_RUNTIME_COPY_SUM] == 5
+          && classes[SOL_MIR_RUNTIME_COPY_WRAPPER] == 1);
+    }
     CHECK(values->recipe_operation_count
         == program->representation.recipe_count);
     size_t demanding = 0, create = 0, copy = 0, drop = 0, equal = 0;
@@ -682,6 +725,8 @@ static void test_inventory(SolMirConcreteProgram *program,
         && strstr(first, "operation-demand-allocation-plan-inventory") != NULL
         && strstr(first, "executable-operations=false") != NULL
         && strstr(first, "ownership-plans=true") != NULL
+        && strstr(first, "copy-plans=true") != NULL
+        && strstr(first, "copy-execution=false") != NULL
         && strstr(first, "move-drop-execution=false") != NULL
         && strstr(first, " recipe=") == NULL
         && strstr(first, "capacity") == NULL
@@ -712,6 +757,7 @@ static void test_inventory(SolMirConcreteProgram *program,
 } while (0)
     ONE_BELOW(max_records);
     ONE_BELOW(max_allocation_plans);
+    ONE_BELOW(max_copy_plans);
     ONE_BELOW(max_ownership_plans);
     ONE_BELOW(max_ownership_variants);
     ONE_BELOW(max_owned_edges);
@@ -741,7 +787,7 @@ static void test_inventory(SolMirConcreteProgram *program,
             == SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED
         && limited.conventions == NULL);
     sol_mir_runtime_values_test_force_persistent_allocation_failure(0);
-    for (size_t attempt = 3; attempt <= 5; ++attempt) {
+    for (size_t attempt = 3; attempt <= 6; ++attempt) {
         sol_mir_runtime_values_test_force_persistent_allocation_failure(attempt);
         CHECK(sol_mir_runtime_values_build(&request, &limited, diagnostics)
                 == SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED
@@ -818,6 +864,37 @@ static void test_inventory(SolMirConcreteProgram *program,
     values->allocation_plans[0].recipe = 1;
     CHECK(!sol_mir_runtime_values_validate(values, NULL));
     values->allocation_plans[0] = saved_plan;
+    --values->copy_plan_count;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    ++values->copy_plan_count;
+    --values->copy_plan_capacity;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    ++values->copy_plan_capacity;
+    SolMirRuntimeCopyPlan saved_copy = values->copy_plans[0];
+    values->copy_plans[0].recipe = 1;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    check_rejected_without_rendering(values);
+    values->copy_plans[0] = saved_copy;
+    values->copy_plans[0].classification = SOL_MIR_RUNTIME_COPY_FORBIDDEN;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    check_rejected_without_rendering(values);
+    values->copy_plans[0] = saved_copy;
+    SolMirRuntimeCopyPlan *copy_plans = values->copy_plans;
+    values->copy_plans = NULL;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    values->copy_plans = (SolMirRuntimeCopyPlan *)(void *)values;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    values->copy_plans = (SolMirRuntimeCopyPlan *)(void *)values->recipe_operations;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    values->copy_plans = (SolMirRuntimeCopyPlan *)(void *)program->representation.recipes;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    values->copy_plans = (SolMirRuntimeCopyPlan *)(uintptr_t)(UINTPTR_MAX - 1);
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    values->copy_plans = copy_plans;
+    SolMirRuntimeValuesUsage copy_usage = values->usage;
+    --values->usage.copy_plans;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    values->usage = copy_usage;
     SolMirRuntimeOwnershipPlan saved_ownership = values->ownership_plans[0];
     values->ownership_plans[0].recipe = 1;
     CHECK(!sol_mir_runtime_values_validate(values, NULL));
@@ -1065,6 +1142,7 @@ static void text_compilation_free(TextCompilation *c) {
 
 static void test_plan_driven_trace_model(const SolMirRuntimeValues *values);
 static void test_callable_trace_model(const SolMirRuntimeValues *values);
+static void test_copy_transaction_model(const SolMirRuntimeValues *values);
 
 static void test_bound_environment_exclusion(void) {
     static const char source[] =
@@ -1202,16 +1280,18 @@ static void test_plan_classification_fixture(void) {
         "record Empty {}\n"
         "enum Void {}\n"
         "record Pair { first: Text, second: Text }\n"
+        "record Eight { a: Text, b: Text, c: Text, d: Text, e: Text, f: Text, g: Text, h: Text }\n"
         "enum Choice { left(first: Text, second: Text), right(value: Pair) }\n"
         "type ScalarWrap = distinct Int64\n"
         "type TextWrap = distinct Text\n"
         "type AggregateWrap = distinct Pair\n"
         "capability Gate { function choose(value: Int64) -> Bool effects { pure } }\n"
+        "record Locked { gate: capability Gate }\n"
         "capability DerivedGate derives_from source: capability Gate { "
         "function choose(value: Int64) -> Bool effects { pure } { return true } }\n"
         "function callback(value: Int64) -> Bool effects { pure } { return true }\n"
         "function root(scalar: ScalarWrap, text: TextWrap, aggregate: AggregateWrap, "
-        "empty: Empty, impossible: Void, pair: Pair, choice: Choice, gate: capability Gate, "
+        "empty: Empty, impossible: Void, pair: Pair, eight: Eight, choice: Choice, locked: Locked, gate: capability Gate, "
         "derived: capability DerivedGate, "
         "callback: function(Int64) -> Bool effects { pure }) -> Bool effects { pure } "
         "{ return true }\n";
@@ -1299,6 +1379,7 @@ static void test_plan_classification_fixture(void) {
             && callable_layout && capability_layout
             && root_capability && derived_capability);
         test_plan_driven_trace_model(&values);
+        test_copy_transaction_model(&values);
     }
     sol_mir_runtime_values_free(&values);
     sol_mir_runtime_conventions_free(&conventions);
@@ -1749,6 +1830,902 @@ static void test_callable_trace_model(const SolMirRuntimeValues *values) {
     }
 }
 
+/* Test-only finite-instance copy transaction model. It deliberately models
+   observable requests and cleanup without creating a production runtime value,
+   allocator, or executor. */
+typedef struct CopyModelNode CopyModelNode;
+typedef struct CopyModelDestination CopyModelDestination;
+
+struct CopyModelNode {
+    SolMirRecipeId recipe;
+    bool live;
+    bool initialized;
+    bool available;
+    size_t active_variant;
+    size_t semantic_tag;
+    uint64_t scalar;
+    uint64_t text_length;
+    char text_bytes[16];
+    uintptr_t physical_id;
+    CopyModelNode *children[8];
+    size_t child_count;
+};
+
+#define COPY_MODEL_CHILD_CAPACITY \
+    (sizeof(((CopyModelNode *)0)->children) / sizeof(((CopyModelNode *)0)->children[0]))
+#define COPY_MODEL_EVENT_CAPACITY 128
+
+typedef struct {
+    bool initialized;
+    bool freed;
+    const CopyModelNode *source;
+    uint64_t bytes;
+    int kind;
+} CopyModelAllocation;
+
+struct CopyModelDestination {
+    bool empty;
+    bool published;
+    bool overlaps_source;
+    size_t publications;
+    size_t copied_nodes;
+    uintptr_t copied_id[64];
+    CopyModelNode nodes[64];
+    CopyModelNode *root;
+    CopyModelAllocation allocations[128];
+    size_t allocation_count;
+};
+
+typedef enum {
+    COPY_MODEL_STAGE_OUTER,
+    COPY_MODEL_STAGE_TEXT_HEADER,
+    COPY_MODEL_STAGE_TEXT_PAYLOAD,
+    COPY_MODEL_ROLLBACK_OUTER,
+    COPY_MODEL_ROLLBACK_TEXT_HEADER,
+    COPY_MODEL_ROLLBACK_TEXT_PAYLOAD,
+    COPY_MODEL_PUBLISH,
+} CopyModelEventKind;
+
+typedef struct {
+    CopyModelEventKind kind;
+    uintptr_t physical_id;
+    size_t allocation;
+} CopyModelEvent;
+
+typedef struct {
+    const CopyModelNode *node;
+    CopyModelNode *destination;
+    size_t outer_allocation;
+    size_t header_allocation;
+    size_t payload_allocation;
+    bool outer;
+    bool header;
+    bool payload;
+} CopyModelStaged;
+
+typedef struct {
+    const SolMirRuntimeValues *values;
+    SolMirRuntimeAllocationQuota quota;
+    SolMirRuntimeAllocationUsage usage;
+    size_t max_depth, max_nodes, max_work;
+    size_t depth, peak_depth, nodes, work;
+    size_t request_at, refuse_at;
+    const CopyModelNode *seen_nodes[64];
+    uintptr_t seen_physical[64];
+    size_t seen_count, physical_count;
+    CopyModelStaged staged[64];
+    size_t staged_count;
+    CopyModelEvent events[COPY_MODEL_EVENT_CAPACITY];
+    size_t max_events;
+    size_t event_count;
+} CopyModel;
+
+static bool copy_model_add_u64(uint64_t *value, uint64_t amount) {
+    if (amount > UINT64_MAX - *value) return false;
+    *value += amount;
+    return true;
+}
+
+static bool copy_model_event(CopyModel *model, CopyModelEventKind kind,
+    const CopyModelNode *node) {
+    if (model->event_count >= model->max_events
+        || model->event_count >= sizeof(model->events) / sizeof(model->events[0]))
+        return false;
+    model->events[model->event_count++] = (CopyModelEvent){kind,
+        node->physical_id, SIZE_MAX};
+    return true;
+}
+
+static CopyModelStaged *copy_model_staged(CopyModel *model,
+    CopyModelDestination *destination, const CopyModelNode *node) {
+    for (size_t i = 0; i < model->staged_count; ++i)
+        if (model->staged[i].node == node) return &model->staged[i];
+    if (model->staged_count == sizeof(model->staged) / sizeof(model->staged[0])
+        || model->staged_count >= sizeof(destination->nodes) / sizeof(destination->nodes[0]))
+        return NULL;
+    CopyModelStaged *staged = &model->staged[model->staged_count];
+    CopyModelNode *copy = &destination->nodes[model->staged_count];
+    *copy = (CopyModelNode){.recipe = node->recipe,
+        .physical_id = (uintptr_t)(void *)copy};
+    *staged = (CopyModelStaged){node, copy, SIZE_MAX, SIZE_MAX, SIZE_MAX,
+        false, false, false};
+    ++model->staged_count;
+    return staged;
+}
+
+static CopyModelStaged *copy_model_find_staged(CopyModel *model,
+    const CopyModelNode *node) {
+    for (size_t i = 0; i < model->staged_count; ++i)
+        if (model->staged[i].node == node) return &model->staged[i];
+    return NULL;
+}
+static bool copy_model_seen(const CopyModel *model, const CopyModelNode *node) {
+    for (size_t i = 0; i < model->seen_count; ++i)
+        if (model->seen_nodes[i] == node) return true;
+    return false;
+}
+
+static bool copy_model_physical_seen(const CopyModel *model, uintptr_t id) {
+    for (size_t i = 0; i < model->physical_count; ++i)
+        if (model->seen_physical[i] == id) return true;
+    return false;
+}
+
+static bool copy_model_visit(CopyModel *model, const CopyModelNode *node,
+    bool preflight, SolMirRuntimeAllocationUsage *aggregate);
+
+static bool copy_model_children(CopyModel *model, const CopyModelNode *node,
+    SolMirRuntimeSlice edges, bool preflight,
+    SolMirRuntimeAllocationUsage *aggregate) {
+    if (node->child_count > COPY_MODEL_CHILD_CAPACITY
+        || edges.count > COPY_MODEL_CHILD_CAPACITY
+        || node->child_count != edges.count) return false;
+    for (size_t i = 0; i < edges.count; ++i) {
+        const SolMirRuntimeOwnedEdge *edge = &model->values->owned_edges[
+            edges.offset + i];
+        if (edge->kind != SOL_MIR_RUNTIME_OWNED_EDGE_FIELD
+            && edge->kind != SOL_MIR_RUNTIME_OWNED_EDGE_BACKING) return false;
+        if (node->children[i] == NULL || node->children[i]->recipe != edge->recipe
+            || !copy_model_visit(model, node->children[i], preflight, aggregate))
+            return false;
+    }
+    return true;
+}
+
+static bool copy_model_account(CopyModel *model, const CopyModelNode *node,
+    SolMirRuntimeAllocationUsage *aggregate) {
+    SolMirRuntimeAllocationRequest request = {node->recipe, node->text_length};
+    SolMirRuntimeAllocationQuota unlimited = {UINT64_MAX, UINT64_MAX};
+    SolMirRuntimeAllocationDemand demand;
+    if (sol_mir_runtime_values_check_allocation(model->values, &request,
+            &unlimited, aggregate, &demand) != SOL_MIR_RUNTIME_ALLOCATION_SUCCEEDED
+        || !copy_model_add_u64(&aggregate->requests, demand.requests)
+        || !copy_model_add_u64(&aggregate->bytes, demand.bytes)) return false;
+    return true;
+}
+
+static bool copy_model_visit(CopyModel *model, const CopyModelNode *node,
+    bool preflight, SolMirRuntimeAllocationUsage *aggregate) {
+    if (node == NULL || !node->live || !node->initialized || !node->available
+        || node->child_count > COPY_MODEL_CHILD_CAPACITY || model->depth >= model->max_depth || model->nodes >= model->max_nodes
+        || model->work >= model->max_work || copy_model_seen(model, node)
+        || model->seen_count == sizeof(model->seen_nodes) / sizeof(model->seen_nodes[0]))
+        return false;
+    ++model->depth; ++model->nodes; ++model->work;
+    if (model->depth > model->peak_depth) model->peak_depth = model->depth;
+    model->seen_nodes[model->seen_count++] = node;
+    if (node->recipe >= model->values->copy_plan_count) return false;
+    const SolMirRuntimeCopyPlan *copy = &model->values->copy_plans[node->recipe];
+    const SolMirRuntimeOwnershipPlan *ownership
+        = &model->values->ownership_plans[node->recipe];
+    if (copy->classification == SOL_MIR_RUNTIME_COPY_UNREACHABLE
+        || copy->classification == SOL_MIR_RUNTIME_COPY_FORBIDDEN) return false;
+    /* A wrapper is a view of precisely its backing physical object. */
+    if (copy->classification != SOL_MIR_RUNTIME_COPY_WRAPPER) {
+        if (node->physical_id == 0 || copy_model_physical_seen(model,
+                node->physical_id) || model->physical_count
+                == sizeof(model->seen_physical) / sizeof(model->seen_physical[0]))
+            return false;
+        model->seen_physical[model->physical_count++] = node->physical_id;
+    }
+    if (copy->classification == SOL_MIR_RUNTIME_COPY_TEXT
+        && node->text_length > sizeof(node->text_bytes)) return false;
+    bool needs_outer = copy->classification == SOL_MIR_RUNTIME_COPY_PRODUCT
+        || copy->classification == SOL_MIR_RUNTIME_COPY_SUM
+        || copy->classification == SOL_MIR_RUNTIME_COPY_TEXT;
+    if (needs_outer && !copy_model_account(model, node, aggregate)) return false;
+    bool ok = false;
+    if (copy->classification == SOL_MIR_RUNTIME_COPY_TRIVIAL)
+        ok = node->child_count == 0;
+    else if (copy->classification == SOL_MIR_RUNTIME_COPY_TEXT)
+        ok = node->child_count == 0;
+    else if (copy->classification == SOL_MIR_RUNTIME_COPY_PRODUCT)
+        ok = copy_model_children(model, node, ownership->edges, preflight,
+            aggregate);
+    else if (copy->classification == SOL_MIR_RUNTIME_COPY_SUM) {
+        if (node->active_variant >= ownership->variants.count) ok = false;
+        else {
+            const SolMirRuntimeOwnershipVariant *variant
+                = &model->values->ownership_variants[ownership->variants.offset
+                    + node->active_variant];
+            ok = node->semantic_tag == variant->semantic_tag
+                && copy_model_children(model, node, variant->edges, preflight,
+                    aggregate);
+        }
+    } else if (copy->classification == SOL_MIR_RUNTIME_COPY_WRAPPER) {
+        ok = ownership->edges.count == 1 && node->child_count == 1
+            && node->children[0] != NULL
+            && node->children[0]->recipe == model->values->owned_edges[
+                ownership->edges.offset].recipe
+            && node->physical_id == node->children[0]->physical_id
+            && copy_model_visit(model, node->children[0], preflight, aggregate);
+    }
+    --model->depth;
+    return ok;
+}
+
+static void copy_model_copy_metadata(CopyModelNode *destination,
+    const CopyModelNode *source) {
+    destination->live = source->live;
+    destination->initialized = source->initialized;
+    destination->available = source->available;
+    destination->active_variant = source->active_variant;
+    destination->semantic_tag = source->semantic_tag;
+    destination->scalar = source->scalar;
+    destination->text_length = source->text_length;
+}
+
+static bool copy_model_stage_request(CopyModel *model,
+    CopyModelDestination *destination, const CopyModelNode *node,
+    CopyModelEventKind kind, uint64_t requests, uint64_t bytes,
+    CopyModelStaged *staged) {
+    if (requests == 0) return true;
+    ++model->request_at;
+    if (model->request_at == model->refuse_at
+        || destination->allocation_count >= sizeof(destination->allocations)
+            / sizeof(destination->allocations[0])) return false;
+    if (!copy_model_add_u64(&model->usage.requests, requests)
+        || !copy_model_add_u64(&model->usage.bytes, bytes)
+        || model->usage.requests > model->quota.max_requests
+        || model->usage.bytes > model->quota.max_bytes) return false;
+    size_t allocation = destination->allocation_count++;
+    destination->allocations[allocation] = (CopyModelAllocation){true, false,
+        node, bytes, kind};
+    if (kind == COPY_MODEL_STAGE_OUTER) {
+        staged->outer = true; staged->outer_allocation = allocation;
+    } else if (kind == COPY_MODEL_STAGE_TEXT_HEADER) {
+        staged->header = true; staged->header_allocation = allocation;
+    } else {
+        staged->payload = true; staged->payload_allocation = allocation;
+    }
+    if (!copy_model_event(model, kind, node)) return false;
+    model->events[model->event_count - 1].allocation = allocation;
+    return true;
+}
+
+static bool copy_model_stage(CopyModel *model, CopyModelDestination *destination,
+    const CopyModelNode *node) {
+    const SolMirRuntimeCopyPlan *copy = &model->values->copy_plans[node->recipe];
+    const SolMirRuntimeAllocationPlan *plan = &model->values->allocation_plans[
+        node->recipe];
+    CopyModelStaged *staged = copy_model_staged(model, destination, node);
+    if (staged == NULL) return false;
+    if (copy->classification == SOL_MIR_RUNTIME_COPY_TEXT) {
+        if (!copy_model_stage_request(model, destination, node,
+                COPY_MODEL_STAGE_TEXT_HEADER, 1, plan->object_size, staged))
+            return false;
+        copy_model_copy_metadata(staged->destination, node);
+        if (node->text_length != 0) {
+            if (!copy_model_stage_request(model, destination, node,
+                    COPY_MODEL_STAGE_TEXT_PAYLOAD, 1, node->text_length, staged))
+                return false;
+            memcpy(staged->destination->text_bytes, node->text_bytes,
+                (size_t)node->text_length);
+        }
+        return true;
+    }
+    if (copy->classification == SOL_MIR_RUNTIME_COPY_PRODUCT
+        || copy->classification == SOL_MIR_RUNTIME_COPY_SUM) {
+        if (plan->kind != SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE
+            && !copy_model_stage_request(model, destination, node,
+                COPY_MODEL_STAGE_OUTER, 1, plan->object_size, staged)) return false;
+        copy_model_copy_metadata(staged->destination, node);
+        SolMirRuntimeSlice edges = copy->classification == SOL_MIR_RUNTIME_COPY_SUM
+            ? model->values->ownership_variants[model->values->ownership_plans[
+                node->recipe].variants.offset + node->active_variant].edges
+            : model->values->ownership_plans[node->recipe].edges;
+        if (edges.count > COPY_MODEL_CHILD_CAPACITY) return false;
+        for (size_t i = 0; i < edges.count; ++i) {
+            if (!copy_model_stage(model, destination, node->children[i])) return false;
+            CopyModelStaged *child = copy_model_find_staged(model, node->children[i]);
+            if (child == NULL) return false;
+            staged->destination->children[i] = child->destination;
+            ++staged->destination->child_count;
+        }
+    } else if (copy->classification == SOL_MIR_RUNTIME_COPY_WRAPPER) {
+        if (!copy_model_stage(model, destination, node->children[0])) return false;
+        CopyModelStaged *child = copy_model_find_staged(model, node->children[0]);
+        if (child == NULL) return false;
+        copy_model_copy_metadata(staged->destination, node);
+        staged->destination->children[0] = child->destination;
+        staged->destination->child_count = 1;
+        staged->destination->physical_id = child->destination->physical_id;
+    } else copy_model_copy_metadata(staged->destination, node);
+    return true;
+}
+static bool copy_model_rollback(CopyModel *model, CopyModelDestination *destination,
+    const CopyModelNode *node) {
+    bool ok = true;
+    const SolMirRuntimeCopyPlan *copy = &model->values->copy_plans[node->recipe];
+    SolMirRuntimeSlice edges = {0, 0};
+    if (copy->classification == SOL_MIR_RUNTIME_COPY_PRODUCT)
+        edges = model->values->ownership_plans[node->recipe].edges;
+    else if (copy->classification == SOL_MIR_RUNTIME_COPY_SUM)
+        edges = model->values->ownership_variants[model->values->ownership_plans[
+            node->recipe].variants.offset + node->active_variant].edges;
+    else if (copy->classification == SOL_MIR_RUNTIME_COPY_WRAPPER)
+        edges = model->values->ownership_plans[node->recipe].edges;
+    for (size_t i = 0; i < edges.count; ++i)
+        if (!copy_model_rollback(model, destination, node->children[i])) ok = false;
+    CopyModelStaged *staged = copy_model_find_staged(model, node);
+    if (staged == NULL) return ok;
+#define COPY_MODEL_FREE(member, event_kind) do { \
+    if (staged->member) { \
+        size_t allocation = staged->member##_allocation; \
+        if (allocation < destination->allocation_count \
+            && destination->allocations[allocation].initialized \
+            && !destination->allocations[allocation].freed) { \
+            destination->allocations[allocation].freed = true; \
+            if (!copy_model_event(model, (event_kind), node)) ok = false; \
+            else model->events[model->event_count - 1].allocation = allocation; \
+        } \
+        staged->member = false; \
+    } \
+} while (0)
+    COPY_MODEL_FREE(payload, COPY_MODEL_ROLLBACK_TEXT_PAYLOAD);
+    COPY_MODEL_FREE(header, COPY_MODEL_ROLLBACK_TEXT_HEADER);
+    COPY_MODEL_FREE(outer, COPY_MODEL_ROLLBACK_OUTER);
+#undef COPY_MODEL_FREE
+    return ok;
+}
+
+static bool copy_model_run(const SolMirRuntimeValues *values, CopyModelNode *root,
+    CopyModelDestination *destination, SolMirRuntimeAllocationQuota quota,
+    size_t max_depth, size_t max_nodes, size_t max_work, size_t max_events,
+    size_t refuse_at, CopyModel *result) {
+    CopyModel model = {0};
+    model.values = values; model.quota = quota; model.max_depth = max_depth;
+    model.max_nodes = max_nodes; model.max_work = max_work;
+    model.max_events = max_events < COPY_MODEL_EVENT_CAPACITY
+        ? max_events : COPY_MODEL_EVENT_CAPACITY;
+    model.refuse_at = refuse_at;
+    SolMirRuntimeAllocationUsage aggregate = {0};
+    if (destination == NULL || !destination->empty || destination->published
+        || destination->overlaps_source || !copy_model_visit(&model, root, true,
+            &aggregate) || aggregate.requests > quota.max_requests
+        || aggregate.bytes > quota.max_bytes || model.max_events == 0
+        || aggregate.requests > (model.max_events - 1) / 2) {
+        *result = model; return false;
+    }
+    /* Fresh traversal state makes staging independent from preflight scratch. */
+    model.depth = model.nodes = model.work = model.seen_count = model.physical_count = 0;
+    if (!copy_model_visit(&model, root, false, &(SolMirRuntimeAllocationUsage){0})
+        || !copy_model_stage(&model, destination, root)) {
+        (void)copy_model_rollback(&model, destination, root);
+        *result = model; return false;
+    }
+    CopyModelStaged *staged_root = copy_model_find_staged(&model, root);
+    if (staged_root == NULL) { copy_model_rollback(&model, destination, root); *result = model; return false; }
+    if (!copy_model_event(&model, COPY_MODEL_PUBLISH, root)) {
+        (void)copy_model_rollback(&model, destination, root);
+        *result = model;
+        return false;
+    }
+    destination->root = staged_root->destination;
+    destination->published = true; destination->empty = false;
+    ++destination->publications;
+    destination->copied_nodes = model.staged_count;
+    for (size_t i = 0; i < model.staged_count; ++i)
+        destination->copied_id[i] = (uintptr_t)(void *)model.staged[i].destination;
+    *result = model;
+    return true;
+}
+
+static CopyModelDestination copy_model_destination(bool empty, bool overlaps) {
+    return (CopyModelDestination){.empty = empty, .overlaps_source = overlaps};
+}
+
+static void copy_model_node(CopyModelNode *node, SolMirRecipeId recipe,
+    uintptr_t physical_id) {
+    memset(node, 0, sizeof(*node));
+    node->recipe = recipe; node->live = node->initialized = node->available = true;
+    node->physical_id = physical_id;
+}
+
+static bool copy_model_equal(const CopyModelNode *source,
+    const CopyModelNode *destination) {
+    if (source == NULL || destination == NULL || source->recipe != destination->recipe
+        || source->scalar != destination->scalar
+        || source->active_variant != destination->active_variant
+        || source->semantic_tag != destination->semantic_tag
+        || source->text_length != destination->text_length
+        || source->text_length > sizeof(source->text_bytes)
+        || memcmp(source->text_bytes, destination->text_bytes,
+            (size_t)source->text_length) != 0
+        || source->child_count != destination->child_count
+        || source->physical_id == destination->physical_id) return false;
+    for (size_t i = 0; i < source->child_count; ++i)
+        if (!copy_model_equal(source->children[i], destination->children[i]))
+            return false;
+    return true;
+}
+
+static bool copy_model_rollback_exact(const CopyModelDestination *destination,
+    const CopyModel *model, size_t successful_requests) {
+    if (destination->allocation_count != successful_requests) return false;
+    size_t rollback_events = 0;
+    uint64_t bytes = 0;
+    for (size_t i = 0; i < destination->allocation_count; ++i)
+        if (!destination->allocations[i].initialized
+            || !destination->allocations[i].freed
+            || !copy_model_add_u64(&bytes, destination->allocations[i].bytes))
+            return false;
+    for (size_t i = 0; i < model->event_count; ++i) {
+        CopyModelEventKind kind = model->events[i].kind;
+        if (kind < COPY_MODEL_ROLLBACK_OUTER
+            || kind > COPY_MODEL_ROLLBACK_TEXT_PAYLOAD) continue;
+        if (model->events[i].allocation >= destination->allocation_count
+            || !destination->allocations[model->events[i].allocation].freed)
+            return false;
+        ++rollback_events;
+    }
+    return rollback_events == successful_requests
+        && model->usage.requests == successful_requests
+        && model->usage.bytes == bytes;
+}
+
+static bool copy_model_cleanup_is(const CopyModel *model,
+    const CopyModelEventKind *kinds, const uintptr_t *identities, size_t count) {
+    size_t at = 0;
+    for (size_t i = 0; i < model->event_count; ++i) {
+        CopyModelEventKind kind = model->events[i].kind;
+        if (kind < COPY_MODEL_ROLLBACK_OUTER
+            || kind > COPY_MODEL_ROLLBACK_TEXT_PAYLOAD) continue;
+        if (at == count || kind != kinds[at]
+            || model->events[i].physical_id != identities[at]) return false;
+        ++at;
+    }
+    return at == count;
+}
+
+static size_t copy_model_count_events(const CopyModel *model, CopyModelEventKind kind) {
+    size_t count = 0;
+    for (size_t i = 0; i < model->event_count; ++i) count += model->events[i].kind == kind;
+    return count;
+}
+
+static void test_copy_transaction_model(const SolMirRuntimeValues *values) {
+    SolMirRecipeId product = SOL_MIR_RECIPE_NONE, sum = SOL_MIR_RECIPE_NONE;
+    SolMirRecipeId text = SOL_MIR_RECIPE_NONE, wrapper = SOL_MIR_RECIPE_NONE;
+    SolMirRecipeId trivial = SOL_MIR_RECIPE_NONE, forbidden = SOL_MIR_RECIPE_NONE;
+    SolMirRecipeId callable_forbidden = SOL_MIR_RECIPE_NONE;
+    SolMirRecipeId capability_forbidden = SOL_MIR_RECIPE_NONE;
+    SolMirRecipeId aggregate_forbidden = SOL_MIR_RECIPE_NONE;
+    SolMirRecipeId capacity_product = SOL_MIR_RECIPE_NONE;
+    size_t sum_variant = SOL_MIR_RUNTIME_NONE;
+    for (size_t i = 0; i < values->copy_plan_count; ++i) {
+        SolMirRuntimeCopyClass c = values->copy_plans[i].classification;
+        const SolMirRuntimeOwnershipPlan *ownership = &values->ownership_plans[i];
+        if (c == SOL_MIR_RUNTIME_COPY_TEXT) text = i;
+        if (c == SOL_MIR_RUNTIME_COPY_TRIVIAL) trivial = i;
+        if (c == SOL_MIR_RUNTIME_COPY_FORBIDDEN) forbidden = i;
+        if (c == SOL_MIR_RUNTIME_COPY_FORBIDDEN
+            && values->conventions->concrete->representation.recipes[i].kind
+                == SOL_MIR_RECIPE_FUNCTION) callable_forbidden = i;
+        if (c == SOL_MIR_RUNTIME_COPY_FORBIDDEN
+            && values->conventions->concrete->representation.recipes[i].kind
+                == SOL_MIR_RECIPE_CAPABILITY) capability_forbidden = i;
+        if (c == SOL_MIR_RUNTIME_COPY_FORBIDDEN
+            && (values->conventions->concrete->representation.recipes[i].kind
+                    == SOL_MIR_RECIPE_RECORD
+                || values->conventions->concrete->representation.recipes[i].kind
+                    == SOL_MIR_RECIPE_TUPLE)) aggregate_forbidden = i;
+        if (c == SOL_MIR_RUNTIME_COPY_PRODUCT && ownership->edges.count == 2)
+            product = i;
+        if (c == SOL_MIR_RUNTIME_COPY_PRODUCT
+            && ownership->edges.count == COPY_MODEL_CHILD_CAPACITY)
+            capacity_product = i;
+        if (c == SOL_MIR_RUNTIME_COPY_SUM && ownership->variants.count != 0) {
+            for (size_t v = 0; v < ownership->variants.count; ++v) {
+                const SolMirRuntimeOwnershipVariant *variant
+                    = &values->ownership_variants[ownership->variants.offset + v];
+                if (variant->edges.count == 1 && values->owned_edges[
+                        variant->edges.offset].recipe == product) {
+                    sum = i; sum_variant = v;
+                }
+            }
+        }
+        if (c == SOL_MIR_RUNTIME_COPY_WRAPPER && ownership->edges.count == 1
+            && values->owned_edges[ownership->edges.offset].recipe == text)
+            wrapper = i;
+    }
+    CHECK(product != SOL_MIR_RECIPE_NONE && sum != SOL_MIR_RECIPE_NONE
+        && text != SOL_MIR_RECIPE_NONE && wrapper != SOL_MIR_RECIPE_NONE
+        && trivial != SOL_MIR_RECIPE_NONE && forbidden != SOL_MIR_RECIPE_NONE
+        && callable_forbidden != SOL_MIR_RECIPE_NONE
+        && capability_forbidden != SOL_MIR_RECIPE_NONE
+        && aggregate_forbidden != SOL_MIR_RECIPE_NONE
+        && capacity_product != SOL_MIR_RECIPE_NONE
+        && sum_variant != SOL_MIR_RUNTIME_NONE);
+    if (product == SOL_MIR_RECIPE_NONE || sum == SOL_MIR_RECIPE_NONE
+        || text == SOL_MIR_RECIPE_NONE || wrapper == SOL_MIR_RECIPE_NONE
+        || trivial == SOL_MIR_RECIPE_NONE || forbidden == SOL_MIR_RECIPE_NONE
+        || callable_forbidden == SOL_MIR_RECIPE_NONE
+        || capability_forbidden == SOL_MIR_RECIPE_NONE
+        || aggregate_forbidden == SOL_MIR_RECIPE_NONE
+        || capacity_product == SOL_MIR_RECIPE_NONE
+        || sum_variant == SOL_MIR_RUNTIME_NONE) return;
+
+    CopyModelNode text_a, text_b, sum_node, root, wrap, zero;
+    copy_model_node(&text_a, text, 1); text_a.text_length = 2;
+    memcpy(text_a.text_bytes, "ok", 3); text_a.scalar = 17;
+    copy_model_node(&text_b, text, 2); text_b.text_length = 0; text_b.scalar = 23;
+    copy_model_node(&root, product, 3); root.scalar = 41; root.children[0] = &text_a;
+    root.children[1] = &text_b; root.child_count = 2;
+    copy_model_node(&sum_node, sum, 4); sum_node.scalar = 51;
+    sum_node.active_variant = sum_variant;
+    sum_node.semantic_tag = values->ownership_variants[values->ownership_plans[sum]
+        .variants.offset + sum_variant].semantic_tag;
+    sum_node.children[0] = &root; sum_node.child_count = 1;
+    /* Choice::right contains Pair; its active finite instance nests the product. */
+    const SolMirRuntimeOwnershipPlan *root_plan = &values->ownership_plans[product];
+    if (values->owned_edges[root_plan->edges.offset].recipe != text
+        || values->owned_edges[root_plan->edges.offset + 1].recipe != text) return;
+    CopyModelDestination destination = copy_model_destination(true, false);
+    CopyModel result;
+    SolMirRuntimeAllocationQuota unlimited = {UINT64_MAX, UINT64_MAX};
+    CopyModelNode root_before = root, sum_before = sum_node, a_before = text_a,
+        b_before = text_b;
+    CHECK(copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result) && destination.published && !destination.empty
+        && destination.publications == 1 && destination.copied_nodes == 4
+        && destination.root != NULL && copy_model_equal(&sum_node, destination.root)
+        && memcmp(&root, &root_before, sizeof(root)) == 0
+        && memcmp(&sum_node, &sum_before, sizeof(sum_node)) == 0
+        && memcmp(&text_a, &a_before, sizeof(text_a)) == 0
+        && memcmp(&text_b, &b_before, sizeof(text_b)) == 0
+        && result.usage.requests == 5 && result.usage.bytes
+            == values->allocation_plans[product].object_size
+                + values->allocation_plans[sum].object_size
+                + values->allocation_plans[text].object_size * 2 + 2
+        && result.event_count != 0 && result.events[0].kind == COPY_MODEL_STAGE_OUTER
+        && result.events[1].kind == COPY_MODEL_STAGE_OUTER
+        && result.events[2].kind == COPY_MODEL_STAGE_TEXT_HEADER
+        && result.events[3].kind == COPY_MODEL_STAGE_TEXT_PAYLOAD
+        && result.events[4].kind == COPY_MODEL_STAGE_TEXT_HEADER
+        && result.events[result.event_count - 1].kind == COPY_MODEL_PUBLISH);
+    size_t required_depth = result.peak_depth, required_nodes = result.nodes;
+    size_t required_work = result.work;
+    CopyModelNode *destination_sum = destination.root;
+    CopyModelNode *destination_product = destination_sum->children[0];
+    CopyModelNode *destination_text = destination_product->children[0];
+    uint64_t saved_scalar = root.scalar;
+    char saved_text[sizeof(text_a.text_bytes)];
+    memcpy(saved_text, text_a.text_bytes, sizeof(saved_text));
+    size_t saved_tag = sum_node.semantic_tag;
+    ++root.scalar; text_a.text_bytes[0] = 'x'; ++sum_node.semantic_tag;
+    CHECK(destination_product->scalar == saved_scalar
+        && destination_text->text_bytes[0] == saved_text[0]
+        && destination_sum->semantic_tag == saved_tag);
+    root.scalar = saved_scalar;
+    memcpy(text_a.text_bytes, saved_text, sizeof(saved_text));
+    sum_node.semantic_tag = saved_tag;
+    CHECK(!copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result));
+
+    /* Exact and one-below quota, depth, node, and work limits reject before stage. */
+    destination = copy_model_destination(true, false);
+    CHECK(copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result));
+    SolMirRuntimeAllocationQuota exact = {result.usage.requests, result.usage.bytes};
+    destination = copy_model_destination(true, false);
+    CHECK(copy_model_run(values, &sum_node, &destination, exact, required_depth,
+        required_nodes, required_work, COPY_MODEL_EVENT_CAPACITY, 0, &result));
+    size_t exact_events = exact.max_requests * 2 + 1;
+    destination = copy_model_destination(true, false);
+    CHECK(copy_model_run(values, &sum_node, &destination, exact, required_depth,
+        required_nodes, required_work, exact_events, 0, &result));
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, exact, required_depth,
+        required_nodes, required_work, exact_events - 1, 0, &result)
+        && result.request_at == 0 && result.event_count == 0);
+    SolMirRuntimeAllocationQuota below = exact; --below.max_bytes;
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, below, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result) && result.usage.requests == 0 && !destination.published);
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, exact, required_depth - 1,
+        required_nodes, required_work, COPY_MODEL_EVENT_CAPACITY, 0, &result) && result.request_at == 0);
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, exact, required_depth,
+        required_nodes - 1, required_work, COPY_MODEL_EVENT_CAPACITY, 0, &result) && result.request_at == 0);
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, exact, required_depth,
+        required_nodes, required_work - 1, COPY_MODEL_EVENT_CAPACITY, 0, &result) && result.request_at == 0);
+
+    /* Every primitive staged request can refuse. Successful charges persist and
+       cleanup is ownership postorder rather than reverse allocation order. */
+    for (size_t refusal = 1; refusal <= exact.max_requests; ++refusal) {
+        destination = copy_model_destination(true, false);
+        CHECK(!copy_model_run(values, &sum_node, &destination, unlimited, 256,
+            1048576, 4000000, COPY_MODEL_EVENT_CAPACITY, refusal, &result) && !destination.published
+            && memcmp(&root, &root_before, sizeof(root)) == 0
+            && memcmp(&sum_node, &sum_before, sizeof(sum_node)) == 0
+            && memcmp(&text_a, &a_before, sizeof(text_a)) == 0
+            && memcmp(&text_b, &b_before, sizeof(text_b)) == 0
+            && result.request_at == refusal && result.usage.requests == refusal - 1
+            && copy_model_count_events(&result, COPY_MODEL_PUBLISH) == 0
+            && copy_model_rollback_exact(&destination, &result, refusal - 1));
+        if (refusal == 1)
+            CHECK(destination.nodes[0].scalar == 0
+                && destination.nodes[0].semantic_tag == 0
+                && destination.nodes[0].child_count == 0);
+        if (refusal == 3)
+            CHECK(destination.nodes[2].text_length == 0
+                && destination.nodes[2].scalar == 0
+                && destination.nodes[2].text_bytes[0] == '\0');
+        if (refusal == 4)
+            CHECK(destination.nodes[2].text_length == text_a.text_length
+                && destination.nodes[2].text_bytes[0] == '\0'
+                && destination.nodes[1].child_count == 0);
+        const CopyModelEventKind cleanup_kinds[][4] = {
+            {0, 0, 0, 0},
+            {COPY_MODEL_ROLLBACK_OUTER, 0, 0, 0},
+            {COPY_MODEL_ROLLBACK_OUTER, COPY_MODEL_ROLLBACK_OUTER, 0, 0},
+            {COPY_MODEL_ROLLBACK_TEXT_HEADER, COPY_MODEL_ROLLBACK_OUTER,
+                COPY_MODEL_ROLLBACK_OUTER, 0},
+            {COPY_MODEL_ROLLBACK_TEXT_PAYLOAD, COPY_MODEL_ROLLBACK_TEXT_HEADER,
+                COPY_MODEL_ROLLBACK_OUTER, COPY_MODEL_ROLLBACK_OUTER},
+        };
+        const uintptr_t cleanup_ids[][4] = {
+            {0, 0, 0, 0}, {sum_node.physical_id, 0, 0, 0},
+            {root.physical_id, sum_node.physical_id, 0, 0},
+            {text_a.physical_id, root.physical_id, sum_node.physical_id, 0},
+            {text_a.physical_id, text_a.physical_id, root.physical_id,
+                sum_node.physical_id},
+        };
+        CHECK(copy_model_cleanup_is(&result, cleanup_kinds[refusal - 1],
+            cleanup_ids[refusal - 1], refusal - 1));
+        CopyModelDestination retry = copy_model_destination(true, false);
+        CHECK(copy_model_run(values, &sum_node, &retry, unlimited, 256, 1048576,
+            4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result) && retry.published
+            && copy_model_equal(&sum_node, retry.root));
+    }
+
+    /* Every invalid input starts with, and changes exactly one fact from, this
+       known-valid tree. */
+    const SolMirRecipeId forbidden_recipes[] = {forbidden, callable_forbidden,
+        capability_forbidden, aggregate_forbidden};
+#define RESET_NESTED() do { \
+    root = root_before; sum_node = sum_before; text_a = a_before; text_b = b_before; \
+    destination = copy_model_destination(true, false); \
+    CHECK(copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576, \
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result)); \
+} while (0)
+    RESET_NESTED();
+    destination = copy_model_destination(false, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result));
+    RESET_NESTED();
+    destination = copy_model_destination(true, true);
+    CHECK(!copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result));
+    RESET_NESTED();
+    root.children[1] = NULL;
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result) && result.request_at == 0);
+    RESET_NESTED();
+    ++sum_node.semantic_tag;
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result) && result.request_at == 0);
+    RESET_NESTED();
+    sum_node.active_variant = values->ownership_plans[sum].variants.count;
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result));
+    RESET_NESTED();
+    text_a.available = false;
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result));
+    RESET_NESTED();
+    text_a.text_length = sizeof(text_a.text_bytes) + 1;
+    CopyModelNode oversized_text = text_a;
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result)
+        && result.request_at == 0 && result.usage.requests == 0
+        && result.usage.bytes == 0 && result.event_count == 0
+        && !destination.published && memcmp(&root, &root_before, sizeof(root)) == 0
+        && memcmp(&sum_node, &sum_before, sizeof(sum_node)) == 0
+        && memcmp(&text_a, &oversized_text, sizeof(text_a)) == 0);
+    RESET_NESTED();
+    text_a.text_length = (uint64_t)UINT32_MAX + 1;
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result) && result.request_at == 0 && result.usage.requests == 0);
+    RESET_NESTED();
+    uint64_t saved_object_limit = values->conventions->concrete->layout.target.max_object_bytes;
+    ((SolMirConcreteProgram *)(void *)values->conventions->concrete)->layout.target
+        .max_object_bytes = 1;
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result) && result.request_at == 0 && !destination.published);
+    ((SolMirConcreteProgram *)(void *)values->conventions->concrete)->layout.target
+        .max_object_bytes = saved_object_limit;
+    RESET_NESTED();
+    text_b.physical_id = text_a.physical_id;
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &sum_node, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result) && result.request_at == 0);
+    RESET_NESTED();
+    CopyModelNode capacity_root;
+    CopyModelNode capacity_children[COPY_MODEL_CHILD_CAPACITY];
+    copy_model_node(&capacity_root, capacity_product, 90);
+    for (size_t i = 0; i < COPY_MODEL_CHILD_CAPACITY; ++i) {
+        copy_model_node(&capacity_children[i], text, 100 + i);
+        capacity_root.children[i] = &capacity_children[i];
+    }
+    capacity_root.child_count = COPY_MODEL_CHILD_CAPACITY;
+    destination = copy_model_destination(true, false);
+    CHECK(copy_model_run(values, &capacity_root, &destination, unlimited, 256,
+        1048576, 4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result));
+    capacity_root.child_count = COPY_MODEL_CHILD_CAPACITY + 1;
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &capacity_root, &destination, unlimited, 256,
+        1048576, 4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result)
+        && result.request_at == 0);
+    RESET_NESTED();
+    copy_model_node(&zero, trivial, 9);
+    destination = copy_model_destination(true, false);
+    CHECK(copy_model_run(values, &zero, &destination, (SolMirRuntimeAllocationQuota){0, 0},
+        256, 1048576, 4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result) && result.usage.requests == 0);
+    RESET_NESTED();
+    copy_model_node(&wrap, wrapper, 1); wrap.children[0] = &text_a;
+    wrap.child_count = 1;
+    destination = copy_model_destination(true, false);
+    CHECK(copy_model_run(values, &wrap, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result) && copy_model_count_events(&result,
+            COPY_MODEL_STAGE_TEXT_HEADER) == 1 && copy_model_count_events(&result,
+            COPY_MODEL_STAGE_OUTER) == 0);
+    destination = copy_model_destination(true, false);
+    CHECK(!copy_model_run(values, &wrap, &destination, unlimited, 256, 1048576,
+        4000000, COPY_MODEL_EVENT_CAPACITY, 1, &result) && copy_model_count_events(&result,
+            COPY_MODEL_ROLLBACK_TEXT_HEADER) == 0);
+    for (size_t i = 0; i < sizeof(forbidden_recipes) / sizeof(forbidden_recipes[0]); ++i) {
+        RESET_NESTED();
+        copy_model_node(&zero, forbidden_recipes[i], 10 + i);
+        destination = copy_model_destination(true, false);
+        CHECK(!copy_model_run(values, &zero, &destination, unlimited, 256, 1048576,
+            4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result) && result.request_at == 0);
+    }
+#undef RESET_NESTED
+}
+
+static void test_recursive_copy_transaction_model(void) {
+    static const char source[] =
+        "module runtime_values_recursive_copy\n"
+        "enum List { nil, cons(next: List) }\n"
+        "function root(value: List) -> Bool effects { pure } { return true }\n";
+    TextCompilation compilation;
+    SolMirConcreteProgram program;
+    SolMirRuntimeConventions conventions;
+    SolMirRuntimeValues values;
+    sol_mir_concrete_program_init(&program);
+    sol_mir_runtime_conventions_init(&conventions);
+    sol_mir_runtime_values_init(&values);
+    CHECK(compile_text(&compilation, "/fixture/runtime_values_recursive_copy.sol",
+        source));
+    SolIrCallableId root = callable(&compilation.ir, "root",
+        SOL_IR_CALLABLE_FUNCTION);
+    SolMirProgramRoot root_request = {root, SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    SolMirTargetDescriptor target = sol_mir_target_wasm32();
+    SolMirConcreteBuildRequest request = {&compilation.ir, &root_request, 1,
+        NULL, 0, &target, NULL};
+    bool built = root != SOL_IR_NONE && sol_mir_concrete_program_build(&request,
+        &program, &compilation.diagnostics) == SOL_MIR_CONCRETE_BUILD_SUCCEEDED;
+    CHECK(built && build_values(&program, &compilation.diagnostics, &conventions,
+        &values));
+    SolMirRecipeId list = SOL_MIR_RECIPE_NONE;
+    size_t nil = SOL_MIR_RUNTIME_NONE, cons = SOL_MIR_RUNTIME_NONE;
+    if (values.conventions != NULL) {
+        for (size_t i = 0; i < values.copy_plan_count; ++i) {
+            const SolMirRuntimeOwnershipPlan *ownership = &values.ownership_plans[i];
+            if (values.copy_plans[i].classification != SOL_MIR_RUNTIME_COPY_SUM)
+                continue;
+            for (size_t v = 0; v < ownership->variants.count; ++v) {
+                const SolMirRuntimeOwnershipVariant *variant = &values.ownership_variants[
+                    ownership->variants.offset + v];
+                if (variant->edges.count == 0) nil = v;
+                else if (variant->edges.count == 1 && values.owned_edges[
+                        variant->edges.offset].recipe == i) cons = v;
+            }
+            if (nil != SOL_MIR_RUNTIME_NONE && cons != SOL_MIR_RUNTIME_NONE) {
+                list = i; break;
+            }
+            nil = cons = SOL_MIR_RUNTIME_NONE;
+        }
+        CHECK(list != SOL_MIR_RECIPE_NONE);
+        if (list != SOL_MIR_RECIPE_NONE) {
+            const SolMirRuntimeOwnershipPlan *ownership = &values.ownership_plans[list];
+            CopyModelNode tail, finite;
+            copy_model_node(&tail, list, 71); tail.active_variant = nil;
+            tail.semantic_tag = values.ownership_variants[ownership->variants.offset
+                + nil].semantic_tag;
+            copy_model_node(&finite, list, 72); finite.active_variant = cons;
+            finite.semantic_tag = values.ownership_variants[ownership->variants.offset
+                + cons].semantic_tag;
+            finite.children[0] = &tail; finite.child_count = 1;
+            CopyModelDestination destination = copy_model_destination(true, false);
+            CopyModel result;
+            SolMirRuntimeAllocationQuota unlimited = {UINT64_MAX, UINT64_MAX};
+            CHECK(copy_model_run(&values, &finite, &destination, unlimited, 256,
+                1048576, 4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result) && destination.published
+                && copy_model_equal(&finite, destination.root));
+            CopyModelNode chain[COPY_MODEL_EVENT_CAPACITY / 2];
+            for (size_t i = 0; i < COPY_MODEL_EVENT_CAPACITY / 2 - 2; ++i) {
+                copy_model_node(&chain[i], list, 200 + i);
+                chain[i].active_variant = cons;
+                chain[i].semantic_tag = values.ownership_variants[
+                    ownership->variants.offset + cons].semantic_tag;
+                chain[i].children[0] = &chain[i + 1]; chain[i].child_count = 1;
+            }
+            copy_model_node(&chain[COPY_MODEL_EVENT_CAPACITY / 2 - 2], list,
+                200 + COPY_MODEL_EVENT_CAPACITY / 2 - 2);
+            chain[COPY_MODEL_EVENT_CAPACITY / 2 - 2].active_variant = nil;
+            chain[COPY_MODEL_EVENT_CAPACITY / 2 - 2].semantic_tag
+                = values.ownership_variants[ownership->variants.offset + nil].semantic_tag;
+            destination = copy_model_destination(true, false);
+            CHECK(copy_model_run(&values, &chain[0], &destination, unlimited, 256,
+                1048576, 4000000, SIZE_MAX, 0, &result)
+                && destination.published);
+            /* 64 allocations require 129 possible stage/rollback/publication
+               events, exceeding the fixed physical event store of 128 even
+               when the caller asks for SIZE_MAX. */
+            CopyModelNode too_many[COPY_MODEL_EVENT_CAPACITY / 2];
+            for (size_t i = 0; i < COPY_MODEL_EVENT_CAPACITY / 2 - 1; ++i) {
+                copy_model_node(&too_many[i], list, 400 + i);
+                too_many[i].active_variant = cons;
+                too_many[i].semantic_tag = values.ownership_variants[
+                    ownership->variants.offset + cons].semantic_tag;
+                too_many[i].children[0] = &too_many[i + 1];
+                too_many[i].child_count = 1;
+            }
+            copy_model_node(&too_many[COPY_MODEL_EVENT_CAPACITY / 2 - 1], list,
+                400 + COPY_MODEL_EVENT_CAPACITY / 2 - 1);
+            too_many[COPY_MODEL_EVENT_CAPACITY / 2 - 1].active_variant = nil;
+            too_many[COPY_MODEL_EVENT_CAPACITY / 2 - 1].semantic_tag
+                = values.ownership_variants[ownership->variants.offset + nil].semantic_tag;
+            destination = copy_model_destination(true, false);
+            CHECK(!copy_model_run(&values, &too_many[0], &destination, unlimited,
+                256, 1048576, 4000000, SIZE_MAX, 0, &result)
+                && result.request_at == 0 && result.usage.requests == 0
+                && result.event_count == 0 && !destination.published);
+            finite.children[0] = &finite;
+            destination = copy_model_destination(true, false);
+            CHECK(!copy_model_run(&values, &finite, &destination, unlimited, 256,
+                1048576, 4000000, COPY_MODEL_EVENT_CAPACITY, 0, &result) && result.request_at == 0
+                && !destination.published);
+        }
+    }
+    sol_mir_runtime_values_free(&values);
+    sol_mir_runtime_conventions_free(&conventions);
+    sol_mir_concrete_program_free(&program);
+    text_compilation_free(&compilation);
+}
+
 int main(void) {
     Compilation compilation;
     CHECK(compile_e6(&compilation));
@@ -1783,6 +2760,7 @@ int main(void) {
     compilation_free(&compilation);
     test_bound_environment_exclusion();
     test_plan_classification_fixture();
+    test_recursive_copy_transaction_model();
     if (failures != 0) {
         fprintf(stderr, "%d runtime values test(s) failed\n", failures);
         return 1;
