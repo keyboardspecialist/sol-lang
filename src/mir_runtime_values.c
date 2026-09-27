@@ -22,6 +22,9 @@ static _Thread_local size_t persistent_allocation_attempt;
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
 static _Thread_local bool force_allocation_failure;
 static _Thread_local size_t force_persistent_allocation_failure;
+static _Thread_local size_t ownership_count_scans;
+static _Thread_local bool reverse_captured_fragments;
+static _Thread_local bool force_captured_digest_collision;
 
 void sol_mir_runtime_values_test_force_allocation_failure(bool force) {
     force_allocation_failure = force;
@@ -30,6 +33,18 @@ void sol_mir_runtime_values_test_force_allocation_failure(bool force) {
 void sol_mir_runtime_values_test_force_persistent_allocation_failure(
     size_t attempt) {
     force_persistent_allocation_failure = attempt;
+}
+
+size_t sol_mir_runtime_values_test_ownership_count_scans(void) {
+    return ownership_count_scans;
+}
+
+void sol_mir_runtime_values_test_reverse_captured_fragments(bool reverse) {
+    reverse_captured_fragments = reverse;
+}
+
+void sol_mir_runtime_values_test_force_captured_digest_collision(bool force) {
+    force_captured_digest_collision = force;
 }
 #endif
 
@@ -53,6 +68,8 @@ static bool build_event(size_t amount) {
 
 static bool limits_zero(SolMirRuntimeValuesLimits value) {
     return value.max_records == 0 && value.max_allocation_plans == 0
+        && value.max_ownership_plans == 0 && value.max_ownership_variants == 0
+        && value.max_owned_edges == 0
         && value.max_owned_bytes == 0
         && value.max_build_scratch_bytes == 0 && value.max_build_work == 0
         && value.max_validation_scratch_bytes == 0
@@ -61,6 +78,8 @@ static bool limits_zero(SolMirRuntimeValuesLimits value) {
 
 static bool limits_complete(SolMirRuntimeValuesLimits value) {
     return value.max_records != 0 && value.max_allocation_plans != 0
+        && value.max_ownership_plans != 0 && value.max_ownership_variants != 0
+        && value.max_owned_edges != 0
         && value.max_owned_bytes != 0
         && value.max_build_scratch_bytes != 0 && value.max_build_work != 0
         && value.max_validation_scratch_bytes != 0
@@ -80,6 +99,15 @@ static bool owner_empty(const SolMirRuntimeValues *values) {
         && values->allocation_plans == NULL
         && values->allocation_plan_count == 0
         && values->allocation_plan_capacity == 0
+        && values->ownership_plans == NULL
+        && values->ownership_plan_count == 0
+        && values->ownership_plan_capacity == 0
+        && values->ownership_variants == NULL
+        && values->ownership_variant_count == 0
+        && values->ownership_variant_capacity == 0
+        && values->owned_edges == NULL
+        && values->owned_edge_count == 0
+        && values->owned_edge_capacity == 0
         && limits_zero(values->limits) && usage_zero(values->usage);
 }
 
@@ -91,6 +119,9 @@ void sol_mir_runtime_values_free(SolMirRuntimeValues *values) {
     if (values == NULL) return;
     free(values->recipe_operations);
     free(values->allocation_plans);
+    free(values->ownership_plans);
+    free(values->ownership_variants);
+    free(values->owned_edges);
     sol_mir_runtime_values_init(values);
 }
 
@@ -98,6 +129,9 @@ SolMirRuntimeValuesLimits sol_mir_runtime_values_default_limits(void) {
     return (SolMirRuntimeValuesLimits){
         .max_records = 4000000,
         .max_allocation_plans = 4000000,
+        .max_ownership_plans = 4000000,
+        .max_ownership_variants = 4000000,
+        .max_owned_edges = 16000000,
         .max_owned_bytes = 512u * 1024u * 1024u,
         .max_build_scratch_bytes = 256u * 1024u * 1024u,
         .max_build_work = (size_t)1000000000ULL,
@@ -119,6 +153,72 @@ static SolMirRuntimeImportId *operation_import(
         case SOL_MIR_RUNTIME_IMPORT_RECIPE_DROP: return &record->drop_import;
         case SOL_MIR_RUNTIME_IMPORT_RECIPE_EQUAL: return &record->equal_import;
         default: return NULL;
+    }
+}
+
+/* This is deliberately construction-local. Validation reconstructs the same
+   facts from P2 independently rather than calling a builder helper. */
+static bool ownership_counts(const SolMirRepresentation *representation,
+    size_t *variants, size_t *edges, size_t *producer_scans) {
+    *variants = 0; *edges = 0; *producer_scans = 0;
+    for (size_t recipe = 0; recipe < representation->recipe_count; ++recipe) {
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+        ++ownership_count_scans;
+#endif
+        const SolMirRecipe *item = &representation->recipes[recipe];
+        size_t add = 0;
+        if (!item->inhabited) continue;
+        if (item->kind == SOL_MIR_RECIPE_TUPLE
+            || item->kind == SOL_MIR_RECIPE_RECORD) add = item->fields.count;
+        else if (item->kind == SOL_MIR_RECIPE_ENUM
+            || item->kind == SOL_MIR_RECIPE_OPTION
+            || item->kind == SOL_MIR_RECIPE_RESULT) {
+            if (item->variants.count > SIZE_MAX - *variants) return false;
+            *variants += item->variants.count;
+            for (size_t v = 0; v < item->variants.count; ++v) {
+                const SolMirRecipeVariant *variant = &representation->variants[
+                    item->variants.offset + v];
+                if (variant->fields.count > SIZE_MAX - add) return false;
+                add += variant->fields.count;
+            }
+        } else if (item->kind == SOL_MIR_RECIPE_DISTINCT
+            || item->kind == SOL_MIR_RECIPE_REFINED) add = 1;
+        else if (item->kind == SOL_MIR_RECIPE_CAPABILITY)
+            add = item->capability_source == SOL_MIR_RECIPE_NONE ? 0 : 1;
+        else if (item->kind == SOL_MIR_RECIPE_FUNCTION) {
+            if (representation->callable_producer_count
+                    > SIZE_MAX - *producer_scans) return false;
+            *producer_scans += representation->callable_producer_count;
+            for (size_t p = 0; p < representation->callable_producer_count; ++p) {
+                const SolMirCallableProducer *producer
+                    = &representation->callable_producers[p];
+                if (producer->function_recipe == recipe
+                    && producer->kind
+                        == SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION) {
+                    if (add == SIZE_MAX) return false;
+                    ++add;
+                }
+            }
+        }
+        if (add > SIZE_MAX - *edges) return false;
+        *edges += add;
+    }
+    return true;
+}
+
+static SolMirRuntimeOwnershipClass ownership_class(const SolMirRecipe *recipe) {
+    if (!recipe->inhabited) return SOL_MIR_RUNTIME_OWNERSHIP_UNREACHABLE;
+    switch (recipe->kind) {
+        case SOL_MIR_RECIPE_TEXT: return SOL_MIR_RUNTIME_OWNERSHIP_TEXT;
+        case SOL_MIR_RECIPE_TUPLE: case SOL_MIR_RECIPE_RECORD:
+            return SOL_MIR_RUNTIME_OWNERSHIP_PRODUCT;
+        case SOL_MIR_RECIPE_ENUM: case SOL_MIR_RECIPE_OPTION:
+        case SOL_MIR_RECIPE_RESULT: return SOL_MIR_RUNTIME_OWNERSHIP_SUM;
+        case SOL_MIR_RECIPE_DISTINCT: case SOL_MIR_RECIPE_REFINED:
+            return SOL_MIR_RUNTIME_OWNERSHIP_WRAPPER;
+        case SOL_MIR_RECIPE_FUNCTION: return SOL_MIR_RUNTIME_OWNERSHIP_CALLABLE;
+        case SOL_MIR_RECIPE_CAPABILITY: return SOL_MIR_RUNTIME_OWNERSHIP_CAPABILITY;
+        default: return SOL_MIR_RUNTIME_OWNERSHIP_LEAF;
     }
 }
 
@@ -146,6 +246,9 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_build(
     metered_build_work = 0;
     metered_build_limit = scratch.limits.max_build_work;
     persistent_allocation_attempt = 0;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+    ownership_count_scans = 0;
+#endif
     const SolMirLinkage *linkage = &scratch.conventions->concrete->linkage;
     unsigned char *consumed = NULL;
     if (scratch.usage.build_scratch_bytes != 0) {
@@ -227,6 +330,129 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_build(
         }
         ++scratch.allocation_plan_count;
     }
+    size_t ownership_variants, owned_edges, producer_scans;
+    const SolMirRepresentation *representation
+        = scratch.conventions->concrete->layout.representation;
+    if (!ownership_counts(representation, &ownership_variants, &owned_edges,
+            &producer_scans)
+        || !build_event(count) || !build_event(producer_scans)) goto internal;
+    if (count != 0 && !build_event(1)) goto exhausted;
+    if (count != 0) {
+        ++persistent_allocation_attempt;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+        if (!force_allocation_failure && persistent_allocation_attempt
+                != force_persistent_allocation_failure)
+#endif
+            scratch.ownership_plans = calloc(count,
+                sizeof(*scratch.ownership_plans));
+    }
+    if (count != 0 && scratch.ownership_plans == NULL) {
+        free(consumed);
+        if (diagnostics != NULL) diagnostics->allocation_failed = true;
+        sol_mir_runtime_values_free(&scratch);
+        report(diagnostics, "runtime values ownership-plan persistent allocation failed");
+        return SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED;
+    }
+    scratch.ownership_plan_capacity = count;
+    if (ownership_variants != 0 && !build_event(1)) goto exhausted;
+    if (ownership_variants != 0) {
+        ++persistent_allocation_attempt;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+        if (!force_allocation_failure && persistent_allocation_attempt
+                != force_persistent_allocation_failure)
+#endif
+            scratch.ownership_variants = calloc(ownership_variants,
+                sizeof(*scratch.ownership_variants));
+    }
+    if (ownership_variants != 0 && scratch.ownership_variants == NULL) {
+        free(consumed);
+        if (diagnostics != NULL) diagnostics->allocation_failed = true;
+        sol_mir_runtime_values_free(&scratch);
+        report(diagnostics, "runtime values ownership-variant persistent allocation failed");
+        return SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED;
+    }
+    scratch.ownership_variant_capacity = ownership_variants;
+    if (owned_edges != 0 && !build_event(1)) goto exhausted;
+    if (owned_edges != 0) {
+        ++persistent_allocation_attempt;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+        if (!force_allocation_failure && persistent_allocation_attempt
+                != force_persistent_allocation_failure)
+#endif
+            scratch.owned_edges = calloc(owned_edges, sizeof(*scratch.owned_edges));
+    }
+    if (owned_edges != 0 && scratch.owned_edges == NULL) {
+        free(consumed);
+        if (diagnostics != NULL) diagnostics->allocation_failed = true;
+        sol_mir_runtime_values_free(&scratch);
+        report(diagnostics, "runtime values owned-edge persistent allocation failed");
+        return SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED;
+    }
+    scratch.owned_edge_capacity = owned_edges;
+    if (!build_event(count) || !build_event(producer_scans)
+        || !build_event(ownership_variants) || !build_event(owned_edges))
+        goto exhausted;
+    for (size_t recipe = 0; recipe < count; ++recipe) {
+        const SolMirRecipe *item = &representation->recipes[recipe];
+        SolMirRuntimeOwnershipPlan *plan = &scratch.ownership_plans[recipe];
+        *plan = (SolMirRuntimeOwnershipPlan){recipe, ownership_class(item),
+            {scratch.owned_edge_count, 0}, {scratch.ownership_variant_count, 0}};
+        if (plan->classification == SOL_MIR_RUNTIME_OWNERSHIP_PRODUCT) {
+            for (size_t f = 0; f < item->fields.count; ++f) {
+                const SolMirRecipeField *field = &representation->fields[
+                    item->fields.offset + f];
+                scratch.owned_edges[scratch.owned_edge_count++]
+                    = (SolMirRuntimeOwnedEdge){SOL_MIR_RUNTIME_OWNED_EDGE_FIELD,
+                        field->type, field->ordinal, SOL_MIR_RUNTIME_NONE};
+                ++plan->edges.count;
+            }
+        } else if (plan->classification == SOL_MIR_RUNTIME_OWNERSHIP_SUM) {
+            for (size_t v = 0; v < item->variants.count; ++v) {
+                const SolMirRecipeVariant *source = &representation->variants[
+                    item->variants.offset + v];
+                SolMirRuntimeOwnershipVariant *variant
+                    = &scratch.ownership_variants[scratch.ownership_variant_count++];
+                *variant = (SolMirRuntimeOwnershipVariant){source->ordinal,
+                    source->semantic_tag, {scratch.owned_edge_count, 0}};
+                ++plan->variants.count;
+                for (size_t f = 0; f < source->fields.count; ++f) {
+                    const SolMirRecipeField *field = &representation->fields[
+                        source->fields.offset + f];
+                    scratch.owned_edges[scratch.owned_edge_count++]
+                        = (SolMirRuntimeOwnedEdge){SOL_MIR_RUNTIME_OWNED_EDGE_FIELD,
+                            field->type, field->ordinal, SOL_MIR_RUNTIME_NONE};
+                    ++variant->edges.count;
+                }
+            }
+        } else if (plan->classification == SOL_MIR_RUNTIME_OWNERSHIP_WRAPPER) {
+            scratch.owned_edges[scratch.owned_edge_count++]
+                = (SolMirRuntimeOwnedEdge){SOL_MIR_RUNTIME_OWNED_EDGE_BACKING,
+                    item->backing, 0, SOL_MIR_RUNTIME_NONE};
+            ++plan->edges.count;
+        } else if (plan->classification == SOL_MIR_RUNTIME_OWNERSHIP_CAPABILITY
+            && item->capability_source != SOL_MIR_RECIPE_NONE) {
+            scratch.owned_edges[scratch.owned_edge_count++]
+                = (SolMirRuntimeOwnedEdge){SOL_MIR_RUNTIME_OWNED_EDGE_PRIVATE_SOURCE,
+                    item->capability_source, 0, SOL_MIR_RUNTIME_NONE};
+            ++plan->edges.count;
+        } else if (plan->classification == SOL_MIR_RUNTIME_OWNERSHIP_CALLABLE) {
+            for (size_t p = 0; p < representation->callable_producer_count; ++p) {
+                const SolMirCallableProducer *producer
+                    = &representation->callable_producers[p];
+                if (producer->function_recipe == recipe && producer->kind
+                        == SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION) {
+                    scratch.owned_edges[scratch.owned_edge_count++]
+                        = (SolMirRuntimeOwnedEdge){
+                            SOL_MIR_RUNTIME_OWNED_EDGE_CAPTURED_RECEIVER,
+                            producer->captured_receiver_type, 0, p};
+                    ++plan->edges.count;
+                }
+            }
+        }
+        ++scratch.ownership_plan_count;
+    }
+    if (scratch.ownership_variant_count != ownership_variants
+        || scratch.owned_edge_count != owned_edges) goto internal;
     for (size_t i = 0; i < linkage->runtime_requirement_count; ++i) {
         if (!build_event(1)) goto exhausted;
         const SolMirLinkageRuntimeRequirement *requirement
@@ -331,6 +557,136 @@ static void render_digest(Buffer *buffer, const SolMirLinkageDigest *digest) {
         format(buffer, "%02x", digest->bytes[i]);
 }
 
+static void producer_u64(SolMirLinkageSha256 *sha, const char *label,
+    uint64_t value) {
+    uint8_t bytes[8];
+    for (size_t i = 0; i < sizeof(bytes); ++i)
+        bytes[i] = (uint8_t)(value >> (56 - i * 8));
+    sol_mir_linkage_internal_sha256_write(sha, label, strlen(label));
+    sol_mir_linkage_internal_sha256_write(sha, bytes, sizeof(bytes));
+}
+
+static void producer_bytes(SolMirLinkageSha256 *sha, const char *label,
+    const void *bytes, size_t length) {
+    producer_u64(sha, "label-length", strlen(label));
+    sol_mir_linkage_internal_sha256_write(sha, label, strlen(label));
+    producer_u64(sha, "value-length", length);
+    sol_mir_linkage_internal_sha256_write(sha, bytes, length);
+}
+
+static void producer_span(SolMirLinkageSha256 *sha, const char *label,
+    SolSpan span) {
+    producer_bytes(sha, label, "span", 4);
+    producer_u64(sha, "span-start", span.start);
+    producer_u64(sha, "span-end", span.end);
+}
+
+static bool producer_source_content(const SolIr *ir, size_t file,
+    SolMirLinkageDigest *result) {
+    if (file >= ir->file_count) return false;
+    const SolIrSourceFile *source = &ir->files[file];
+    if (source->aggregate_start > source->aggregate_end
+        || source->aggregate_end > ir->source_length) return false;
+    SolMirLinkageSha256 sha;
+    sol_mir_linkage_internal_sha256_init(&sha);
+    sol_mir_linkage_internal_sha256_write(&sha,
+        ir->source_bytes + source->aggregate_start,
+        source->aggregate_end - source->aggregate_start);
+    return sol_mir_linkage_internal_sha256_finish(&sha, result);
+}
+
+static bool render_captured_producer_key(const SolMirRuntimeValues *values,
+    const SolMirRuntimeOwnedEdge *edge, SolMirLinkageDigest *result) {
+    const SolMirConcreteProgram *concrete = values->conventions->concrete;
+    const SolMirRepresentation *r = &concrete->representation;
+    const SolMirMaterialization *m = &concrete->materialization;
+    const SolMirLinkage *linkage = &concrete->linkage;
+    const SolIr *ir = concrete->program.ir;
+    if (edge->producer >= r->callable_producer_count) return false;
+    const SolMirCallableProducer *producer = &r->callable_producers[edge->producer];
+    if (producer->kind != SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION
+        || producer->semantic_site >= m->semantic_site_count
+        || producer->binding >= m->binding_count) return false;
+    const SolMirMaterializedSemanticSite *site = &m->semantic_sites[
+        producer->semantic_site];
+    const SolMirMaterializedBinding *binding = &m->bindings[producer->binding];
+    if (site->binding != producer->binding || site->parent >= m->plan->instance_count
+        || site->context >= m->context_count || (site->source_definition
+            != SOL_IR_NONE && site->source_definition >= ir->definition_count)
+        || (site->source_obligation != SOL_IR_NONE
+                && site->source_obligation >= ir->obligation_count))
+        return false;
+    SolMirLinkageDigest parent, site_content, context_content;
+    if (!sol_mir_linkage_internal_instance_key(linkage, site->parent, &parent,
+            NULL)) return false;
+    if (!producer_source_content(ir, site->source.file, &site_content)) return false;
+    SolMirLinkageSha256 sha;
+    sol_mir_linkage_internal_sha256_init(&sha);
+    producer_bytes(&sha, "domain", "sol.runtime-values.captured-producer.v1", 39);
+    producer_bytes(&sha, "parent-instance", parent.bytes, sizeof(parent.bytes));
+    producer_bytes(&sha, "source-content", site_content.bytes,
+        sizeof(site_content.bytes));
+    producer_u64(&sha, "site-start", site->source.start);
+    producer_u64(&sha, "site-end", site->source.end);
+    const SolMirPlanContext *context = &m->contexts[site->context];
+    if (!producer_source_content(ir, context->source.file, &context_content))
+        return false;
+    producer_u64(&sha, "context-kind", context->kind);
+    producer_bytes(&sha, "context-content", context_content.bytes,
+        sizeof(context_content.bytes));
+    producer_u64(&sha, "context-start", context->source.start);
+    producer_u64(&sha, "context-end", context->source.end);
+    if (site->source_definition != SOL_IR_NONE) {
+        const SolSemanticId semantic
+            = ir->definitions[site->source_definition].semantic_id;
+        producer_u64(&sha, "definition-high", semantic.high);
+        producer_u64(&sha, "definition-low", semantic.low);
+    } else producer_bytes(&sha, "definition", "none", 4);
+    if (site->source_obligation != SOL_IR_NONE) {
+        const SolIrObligation *obligation = &ir->obligations[site->source_obligation];
+        if (obligation->predicate >= ir->expression_count) return false;
+        producer_span(&sha, "obligation-predicate",
+            ir->expressions[obligation->predicate].span);
+    } else producer_bytes(&sha, "obligation-predicate", "none", 4);
+    bool target_found = false;
+    for (size_t i = 0; i < linkage->binding_count; ++i) {
+        const SolMirLinkageBinding *target = &linkage->bindings[i];
+        if (target->binding != producer->binding) continue;
+        target_found = true;
+        producer_u64(&sha, "target-kind", target->target_kind);
+        if (target->target_kind == SOL_MIR_LINKAGE_TARGET_INTERNAL) {
+            if (target->internal >= linkage->callable_count) return false;
+            producer_bytes(&sha, "target-symbol",
+                linkage->callables[target->internal].symbol.bytes,
+                strlen(linkage->callables[target->internal].symbol.bytes));
+        } else if (target->target_kind == SOL_MIR_LINKAGE_TARGET_HOST) {
+            if (target->host >= linkage->host_requirement_count) return false;
+            const SolMirLinkageHostRequirement *host
+                = &linkage->host_requirements[target->host];
+            producer_u64(&sha, "host-semantic-high", host->semantic_id.high);
+            producer_u64(&sha, "host-semantic-low", host->semantic_id.low);
+            producer_bytes(&sha, "host-requirement", host->requirement_key.bytes,
+                sizeof(host->requirement_key.bytes));
+        } else return false;
+        break;
+    }
+    return target_found && binding->target_kind == producer->target_kind
+        && sol_mir_linkage_internal_sha256_finish(&sha, result);
+}
+
+static const char *ownership_class_name(SolMirRuntimeOwnershipClass value) {
+    static const char *const names[] = {"unreachable", "leaf", "text",
+        "product", "sum", "wrapper", "callable", "capability"};
+    return value <= SOL_MIR_RUNTIME_OWNERSHIP_CAPABILITY ? names[value] : NULL;
+}
+
+static const char *owned_edge_name(SolMirRuntimeOwnedEdgeKind value) {
+    static const char *const names[] = {"field", "backing", "private-source",
+        "captured-receiver"};
+    return value <= SOL_MIR_RUNTIME_OWNED_EDGE_CAPTURED_RECEIVER
+        ? names[value] : NULL;
+}
+
 typedef struct { Buffer text; } RenderLine;
 
 static int compare_lines(const void *left, const void *right) {
@@ -345,7 +701,7 @@ bool sol_mir_runtime_values_render(FILE *stream,
         return false;
     Buffer output = {0};
     format(&output, "mir_runtime_values\n");
-    format(&output, "declaration.kind=operation-demand-allocation-plan-inventory executable-operations=false allocation-plans=true\n");
+    format(&output, "declaration.kind=operation-demand-allocation-plan-inventory executable-operations=false allocation-plans=true ownership-plans=true move-drop-execution=false\n");
     size_t count = values->recipe_operation_count;
     RenderLine *lines = count == 0 ? NULL : calloc(count, sizeof(*lines));
     if (count != 0 && lines == NULL) { free(output.data); return false; }
@@ -385,6 +741,88 @@ bool sol_mir_runtime_values_render(FILE *stream,
                 ? "fixed-object" : "text";
         format(line, " allocation=%s size=%" PRIu64 " alignment=%" PRIu64,
             kind, plan->object_size, plan->object_alignment);
+        const SolMirRuntimeOwnershipPlan *ownership
+            = &values->ownership_plans[i];
+        const char *classification = ownership_class_name(ownership->classification);
+        if (classification == NULL) { output.failed = true; break; }
+        format(line, " ownership=%s", classification);
+        if (ownership->classification == SOL_MIR_RUNTIME_OWNERSHIP_CALLABLE) {
+            RenderLine *captures = ownership->edges.count == 0 ? NULL
+                : calloc(ownership->edges.count, sizeof(*captures));
+            if (ownership->edges.count != 0 && captures == NULL) output.failed = true;
+            for (size_t edge_i = 0; !output.failed
+                    && edge_i < ownership->edges.count; ++edge_i) {
+                const SolMirRuntimeOwnedEdge *edge = &values->owned_edges[
+                    ownership->edges.offset
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+                    + (reverse_captured_fragments
+                        ? ownership->edges.count - edge_i - 1 : edge_i)
+#else
+                    + edge_i
+#endif
+                    ];
+                SolMirLinkageDigest target, capture;
+                if (edge->kind != SOL_MIR_RUNTIME_OWNED_EDGE_CAPTURED_RECEIVER
+                    || !sol_mir_linkage_internal_recipe_key(linkage, edge->recipe,
+                        &target, NULL)
+                    || !render_captured_producer_key(values, edge, &capture)) {
+                    output.failed = true; break;
+                }
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+                if (force_captured_digest_collision) memset(&capture, 0,
+                    sizeof(capture));
+#endif
+                format(&captures[edge_i].text, " edge=captured-receiver:0:");
+                render_digest(&captures[edge_i].text, &capture);
+                format(&captures[edge_i].text, ":");
+                render_digest(&captures[edge_i].text, &target);
+                if (captures[edge_i].text.failed) output.failed = true;
+            }
+            if (!output.failed && ownership->edges.count > 1)
+                qsort(captures, ownership->edges.count, sizeof(*captures),
+                    compare_lines);
+            for (size_t edge_i = 1; !output.failed
+                    && edge_i < ownership->edges.count; ++edge_i)
+                if (memcmp(captures[edge_i - 1].text.data
+                        + strlen(" edge=captured-receiver:0:"),
+                        captures[edge_i].text.data
+                        + strlen(" edge=captured-receiver:0:"),
+                        SOL_MIR_LINKAGE_DIGEST_BYTES * 2) == 0)
+                    output.failed = true;
+            for (size_t edge_i = 0; !output.failed
+                    && edge_i < ownership->edges.count; ++edge_i)
+                format(line, "%s", captures[edge_i].text.data);
+            for (size_t edge_i = 0; edge_i < ownership->edges.count; ++edge_i)
+                free(captures[edge_i].text.data);
+            free(captures);
+        } else for (size_t edge_i = 0; edge_i < ownership->edges.count; ++edge_i) {
+            const SolMirRuntimeOwnedEdge *edge = &values->owned_edges[
+                ownership->edges.offset + edge_i];
+            SolMirLinkageDigest target;
+            const char *edge_name = owned_edge_name(edge->kind);
+            if (edge_name == NULL || !sol_mir_linkage_internal_recipe_key(linkage,
+                    edge->recipe, &target, NULL)) { output.failed = true; break; }
+            format(line, " edge=%s:%zu:", edge_name, edge->ordinal);
+            render_digest(line, &target);
+        }
+        for (size_t variant_i = 0; !output.failed
+                && variant_i < ownership->variants.count; ++variant_i) {
+            const SolMirRuntimeOwnershipVariant *variant
+                = &values->ownership_variants[ownership->variants.offset + variant_i];
+            format(line, " variant=%zu:%zu", variant->ordinal, variant->semantic_tag);
+            for (size_t edge_i = 0; edge_i < variant->edges.count; ++edge_i) {
+                const SolMirRuntimeOwnedEdge *edge = &values->owned_edges[
+                    variant->edges.offset + edge_i];
+                SolMirLinkageDigest target;
+                const char *edge_name = owned_edge_name(edge->kind);
+                if (edge_name == NULL || !sol_mir_linkage_internal_recipe_key(linkage,
+                        edge->recipe, &target, NULL)) {
+                    output.failed = true; break;
+                }
+                format(line, " edge=%s:%zu:", edge_name, edge->ordinal);
+                render_digest(line, &target);
+            }
+        }
         format(line, "\n");
     }
     for (size_t i = 0; i < count; ++i)
@@ -466,7 +904,11 @@ static bool owner_header_valid(const SolMirRuntimeValues *values) {
         || !limits_complete(values->limits)
         || values->recipe_operation_count != values->recipe_operation_capacity
         || values->allocation_plan_count != values->allocation_plan_capacity
+        || values->ownership_plan_count != values->ownership_plan_capacity
+        || values->ownership_variant_count != values->ownership_variant_capacity
+        || values->owned_edge_count != values->owned_edge_capacity
         || values->recipe_operation_count != values->allocation_plan_count
+        || values->recipe_operation_count != values->ownership_plan_count
         || values->recipe_operation_count != representation->recipe_count
         || representation->recipe_count != representation->recipe_capacity
         || layout->type_count != layout->type_capacity
@@ -478,6 +920,13 @@ static bool owner_header_valid(const SolMirRuntimeValues *values) {
             values->recipe_operation_capacity)
         || !allocation_plan_range_valid(values->allocation_plans,
             values->allocation_plan_capacity)
+        || !range_valid(values->ownership_plans, values->ownership_plan_capacity,
+            sizeof(*values->ownership_plans))
+        || !range_valid(values->ownership_variants,
+            values->ownership_variant_capacity,
+            sizeof(*values->ownership_variants))
+        || !range_valid(values->owned_edges, values->owned_edge_capacity,
+            sizeof(*values->owned_edges))
         || !range_valid(representation->recipes, representation->recipe_capacity,
             sizeof(*representation->recipes))
         || !range_valid(layout->types, layout->type_capacity,
@@ -488,12 +937,22 @@ static bool owner_header_valid(const SolMirRuntimeValues *values) {
             concrete->linkage.runtime_requirement_capacity,
             sizeof(*concrete->linkage.runtime_requirements))
         || !sol_mir_target_descriptor_validate(&layout->target)) return false;
-    size_t owned_bytes, plan_bytes, build_work;
+    size_t owned_bytes, plan_bytes, ownership_plan_bytes, variant_bytes, edge_bytes,
+        build_work;
     if (!mul_size(values->recipe_operation_count,
             sizeof(*values->recipe_operations), &owned_bytes)
         || !mul_size(values->allocation_plan_count,
             sizeof(*values->allocation_plans), &plan_bytes)
+        || !mul_size(values->ownership_plan_count,
+            sizeof(*values->ownership_plans), &ownership_plan_bytes)
+        || !mul_size(values->ownership_variant_count,
+            sizeof(*values->ownership_variants), &variant_bytes)
+        || !mul_size(values->owned_edge_count, sizeof(*values->owned_edges),
+            &edge_bytes)
         || !add_size(&owned_bytes, plan_bytes)
+        || !add_size(&owned_bytes, ownership_plan_bytes)
+        || !add_size(&owned_bytes, variant_bytes)
+        || !add_size(&owned_bytes, edge_bytes)
         || !mul_size(values->recipe_operation_count, 3, &build_work)
         || !add_size(&build_work,
             concrete->linkage.runtime_requirement_count)
@@ -501,7 +960,14 @@ static bool owner_header_valid(const SolMirRuntimeValues *values) {
         || !add_size(&build_work, conventions->import_count)
         || (conventions->import_count != 0 && !add_size(&build_work, 1))
         || (values->recipe_operation_count != 0
-            && (!add_size(&build_work, 1) || !add_size(&build_work, 1))))
+            && (!add_size(&build_work, 1) || !add_size(&build_work, 1)))
+        || !add_size(&build_work, values->recipe_operation_count)
+        || (values->ownership_plan_count != 0 && !add_size(&build_work, 1))
+        || !add_size(&build_work, values->ownership_plan_count)
+        || !add_size(&build_work, values->ownership_variant_count)
+        || !add_size(&build_work, values->owned_edge_count)
+        || (values->ownership_variant_count != 0 && !add_size(&build_work, 1))
+        || (values->owned_edge_count != 0 && !add_size(&build_work, 1)))
         return false;
     size_t local_scratch = values->recipe_operation_count;
     size_t minimum_work = conventions->usage.validation_work;
@@ -511,13 +977,22 @@ static bool owner_header_valid(const SolMirRuntimeValues *values) {
     if (expected_scratch < local_scratch) expected_scratch = local_scratch;
     return values->usage.records == values->recipe_operation_count
         && values->usage.allocation_plans == values->allocation_plan_count
+        && values->usage.ownership_plans == values->ownership_plan_count
+        && values->usage.ownership_variants == values->ownership_variant_count
+        && values->usage.owned_edges == values->owned_edge_count
         && values->usage.owned_bytes == owned_bytes
         && values->usage.build_scratch_bytes == conventions->import_count
-        && values->usage.build_work == build_work
+        /* This O(1) checker establishes only a structural lower bound. Full
+           validation independently authenticates the exact construction work. */
+        && values->usage.build_work >= build_work
         && values->usage.validation_scratch_bytes == expected_scratch
         && values->usage.validation_work >= minimum_work
         && values->usage.records <= values->limits.max_records
         && values->usage.allocation_plans <= values->limits.max_allocation_plans
+        && values->usage.ownership_plans <= values->limits.max_ownership_plans
+        && values->usage.ownership_variants
+            <= values->limits.max_ownership_variants
+        && values->usage.owned_edges <= values->limits.max_owned_edges
         && values->usage.owned_bytes <= values->limits.max_owned_bytes
         && values->usage.build_scratch_bytes
             <= values->limits.max_build_scratch_bytes
@@ -567,6 +1042,12 @@ SolMirRuntimeAllocationOutcome sol_mir_runtime_values_check_allocation(
             values->recipe_operation_count * sizeof(*values->recipe_operations))
         || ranges_overlap(demand, sizeof(*demand), values->allocation_plans,
             values->allocation_plan_count * sizeof(*values->allocation_plans))
+        || ranges_overlap(demand, sizeof(*demand), values->ownership_plans,
+            values->ownership_plan_count * sizeof(*values->ownership_plans))
+        || ranges_overlap(demand, sizeof(*demand), values->ownership_variants,
+            values->ownership_variant_count * sizeof(*values->ownership_variants))
+        || ranges_overlap(demand, sizeof(*demand), values->owned_edges,
+            values->owned_edge_count * sizeof(*values->owned_edges))
         || request->recipe >= values->allocation_plan_count
         || usage->requests > quota->max_requests
         || usage->bytes > quota->max_bytes) {

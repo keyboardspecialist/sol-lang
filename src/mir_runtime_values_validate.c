@@ -55,10 +55,88 @@ static bool mul_size(size_t left, size_t right, size_t *result) {
 
 static bool limits_complete(SolMirRuntimeValuesLimits value) {
     return value.max_records != 0 && value.max_allocation_plans != 0
+        && value.max_ownership_plans != 0 && value.max_ownership_variants != 0
+        && value.max_owned_edges != 0
         && value.max_owned_bytes != 0
         && value.max_build_scratch_bytes != 0 && value.max_build_work != 0
         && value.max_validation_scratch_bytes != 0
         && value.max_validation_work != 0;
+}
+
+/* Kept independent from construction: validation must not trust builder logic. */
+static bool reconstructed_ownership_counts(const SolMirRepresentation *r,
+    size_t *variants, size_t *edges, size_t *producer_scans) {
+    *variants = 0; *edges = 0; *producer_scans = 0;
+    for (size_t recipe = 0; recipe < r->recipe_count; ++recipe) {
+        const SolMirRecipe *item = &r->recipes[recipe];
+        size_t add = 0;
+        if (!item->inhabited) continue;
+        if (item->kind == SOL_MIR_RECIPE_TUPLE
+            || item->kind == SOL_MIR_RECIPE_RECORD) add = item->fields.count;
+        else if (item->kind == SOL_MIR_RECIPE_ENUM
+            || item->kind == SOL_MIR_RECIPE_OPTION
+            || item->kind == SOL_MIR_RECIPE_RESULT) {
+            if (item->variants.count > SIZE_MAX - *variants) return false;
+            *variants += item->variants.count;
+            for (size_t v = 0; v < item->variants.count; ++v) {
+                size_t fields = r->variants[item->variants.offset + v].fields.count;
+                if (fields > SIZE_MAX - add) return false;
+                add += fields;
+            }
+        } else if (item->kind == SOL_MIR_RECIPE_DISTINCT
+            || item->kind == SOL_MIR_RECIPE_REFINED) add = 1;
+        else if (item->kind == SOL_MIR_RECIPE_CAPABILITY)
+            add = item->capability_source == SOL_MIR_RECIPE_NONE ? 0 : 1;
+        else if (item->kind == SOL_MIR_RECIPE_FUNCTION) {
+            if (r->callable_producer_count > SIZE_MAX - *producer_scans)
+                return false;
+            *producer_scans += r->callable_producer_count;
+            for (size_t p = 0; p < r->callable_producer_count; ++p)
+                if (r->callable_producers[p].function_recipe == recipe
+                    && r->callable_producers[p].kind
+                        == SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION) {
+                    if (add == SIZE_MAX) return false;
+                    ++add;
+                }
+        }
+        if (add > SIZE_MAX - *edges) return false;
+        *edges += add;
+    }
+    return true;
+}
+
+static SolMirRuntimeOwnershipClass reconstructed_ownership_class(
+    const SolMirRecipe *recipe) {
+    if (!recipe->inhabited) return SOL_MIR_RUNTIME_OWNERSHIP_UNREACHABLE;
+    switch (recipe->kind) {
+        case SOL_MIR_RECIPE_TEXT: return SOL_MIR_RUNTIME_OWNERSHIP_TEXT;
+        case SOL_MIR_RECIPE_TUPLE: case SOL_MIR_RECIPE_RECORD:
+            return SOL_MIR_RUNTIME_OWNERSHIP_PRODUCT;
+        case SOL_MIR_RECIPE_ENUM: case SOL_MIR_RECIPE_OPTION:
+        case SOL_MIR_RECIPE_RESULT: return SOL_MIR_RUNTIME_OWNERSHIP_SUM;
+        case SOL_MIR_RECIPE_DISTINCT: case SOL_MIR_RECIPE_REFINED:
+            return SOL_MIR_RUNTIME_OWNERSHIP_WRAPPER;
+        case SOL_MIR_RECIPE_FUNCTION: return SOL_MIR_RUNTIME_OWNERSHIP_CALLABLE;
+        case SOL_MIR_RECIPE_CAPABILITY: return SOL_MIR_RUNTIME_OWNERSHIP_CAPABILITY;
+        default: return SOL_MIR_RUNTIME_OWNERSHIP_LEAF;
+    }
+}
+
+static bool reconstructed_captured_edge_count(const SolMirRepresentation *r,
+    size_t *captured) {
+    *captured = 0;
+    for (size_t recipe = 0; recipe < r->recipe_count; ++recipe) {
+        const SolMirRecipe *item = &r->recipes[recipe];
+        if (!item->inhabited || item->kind != SOL_MIR_RECIPE_FUNCTION) continue;
+        for (size_t p = 0; p < r->callable_producer_count; ++p)
+            if (r->callable_producers[p].function_recipe == recipe
+                && r->callable_producers[p].kind
+                    == SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION) {
+                if (*captured == SIZE_MAX) return false;
+                ++*captured;
+            }
+    }
+    return true;
 }
 
 static bool range_valid(const void *pointer, size_t count, size_t size) {
@@ -86,17 +164,40 @@ static bool reconstruct_usage(const SolMirRuntimeConventions *conventions,
     const SolMirConcreteProgram *concrete = conventions->concrete;
     size_t records = concrete->representation.recipe_count;
     size_t owned_bytes, build_work = 0, validation_work = 0;
-    size_t plan_bytes;
+    size_t plan_bytes, ownership_plan_bytes, variant_bytes, edge_bytes;
+    size_t variants, edges, producer_scans, captured_edges;
     if (!mul_size(records, sizeof(SolMirRuntimeRecipeOperations), &owned_bytes)
         || !mul_size(records, sizeof(SolMirRuntimeAllocationPlan), &plan_bytes)
+        || !mul_size(records, sizeof(SolMirRuntimeOwnershipPlan),
+            &ownership_plan_bytes)
+        || !reconstructed_ownership_counts(&concrete->representation, &variants,
+            &edges, &producer_scans)
+        || !reconstructed_captured_edge_count(&concrete->representation,
+            &captured_edges)
+        || captured_edges > edges
+        || !mul_size(variants, sizeof(SolMirRuntimeOwnershipVariant),
+            &variant_bytes)
+        || !mul_size(edges, sizeof(SolMirRuntimeOwnedEdge), &edge_bytes)
         || !add_size(&owned_bytes, plan_bytes)
+        || !add_size(&owned_bytes, ownership_plan_bytes)
+        || !add_size(&owned_bytes, variant_bytes)
+        || !add_size(&owned_bytes, edge_bytes)
         || !mul_size(records, 3, &build_work)
         || !add_size(&build_work, concrete->linkage.runtime_requirement_count)
         || !add_size(&build_work, conventions->import_count)
         || !add_size(&build_work, conventions->import_count)
         || (conventions->import_count != 0 && !add_size(&build_work, 1))
         || (records != 0 && (!add_size(&build_work, 1)
-            || !add_size(&build_work, 1)))) return false;
+            || !add_size(&build_work, 1)))
+        || !add_size(&build_work, records)
+        || !add_size(&build_work, producer_scans)
+        || (records != 0 && !add_size(&build_work, 1))
+        || !add_size(&build_work, records)
+        || !add_size(&build_work, producer_scans)
+        || !add_size(&build_work, variants)
+        || !add_size(&build_work, edges)
+        || (variants != 0 && !add_size(&build_work, 1))
+        || (edges != 0 && !add_size(&build_work, 1))) return false;
     size_t local_validation_scratch = records;
     if (!add_size(&local_validation_scratch, conventions->import_count))
         return false;
@@ -109,13 +210,17 @@ static bool reconstruct_usage(const SolMirRuntimeConventions *conventions,
         || !add_size(&validation_work, alias_work)
         || (local_validation_scratch != 0
             && !add_size(&validation_work, 1))
-        || records > (SIZE_MAX - validation_work) / 7
-        || !add_size(&validation_work, records * 7)
+        || records > (SIZE_MAX - validation_work) / 8
+        || !add_size(&validation_work, records * 8)
         || !add_size(&validation_work,
             concrete->linkage.runtime_requirement_count)
-        || !add_size(&validation_work, conventions->import_count)) return false;
-    *usage = (SolMirRuntimeValuesUsage){records, records, owned_bytes,
-        conventions->import_count, build_work, validation_scratch, validation_work};
+        || !add_size(&validation_work, conventions->import_count)
+        || !add_size(&validation_work, variants)
+        || !add_size(&validation_work, edges - captured_edges)
+        || !add_size(&validation_work, producer_scans)) return false;
+    *usage = (SolMirRuntimeValuesUsage){records, records, records, variants, edges,
+        owned_bytes, conventions->import_count, build_work, validation_scratch,
+        validation_work};
     return true;
 }
 
@@ -123,6 +228,9 @@ static bool usage_fits(const SolMirRuntimeValuesUsage *usage,
     const SolMirRuntimeValuesLimits *limits) {
     return usage->records <= limits->max_records
         && usage->allocation_plans <= limits->max_allocation_plans
+        && usage->ownership_plans <= limits->max_ownership_plans
+        && usage->ownership_variants <= limits->max_ownership_variants
+        && usage->owned_edges <= limits->max_owned_edges
         && usage->owned_bytes <= limits->max_owned_bytes
         && usage->build_scratch_bytes <= limits->max_build_scratch_bytes
         && usage->build_work <= limits->max_build_work
@@ -146,16 +254,53 @@ static bool walk_aliases(const SolMirRuntimeValues *values,
     size_t record_count = check ? values->recipe_operation_capacity : 0;
     const void *plans = check ? values->allocation_plans : NULL;
     size_t plan_count = check ? values->allocation_plan_capacity : 0;
+    const void *ownership_plans = check ? values->ownership_plans : NULL;
+    size_t ownership_plan_count = check ? values->ownership_plan_capacity : 0;
+    const void *variants = check ? values->ownership_variants : NULL;
+    size_t variant_count = check ? values->ownership_variant_capacity : 0;
+    const void *edges = check ? values->owned_edges : NULL;
+    size_t edge_count = check ? values->owned_edge_capacity : 0;
     if (!validation_event(1)) return false;
     if (check && overlaps(records, record_count,
             sizeof(*values->recipe_operations), plans, plan_count,
             sizeof(*values->allocation_plans))) return false;
+    if (check && (overlaps(records, record_count,
+                sizeof(*values->recipe_operations), ownership_plans,
+                ownership_plan_count, sizeof(*values->ownership_plans))
+            || overlaps(records, record_count,
+                sizeof(*values->recipe_operations), variants, variant_count,
+                sizeof(*values->ownership_variants))
+            || overlaps(records, record_count,
+                sizeof(*values->recipe_operations), edges, edge_count,
+                sizeof(*values->owned_edges))
+            || overlaps(plans, plan_count, sizeof(*values->allocation_plans),
+                ownership_plans, ownership_plan_count,
+                sizeof(*values->ownership_plans))
+            || overlaps(plans, plan_count, sizeof(*values->allocation_plans),
+                variants, variant_count, sizeof(*values->ownership_variants))
+            || overlaps(plans, plan_count, sizeof(*values->allocation_plans),
+                edges, edge_count, sizeof(*values->owned_edges))
+            || overlaps(ownership_plans, ownership_plan_count,
+                sizeof(*values->ownership_plans), variants, variant_count,
+                sizeof(*values->ownership_variants))
+            || overlaps(ownership_plans, ownership_plan_count,
+                sizeof(*values->ownership_plans), edges, edge_count,
+                sizeof(*values->owned_edges))
+            || overlaps(variants, variant_count,
+                sizeof(*values->ownership_variants), edges, edge_count,
+                sizeof(*values->owned_edges)))) return false;
     const SolMirConcreteProgram *c = runtime->concrete;
 #define AGAINST(pointer, item_count, type) \
     if (!validation_event(1) || (check && (overlaps(records, record_count, \
             sizeof(*values->recipe_operations), (pointer), (item_count), \
-            sizeof(type)) || overlaps(plans, plan_count, \
+             sizeof(type)) || overlaps(plans, plan_count, \
             sizeof(*values->allocation_plans), (pointer), (item_count), \
+            sizeof(type)) || overlaps(ownership_plans, ownership_plan_count, \
+            sizeof(*values->ownership_plans), (pointer), (item_count), \
+            sizeof(type)) || overlaps(variants, variant_count, \
+            sizeof(*values->ownership_variants), (pointer), (item_count), \
+            sizeof(type)) || overlaps(edges, edge_count, \
+            sizeof(*values->owned_edges), (pointer), (item_count), \
             sizeof(type))))) return false
     AGAINST(values, 1, SolMirRuntimeValues);
     AGAINST(runtime, 1, SolMirRuntimeConventions);
@@ -498,6 +643,102 @@ static bool validate_plans(const SolMirRuntimeValues *values) {
     return true;
 }
 
+static bool same_runtime_slice(SolMirRuntimeSlice actual, size_t offset,
+    size_t count) {
+    return actual.offset == offset && actual.count == count;
+}
+
+static bool validate_owned_edge(const SolMirRuntimeOwnedEdge *actual,
+    SolMirRuntimeOwnedEdgeKind kind, SolMirRecipeId recipe, size_t ordinal,
+    size_t producer) {
+    return actual->kind == kind && actual->recipe == recipe
+        && actual->ordinal == ordinal && actual->producer == producer;
+}
+
+static bool validate_ownership_plans(const SolMirRuntimeValues *values) {
+    const SolMirRepresentation *r = &values->conventions->concrete->representation;
+    size_t edge_at = 0, variant_at = 0;
+    for (size_t recipe = 0; recipe < values->ownership_plan_count; ++recipe) {
+        if (!validation_event(1)) return false;
+        const SolMirRecipe *item = &r->recipes[recipe];
+        const SolMirRuntimeOwnershipPlan *plan = &values->ownership_plans[recipe];
+        SolMirRuntimeOwnershipClass classification
+            = reconstructed_ownership_class(item);
+        size_t edge_start = edge_at, variant_start = variant_at;
+        if (plan->recipe != recipe || plan->classification != classification
+            || plan->edges.offset != edge_start
+            || plan->variants.offset != variant_start) return false;
+        if (classification == SOL_MIR_RUNTIME_OWNERSHIP_PRODUCT) {
+            for (size_t f = 0; f < item->fields.count; ++f) {
+                if (!validation_event(1) || edge_at >= values->owned_edge_count)
+                    return false;
+                const SolMirRecipeField *field = &r->fields[item->fields.offset + f];
+                if (!validate_owned_edge(&values->owned_edges[edge_at],
+                        SOL_MIR_RUNTIME_OWNED_EDGE_FIELD, field->type,
+                        field->ordinal, SOL_MIR_RUNTIME_NONE)) return false;
+                ++edge_at;
+            }
+        } else if (classification == SOL_MIR_RUNTIME_OWNERSHIP_SUM) {
+            for (size_t v = 0; v < item->variants.count; ++v) {
+                if (!validation_event(1)
+                    || variant_at >= values->ownership_variant_count) return false;
+                const SolMirRecipeVariant *source = &r->variants[
+                    item->variants.offset + v];
+                const SolMirRuntimeOwnershipVariant *variant
+                    = &values->ownership_variants[variant_at];
+                if (variant->ordinal != source->ordinal
+                    || variant->semantic_tag != source->semantic_tag
+                    || !same_runtime_slice(variant->edges, edge_at,
+                        source->fields.count)) return false;
+                ++variant_at;
+                for (size_t f = 0; f < source->fields.count; ++f) {
+                    if (!validation_event(1) || edge_at >= values->owned_edge_count)
+                        return false;
+                    const SolMirRecipeField *field = &r->fields[
+                        source->fields.offset + f];
+                    if (!validate_owned_edge(&values->owned_edges[edge_at],
+                            SOL_MIR_RUNTIME_OWNED_EDGE_FIELD, field->type,
+                            field->ordinal, SOL_MIR_RUNTIME_NONE)) return false;
+                    ++edge_at;
+                }
+            }
+        } else if (classification == SOL_MIR_RUNTIME_OWNERSHIP_WRAPPER) {
+            if (!validation_event(1) || edge_at >= values->owned_edge_count
+                || !validate_owned_edge(&values->owned_edges[edge_at],
+                    SOL_MIR_RUNTIME_OWNED_EDGE_BACKING, item->backing, 0,
+                    SOL_MIR_RUNTIME_NONE)) return false;
+            ++edge_at;
+        } else if (classification == SOL_MIR_RUNTIME_OWNERSHIP_CAPABILITY
+            && item->capability_source != SOL_MIR_RECIPE_NONE) {
+            if (!validation_event(1) || edge_at >= values->owned_edge_count
+                || !validate_owned_edge(&values->owned_edges[edge_at],
+                    SOL_MIR_RUNTIME_OWNED_EDGE_PRIVATE_SOURCE,
+                    item->capability_source, 0, SOL_MIR_RUNTIME_NONE)) return false;
+            ++edge_at;
+        } else if (classification == SOL_MIR_RUNTIME_OWNERSHIP_CALLABLE) {
+            for (size_t p = 0; p < r->callable_producer_count; ++p) {
+                if (!validation_event(1)) return false;
+                const SolMirCallableProducer *producer = &r->callable_producers[p];
+                if (producer->function_recipe == recipe && producer->kind
+                        == SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION) {
+                    if (edge_at >= values->owned_edge_count
+                        || !validate_owned_edge(&values->owned_edges[edge_at],
+                            SOL_MIR_RUNTIME_OWNED_EDGE_CAPTURED_RECEIVER,
+                            producer->captured_receiver_type, 0, p)) return false;
+                    ++edge_at;
+                }
+            }
+        }
+        size_t expected_edges = classification == SOL_MIR_RUNTIME_OWNERSHIP_SUM
+            ? 0 : edge_at - edge_start;
+        size_t expected_variants = variant_at - variant_start;
+        if (plan->edges.count != expected_edges
+            || plan->variants.count != expected_variants) return false;
+    }
+    return edge_at == values->owned_edge_count
+        && variant_at == values->ownership_variant_count;
+}
+
 static SolMirRuntimeValuesBuildOutcome validate_predecessor(
     const SolMirRuntimeConventions *conventions, size_t *work, size_t *scratch,
     SolDiagnostics *diagnostics) {
@@ -599,14 +840,28 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_internal_validate(
             predecessor_scratch, alias_work, &expected)
         || values->recipe_operation_count != expected.records
         || values->recipe_operation_capacity != expected.records
-        || values->allocation_plan_count != expected.allocation_plans
-        || values->allocation_plan_capacity != expected.allocation_plans
+            || values->allocation_plan_count != expected.allocation_plans
+            || values->allocation_plan_capacity != expected.allocation_plans
+            || values->ownership_plan_count != expected.ownership_plans
+            || values->ownership_plan_capacity != expected.ownership_plans
+            || values->ownership_variant_count != expected.ownership_variants
+            || values->ownership_variant_capacity != expected.ownership_variants
+            || values->owned_edge_count != expected.owned_edges
+            || values->owned_edge_capacity != expected.owned_edges
         || !range_valid(values->recipe_operations,
             values->recipe_operation_capacity,
             sizeof(*values->recipe_operations))
         || !range_valid(values->allocation_plans,
             values->allocation_plan_capacity,
             sizeof(*values->allocation_plans))
+        || !range_valid(values->ownership_plans,
+            values->ownership_plan_capacity,
+            sizeof(*values->ownership_plans))
+        || !range_valid(values->ownership_variants,
+            values->ownership_variant_capacity,
+            sizeof(*values->ownership_variants))
+        || !range_valid(values->owned_edges, values->owned_edge_capacity,
+            sizeof(*values->owned_edges))
         || !usage_fits(&expected, &values->limits)
         || memcmp(&expected, &values->usage, sizeof(expected)) != 0) {
         invalid(diagnostics, "runtime values preflight or usage is invalid");
@@ -646,6 +901,7 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_internal_validate(
     unsigned char *import_consumed = scratch == NULL ? NULL : scratch + recipes;
     bool ok = validate_records(values, scratch, import_consumed);
     if (ok) ok = validate_plans(values);
+    if (ok) ok = validate_ownership_plans(values);
     free(scratch);
     if (!ok) {
         invalid(diagnostics, "runtime values records or allocation plans are not reconstructive");

@@ -30,6 +30,48 @@ typedef struct {
     uint64_t object_alignment;
 } SolMirRuntimeAllocationPlan;
 
+/* Static ownership descriptions only: P3.2c does not execute moves or drops. */
+typedef enum {
+    SOL_MIR_RUNTIME_OWNERSHIP_UNREACHABLE,
+    SOL_MIR_RUNTIME_OWNERSHIP_LEAF,
+    SOL_MIR_RUNTIME_OWNERSHIP_TEXT,
+    SOL_MIR_RUNTIME_OWNERSHIP_PRODUCT,
+    SOL_MIR_RUNTIME_OWNERSHIP_SUM,
+    SOL_MIR_RUNTIME_OWNERSHIP_WRAPPER,
+    SOL_MIR_RUNTIME_OWNERSHIP_CALLABLE,
+    SOL_MIR_RUNTIME_OWNERSHIP_CAPABILITY,
+} SolMirRuntimeOwnershipClass;
+
+typedef enum {
+    SOL_MIR_RUNTIME_OWNED_EDGE_FIELD,
+    SOL_MIR_RUNTIME_OWNED_EDGE_BACKING,
+    SOL_MIR_RUNTIME_OWNED_EDGE_PRIVATE_SOURCE,
+    SOL_MIR_RUNTIME_OWNED_EDGE_CAPTURED_RECEIVER,
+} SolMirRuntimeOwnedEdgeKind;
+
+/* producer is SOL_MIR_RUNTIME_NONE except for CAPTURED_RECEIVER edges. */
+typedef struct {
+    SolMirRuntimeOwnedEdgeKind kind;
+    SolMirRecipeId recipe;
+    size_t ordinal;
+    size_t producer;
+} SolMirRuntimeOwnedEdge;
+
+/* A SUM plan indexes one of these records for every source variant, including
+   empty and unreachable variants. */
+typedef struct {
+    size_t ordinal;
+    size_t semantic_tag;
+    SolMirRuntimeSlice edges;
+} SolMirRuntimeOwnershipVariant;
+
+typedef struct {
+    SolMirRecipeId recipe;
+    SolMirRuntimeOwnershipClass classification;
+    SolMirRuntimeSlice edges;
+    SolMirRuntimeSlice variants;
+} SolMirRuntimeOwnershipPlan;
+
 /* Runtime allocation quotas are cumulative and distinct from build limits. */
 typedef struct {
     uint64_t max_requests;
@@ -63,6 +105,9 @@ typedef enum {
 typedef struct {
     size_t max_records;
     size_t max_allocation_plans;
+    size_t max_ownership_plans;
+    size_t max_ownership_variants;
+    size_t max_owned_edges;
     size_t max_owned_bytes;
     size_t max_build_scratch_bytes;
     size_t max_build_work;
@@ -73,6 +118,9 @@ typedef struct {
 typedef struct {
     size_t records;
     size_t allocation_plans;
+    size_t ownership_plans;
+    size_t ownership_variants;
+    size_t owned_edges;
     size_t owned_bytes;
     size_t build_scratch_bytes;
     size_t build_work;
@@ -91,6 +139,15 @@ typedef struct {
     SolMirRuntimeAllocationPlan *allocation_plans;
     size_t allocation_plan_count;
     size_t allocation_plan_capacity;
+    SolMirRuntimeOwnershipPlan *ownership_plans;
+    size_t ownership_plan_count;
+    size_t ownership_plan_capacity;
+    SolMirRuntimeOwnershipVariant *ownership_variants;
+    size_t ownership_variant_count;
+    size_t ownership_variant_capacity;
+    SolMirRuntimeOwnedEdge *owned_edges;
+    size_t owned_edge_count;
+    size_t owned_edge_capacity;
     SolMirRuntimeValuesLimits limits;
     SolMirRuntimeValuesUsage usage;
 } SolMirRuntimeValues;
@@ -153,6 +210,9 @@ void sol_mir_runtime_values_test_force_persistent_allocation_failure(
 );
 void sol_mir_runtime_values_test_force_validation_allocation_failure(bool force);
 size_t sol_mir_runtime_values_test_validation_allocation_attempts(void);
+size_t sol_mir_runtime_values_test_ownership_count_scans(void);
+void sol_mir_runtime_values_test_reverse_captured_fragments(bool reverse);
+void sol_mir_runtime_values_test_force_captured_digest_collision(bool force);
 bool sol_mir_runtime_values_test_reconstruct_usage(
     const SolMirRuntimeConventions *conventions,
     const SolMirRuntimeValuesLimits *limits,
