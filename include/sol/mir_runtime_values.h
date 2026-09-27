@@ -56,6 +56,30 @@ typedef struct {
     SolMirRuntimeEqualityClass classification;
 } SolMirRuntimeEqualityPlan;
 
+/* Static E3 borrowed-host-result eligibility.  These plans describe transfer
+   only; they neither call a host nor define an adapter ABI. */
+typedef enum {
+    SOL_MIR_RUNTIME_HOST_RESULT_UNREACHABLE,
+    SOL_MIR_RUNTIME_HOST_RESULT_FORBIDDEN,
+    SOL_MIR_RUNTIME_HOST_RESULT_INT64,
+    SOL_MIR_RUNTIME_HOST_RESULT_BOOL,
+    SOL_MIR_RUNTIME_HOST_RESULT_TEXT,
+    SOL_MIR_RUNTIME_HOST_RESULT_UNIT,
+    SOL_MIR_RUNTIME_HOST_RESULT_OPTION,
+    SOL_MIR_RUNTIME_HOST_RESULT_RESULT,
+} SolMirRuntimeHostResultClass;
+
+typedef struct {
+    SolMirRecipeId recipe;
+    SolMirRuntimeHostResultClass classification;
+} SolMirRuntimeHostResultPlan;
+
+/* The authenticated P3.1 host requirement and its concrete result recipe. */
+typedef struct {
+    SolMirLinkageHostRequirementId host;
+    SolMirRecipeId result;
+} SolMirRuntimeHostResultRequirement;
+
 typedef struct {
     SolMirRecipeId recipe;
     SolMirRuntimeAllocationPlanKind kind;
@@ -140,6 +164,8 @@ typedef struct {
     size_t max_allocation_plans;
     size_t max_copy_plans;
     size_t max_equality_plans;
+    size_t max_host_result_plans;
+    size_t max_host_result_requirements;
     size_t max_ownership_plans;
     size_t max_ownership_variants;
     size_t max_owned_edges;
@@ -155,6 +181,8 @@ typedef struct {
     size_t allocation_plans;
     size_t copy_plans;
     size_t equality_plans;
+    size_t host_result_plans;
+    size_t host_result_requirements;
     size_t ownership_plans;
     size_t ownership_variants;
     size_t owned_edges;
@@ -182,6 +210,12 @@ typedef struct {
     SolMirRuntimeEqualityPlan *equality_plans;
     size_t equality_plan_count;
     size_t equality_plan_capacity;
+    SolMirRuntimeHostResultPlan *host_result_plans;
+    size_t host_result_plan_count;
+    size_t host_result_plan_capacity;
+    SolMirRuntimeHostResultRequirement *host_result_requirements;
+    size_t host_result_requirement_count;
+    size_t host_result_requirement_capacity;
     SolMirRuntimeOwnershipPlan *ownership_plans;
     size_t ownership_plan_count;
     size_t ownership_plan_capacity;
@@ -246,6 +280,74 @@ bool sol_mir_runtime_allocation_outcome_failure(
 );
 
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
+/* Finite borrowed-view transfer model used only by plan tests.  Its trees are
+   views: neither this API nor sol_mir_runtime_host_owned_value_free ever
+   modifies or frees a source node or source text. */
+typedef enum {
+    SOL_MIR_RUNTIME_HOST_VALUE_INT64,
+    SOL_MIR_RUNTIME_HOST_VALUE_BOOL,
+    SOL_MIR_RUNTIME_HOST_VALUE_TEXT,
+    SOL_MIR_RUNTIME_HOST_VALUE_UNIT,
+    SOL_MIR_RUNTIME_HOST_VALUE_OPTION,
+    SOL_MIR_RUNTIME_HOST_VALUE_RESULT,
+} SolMirRuntimeHostValueKind;
+
+typedef struct SolMirRuntimeHostValue SolMirRuntimeHostValue;
+struct SolMirRuntimeHostValue {
+    SolMirRuntimeHostValueKind kind;
+    union {
+        int64_t int64_value;
+        bool bool_value;
+        struct { const uint8_t *bytes; uint64_t length; } text;
+        struct { size_t ordinal; const SolMirRuntimeHostValue *payload; } sum;
+    } as;
+};
+
+typedef struct SolMirRuntimeHostOwnedValue SolMirRuntimeHostOwnedValue;
+struct SolMirRuntimeHostOwnedValue {
+    SolMirRuntimeHostValueKind kind;
+    union {
+        int64_t int64_value;
+        bool bool_value;
+        struct { uint8_t *bytes; uint64_t length; } text;
+        struct { size_t ordinal; SolMirRuntimeHostOwnedValue *payload; } sum;
+    } as;
+};
+
+typedef enum {
+    SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED,
+    SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID,
+    SOL_MIR_RUNTIME_HOST_TRANSFER_LIMIT,
+    SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_LIMIT,
+    SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_FAILED,
+} SolMirRuntimeHostTransferOutcome;
+
+typedef struct {
+    size_t max_depth; /* zero selects the specified limit of 256. */
+    size_t max_nodes; /* zero selects the specified limit of 1,048,576. */
+    size_t max_work; /* zero selects the specified limit of 4,000,000. */
+    /* One-based allocation request to refuse; zero never refuses. */
+    size_t fail_allocation_attempt;
+} SolMirRuntimeHostTransferLimits;
+
+typedef struct {
+    const SolMirRuntimeValues *values;
+    SolMirRecipeId recipe;
+    const SolMirRuntimeHostValue *source;
+    const SolMirRuntimeAllocationQuota *quota;
+    SolMirRuntimeAllocationUsage *usage;
+    const SolMirRuntimeHostTransferLimits *limits;
+} SolMirRuntimeHostTransferRequest;
+
+/* destination must be initialized to NULL.  It is published exactly once on
+   success; a failed staging attempt leaves it NULL and keeps prior successful
+   allocation quota charges. */
+SolMirRuntimeHostTransferOutcome sol_mir_runtime_values_test_transfer_host_result(
+    const SolMirRuntimeHostTransferRequest *request,
+    SolMirRuntimeHostOwnedValue **destination
+);
+void sol_mir_runtime_host_owned_value_free(SolMirRuntimeHostOwnedValue *value);
+
 void sol_mir_runtime_values_test_force_allocation_failure(bool force);
 /* One-based persistent-arena allocation attempt; zero disables this hook. */
 void sol_mir_runtime_values_test_force_persistent_allocation_failure(

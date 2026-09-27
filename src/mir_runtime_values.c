@@ -69,6 +69,7 @@ static bool build_event(size_t amount) {
 static bool limits_zero(SolMirRuntimeValuesLimits value) {
     return value.max_records == 0 && value.max_allocation_plans == 0
         && value.max_copy_plans == 0 && value.max_equality_plans == 0
+        && value.max_host_result_plans == 0 && value.max_host_result_requirements == 0
         && value.max_ownership_plans == 0 && value.max_ownership_variants == 0
         && value.max_owned_edges == 0
         && value.max_owned_bytes == 0
@@ -80,6 +81,7 @@ static bool limits_zero(SolMirRuntimeValuesLimits value) {
 static bool limits_complete(SolMirRuntimeValuesLimits value) {
     return value.max_records != 0 && value.max_allocation_plans != 0
         && value.max_copy_plans != 0 && value.max_equality_plans != 0
+        && value.max_host_result_plans != 0 && value.max_host_result_requirements != 0
         && value.max_ownership_plans != 0 && value.max_ownership_variants != 0
         && value.max_owned_edges != 0
         && value.max_owned_bytes != 0
@@ -107,6 +109,12 @@ static bool owner_empty(const SolMirRuntimeValues *values) {
         && values->equality_plans == NULL
         && values->equality_plan_count == 0
         && values->equality_plan_capacity == 0
+        && values->host_result_plans == NULL
+        && values->host_result_plan_count == 0
+        && values->host_result_plan_capacity == 0
+        && values->host_result_requirements == NULL
+        && values->host_result_requirement_count == 0
+        && values->host_result_requirement_capacity == 0
         && values->ownership_plans == NULL
         && values->ownership_plan_count == 0
         && values->ownership_plan_capacity == 0
@@ -129,6 +137,8 @@ void sol_mir_runtime_values_free(SolMirRuntimeValues *values) {
     free(values->allocation_plans);
     free(values->copy_plans);
     free(values->equality_plans);
+    free(values->host_result_plans);
+    free(values->host_result_requirements);
     free(values->ownership_plans);
     free(values->ownership_variants);
     free(values->owned_edges);
@@ -141,6 +151,8 @@ SolMirRuntimeValuesLimits sol_mir_runtime_values_default_limits(void) {
         .max_allocation_plans = 4000000,
         .max_copy_plans = 4000000,
         .max_equality_plans = 4000000,
+        .max_host_result_plans = 4000000,
+        .max_host_result_requirements = 4000000,
         .max_ownership_plans = 4000000,
         .max_ownership_variants = 4000000,
         .max_owned_edges = 16000000,
@@ -351,6 +363,59 @@ static SolMirRuntimeEqualityClass equality_class(const SolMirRecipe *recipe,
     }
 }
 
+/* This is a least fixed point deliberately: a recursive recipe cycle has no
+   finite E3 leaf proof and is therefore not a transferable host result. */
+static bool host_result_classes(const SolMirRepresentation *representation,
+    unsigned char *eligible, size_t *work) {
+    size_t count = representation->recipe_count;
+    for (size_t i = 0; i < count; ++i) {
+        const SolMirRecipe *recipe = &representation->recipes[i];
+        eligible[i] = recipe->inhabited && (recipe->kind == SOL_MIR_RECIPE_INT64
+            || recipe->kind == SOL_MIR_RECIPE_BOOL || recipe->kind == SOL_MIR_RECIPE_TEXT
+            || recipe->kind == SOL_MIR_RECIPE_UNIT);
+    }
+    bool changed;
+    do {
+        changed = false;
+        for (size_t i = 0; i < count; ++i) {
+            if (*work == SIZE_MAX) return false;
+            ++*work;
+            const SolMirRecipe *recipe = &representation->recipes[i];
+            if (eligible[i] || !recipe->inhabited
+                || (recipe->kind != SOL_MIR_RECIPE_OPTION
+                    && recipe->kind != SOL_MIR_RECIPE_RESULT)) continue;
+            bool valid = true;
+            for (size_t v = 0; v < recipe->variants.count && valid; ++v) {
+                const SolMirRecipeVariant *variant = &representation->variants[
+                    recipe->variants.offset + v];
+                if (variant->fields.count > 1) valid = false;
+                for (size_t f = 0; valid && f < variant->fields.count; ++f) {
+                    SolMirRecipeId child = representation->fields[
+                        variant->fields.offset + f].type;
+                    if (child >= count || !eligible[child]) valid = false;
+                }
+            }
+            if (valid) { eligible[i] = 1; changed = true; }
+        }
+    } while (changed);
+    return true;
+}
+
+static SolMirRuntimeHostResultClass host_result_class(const SolMirRecipe *recipe,
+    bool eligible) {
+    if (!recipe->inhabited) return SOL_MIR_RUNTIME_HOST_RESULT_UNREACHABLE;
+    if (!eligible) return SOL_MIR_RUNTIME_HOST_RESULT_FORBIDDEN;
+    switch (recipe->kind) {
+        case SOL_MIR_RECIPE_INT64: return SOL_MIR_RUNTIME_HOST_RESULT_INT64;
+        case SOL_MIR_RECIPE_BOOL: return SOL_MIR_RUNTIME_HOST_RESULT_BOOL;
+        case SOL_MIR_RECIPE_TEXT: return SOL_MIR_RUNTIME_HOST_RESULT_TEXT;
+        case SOL_MIR_RECIPE_UNIT: return SOL_MIR_RUNTIME_HOST_RESULT_UNIT;
+        case SOL_MIR_RECIPE_OPTION: return SOL_MIR_RUNTIME_HOST_RESULT_OPTION;
+        case SOL_MIR_RECIPE_RESULT: return SOL_MIR_RUNTIME_HOST_RESULT_RESULT;
+        default: return SOL_MIR_RUNTIME_HOST_RESULT_FORBIDDEN;
+    }
+}
+
 SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_build(
     const SolMirRuntimeValuesBuildRequest *request, SolMirRuntimeValues *output,
     SolDiagnostics *diagnostics) {
@@ -381,6 +446,7 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_build(
     const SolMirLinkage *linkage = &scratch.conventions->concrete->linkage;
     unsigned char *consumed = NULL;
     unsigned char *equality_eligible = NULL;
+    unsigned char *host_result_eligible = NULL;
     if (scratch.usage.build_scratch_bytes != 0) {
         if (!build_event(1)) goto exhausted;
         consumed = calloc(scratch.usage.build_scratch_bytes, 1);
@@ -393,6 +459,7 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_build(
     }
     size_t count = scratch.usage.records;
     equality_eligible = consumed == NULL ? NULL : consumed + scratch.conventions->import_count;
+    host_result_eligible = equality_eligible == NULL ? NULL : equality_eligible + count;
     if (count != 0 && !build_event(1)) goto exhausted;
     if (count != 0) {
         ++persistent_allocation_attempt;
@@ -513,6 +580,69 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_build(
             &scratch.conventions->concrete->representation.recipes[i],
             equality_eligible[i] != 0)};
         ++scratch.equality_plan_count;
+    }
+    if (count != 0 && !build_event(1)) goto exhausted;
+    if (count != 0) {
+        ++persistent_allocation_attempt;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+        if (!force_allocation_failure && persistent_allocation_attempt
+                != force_persistent_allocation_failure)
+#endif
+            scratch.host_result_plans = calloc(count, sizeof(*scratch.host_result_plans));
+    }
+    if (count != 0 && scratch.host_result_plans == NULL) {
+        free(consumed);
+        if (diagnostics != NULL) diagnostics->allocation_failed = true;
+        sol_mir_runtime_values_free(&scratch);
+        report(diagnostics, "runtime values host-result-plan persistent allocation failed");
+        return SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED;
+    }
+    scratch.host_result_plan_capacity = count;
+    size_t host_result_work = 0;
+    if ((count != 0 && host_result_eligible == NULL)
+        || !host_result_classes(&scratch.conventions->concrete->representation,
+            host_result_eligible, &host_result_work) || !build_event(host_result_work))
+        goto internal;
+    for (size_t i = 0; i < count; ++i) {
+        scratch.host_result_plans[i] = (SolMirRuntimeHostResultPlan){i,
+            host_result_class(&scratch.conventions->concrete->representation.recipes[i],
+                host_result_eligible[i] != 0)};
+        ++scratch.host_result_plan_count;
+    }
+    size_t host_requirements = linkage->host_requirement_count;
+    if (host_requirements != 0 && !build_event(1)) goto exhausted;
+    if (host_requirements != 0) {
+        ++persistent_allocation_attempt;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+        if (!force_allocation_failure && persistent_allocation_attempt
+                != force_persistent_allocation_failure)
+#endif
+            scratch.host_result_requirements = calloc(host_requirements,
+                sizeof(*scratch.host_result_requirements));
+    }
+    if (host_requirements != 0 && scratch.host_result_requirements == NULL) {
+        free(consumed);
+        if (diagnostics != NULL) diagnostics->allocation_failed = true;
+        sol_mir_runtime_values_free(&scratch);
+        report(diagnostics, "runtime values host-result-requirement persistent allocation failed");
+        return SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED;
+    }
+    scratch.host_result_requirement_capacity = host_requirements;
+    for (size_t i = 0; i < host_requirements; ++i) {
+        if (!build_event(1)) goto exhausted;
+        if (linkage->host_requirements[i].result >= count
+            || scratch.host_result_plans[linkage->host_requirements[i].result]
+                .classification == SOL_MIR_RUNTIME_HOST_RESULT_UNREACHABLE
+            || scratch.host_result_plans[linkage->host_requirements[i].result]
+                .classification == SOL_MIR_RUNTIME_HOST_RESULT_FORBIDDEN) {
+            free(consumed);
+            sol_mir_runtime_values_free(&scratch);
+            report(diagnostics, "host requirement result is outside the E3 host-result closure");
+            return SOL_MIR_RUNTIME_VALUES_BUILD_UNSUPPORTED;
+        }
+        scratch.host_result_requirements[scratch.host_result_requirement_count++]
+            = (SolMirRuntimeHostResultRequirement){i,
+                linkage->host_requirements[i].result};
     }
     size_t ownership_variants, owned_edges, producer_scans;
     const SolMirRepresentation *representation
@@ -864,6 +994,12 @@ static const char *ownership_class_name(SolMirRuntimeOwnershipClass value) {
     return value <= SOL_MIR_RUNTIME_OWNERSHIP_CAPABILITY ? names[value] : NULL;
 }
 
+static const char *host_result_class_name(SolMirRuntimeHostResultClass value) {
+    static const char *const names[] = {"unreachable", "forbidden", "int64",
+        "bool", "text", "unit", "option", "result"};
+    return value <= SOL_MIR_RUNTIME_HOST_RESULT_RESULT ? names[value] : NULL;
+}
+
 static const char *owned_edge_name(SolMirRuntimeOwnedEdgeKind value) {
     static const char *const names[] = {"field", "backing", "private-source",
         "captured-receiver"};
@@ -885,7 +1021,7 @@ bool sol_mir_runtime_values_render(FILE *stream,
         return false;
     Buffer output = {0};
     format(&output, "mir_runtime_values\n");
-    format(&output, "declaration.kind=operation-demand-allocation-plan-inventory executable-operations=false allocation-plans=true ownership-plans=true copy-plans=true equality-plans=true equality-execution=false copy-execution=false move-drop-execution=false\n");
+    format(&output, "declaration.kind=operation-demand-allocation-plan-inventory executable-operations=false allocation-plans=true ownership-plans=true copy-plans=true equality-plans=true host-result-plans=true host-result-execution=false equality-execution=false copy-execution=false move-drop-execution=false\n");
     size_t count = values->recipe_operation_count;
     RenderLine *lines = count == 0 ? NULL : calloc(count, sizeof(*lines));
     if (count != 0 && lines == NULL) { free(output.data); return false; }
@@ -944,6 +1080,11 @@ bool sol_mir_runtime_values_render(FILE *stream,
         if (equality->recipe != i || equality->classification
                 > SOL_MIR_RUNTIME_EQUALITY_WRAPPER) { output.failed = true; break; }
         format(line, " equality=%s", equality_names[equality->classification]);
+        const SolMirRuntimeHostResultPlan *host_result = &values->host_result_plans[i];
+        const char *host_class = host_result->recipe == i
+            ? host_result_class_name(host_result->classification) : NULL;
+        if (host_class == NULL) { output.failed = true; break; }
+        format(line, " host-result=%s", host_class);
         if (ownership->classification == SOL_MIR_RUNTIME_OWNERSHIP_CALLABLE) {
             RenderLine *captures = ownership->edges.count == 0 ? NULL
                 : calloc(ownership->edges.count, sizeof(*captures));
@@ -1031,6 +1172,38 @@ bool sol_mir_runtime_values_render(FILE *stream,
         format(&output, "%s", lines[i].text.data);
     for (size_t i = 0; i < count; ++i) free(lines[i].text.data);
     free(lines);
+    size_t host_count = values->host_result_requirement_count;
+    RenderLine *host_lines = host_count == 0 ? NULL : calloc(host_count,
+        sizeof(*host_lines));
+    if (host_count != 0 && host_lines == NULL) output.failed = true;
+    for (size_t i = 0; !output.failed && i < host_count; ++i) {
+        const SolMirRuntimeHostResultRequirement *relation
+            = &values->host_result_requirements[i];
+        if (relation->host >= values->conventions->concrete->linkage.host_requirement_count
+            || relation->result >= count) { output.failed = true; break; }
+        const SolMirLinkageHostRequirement *host
+            = &values->conventions->concrete->linkage.host_requirements[relation->host];
+        SolMirLinkageDigest result;
+        if (!sol_mir_linkage_internal_recipe_key(linkage, relation->result,
+                &result, NULL)) { output.failed = true; break; }
+        const char *classification = host_result_class_name(
+            values->host_result_plans[relation->result].classification);
+        if (classification == NULL) { output.failed = true; break; }
+        format(&host_lines[i].text, "host-result requirement=");
+        render_digest(&host_lines[i].text, &host->requirement_key);
+        format(&host_lines[i].text, " result=");
+        render_digest(&host_lines[i].text, &result);
+        format(&host_lines[i].text, " class=%s", classification);
+        format(&host_lines[i].text, "\n");
+    }
+    for (size_t i = 0; i < host_count; ++i)
+        if (host_lines[i].text.failed) output.failed = true;
+    if (!output.failed && host_count > 1)
+        qsort(host_lines, host_count, sizeof(*host_lines), compare_lines);
+    for (size_t i = 0; !output.failed && i < host_count; ++i)
+        format(&output, "%s", host_lines[i].text.data);
+    for (size_t i = 0; i < host_count; ++i) free(host_lines[i].text.data);
+    free(host_lines);
     bool ok = !output.failed && (output.length == 0
         || fwrite(output.data, output.length, 1, stream) == 1);
     free(output.data);
@@ -1104,12 +1277,16 @@ static bool owner_header_valid(const SolMirRuntimeValues *values) {
         || values->allocation_plan_count != values->allocation_plan_capacity
         || values->copy_plan_count != values->copy_plan_capacity
         || values->equality_plan_count != values->equality_plan_capacity
+        || values->host_result_plan_count != values->host_result_plan_capacity
+        || values->host_result_requirement_count
+            != values->host_result_requirement_capacity
         || values->ownership_plan_count != values->ownership_plan_capacity
         || values->ownership_variant_count != values->ownership_variant_capacity
         || values->owned_edge_count != values->owned_edge_capacity
         || values->recipe_operation_count != values->allocation_plan_count
         || values->recipe_operation_count != values->copy_plan_count
         || values->recipe_operation_count != values->equality_plan_count
+        || values->recipe_operation_count != values->host_result_plan_count
         || values->recipe_operation_count != values->ownership_plan_count
         || values->recipe_operation_count != representation->recipe_count
         || representation->recipe_count != representation->recipe_capacity
@@ -1126,6 +1303,11 @@ static bool owner_header_valid(const SolMirRuntimeValues *values) {
             sizeof(*values->copy_plans))
         || !range_valid(values->equality_plans, values->equality_plan_capacity,
             sizeof(*values->equality_plans))
+        || !range_valid(values->host_result_plans, values->host_result_plan_capacity,
+            sizeof(*values->host_result_plans))
+        || !range_valid(values->host_result_requirements,
+            values->host_result_requirement_capacity,
+            sizeof(*values->host_result_requirements))
         || !range_valid(values->ownership_plans, values->ownership_plan_capacity,
             sizeof(*values->ownership_plans))
         || !range_valid(values->ownership_variants,
@@ -1144,6 +1326,7 @@ static bool owner_header_valid(const SolMirRuntimeValues *values) {
             sizeof(*concrete->linkage.runtime_requirements))
         || !sol_mir_target_descriptor_validate(&layout->target)) return false;
     size_t owned_bytes, plan_bytes, copy_plan_bytes, equality_plan_bytes,
+        host_plan_bytes, host_requirement_bytes,
         ownership_plan_bytes, variant_bytes, edge_bytes, build_work;
     if (!mul_size(values->recipe_operation_count,
             sizeof(*values->recipe_operations), &owned_bytes)
@@ -1153,6 +1336,10 @@ static bool owner_header_valid(const SolMirRuntimeValues *values) {
             &copy_plan_bytes)
         || !mul_size(values->equality_plan_count, sizeof(*values->equality_plans),
             &equality_plan_bytes)
+        || !mul_size(values->host_result_plan_count,
+            sizeof(*values->host_result_plans), &host_plan_bytes)
+        || !mul_size(values->host_result_requirement_count,
+            sizeof(*values->host_result_requirements), &host_requirement_bytes)
         || !mul_size(values->ownership_plan_count,
             sizeof(*values->ownership_plans), &ownership_plan_bytes)
         || !mul_size(values->ownership_variant_count,
@@ -1162,6 +1349,8 @@ static bool owner_header_valid(const SolMirRuntimeValues *values) {
         || !add_size(&owned_bytes, plan_bytes)
         || !add_size(&owned_bytes, copy_plan_bytes)
         || !add_size(&owned_bytes, equality_plan_bytes)
+        || !add_size(&owned_bytes, host_plan_bytes)
+        || !add_size(&owned_bytes, host_requirement_bytes)
         || !add_size(&owned_bytes, ownership_plan_bytes)
         || !add_size(&owned_bytes, variant_bytes)
         || !add_size(&owned_bytes, edge_bytes)
@@ -1183,21 +1372,28 @@ static bool owner_header_valid(const SolMirRuntimeValues *values) {
         || (values->owned_edge_count != 0 && !add_size(&build_work, 1)))
         return false;
     size_t local_scratch = values->recipe_operation_count;
+    size_t build_scratch = conventions->import_count;
     size_t minimum_work = conventions->usage.validation_work;
-    if (!add_size(&local_scratch, conventions->import_count)
-        || !add_size(&minimum_work, 8)) return false;
+    if (!add_size(&local_scratch, values->recipe_operation_count)
+        || !add_size(&local_scratch, conventions->import_count)
+        || !add_size(&local_scratch, values->recipe_operation_count)
+        || !add_size(&minimum_work, 8)
+        || !add_size(&build_scratch, values->recipe_operation_count)
+        || !add_size(&build_scratch, values->recipe_operation_count)) return false;
     size_t expected_scratch = conventions->usage.validation_scratch_bytes;
     if (expected_scratch < local_scratch) expected_scratch = local_scratch;
     return values->usage.records == values->recipe_operation_count
         && values->usage.allocation_plans == values->allocation_plan_count
         && values->usage.copy_plans == values->copy_plan_count
         && values->usage.equality_plans == values->equality_plan_count
+        && values->usage.host_result_plans == values->host_result_plan_count
+        && values->usage.host_result_requirements
+            == values->host_result_requirement_count
         && values->usage.ownership_plans == values->ownership_plan_count
         && values->usage.ownership_variants == values->ownership_variant_count
         && values->usage.owned_edges == values->owned_edge_count
         && values->usage.owned_bytes == owned_bytes
-        && values->usage.build_scratch_bytes
-            == conventions->import_count + values->recipe_operation_count
+        && values->usage.build_scratch_bytes == build_scratch
         /* This O(1) checker establishes only a structural lower bound. Full
            validation independently authenticates the exact construction work. */
         && values->usage.build_work >= build_work
@@ -1207,6 +1403,9 @@ static bool owner_header_valid(const SolMirRuntimeValues *values) {
         && values->usage.allocation_plans <= values->limits.max_allocation_plans
         && values->usage.copy_plans <= values->limits.max_copy_plans
         && values->usage.equality_plans <= values->limits.max_equality_plans
+        && values->usage.host_result_plans <= values->limits.max_host_result_plans
+        && values->usage.host_result_requirements
+            <= values->limits.max_host_result_requirements
         && values->usage.ownership_plans <= values->limits.max_ownership_plans
         && values->usage.ownership_variants
             <= values->limits.max_ownership_variants
@@ -1264,6 +1463,11 @@ SolMirRuntimeAllocationOutcome sol_mir_runtime_values_check_allocation(
             values->copy_plan_count * sizeof(*values->copy_plans))
         || ranges_overlap(demand, sizeof(*demand), values->equality_plans,
             values->equality_plan_count * sizeof(*values->equality_plans))
+        || ranges_overlap(demand, sizeof(*demand), values->host_result_plans,
+            values->host_result_plan_count * sizeof(*values->host_result_plans))
+        || ranges_overlap(demand, sizeof(*demand), values->host_result_requirements,
+            values->host_result_requirement_count
+                * sizeof(*values->host_result_requirements))
         || ranges_overlap(demand, sizeof(*demand), values->ownership_plans,
             values->ownership_plan_count * sizeof(*values->ownership_plans))
         || ranges_overlap(demand, sizeof(*demand), values->ownership_variants,
@@ -1319,3 +1523,213 @@ bool sol_mir_runtime_allocation_outcome_failure(
     else return false;
     return true;
 }
+
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+enum { HOST_TRANSFER_DEFAULT_DEPTH = 256, HOST_TRANSFER_DEFAULT_NODES = 1048576,
+    HOST_TRANSFER_DEFAULT_WORK = 4000000 };
+
+typedef struct {
+    const SolMirRuntimeValues *values;
+    size_t max_depth, max_nodes, max_work, nodes, work, allocation_attempt;
+    size_t fail_allocation_attempt;
+} HostTransfer;
+
+
+static bool host_transfer_tick(HostTransfer *transfer, size_t amount) {
+    return amount <= SIZE_MAX - transfer->work
+        && (transfer->work += amount) <= transfer->max_work;
+}
+
+static const SolMirRecipeVariant *host_transfer_variant(
+    const SolMirRepresentation *representation, const SolMirRecipe *recipe,
+    size_t ordinal) {
+    for (size_t i = 0; i < recipe->variants.count; ++i) {
+        const SolMirRecipeVariant *variant = &representation->variants[
+            recipe->variants.offset + i];
+        if (variant->ordinal == ordinal) return variant;
+    }
+    return NULL;
+}
+
+static bool host_transfer_kind(SolMirRuntimeHostResultClass classification,
+    SolMirRuntimeHostValueKind *kind) {
+    switch (classification) {
+        case SOL_MIR_RUNTIME_HOST_RESULT_INT64: *kind = SOL_MIR_RUNTIME_HOST_VALUE_INT64; return true;
+        case SOL_MIR_RUNTIME_HOST_RESULT_BOOL: *kind = SOL_MIR_RUNTIME_HOST_VALUE_BOOL; return true;
+        case SOL_MIR_RUNTIME_HOST_RESULT_TEXT: *kind = SOL_MIR_RUNTIME_HOST_VALUE_TEXT; return true;
+        case SOL_MIR_RUNTIME_HOST_RESULT_UNIT: *kind = SOL_MIR_RUNTIME_HOST_VALUE_UNIT; return true;
+        case SOL_MIR_RUNTIME_HOST_RESULT_OPTION: *kind = SOL_MIR_RUNTIME_HOST_VALUE_OPTION; return true;
+        case SOL_MIR_RUNTIME_HOST_RESULT_RESULT: *kind = SOL_MIR_RUNTIME_HOST_VALUE_RESULT; return true;
+        default: return false;
+    }
+}
+
+/* The first pass deliberately has no quota or allocation decision.  It walks
+   every selected child before demand reconstruction so a malformed later view
+   cannot be hidden by an earlier quota failure. */
+static SolMirRuntimeHostTransferOutcome host_transfer_shape(HostTransfer *transfer,
+    SolMirRecipeId recipe, const SolMirRuntimeHostValue *source, size_t depth,
+    const SolMirRuntimeHostValue *const *ancestors) {
+    if (!host_transfer_tick(transfer, 1)) return SOL_MIR_RUNTIME_HOST_TRANSFER_LIMIT;
+    if (source == NULL) return SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID;
+    if (depth > transfer->max_depth || transfer->nodes == transfer->max_nodes)
+        return SOL_MIR_RUNTIME_HOST_TRANSFER_LIMIT;
+    for (size_t i = 0; i + 1 < depth; ++i)
+        if (ancestors[i] == source) return SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID;
+    ++transfer->nodes;
+    if (recipe >= transfer->values->host_result_plan_count) return SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID;
+    const SolMirRuntimeHostResultPlan *plan = &transfer->values->host_result_plans[recipe];
+    SolMirRuntimeHostValueKind wanted;
+    if (plan->recipe != recipe || !host_transfer_kind(plan->classification, &wanted)
+        || source->kind != wanted) return SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID;
+    if (source->kind == SOL_MIR_RUNTIME_HOST_VALUE_TEXT
+        && source->as.text.length != 0 && source->as.text.bytes == NULL)
+        return SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID;
+    if (source->kind != SOL_MIR_RUNTIME_HOST_VALUE_OPTION
+        && source->kind != SOL_MIR_RUNTIME_HOST_VALUE_RESULT)
+        return SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED;
+    const SolMirRepresentation *r = &transfer->values->conventions->concrete->representation;
+    const SolMirRecipe *expected = &r->recipes[recipe];
+    const SolMirRecipeVariant *variant = host_transfer_variant(r, expected,
+        source->as.sum.ordinal);
+    if (variant == NULL || variant->fields.count > 1
+        || (variant->fields.count == 0 && source->as.sum.payload != NULL)
+        || (variant->fields.count == 1 && source->as.sum.payload == NULL))
+        return SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID;
+    if (variant->fields.count == 0) return SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED;
+    const SolMirRuntimeHostValue *next[HOST_TRANSFER_DEFAULT_DEPTH];
+    if (depth >= HOST_TRANSFER_DEFAULT_DEPTH) return SOL_MIR_RUNTIME_HOST_TRANSFER_LIMIT;
+    for (size_t i = 0; i < depth; ++i) next[i] = ancestors[i];
+    next[depth] = source;
+    return host_transfer_shape(transfer, r->fields[variant->fields.offset].type,
+        source->as.sum.payload, depth + 1, next);
+}
+
+/* This second preflight pass authenticates each exact P3.2b request against a
+   private cumulative usage.  The caller's usage remains untouched until a
+   later staging allocation succeeds. */
+static SolMirRuntimeHostTransferOutcome host_transfer_demand(HostTransfer *transfer,
+    SolMirRecipeId recipe, const SolMirRuntimeHostValue *source,
+    const SolMirRuntimeAllocationQuota *quota, SolMirRuntimeAllocationUsage *tentative) {
+    if (!host_transfer_tick(transfer, 1)) return SOL_MIR_RUNTIME_HOST_TRANSFER_LIMIT;
+    SolMirRuntimeAllocationRequest request = {recipe,
+        source->kind == SOL_MIR_RUNTIME_HOST_VALUE_TEXT ? source->as.text.length : 0};
+    SolMirRuntimeAllocationDemand demand;
+    SolMirRuntimeAllocationOutcome outcome = sol_mir_runtime_values_check_allocation(
+        transfer->values, &request, quota, tentative, &demand);
+    if (outcome != SOL_MIR_RUNTIME_ALLOCATION_SUCCEEDED)
+        return outcome == SOL_MIR_RUNTIME_ALLOCATION_LIMIT
+            ? SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_LIMIT
+            : SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID;
+    if (!add_u64(tentative->requests, demand.requests, &tentative->requests)
+        || !add_u64(tentative->bytes, demand.bytes, &tentative->bytes))
+        return SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_LIMIT;
+    if (source->kind != SOL_MIR_RUNTIME_HOST_VALUE_OPTION
+        && source->kind != SOL_MIR_RUNTIME_HOST_VALUE_RESULT)
+        return SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED;
+    const SolMirRepresentation *r = &transfer->values->conventions->concrete->representation;
+    const SolMirRecipeVariant *variant = host_transfer_variant(r, &r->recipes[recipe],
+        source->as.sum.ordinal);
+    return variant->fields.count == 0 ? SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED
+        : host_transfer_demand(transfer, r->fields[variant->fields.offset].type,
+            source->as.sum.payload, quota, tentative);
+}
+
+void sol_mir_runtime_host_owned_value_free(SolMirRuntimeHostOwnedValue *value) {
+    if (value == NULL) return;
+    if (value->kind == SOL_MIR_RUNTIME_HOST_VALUE_TEXT) free(value->as.text.bytes);
+    else if (value->kind == SOL_MIR_RUNTIME_HOST_VALUE_OPTION
+        || value->kind == SOL_MIR_RUNTIME_HOST_VALUE_RESULT)
+        sol_mir_runtime_host_owned_value_free(value->as.sum.payload);
+    free(value);
+}
+
+static bool host_transfer_request(HostTransfer *transfer) {
+    ++transfer->allocation_attempt;
+    return transfer->allocation_attempt != transfer->fail_allocation_attempt;
+}
+
+static bool host_transfer_charge(SolMirRuntimeAllocationUsage *usage, uint64_t bytes) {
+    return add_u64(usage->requests, 1, &usage->requests)
+        && add_u64(usage->bytes, bytes, &usage->bytes);
+}
+
+/* Each P3.2b request is attempted, physically allocated, then charged.  A
+   later refusal therefore retains exactly the charges of earlier successes. */
+static SolMirRuntimeHostTransferOutcome host_transfer_stage(HostTransfer *transfer,
+    SolMirRecipeId recipe, const SolMirRuntimeHostValue *source,
+    SolMirRuntimeAllocationUsage *usage, SolMirRuntimeHostOwnedValue **result) {
+    const SolMirRuntimeAllocationPlan *plan = &transfer->values->allocation_plans[recipe];
+    SolMirRuntimeHostOwnedValue *owned = NULL;
+    bool outer = plan->kind != SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE;
+    if (outer && !host_transfer_request(transfer)) return SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_FAILED;
+    owned = calloc(1, sizeof(*owned));
+    if (owned == NULL) return SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_FAILED;
+    if (outer && !host_transfer_charge(usage, plan->object_size)) { free(owned); return SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_FAILED; }
+    owned->kind = source->kind;
+    if (source->kind == SOL_MIR_RUNTIME_HOST_VALUE_INT64) owned->as.int64_value = source->as.int64_value;
+    else if (source->kind == SOL_MIR_RUNTIME_HOST_VALUE_BOOL) owned->as.bool_value = source->as.bool_value;
+    else if (source->kind == SOL_MIR_RUNTIME_HOST_VALUE_TEXT) {
+        owned->as.text.length = source->as.text.length;
+        if (source->as.text.length != 0) {
+            if (!host_transfer_request(transfer)) { free(owned); return SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_FAILED; }
+            owned->as.text.bytes = malloc((size_t)source->as.text.length);
+            if (owned->as.text.bytes == NULL) { free(owned); return SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_FAILED; }
+            if (!host_transfer_charge(usage, source->as.text.length)) {
+                free(owned->as.text.bytes); free(owned); return SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_FAILED;
+            }
+            memcpy(owned->as.text.bytes, source->as.text.bytes, (size_t)source->as.text.length);
+        }
+    } else if (source->kind == SOL_MIR_RUNTIME_HOST_VALUE_OPTION
+        || source->kind == SOL_MIR_RUNTIME_HOST_VALUE_RESULT) {
+        owned->as.sum.ordinal = source->as.sum.ordinal;
+        const SolMirRepresentation *r = &transfer->values->conventions->concrete->representation;
+        const SolMirRecipeVariant *variant = host_transfer_variant(r, &r->recipes[recipe], source->as.sum.ordinal);
+        if (variant->fields.count == 1) {
+            SolMirRuntimeHostTransferOutcome child = host_transfer_stage(transfer,
+                r->fields[variant->fields.offset].type, source->as.sum.payload, usage,
+                &owned->as.sum.payload);
+            if (child != SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED) {
+                sol_mir_runtime_host_owned_value_free(owned); return child;
+            }
+        }
+    }
+    *result = owned;
+    return SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED;
+}
+
+SolMirRuntimeHostTransferOutcome sol_mir_runtime_values_test_transfer_host_result(
+    const SolMirRuntimeHostTransferRequest *request,
+    SolMirRuntimeHostOwnedValue **destination) {
+    if (request == NULL || destination == NULL || *destination != NULL
+        || request->values == NULL || request->source == NULL || request->quota == NULL
+        || request->usage == NULL || !owner_header_valid(request->values))
+        return SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID;
+    SolMirRuntimeHostTransferLimits limits = request->limits == NULL
+        ? (SolMirRuntimeHostTransferLimits){0} : *request->limits;
+    HostTransfer transfer = {request->values,
+        limits.max_depth == 0 ? HOST_TRANSFER_DEFAULT_DEPTH : limits.max_depth,
+        limits.max_nodes == 0 ? HOST_TRANSFER_DEFAULT_NODES : limits.max_nodes,
+        limits.max_work == 0 ? HOST_TRANSFER_DEFAULT_WORK : limits.max_work,
+        0, 0, 0, limits.fail_allocation_attempt};
+    const SolMirRuntimeHostValue *ancestors[HOST_TRANSFER_DEFAULT_DEPTH] = {0};
+    SolMirRuntimeHostTransferOutcome shape = host_transfer_shape(&transfer,
+        request->recipe, request->source, 1, ancestors);
+    if (shape != SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED) return shape;
+    SolMirRuntimeAllocationUsage tentative = *request->usage;
+    SolMirRuntimeHostTransferOutcome demanded = host_transfer_demand(&transfer,
+        request->recipe, request->source, request->quota, &tentative);
+    if (demanded != SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED) return demanded;
+    SolMirRuntimeHostOwnedValue *staged = NULL;
+    SolMirRuntimeAllocationUsage charged = *request->usage;
+    SolMirRuntimeHostTransferOutcome staged_outcome = host_transfer_stage(&transfer,
+        request->recipe, request->source, &charged, &staged);
+    *request->usage = charged;
+    if (staged_outcome != SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED) {
+        sol_mir_runtime_host_owned_value_free(staged);
+        return staged_outcome;
+    }
+    *destination = staged;
+    return SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED;
+}
+#endif

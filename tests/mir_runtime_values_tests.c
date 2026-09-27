@@ -1,3 +1,4 @@
+#define SOL_MIR_PLAN_TEST_HOOKS 1
 #include "sol/mir_runtime_values.h"
 
 #include "sol/effects.h"
@@ -214,6 +215,8 @@ static SolMirRuntimeValuesLimits exact_limits(const SolMirRuntimeValues *values)
         .max_allocation_plans = values->usage.allocation_plans,
         .max_copy_plans = values->usage.copy_plans,
         .max_equality_plans = values->usage.equality_plans,
+        .max_host_result_plans = values->usage.host_result_plans,
+        .max_host_result_requirements = values->usage.host_result_requirements,
         .max_ownership_plans = values->usage.ownership_plans,
         .max_ownership_variants = values->usage.ownership_variants,
         .max_owned_edges = values->usage.owned_edges,
@@ -637,23 +640,172 @@ static void test_allocation_plans(SolMirRuntimeValues *values) {
         SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT, &failure));
 }
 
+static SolMirRecipeId host_result_recipe(const SolMirRuntimeValues *values,
+    SolMirRuntimeHostResultClass classification) {
+    for (size_t i = 0; i < values->host_result_plan_count; ++i)
+        if (values->host_result_plans[i].classification == classification) return i;
+    return SOL_MIR_RECIPE_NONE;
+}
+
+static void test_host_result_transfer_model(const SolMirRuntimeValues *values) {
+    SolMirRecipeId boolean = host_result_recipe(values,
+        SOL_MIR_RUNTIME_HOST_RESULT_BOOL);
+    SolMirRecipeId text = host_result_recipe(values, SOL_MIR_RUNTIME_HOST_RESULT_TEXT);
+    CHECK(boolean != SOL_MIR_RECIPE_NONE && text != SOL_MIR_RECIPE_NONE);
+    SolMirRuntimeAllocationQuota zero = {0, 0};
+    SolMirRuntimeAllocationUsage usage = {0};
+    SolMirRuntimeHostValue source = {.kind = SOL_MIR_RUNTIME_HOST_VALUE_BOOL,
+        .as.bool_value = true};
+    SolMirRuntimeHostOwnedValue *owned = NULL;
+    SolMirRuntimeHostTransferRequest request = {values, boolean, &source, &zero,
+        &usage, NULL};
+    CHECK(sol_mir_runtime_values_test_transfer_host_result(&request, &owned)
+            == SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED
+        && owned != NULL && owned->kind == SOL_MIR_RUNTIME_HOST_VALUE_BOOL
+        && owned->as.bool_value && usage.requests == 0 && usage.bytes == 0);
+    sol_mir_runtime_host_owned_value_free(owned);
+    owned = NULL;
+    source.kind = SOL_MIR_RUNTIME_HOST_VALUE_INT64;
+    CHECK(sol_mir_runtime_values_test_transfer_host_result(&request, &owned)
+            == SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID
+        && owned == NULL && usage.requests == 0 && usage.bytes == 0);
+    SolMirRecipeId integer = host_result_recipe(values,
+        SOL_MIR_RUNTIME_HOST_RESULT_INT64);
+    SolMirRecipeId unit = host_result_recipe(values, SOL_MIR_RUNTIME_HOST_RESULT_UNIT);
+    source = (SolMirRuntimeHostValue){.kind = SOL_MIR_RUNTIME_HOST_VALUE_INT64,
+        .as.int64_value = -17};
+    request = (SolMirRuntimeHostTransferRequest){values, integer, &source, &zero,
+        &usage, NULL};
+    CHECK(sol_mir_runtime_values_test_transfer_host_result(&request, &owned)
+            == SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED && owned != NULL
+        && owned->as.int64_value == -17);
+    sol_mir_runtime_host_owned_value_free(owned); owned = NULL;
+    source = (SolMirRuntimeHostValue){.kind = SOL_MIR_RUNTIME_HOST_VALUE_UNIT};
+    request.recipe = unit;
+    CHECK(sol_mir_runtime_values_test_transfer_host_result(&request, &owned)
+            == SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED && owned != NULL);
+    sol_mir_runtime_host_owned_value_free(owned); owned = NULL;
+
+    uint8_t bytes[] = {'h', 'o', 's', 't'};
+    source = (SolMirRuntimeHostValue){.kind = SOL_MIR_RUNTIME_HOST_VALUE_TEXT,
+        .as.text = {bytes, sizeof(bytes)}};
+    const SolMirRuntimeAllocationPlan *text_plan = &values->allocation_plans[text];
+    SolMirRuntimeAllocationQuota quota = {2, text_plan->object_size + sizeof(bytes)};
+    request = (SolMirRuntimeHostTransferRequest){values, text, &source, &quota,
+        &usage, NULL};
+    CHECK(sol_mir_runtime_values_test_transfer_host_result(&request, &owned)
+            == SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED && owned != NULL
+        && owned->as.text.bytes != bytes && owned->as.text.length == sizeof(bytes)
+        && memcmp(owned->as.text.bytes, bytes, sizeof(bytes)) == 0
+        && usage.requests == 2 && usage.bytes == text_plan->object_size + sizeof(bytes));
+    bytes[0] = 'X';
+    CHECK(owned->as.text.bytes[0] == 'h');
+    sol_mir_runtime_host_owned_value_free(owned);
+    owned = NULL;
+
+    /* The same borrowed argument view may be returned repeatedly, and an
+       unrelated persistent host view gets an independently owned payload. */
+    uint8_t persistent[] = {'s', 't', 'o', 'r', 'e'};
+    usage = (SolMirRuntimeAllocationUsage){0};
+    source.as.text.bytes = bytes; source.as.text.length = sizeof(bytes);
+    quota = (SolMirRuntimeAllocationQuota){2, text_plan->object_size + sizeof(bytes)};
+    request.quota = &quota;
+    CHECK(sol_mir_runtime_values_test_transfer_host_result(&request, &owned)
+            == SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED && owned != NULL);
+    sol_mir_runtime_host_owned_value_free(owned); owned = NULL;
+    usage = (SolMirRuntimeAllocationUsage){0};
+    source.as.text.bytes = persistent; source.as.text.length = sizeof(persistent);
+    quota = (SolMirRuntimeAllocationQuota){2, text_plan->object_size + sizeof(persistent)};
+    CHECK(sol_mir_runtime_values_test_transfer_host_result(&request, &owned)
+            == SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED && owned != NULL
+        && owned->as.text.bytes != persistent);
+    persistent[0] = 'X';
+    CHECK(owned->as.text.bytes[0] == 's');
+    sol_mir_runtime_host_owned_value_free(owned); owned = NULL;
+
+    source = (SolMirRuntimeHostValue){.kind = SOL_MIR_RUNTIME_HOST_VALUE_TEXT,
+        .as.text = {NULL, 0}};
+    usage = (SolMirRuntimeAllocationUsage){0};
+    SolMirRuntimeAllocationQuota header_only = {1, text_plan->object_size};
+    request.quota = &header_only; request.usage = &usage; request.limits = NULL;
+    CHECK(sol_mir_runtime_values_test_transfer_host_result(&request, &owned)
+            == SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED && owned != NULL
+        && owned->as.text.length == 0 && owned->as.text.bytes == NULL
+        && usage.requests == 1 && usage.bytes == text_plan->object_size);
+    sol_mir_runtime_host_owned_value_free(owned); owned = NULL;
+
+    usage = (SolMirRuntimeAllocationUsage){0};
+    source = (SolMirRuntimeHostValue){.kind = SOL_MIR_RUNTIME_HOST_VALUE_TEXT,
+        .as.text = {bytes, sizeof(bytes)}};
+    quota = (SolMirRuntimeAllocationQuota){2, text_plan->object_size + sizeof(bytes)};
+    request.quota = &quota;
+    SolMirRuntimeHostTransferLimits fail_second = {.fail_allocation_attempt = 2};
+    request.limits = &fail_second;
+    CHECK(sol_mir_runtime_values_test_transfer_host_result(&request, &owned)
+            == SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_FAILED && owned == NULL
+        && usage.requests == 1 && usage.bytes == text_plan->object_size);
+    SolMirRuntimeAllocationPlan saved_text_plan = values->allocation_plans[text];
+    ((SolMirRuntimeValues *)(void *)values)->allocation_plans[text].object_size = 0;
+    usage = (SolMirRuntimeAllocationUsage){0};
+    request.limits = NULL;
+    CHECK(sol_mir_runtime_values_test_transfer_host_result(&request, &owned)
+            == SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID && owned == NULL
+        && usage.requests == 0 && usage.bytes == 0);
+    ((SolMirRuntimeValues *)(void *)values)->allocation_plans[text] = saved_text_plan;
+    usage = (SolMirRuntimeAllocationUsage){0};
+    source.as.text.bytes = NULL;
+    CHECK(sol_mir_runtime_values_test_transfer_host_result(&request, &owned)
+            == SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID && owned == NULL
+        && usage.requests == 0 && usage.bytes == 0);
+    source.as.text.bytes = bytes;
+    source.as.text.length = values->conventions->concrete->layout.target.max_object_bytes + 1;
+    SolMirRuntimeAllocationQuota unlimited = {UINT64_MAX, UINT64_MAX};
+    request.quota = &unlimited;
+    CHECK(sol_mir_runtime_values_test_transfer_host_result(&request, &owned)
+            == SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_LIMIT && owned == NULL
+        && usage.requests == 0 && usage.bytes == 0);
+    source.as.text.length = sizeof(bytes);
+}
+
 static void test_inventory(SolMirConcreteProgram *program,
     SolDiagnostics *diagnostics, SolMirRuntimeConventions *conventions,
     SolMirRuntimeValues *values) {
     CHECK(values->recipe_operation_count == 21);
     CHECK(values->usage.records == 21 && values->usage.allocation_plans == 21
         && values->usage.copy_plans == 21 && values->usage.equality_plans == 21
+        && values->usage.host_result_plans == 21
+        && values->usage.host_result_requirements == 4
         && values->usage.ownership_plans == 21
         && values->usage.ownership_variants == 9 && values->usage.owned_edges == 12
-        && values->usage.owned_bytes == 4032
-        && values->usage.build_scratch_bytes == 73
-        && values->usage.build_work == 309
+        && values->usage.owned_bytes == 4432
+        && values->usage.build_scratch_bytes == 94
+        && values->usage.build_work == 357
         && values->usage.validation_scratch_bytes == 584692564
-        && values->usage.validation_work == 73654948);
+        && values->usage.validation_work == 73655017);
     test_allocation_plans(values);
+    test_host_result_transfer_model(values);
     check_ownership_plans(values);
     CHECK(values->copy_plan_count == 21 && values->copy_plan_capacity == 21);
     CHECK(values->equality_plan_count == 21 && values->equality_plan_capacity == 21);
+    CHECK(values->host_result_plan_count == 21
+        && values->host_result_requirement_count == 4);
+    { size_t classes[8] = {0};
+      for (size_t i = 0; i < values->host_result_plan_count; ++i) {
+          const SolMirRuntimeHostResultPlan *plan = &values->host_result_plans[i];
+          CHECK(plan->recipe == i && plan->classification
+              <= SOL_MIR_RUNTIME_HOST_RESULT_RESULT);
+          if (plan->classification <= SOL_MIR_RUNTIME_HOST_RESULT_RESULT)
+              ++classes[plan->classification];
+      }
+      CHECK(classes[SOL_MIR_RUNTIME_HOST_RESULT_UNREACHABLE] == 1
+          && classes[SOL_MIR_RUNTIME_HOST_RESULT_FORBIDDEN] == 14
+          && classes[SOL_MIR_RUNTIME_HOST_RESULT_INT64] == 1
+          && classes[SOL_MIR_RUNTIME_HOST_RESULT_BOOL] == 1
+          && classes[SOL_MIR_RUNTIME_HOST_RESULT_TEXT] == 1
+          && classes[SOL_MIR_RUNTIME_HOST_RESULT_UNIT] == 1
+          && classes[SOL_MIR_RUNTIME_HOST_RESULT_OPTION] == 2
+          && classes[SOL_MIR_RUNTIME_HOST_RESULT_RESULT] == 0);
+    }
     { size_t classes[7] = {0};
       for (size_t i = 0; i < values->equality_plan_count; ++i) {
           const SolMirRuntimeEqualityPlan *plan = &values->equality_plans[i];
@@ -749,6 +901,8 @@ static void test_inventory(SolMirConcreteProgram *program,
         && strstr(first, "ownership-plans=true") != NULL
         && strstr(first, "copy-plans=true") != NULL
         && strstr(first, "equality-plans=true") != NULL
+        && strstr(first, "host-result-plans=true") != NULL
+        && strstr(first, "host-result-execution=false") != NULL
         && strstr(first, "equality-execution=false") != NULL
         && strstr(first, "copy-execution=false") != NULL
         && strstr(first, "move-drop-execution=false") != NULL
@@ -756,6 +910,13 @@ static void test_inventory(SolMirConcreteProgram *program,
         && strstr(first, "capacity") == NULL
         && strstr(first, "producer=") == NULL
         && strstr(first, program->program.ir->source_path) == NULL);
+    if (first != NULL) {
+        size_t relations = 0;
+        for (const char *at = first; (at = strstr(at, "host-result requirement=")) != NULL;
+                at += strlen("host-result requirement=")) ++relations;
+        CHECK(relations == values->host_result_requirement_count
+            && strstr(first, " result=") != NULL && strstr(first, " class=") != NULL);
+    }
 
     SolMirRuntimeValuesLimits exact = exact_limits(values);
     SolMirRuntimeValues limited;
@@ -783,6 +944,8 @@ static void test_inventory(SolMirConcreteProgram *program,
     ONE_BELOW(max_allocation_plans);
     ONE_BELOW(max_copy_plans);
     ONE_BELOW(max_equality_plans);
+    ONE_BELOW(max_host_result_plans);
+    ONE_BELOW(max_host_result_requirements);
     ONE_BELOW(max_ownership_plans);
     ONE_BELOW(max_ownership_variants);
     ONE_BELOW(max_owned_edges);
@@ -812,7 +975,7 @@ static void test_inventory(SolMirConcreteProgram *program,
             == SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED
         && limited.conventions == NULL);
     sol_mir_runtime_values_test_force_persistent_allocation_failure(0);
-    for (size_t attempt = 3; attempt <= 7; ++attempt) {
+    for (size_t attempt = 3; attempt <= 9; ++attempt) {
         sol_mir_runtime_values_test_force_persistent_allocation_failure(attempt);
         CHECK(sol_mir_runtime_values_build(&request, &limited, diagnostics)
                 == SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED
@@ -958,6 +1121,80 @@ static void test_inventory(SolMirConcreteProgram *program,
     --values->usage.equality_plans;
     check_rejected_without_rendering(values);
     values->usage = equality_usage;
+    SolMirRuntimeHostResultPlan saved_host_plan = values->host_result_plans[0];
+    values->host_result_plans[0].recipe = 1;
+    check_rejected_without_rendering(values);
+    values->host_result_plans[0] = saved_host_plan;
+    values->host_result_plans[0].classification
+        = SOL_MIR_RUNTIME_HOST_RESULT_FORBIDDEN;
+    check_rejected_without_rendering(values);
+    values->host_result_plans[0] = saved_host_plan;
+    SolMirRuntimeHostResultPlan *host_plans = values->host_result_plans;
+    values->host_result_plans = NULL;
+    check_rejected_without_rendering(values);
+    values->host_result_plans = (SolMirRuntimeHostResultPlan *)(void *)values;
+    check_rejected_without_rendering(values);
+    values->host_result_plans = (SolMirRuntimeHostResultPlan *)(void *)values->copy_plans;
+    check_rejected_without_rendering(values);
+    values->host_result_plans = (SolMirRuntimeHostResultPlan *)(void *)program->representation.recipes;
+    check_rejected_without_rendering(values);
+    values->host_result_plans = (SolMirRuntimeHostResultPlan *)(void *)conventions->imports;
+    check_rejected_without_rendering(values);
+    values->host_result_plans = (SolMirRuntimeHostResultPlan *)(void *)program->program.ir->source_bytes;
+    check_rejected_without_rendering(values);
+    values->host_result_plans = (SolMirRuntimeHostResultPlan *)(uintptr_t)(UINTPTR_MAX - 1);
+    check_rejected_without_rendering(values);
+    values->host_result_plans = host_plans;
+    SolMirRuntimeHostResultRequirement *host_requirements
+        = values->host_result_requirements;
+    values->host_result_requirements = NULL;
+    check_rejected_without_rendering(values);
+    values->host_result_requirements
+        = (SolMirRuntimeHostResultRequirement *)(void *)values->host_result_plans;
+    check_rejected_without_rendering(values);
+    values->host_result_requirements
+        = (SolMirRuntimeHostResultRequirement *)(void *)program->representation.recipes;
+    check_rejected_without_rendering(values);
+    values->host_result_requirements
+        = (SolMirRuntimeHostResultRequirement *)(void *)conventions->imports;
+    check_rejected_without_rendering(values);
+    values->host_result_requirements
+        = (SolMirRuntimeHostResultRequirement *)(void *)program->program.ir->source_bytes;
+    check_rejected_without_rendering(values);
+    values->host_result_requirements
+        = (SolMirRuntimeHostResultRequirement *)(void *)values;
+    check_rejected_without_rendering(values);
+    values->host_result_requirements
+        = (SolMirRuntimeHostResultRequirement *)(uintptr_t)(UINTPTR_MAX - 1);
+    check_rejected_without_rendering(values);
+    values->host_result_requirements = host_requirements;
+    if (values->host_result_requirement_count != 0) {
+        SolMirRuntimeHostResultRequirement saved_host_requirement
+            = values->host_result_requirements[0];
+        values->host_result_requirements[0].result = SOL_MIR_RECIPE_NONE;
+        check_rejected_without_rendering(values);
+        values->host_result_requirements[0] = saved_host_requirement;
+    }
+    SolMirRuntimeValuesUsage host_usage = values->usage;
+    --values->usage.host_result_plans;
+    check_rejected_without_rendering(values);
+    values->usage = host_usage;
+    size_t saved_host_plan_count = values->host_result_plan_count;
+    size_t saved_host_plan_capacity = values->host_result_plan_capacity;
+    --values->host_result_plan_count;
+    check_rejected_without_rendering(values);
+    values->host_result_plan_count = saved_host_plan_count;
+    values->host_result_plan_capacity = SIZE_MAX;
+    check_rejected_without_rendering(values);
+    values->host_result_plan_capacity = saved_host_plan_capacity;
+    size_t saved_host_requirement_count = values->host_result_requirement_count;
+    size_t saved_host_requirement_capacity = values->host_result_requirement_capacity;
+    --values->host_result_requirement_count;
+    check_rejected_without_rendering(values);
+    values->host_result_requirement_count = saved_host_requirement_count;
+    values->host_result_requirement_capacity = SIZE_MAX;
+    check_rejected_without_rendering(values);
+    values->host_result_requirement_capacity = saved_host_requirement_capacity;
     SolMirRuntimeOwnershipPlan saved_ownership = values->ownership_plans[0];
     values->ownership_plans[0].recipe = 1;
     CHECK(!sol_mir_runtime_values_validate(values, NULL));
@@ -1338,6 +1575,252 @@ static void test_bound_environment_exclusion(void) {
     }
 }
 
+static void test_host_result_result_fixture(void) {
+    static const char source[] =
+        "module runtime_values_host_result\n"
+        "capability Host { function ask() -> Result<Option<Text>, Text> effects { pure } }\n"
+        "function root(host: capability Host) -> Result<Option<Text>, Text> effects { pure } "
+        "{ return host.ask() }\n";
+    TextCompilation compilation;
+    SolMirConcreteProgram program;
+    SolMirRuntimeConventions conventions;
+    SolMirRuntimeValues values;
+    sol_mir_concrete_program_init(&program);
+    sol_mir_runtime_conventions_init(&conventions);
+    sol_mir_runtime_values_init(&values);
+    CHECK(compile_text(&compilation, "/fixture/host-result.sol", source));
+    SolIrCallableId root = callable(&compilation.ir, "root", SOL_IR_CALLABLE_FUNCTION);
+    SolIrCallableId ask = callable(&compilation.ir, "ask", SOL_IR_CALLABLE_CAPABILITY);
+    SolMirProgramRoot root_request = {root, SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    SolMirTargetDescriptor target = sol_mir_target_wasm32();
+    SolMirConcreteBuildRequest request = {&compilation.ir, &root_request, 1,
+        &ask, 1, &target, NULL};
+    bool built = root != SOL_IR_NONE && ask != SOL_IR_NONE
+        && sol_mir_concrete_program_build(&request, &program, &compilation.diagnostics)
+            == SOL_MIR_CONCRETE_BUILD_SUCCEEDED;
+    CHECK(built && build_values(&program, &compilation.diagnostics, &conventions, &values));
+    SolMirRecipeId result = host_result_recipe(&values,
+        SOL_MIR_RUNTIME_HOST_RESULT_RESULT);
+    if (result != SOL_MIR_RECIPE_NONE) {
+        const SolMirRepresentation *r = &program.representation;
+        const SolMirRecipe *result_recipe = &r->recipes[result];
+        const SolMirRecipeVariant *result_variant = NULL;
+        SolMirRecipeId option = SOL_MIR_RECIPE_NONE;
+        for (size_t i = 0; i < result_recipe->variants.count; ++i) {
+            const SolMirRecipeVariant *candidate = &r->variants[result_recipe->variants.offset + i];
+            if (candidate->fields.count == 1 && values.host_result_plans[
+                    r->fields[candidate->fields.offset].type].classification
+                    == SOL_MIR_RUNTIME_HOST_RESULT_OPTION) {
+                result_variant = candidate;
+                option = r->fields[candidate->fields.offset].type;
+            }
+        }
+        CHECK(result_variant != NULL && option != SOL_MIR_RECIPE_NONE);
+        if (result_variant != NULL) {
+            const SolMirRecipe *option_recipe = &r->recipes[option];
+            const SolMirRecipeVariant *some = NULL, *none = NULL;
+            for (size_t i = 0; i < option_recipe->variants.count; ++i) {
+                const SolMirRecipeVariant *candidate = &r->variants[option_recipe->variants.offset + i];
+                if (candidate->fields.count == 1) some = candidate;
+                else if (candidate->fields.count == 0) none = candidate;
+            }
+            CHECK(some != NULL && none != NULL);
+            if (some != NULL && none != NULL) {
+                uint8_t bytes[] = {'n', '\0', 'e', 's', 't'};
+                SolMirRuntimeHostValue text = {.kind = SOL_MIR_RUNTIME_HOST_VALUE_TEXT,
+                    .as.text = {bytes, sizeof(bytes)}};
+                SolMirRuntimeHostValue option_some = {.kind = SOL_MIR_RUNTIME_HOST_VALUE_OPTION,
+                    .as.sum = {some->ordinal, &text}};
+                SolMirRuntimeHostValue nested = {.kind = SOL_MIR_RUNTIME_HOST_VALUE_RESULT,
+                    .as.sum = {result_variant->ordinal, &option_some}};
+                const SolMirRuntimeAllocationPlan *result_plan = &values.allocation_plans[result];
+                const SolMirRuntimeAllocationPlan *option_plan = &values.allocation_plans[option];
+                SolMirRecipeId text_recipe = r->fields[some->fields.offset].type;
+                const SolMirRuntimeAllocationPlan *text_plan = &values.allocation_plans[text_recipe];
+                uint64_t expected_bytes = result_plan->object_size + option_plan->object_size
+                    + text_plan->object_size + sizeof(bytes);
+                SolMirRuntimeAllocationQuota exact = {4, expected_bytes};
+                /* Result -> Option -> Text visits three nodes in each of the
+                   shape and demand passes.  Exact limits succeed; one below
+                   each independently rejects before staging. */
+                const SolMirRuntimeHostTransferLimits exact_limits
+                    = {.max_depth = 3, .max_nodes = 3, .max_work = 6};
+                SolMirRuntimeAllocationUsage usage = {0};
+                SolMirRuntimeHostOwnedValue *owned = NULL;
+                SolMirRuntimeHostTransferRequest transfer = {&values, result, &nested,
+                    &exact, &usage, &exact_limits};
+                /* Representable malformed Option/Result views are rejected
+                   during shape preflight, before the quota is consulted. */
+                SolMirRuntimeHostValue wrong_leaf = {.kind = SOL_MIR_RUNTIME_HOST_VALUE_BOOL,
+                    .as.bool_value = true};
+                option_some.as.sum.payload = &wrong_leaf;
+                transfer.limits = NULL;
+                CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                        == SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID && owned == NULL
+                    && usage.requests == 0 && usage.bytes == 0);
+                option_some.as.sum.payload = &text;
+                option_some.as.sum.ordinal = SIZE_MAX;
+                CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                        == SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID && owned == NULL);
+                option_some.as.sum.ordinal = some->ordinal;
+                nested.as.sum.payload = NULL;
+                CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                        == SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID && owned == NULL);
+                nested.as.sum.payload = &option_some;
+                CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                        == SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED && owned != NULL);
+                sol_mir_runtime_host_owned_value_free(owned); owned = NULL;
+                usage = (SolMirRuntimeAllocationUsage){0};
+                transfer.limits = &exact_limits;
+                const SolMirRuntimeHostTransferLimits below_depth = {.max_depth = 2};
+                const SolMirRuntimeHostTransferLimits below_nodes = {.max_nodes = 2};
+                const SolMirRuntimeHostTransferLimits below_work = {.max_work = 5};
+                transfer.limits = &below_depth;
+                CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                    == SOL_MIR_RUNTIME_HOST_TRANSFER_LIMIT && owned == NULL);
+                transfer.limits = &below_nodes;
+                CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                    == SOL_MIR_RUNTIME_HOST_TRANSFER_LIMIT && owned == NULL);
+                transfer.limits = &below_work;
+                CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                    == SOL_MIR_RUNTIME_HOST_TRANSFER_LIMIT && owned == NULL);
+                usage = (SolMirRuntimeAllocationUsage){0};
+                transfer.limits = NULL;
+                SolMirRuntimeAllocationQuota request_below = {3, expected_bytes};
+                transfer.quota = &request_below;
+                CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                    == SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_LIMIT && owned == NULL
+                    && usage.requests == 0 && usage.bytes == 0);
+                SolMirRuntimeAllocationQuota byte_below = {4, expected_bytes - 1};
+                transfer.quota = &byte_below;
+                CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                    == SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_LIMIT && owned == NULL
+                    && usage.requests == 0 && usage.bytes == 0);
+                for (size_t refusal = 1; refusal <= 4; ++refusal) {
+                    usage = (SolMirRuntimeAllocationUsage){0};
+                    owned = NULL;
+                    SolMirRuntimeHostTransferLimits limits = {.fail_allocation_attempt = refusal};
+                    transfer = (SolMirRuntimeHostTransferRequest){&values, result, &nested,
+                        &exact, &usage, &limits};
+                    CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                            == SOL_MIR_RUNTIME_HOST_TRANSFER_ALLOCATION_FAILED
+                        && owned == NULL && usage.requests == refusal - 1);
+                    uint64_t prefix[] = {0, result_plan->object_size,
+                        result_plan->object_size + option_plan->object_size,
+                        result_plan->object_size + option_plan->object_size + text_plan->object_size};
+                    CHECK(usage.bytes == prefix[refusal - 1]);
+                }
+                usage = (SolMirRuntimeAllocationUsage){0};
+                owned = NULL;
+                transfer = (SolMirRuntimeHostTransferRequest){&values, result, &nested,
+                    &exact, &usage, NULL};
+                CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                        == SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED && owned != NULL
+                    && usage.requests == 4 && usage.bytes == expected_bytes
+                    && owned->as.sum.payload != NULL
+                    && owned->as.sum.payload->as.sum.payload != NULL
+                    && owned->as.sum.payload->as.sum.payload->as.text.bytes != bytes
+                    && memcmp(owned->as.sum.payload->as.sum.payload->as.text.bytes,
+                        bytes, sizeof(bytes)) == 0);
+                bytes[0] = 'X';
+                CHECK(owned->as.sum.payload->as.sum.payload->as.text.bytes[0] == 'n');
+                sol_mir_runtime_host_owned_value_free(owned);
+                owned = NULL;
+
+                /* Shape validation wins over quota: the malformed selected leaf
+                   is still observed under an intentionally impossible quota. */
+                text.as.text.bytes = NULL;
+                SolMirRuntimeAllocationQuota one_below = {3, expected_bytes - 1};
+                usage = (SolMirRuntimeAllocationUsage){0};
+                transfer.quota = &one_below;
+                transfer.limits = NULL;
+                CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                        == SOL_MIR_RUNTIME_HOST_TRANSFER_INVALID && owned == NULL
+                    && usage.requests == 0 && usage.bytes == 0);
+                text.as.text.bytes = bytes;
+
+                /* None is a selected zero-payload Option case. */
+                SolMirRuntimeHostValue option_none = {.kind = SOL_MIR_RUNTIME_HOST_VALUE_OPTION,
+                    .as.sum = {none->ordinal, NULL}};
+                nested.as.sum.payload = &option_none;
+                SolMirRuntimeAllocationQuota none_quota = {2,
+                    result_plan->object_size + option_plan->object_size};
+                usage = (SolMirRuntimeAllocationUsage){0};
+                transfer.quota = &none_quota;
+                CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                        == SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED && owned != NULL
+                    && usage.requests == 2);
+                sol_mir_runtime_host_owned_value_free(owned);
+                owned = NULL;
+
+                for (size_t i = 0; i < result_recipe->variants.count; ++i) {
+                    const SolMirRecipeVariant *other = &r->variants[
+                        result_recipe->variants.offset + i];
+                    if (other == result_variant || other->fields.count != 1) continue;
+                    SolMirRecipeId other_recipe = r->fields[other->fields.offset].type;
+                    if (values.host_result_plans[other_recipe].classification
+                            != SOL_MIR_RUNTIME_HOST_RESULT_TEXT) continue;
+                    SolMirRuntimeHostValue other_text = {.kind = SOL_MIR_RUNTIME_HOST_VALUE_TEXT,
+                        .as.text = {bytes, sizeof(bytes)}};
+                    nested = (SolMirRuntimeHostValue){.kind = SOL_MIR_RUNTIME_HOST_VALUE_RESULT,
+                        .as.sum = {other->ordinal, &other_text}};
+                    const SolMirRuntimeAllocationPlan *other_plan
+                        = &values.allocation_plans[other_recipe];
+                    SolMirRuntimeAllocationQuota other_quota = {3,
+                        result_plan->object_size + other_plan->object_size + sizeof(bytes)};
+                    usage = (SolMirRuntimeAllocationUsage){0};
+                    transfer = (SolMirRuntimeHostTransferRequest){&values, result, &nested,
+                        &other_quota, &usage, NULL};
+                    CHECK(sol_mir_runtime_values_test_transfer_host_result(&transfer, &owned)
+                            == SOL_MIR_RUNTIME_HOST_TRANSFER_SUCCEEDED && owned != NULL
+                        && usage.requests == 3);
+                    sol_mir_runtime_host_owned_value_free(owned); owned = NULL;
+                }
+            }
+        }
+    }
+    sol_mir_runtime_values_free(&values);
+    sol_mir_runtime_conventions_free(&conventions);
+    sol_mir_concrete_program_free(&program);
+    text_compilation_free(&compilation);
+}
+static void test_forbidden_host_result_requirement(void) {
+    static const char source[] =
+        "module runtime_values_forbidden_host_result\n"
+        "record Pair { left: Int64, right: Int64 }\n"
+        "capability Host { function ask() -> Pair effects { pure } }\n"
+        "function root(host: capability Host) -> Pair effects { pure } { return host.ask() }\n";
+    TextCompilation compilation;
+    SolMirConcreteProgram program;
+    SolMirRuntimeConventions conventions;
+    SolMirRuntimeValues values;
+    sol_mir_concrete_program_init(&program);
+    sol_mir_runtime_conventions_init(&conventions);
+    sol_mir_runtime_values_init(&values);
+    CHECK(compile_text(&compilation, "/fixture/forbidden-host-result.sol", source));
+    SolIrCallableId root = callable(&compilation.ir, "root", SOL_IR_CALLABLE_FUNCTION);
+    SolIrCallableId ask = callable(&compilation.ir, "ask", SOL_IR_CALLABLE_CAPABILITY);
+    SolMirProgramRoot root_request = {root, SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    SolMirTargetDescriptor target = sol_mir_target_wasm32();
+    SolMirConcreteBuildRequest concrete_request = {&compilation.ir, &root_request, 1,
+        &ask, 1, &target, NULL};
+    bool built = root != SOL_IR_NONE && ask != SOL_IR_NONE
+        && sol_mir_concrete_program_build(&concrete_request, &program,
+            &compilation.diagnostics) == SOL_MIR_CONCRETE_BUILD_SUCCEEDED;
+    SolMirRuntimeConventionsBuildRequest conventions_request = {&program, NULL};
+    SolMirRuntimeValuesBuildRequest values_request = {&conventions, NULL};
+    CHECK(built && sol_mir_runtime_conventions_build(&conventions_request,
+            &conventions, &compilation.diagnostics)
+            == SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED
+        && sol_mir_runtime_values_build(&values_request, &values,
+            &compilation.diagnostics) == SOL_MIR_RUNTIME_VALUES_BUILD_UNSUPPORTED
+        && values.conventions == NULL);
+    sol_mir_runtime_values_free(&values);
+    sol_mir_runtime_conventions_free(&conventions);
+    sol_mir_concrete_program_free(&program);
+    text_compilation_free(&compilation);
+}
+
 static void test_plan_classification_fixture(void) {
     static const char source[] =
         "module runtime_values_plan_classes\n"
@@ -1399,7 +1882,17 @@ static void test_plan_classification_fixture(void) {
             const SolMirRecipe *recipe = &program.representation.recipes[i];
             const SolMirRuntimeAllocationPlan *plan = &values.allocation_plans[i];
             const SolMirRuntimeEqualityPlan *equality = &values.equality_plans[i];
+            const SolMirRuntimeHostResultPlan *host = &values.host_result_plans[i];
             CHECK(equality->recipe == i);
+            CHECK(host->recipe == i);
+            if (recipe->kind == SOL_MIR_RECIPE_INT64)
+                CHECK(host->classification == SOL_MIR_RUNTIME_HOST_RESULT_INT64);
+            if (recipe->kind == SOL_MIR_RECIPE_BOOL)
+                CHECK(host->classification == SOL_MIR_RUNTIME_HOST_RESULT_BOOL);
+            if (recipe->kind == SOL_MIR_RECIPE_TEXT)
+                CHECK(host->classification == SOL_MIR_RUNTIME_HOST_RESULT_TEXT);
+            if (recipe->kind == SOL_MIR_RECIPE_UNIT)
+                CHECK(host->classification == SOL_MIR_RUNTIME_HOST_RESULT_UNIT);
             if (recipe->kind == SOL_MIR_RECIPE_RECORD
                 && recipe->fields.count == 0 && recipe->inhabited) {
                 empty = true;
@@ -1467,6 +1960,13 @@ static void test_plan_classification_fixture(void) {
             if (recipe->kind == SOL_MIR_RECIPE_ENUM && recipe->variants.count == 2
                 && equality->classification == SOL_MIR_RUNTIME_EQUALITY_SUM)
                 recursive = true;
+            for (size_t v = 0; v < recipe->variants.count; ++v) {
+                const SolMirRecipeVariant *variant = &program.representation.variants[
+                    recipe->variants.offset + v];
+                for (size_t f = 0; f < variant->fields.count; ++f)
+                    if (program.representation.fields[variant->fields.offset + f].type == i)
+                        CHECK(host->classification == SOL_MIR_RUNTIME_HOST_RESULT_FORBIDDEN);
+            }
             if (values.recipe_operations[i].demanded_operations == 0
                 && equality->classification != SOL_MIR_RUNTIME_EQUALITY_FORBIDDEN
                 && equality->classification != SOL_MIR_RUNTIME_EQUALITY_UNREACHABLE)
@@ -3386,6 +3886,8 @@ int main(void) {
     }
     compilation_free(&compilation);
     test_bound_environment_exclusion();
+    test_host_result_result_fixture();
+    test_forbidden_host_result_requirement();
     test_plan_classification_fixture();
     test_recursive_copy_transaction_model();
     if (failures != 0) {
