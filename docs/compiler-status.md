@@ -7,11 +7,11 @@ This relocates the detailed baseline README documentation, reconciled with the
 approved ledger. It is not a second checklist, a new test report, or a stable ABI
 specification. [TODO.md](../TODO.md) alone owns live work status and order.
 
-**Current-worktree addendum, September 26, 2026:** P2.7, P2.8, P3.1, and P3.2a are
+**Current-worktree addendum, September 26, 2026:** P2.7, P2.8, P3.1, P3.2a, and P3.2b are
 independently approved and complete in the current worktree, completing P2 and the
 first runtime-value inventory checkpoint for the frozen E6 profile. The baseline hash above remains the
 historical September 9 snapshot; no post-baseline commit hash is asserted here. M1
-completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. P3.2b
+completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. P3.2c
 is next overall and the next production checkpoint.
 
 Use the [README](../README.md) for onboarding and runnable examples, and
@@ -28,9 +28,10 @@ The implemented CLI provides `check`, `test`, `run`, `effects`, `inspect`, and
 `fmt`. Reference execution uses owning typed IR, not the separate experimental
 MIR/P2/P3 owners. There is no backend, complete production runtime ABI,
 `sol build`, full public IR, or SMT discharge. P3.1 supplies target-independent
-call/result/failure conventions, and P3.2a adds only a recipe operation-demand
-inventory: there is no physical ABI, executable value operation, allocation plan,
-or complete runtime lowering. Wasm is the first planned production target; native
+call/result/failure conventions, P3.2a adds a recipe operation-demand inventory, and
+P3.2b adds independently validated allocation plans and pure quota checking: there
+is no physical ABI, allocation execution, executable value operation, or complete
+runtime lowering. Wasm is the first planned production target; native
 output is deferred and Component Model integration is not implemented.
 
 Compilation sessions use configurable deterministic ceilings for per-file and package source bytes, source files, directory depth and entries, tokens, persistent arena entries, diagnostics, cumulative allocation bytes, and allocation requests. Disk packages are discovered relative to verified open directory descriptors; source reads reject symbolic links, non-regular or duplicate identities, growth, truncation, replacement, and metadata changes. Raw interpreter host failures are copied through interpreter-owned length-delimited storage rather than borrowed C strings.
@@ -992,7 +993,7 @@ P3.1 provides no backend or physical ABI, allocation operations, cleanup/unwind
 lowering, host marshalling/adapters, handler ABI, complete runtime-lowered program,
 compiled `sol build`, or backend-backed `sol run`. Those remain P3.2-P5 work.
 
-## Runtime Value Operation-Demand Inventory (P3.2a Current-Worktree Addendum)
+## Runtime Value Operation-Demand and Allocation Plans (P3.2a-P3.2b Current-Worktree Addendum)
 
 The separate unstable compiler-internal
 [SolMirRuntimeValues](../include/sol/mir_runtime_values.h) owner borrows one
@@ -1036,10 +1037,15 @@ and one-below limits, persistent and validator allocation faults, malformed IDs,
 masks, import IDs, predecessor data, counts, capacities, usage, aliases, and
 zero-write malformed rendering while preserving P3.1 symbols/rendering.
 
-P3.2a is inventory only. It defines no allocation or quota plan, allocated runtime
-value, ownership graph, move/drop execution, transactional deep copy,
-allocation-free equality execution, or host-result transfer. Those are the open
-P3.2b-P3.2f checkpoints, so parent P3.2 and P3 remain incomplete.
+P3.2b extends the inventory with one same-ID target-parameterized plan per recipe:
+NONE for uninhabited, zero-sized, scalar, callable, and capability layouts; exact
+fixed outer objects for products and sums; and exact Text headers. The E6 Wasm32
+census is 21 plans: eight fixed objects totaling 92 bytes, one eight-byte
+four-aligned Text header, and twelve NONE plans. The allocation-free O(1) checker
+handles zero-length and positive Text payload demand, target/object bounds, checked
+cumulative request/byte quotas, and existing P3.1 allocation-limit/failure mapping.
+It performs no physical allocation or value operation. P3.2c-P3.2f remain open, so
+parent P3.2 and P3 remain incomplete.
 
 ## Remaining Boundary
 
@@ -1049,6 +1055,6 @@ allocation or cleanup operations, build artifact, or public format. Those bounda
 artifacts, and interpreter/Wasm differential execution remain later tracks. No
 internal census is an empirical maintenance advantage, user-facing performance
 guarantee, or proof of application behavior. The proposed M experiment is not
-implemented by these compiler owners. P3.2b is the next production checkpoint.
+implemented by these compiler owners. P3.2c is the next production checkpoint.
 Consult [TODO.md](../TODO.md#execution-cursor) for the single active cursor and
 [the analysis](project-analysis.md) for the experiment rationale.

@@ -54,7 +54,8 @@ static bool mul_size(size_t left, size_t right, size_t *result) {
 }
 
 static bool limits_complete(SolMirRuntimeValuesLimits value) {
-    return value.max_records != 0 && value.max_owned_bytes != 0
+    return value.max_records != 0 && value.max_allocation_plans != 0
+        && value.max_owned_bytes != 0
         && value.max_build_scratch_bytes != 0 && value.max_build_work != 0
         && value.max_validation_scratch_bytes != 0
         && value.max_validation_work != 0;
@@ -85,13 +86,17 @@ static bool reconstruct_usage(const SolMirRuntimeConventions *conventions,
     const SolMirConcreteProgram *concrete = conventions->concrete;
     size_t records = concrete->representation.recipe_count;
     size_t owned_bytes, build_work = 0, validation_work = 0;
+    size_t plan_bytes;
     if (!mul_size(records, sizeof(SolMirRuntimeRecipeOperations), &owned_bytes)
-        || !mul_size(records, 2, &build_work)
+        || !mul_size(records, sizeof(SolMirRuntimeAllocationPlan), &plan_bytes)
+        || !add_size(&owned_bytes, plan_bytes)
+        || !mul_size(records, 3, &build_work)
         || !add_size(&build_work, concrete->linkage.runtime_requirement_count)
         || !add_size(&build_work, conventions->import_count)
         || !add_size(&build_work, conventions->import_count)
         || (conventions->import_count != 0 && !add_size(&build_work, 1))
-        || (records != 0 && !add_size(&build_work, 1))) return false;
+        || (records != 0 && (!add_size(&build_work, 1)
+            || !add_size(&build_work, 1)))) return false;
     size_t local_validation_scratch = records;
     if (!add_size(&local_validation_scratch, conventions->import_count))
         return false;
@@ -104,20 +109,20 @@ static bool reconstruct_usage(const SolMirRuntimeConventions *conventions,
         || !add_size(&validation_work, alias_work)
         || (local_validation_scratch != 0
             && !add_size(&validation_work, 1))
-        || records > (SIZE_MAX - validation_work) / 6
-        || !add_size(&validation_work, records * 6)
+        || records > (SIZE_MAX - validation_work) / 7
+        || !add_size(&validation_work, records * 7)
         || !add_size(&validation_work,
             concrete->linkage.runtime_requirement_count)
         || !add_size(&validation_work, conventions->import_count)) return false;
-    *usage = (SolMirRuntimeValuesUsage){records, owned_bytes,
-        conventions->import_count, build_work, validation_scratch,
-        validation_work};
+    *usage = (SolMirRuntimeValuesUsage){records, records, owned_bytes,
+        conventions->import_count, build_work, validation_scratch, validation_work};
     return true;
 }
 
 static bool usage_fits(const SolMirRuntimeValuesUsage *usage,
     const SolMirRuntimeValuesLimits *limits) {
     return usage->records <= limits->max_records
+        && usage->allocation_plans <= limits->max_allocation_plans
         && usage->owned_bytes <= limits->max_owned_bytes
         && usage->build_scratch_bytes <= limits->max_build_scratch_bytes
         && usage->build_work <= limits->max_build_work
@@ -137,13 +142,21 @@ static bool measured_text_size(const char *text, size_t *size) {
 
 static bool walk_aliases(const SolMirRuntimeValues *values,
     const SolMirRuntimeConventions *runtime, bool check) {
-    const void *owned = check ? values->recipe_operations : NULL;
-    size_t count = check ? values->recipe_operation_capacity : 0;
+    const void *records = check ? values->recipe_operations : NULL;
+    size_t record_count = check ? values->recipe_operation_capacity : 0;
+    const void *plans = check ? values->allocation_plans : NULL;
+    size_t plan_count = check ? values->allocation_plan_capacity : 0;
+    if (!validation_event(1)) return false;
+    if (check && overlaps(records, record_count,
+            sizeof(*values->recipe_operations), plans, plan_count,
+            sizeof(*values->allocation_plans))) return false;
     const SolMirConcreteProgram *c = runtime->concrete;
 #define AGAINST(pointer, item_count, type) \
-    if (!validation_event(1) || (check && overlaps(owned, count, \
+    if (!validation_event(1) || (check && (overlaps(records, record_count, \
             sizeof(*values->recipe_operations), (pointer), (item_count), \
-            sizeof(type)))) return false
+            sizeof(type)) || overlaps(plans, plan_count, \
+            sizeof(*values->allocation_plans), (pointer), (item_count), \
+            sizeof(type))))) return false
     AGAINST(values, 1, SolMirRuntimeValues);
     AGAINST(runtime, 1, SolMirRuntimeConventions);
 #define RUNTIME_RANGE(member, type, singular) \
@@ -461,6 +474,30 @@ static bool validate_records(const SolMirRuntimeValues *values,
     return true;
 }
 
+static bool validate_plans(const SolMirRuntimeValues *values) {
+    const SolMirLayout *layout = &values->conventions->concrete->layout;
+    for (size_t recipe = 0; recipe < values->allocation_plan_count; ++recipe) {
+        if (!validation_event(1)) return false;
+        const SolMirRuntimeAllocationPlan *plan = &values->allocation_plans[recipe];
+        const SolMirTypeLayout *type = &layout->types[recipe];
+        SolMirRuntimeAllocationPlanKind kind
+            = SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE;
+        uint64_t size = 0, alignment = 1;
+        if (type->object_kind == SOL_MIR_LAYOUT_OBJECT_PRODUCT
+            || type->object_kind == SOL_MIR_LAYOUT_OBJECT_SUM) {
+            kind = SOL_MIR_RUNTIME_ALLOCATION_PLAN_FIXED_OBJECT;
+            size = type->object_size; alignment = type->object_alignment;
+        } else if (type->object_kind == SOL_MIR_LAYOUT_OBJECT_TEXT) {
+            kind = SOL_MIR_RUNTIME_ALLOCATION_PLAN_TEXT;
+            size = type->object_size; alignment = type->object_alignment;
+        }
+        if (plan->recipe != recipe || plan->kind != kind
+            || plan->object_size != size || plan->object_alignment != alignment)
+            return false;
+    }
+    return true;
+}
+
 static SolMirRuntimeValuesBuildOutcome validate_predecessor(
     const SolMirRuntimeConventions *conventions, size_t *work, size_t *scratch,
     SolDiagnostics *diagnostics) {
@@ -562,9 +599,14 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_internal_validate(
             predecessor_scratch, alias_work, &expected)
         || values->recipe_operation_count != expected.records
         || values->recipe_operation_capacity != expected.records
+        || values->allocation_plan_count != expected.allocation_plans
+        || values->allocation_plan_capacity != expected.allocation_plans
         || !range_valid(values->recipe_operations,
             values->recipe_operation_capacity,
             sizeof(*values->recipe_operations))
+        || !range_valid(values->allocation_plans,
+            values->allocation_plan_capacity,
+            sizeof(*values->allocation_plans))
         || !usage_fits(&expected, &values->limits)
         || memcmp(&expected, &values->usage, sizeof(expected)) != 0) {
         invalid(diagnostics, "runtime values preflight or usage is invalid");
@@ -603,9 +645,10 @@ SolMirRuntimeValuesBuildOutcome sol_mir_runtime_values_internal_validate(
     }
     unsigned char *import_consumed = scratch == NULL ? NULL : scratch + recipes;
     bool ok = validate_records(values, scratch, import_consumed);
+    if (ok) ok = validate_plans(values);
     free(scratch);
     if (!ok) {
-        invalid(diagnostics, "runtime values records are not reconstructive");
+        invalid(diagnostics, "runtime values records or allocation plans are not reconstructive");
         return validation_work_exhausted
             ? SOL_MIR_RUNTIME_VALUES_BUILD_RESOURCE_EXHAUSTED
             : SOL_MIR_RUNTIME_VALUES_BUILD_INTERNAL_FAILED;

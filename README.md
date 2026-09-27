@@ -10,8 +10,8 @@ them from conventions and repository history.
 
 **Status, September 26, 2026:** the September 9 baseline at `6ec4ba9` has an
 executable reference interpreter and CLI, not a production-ready compiler or stable
-toolchain. The current worktree completes E1-E6, P1, P2, P3.1, and P3.2a for the
-frozen E6 profile; P3.2b is the next overall item and production checkpoint, while
+toolchain. The current worktree completes E1-E6, P1, P2, P3.1, P3.2a, and P3.2b for the
+frozen E6 profile; P3.2c is the next overall item and production checkpoint, while
 parent P3.2 remains incomplete. M1 evaluated an
 unvalidated candidate and stopped as infeasible because independent governance and
 protected evaluation material are unavailable. There is no backend, production
@@ -183,7 +183,7 @@ P3.1 froze the separate target-independent call/result/failure contract.
 1. **M1 (completed as infeasible):** evaluated an unvalidated expense-policy candidate and stopped because no independent participant, protected held-out material, externally controlled verifier, or independent adjudicator exists.
 2. **P2 (complete):** P2.8 froze, validated, rendered, and censused the complete concrete-program contract without selecting a runtime ABI or emitting Wasm.
 3. **P3.1 (complete):** froze target-independent receiver-first signatures, direct/indirect calls, access/result/failure conventions, stable runtime-import identities, canonical failure provenance, and E2 exit mapping over the immutable P2 owner.
-4. **P3.2 (incomplete; P3.2a complete, P3.2b next overall and production checkpoint):** continue bounded allocation and owned-value operations without widening the frozen language profile.
+4. **P3.2 (incomplete; P3.2a-P3.2b complete, P3.2c next overall and production checkpoint):** continue bounded allocation and owned-value operations without widening the frozen language profile.
 5. **P4-P5:** integrate a pinned Wasm backend/host adapter, then reproducible `sol build` artifacts and interpreter/Wasm differential conformance.
 
 **M2-M5 remain gated** unless M1 is reopened and completed feasibly with independent

@@ -16,6 +16,8 @@ static int failures;
 } } while (0)
 
 void sol_mir_runtime_values_test_force_allocation_failure(bool force);
+void sol_mir_runtime_values_test_force_persistent_allocation_failure(
+    size_t attempt);
 void sol_mir_runtime_values_test_force_validation_allocation_failure(bool force);
 size_t sol_mir_runtime_values_test_validation_allocation_attempts(void);
 bool sol_mir_runtime_values_test_reconstruct_usage(
@@ -202,16 +204,194 @@ static char *render_conventions(const SolMirRuntimeConventions *conventions) {
 }
 
 static SolMirRuntimeValuesLimits exact_limits(const SolMirRuntimeValues *values) {
-    return (SolMirRuntimeValuesLimits){values->usage.records,
-        values->usage.owned_bytes, values->usage.build_scratch_bytes,
-        values->usage.build_work, values->usage.validation_scratch_bytes,
-        values->usage.validation_work};
+    return (SolMirRuntimeValuesLimits){
+        .max_records = values->usage.records,
+        .max_allocation_plans = values->usage.allocation_plans,
+        .max_owned_bytes = values->usage.owned_bytes,
+        .max_build_scratch_bytes = values->usage.build_scratch_bytes,
+        .max_build_work = values->usage.build_work,
+        .max_validation_scratch_bytes = values->usage.validation_scratch_bytes,
+        .max_validation_work = values->usage.validation_work,
+    };
+}
+
+static void check_plan_layout_classification(const SolMirRuntimeValues *values) {
+    const SolMirLayout *layout = &values->conventions->concrete->layout;
+    CHECK(values->allocation_plan_count == layout->type_count);
+    for (size_t i = 0; i < values->allocation_plan_count; ++i) {
+        const SolMirRuntimeAllocationPlan *plan = &values->allocation_plans[i];
+        const SolMirTypeLayout *type = &layout->types[i];
+        SolMirRuntimeAllocationPlanKind expected
+            = SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE;
+        if (type->object_kind == SOL_MIR_LAYOUT_OBJECT_PRODUCT
+            || type->object_kind == SOL_MIR_LAYOUT_OBJECT_SUM)
+            expected = SOL_MIR_RUNTIME_ALLOCATION_PLAN_FIXED_OBJECT;
+        else if (type->object_kind == SOL_MIR_LAYOUT_OBJECT_TEXT)
+            expected = SOL_MIR_RUNTIME_ALLOCATION_PLAN_TEXT;
+        CHECK(plan->recipe == i && plan->kind == expected);
+        if (expected == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE)
+            CHECK(plan->object_size == 0 && plan->object_alignment == 1);
+        else
+            CHECK(plan->object_size == type->object_size
+                && plan->object_alignment == type->object_alignment);
+    }
+}
+
+static void test_allocation_plans(SolMirRuntimeValues *values) {
+    size_t fixed = 0, text = 0, none = 0;
+    uint64_t fixed_bytes = 0, text_size = 0, text_alignment = 0;
+    SolMirRecipeId fixed_recipe = SOL_MIR_RECIPE_NONE;
+    SolMirRecipeId text_recipe = SOL_MIR_RECIPE_NONE;
+    SolMirRecipeId none_recipe = SOL_MIR_RECIPE_NONE;
+    check_plan_layout_classification(values);
+    for (size_t i = 0; i < values->allocation_plan_count; ++i) {
+        const SolMirRuntimeAllocationPlan *plan = &values->allocation_plans[i];
+        CHECK(plan->recipe == i);
+        if (plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_FIXED_OBJECT) {
+            ++fixed; fixed_bytes += plan->object_size; fixed_recipe = i;
+        } else if (plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_TEXT) {
+            ++text; text_size = plan->object_size;
+            text_alignment = plan->object_alignment; text_recipe = i;
+        } else {
+            ++none; none_recipe = i;
+            CHECK(plan->object_size == 0 && plan->object_alignment == 1);
+        }
+    }
+    CHECK(values->allocation_plan_count == 21 && fixed == 8 && text == 1
+        && none == 12 && fixed_bytes == 92 && text_size == 8
+        && text_alignment == 4);
+    SolMirRuntimeAllocationDemand demand = {0};
+    SolMirRuntimeAllocationUsage usage = {0};
+    SolMirRuntimeAllocationQuota none_quota = {0, 0};
+    SolMirRuntimeAllocationRequest request = {none_recipe, 0};
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &none_quota,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_SUCCEEDED
+        && demand.requests == 0 && demand.bytes == 0);
+    request.recipe = fixed_recipe;
+    const SolMirRuntimeAllocationPlan *fixed_plan
+        = &values->allocation_plans[fixed_recipe];
+    SolMirRuntimeAllocationQuota fixed_quota = {1, fixed_plan->object_size};
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &fixed_quota,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_SUCCEEDED
+        && demand.requests == 1 && demand.bytes == fixed_plan->object_size);
+    --fixed_quota.max_bytes;
+    demand = (SolMirRuntimeAllocationDemand){111, 222};
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &fixed_quota,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_LIMIT
+        && demand.requests == 111 && demand.bytes == 222);
+    request.recipe = text_recipe;
+    request.text_length = 0;
+    SolMirRuntimeAllocationQuota text_header = {1, text_size};
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &text_header,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_SUCCEEDED
+        && demand.requests == 1 && demand.bytes == text_size);
+    request.text_length = 7;
+    SolMirRuntimeAllocationQuota text_quota = {2, text_size + 7};
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &text_quota,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_SUCCEEDED
+        && demand.requests == 2 && demand.bytes == text_size + 7);
+    --text_quota.max_requests;
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &text_quota,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_LIMIT);
+    ++text_quota.max_requests;
+    --text_quota.max_bytes;
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &text_quota,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_LIMIT);
+    request.recipe = fixed_recipe;
+    request.text_length = 1;
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &fixed_quota,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT);
+    request.recipe = text_recipe;
+    request.text_length = (uint64_t)UINT32_MAX + 1;
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &text_quota,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_LIMIT);
+    request.text_length = 1;
+    SolMirRuntimeAllocationQuota unlimited = {UINT64_MAX, UINT64_MAX};
+    usage = (SolMirRuntimeAllocationUsage){UINT64_MAX, 0};
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &unlimited,
+        &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_LIMIT);
+    usage = (SolMirRuntimeAllocationUsage){0, UINT64_MAX};
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &unlimited,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_LIMIT);
+    usage = (SolMirRuntimeAllocationUsage){2, 0};
+    SolMirRuntimeAllocationQuota malformed_usage = {1, UINT64_MAX};
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request,
+            &malformed_usage, &usage, &demand)
+        == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT);
+    usage = (SolMirRuntimeAllocationUsage){0, 0};
+    request.recipe = none_recipe;
+    request.text_length = 0;
+    SolMirRuntimeAllocationUsage before_alias = usage;
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &none_quota,
+            &usage, (SolMirRuntimeAllocationDemand *)(void *)&usage)
+        == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT
+        && memcmp(&usage, &before_alias, sizeof(usage)) == 0);
+    SolMirRuntimeAllocationPlan plan_before = values->allocation_plans[none_recipe];
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &none_quota,
+            &usage, (SolMirRuntimeAllocationDemand *)(void *)
+                &values->allocation_plans[none_recipe])
+        == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT
+        && memcmp(&values->allocation_plans[none_recipe], &plan_before,
+            sizeof(plan_before)) == 0);
+    request.recipe = text_recipe;
+    request.text_length = 17;
+    uint64_t saved_object_limit
+        = values->conventions->concrete->layout.target.max_object_bytes;
+    ((SolMirConcreteProgram *)(void *)values->conventions->concrete)
+        ->layout.target.max_object_bytes = 16;
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &unlimited,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_LIMIT);
+    ((SolMirConcreteProgram *)(void *)values->conventions->concrete)
+        ->layout.target.max_object_bytes = saved_object_limit;
+    SolMirRuntimeValuesUsage saved_owner_usage = values->usage;
+    values->usage.allocation_plans = 0;
+    demand = (SolMirRuntimeAllocationDemand){333, 444};
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &unlimited,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT
+        && demand.requests == 333 && demand.bytes == 444);
+    values->usage = saved_owner_usage;
+    SolMirRuntimeValuesLimits saved_owner_limits = values->limits;
+    values->limits.max_allocation_plans = 0;
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &unlimited,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT);
+    values->limits = saved_owner_limits;
+    size_t saved_plan_capacity = values->allocation_plan_capacity;
+    --values->allocation_plan_capacity;
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &unlimited,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT);
+    values->allocation_plan_capacity = saved_plan_capacity;
+    SolMirRuntimeConventions *mutable_conventions
+        = (SolMirRuntimeConventions *)(void *)values->conventions;
+    const SolMirConcreteProgram *saved_concrete = mutable_conventions->concrete;
+    mutable_conventions->concrete = NULL;
+    CHECK(sol_mir_runtime_values_check_allocation(values, &request, &unlimited,
+            &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT);
+    mutable_conventions->concrete = saved_concrete;
+    SolMirRuntimeFailureCode failure;
+    CHECK(sol_mir_runtime_allocation_outcome_failure(
+            SOL_MIR_RUNTIME_ALLOCATION_SUCCEEDED, &failure)
+        && failure == SOL_MIR_RUNTIME_FAILURE_NONE);
+    CHECK(sol_mir_runtime_allocation_outcome_failure(
+            SOL_MIR_RUNTIME_ALLOCATION_LIMIT, &failure)
+        && failure == SOL_MIR_RUNTIME_FAILURE_ALLOCATION_LIMIT);
+    CHECK(sol_mir_runtime_allocation_outcome_failure(
+            SOL_MIR_RUNTIME_ALLOCATION_FAILED, &failure)
+        && failure == SOL_MIR_RUNTIME_FAILURE_ALLOCATION_FAILED);
+    CHECK(!sol_mir_runtime_allocation_outcome_failure(
+        SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT, &failure));
 }
 
 static void test_inventory(SolMirConcreteProgram *program,
     SolDiagnostics *diagnostics, SolMirRuntimeConventions *conventions,
     SolMirRuntimeValues *values) {
     CHECK(values->recipe_operation_count == 21);
+    CHECK(values->usage.records == 21 && values->usage.allocation_plans == 21
+        && values->usage.owned_bytes == 1680
+        && values->usage.build_scratch_bytes == 52
+        && values->usage.build_work == 187
+        && values->usage.validation_scratch_bytes == 584692564
+        && values->usage.validation_work == 73654852);
+    test_allocation_plans(values);
     CHECK(values->recipe_operation_count
         == program->representation.recipe_count);
     size_t demanding = 0, create = 0, copy = 0, drop = 0, equal = 0;
@@ -268,7 +448,7 @@ static void test_inventory(SolMirConcreteProgram *program,
     CHECK(runtime_before != NULL && runtime_after != NULL
         && strcmp(runtime_before, runtime_after) == 0);
     CHECK(first != NULL
-        && strstr(first, "operation-demand-inventory") != NULL
+        && strstr(first, "operation-demand-allocation-plan-inventory") != NULL
         && strstr(first, "executable-operations=false") != NULL
         && strstr(first, " recipe=") == NULL
         && strstr(first, "capacity") == NULL
@@ -297,6 +477,7 @@ static void test_inventory(SolMirConcreteProgram *program,
     CHECK(limited.conventions == NULL); \
 } while (0)
     ONE_BELOW(max_records);
+    ONE_BELOW(max_allocation_plans);
     ONE_BELOW(max_owned_bytes);
     ONE_BELOW(max_build_scratch_bytes);
     ONE_BELOW(max_build_work);
@@ -318,6 +499,11 @@ static void test_inventory(SolMirConcreteProgram *program,
             == SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED
         && limited.conventions == NULL);
     sol_mir_runtime_values_test_force_allocation_failure(false);
+    sol_mir_runtime_values_test_force_persistent_allocation_failure(2);
+    CHECK(sol_mir_runtime_values_build(&request, &limited, diagnostics)
+            == SOL_MIR_RUNTIME_VALUES_BUILD_ALLOCATION_FAILED
+        && limited.conventions == NULL);
+    sol_mir_runtime_values_test_force_persistent_allocation_failure(0);
     diagnostics->allocation_failed = false;
     sol_mir_runtime_values_test_force_validation_allocation_failure(true);
     CHECK(!sol_mir_runtime_values_validate(values, diagnostics)
@@ -378,6 +564,34 @@ static void test_inventory(SolMirConcreteProgram *program,
     --values->recipe_operation_capacity;
     CHECK(!sol_mir_runtime_values_validate(values, NULL));
     ++values->recipe_operation_capacity;
+    --values->allocation_plan_count;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    ++values->allocation_plan_count;
+    --values->allocation_plan_capacity;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    ++values->allocation_plan_capacity;
+    SolMirRuntimeAllocationPlan saved_plan = values->allocation_plans[0];
+    values->allocation_plans[0].recipe = 1;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    values->allocation_plans[0] = saved_plan;
+    values->allocation_plans[0].kind
+        = SOL_MIR_RUNTIME_ALLOCATION_PLAN_FIXED_OBJECT;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    values->allocation_plans[0] = saved_plan;
+    ++values->allocation_plans[0].object_size;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    values->allocation_plans[0] = saved_plan;
+    values->allocation_plans[0].object_alignment = 2;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    FILE *plan_stream = tmpfile();
+    CHECK(plan_stream != NULL);
+    if (plan_stream != NULL) {
+        CHECK(!sol_mir_runtime_values_render(plan_stream, values));
+        CHECK(fflush(plan_stream) == 0 && fseek(plan_stream, 0, SEEK_END) == 0
+            && ftell(plan_stream) == 0);
+        fclose(plan_stream);
+    }
+    values->allocation_plans[0] = saved_plan;
     ++values->recipe_operation_count;
     ++values->recipe_operation_capacity;
     CHECK(!sol_mir_runtime_values_validate(values, NULL));
@@ -408,6 +622,18 @@ static void test_inventory(SolMirConcreteProgram *program,
         program->program.ir->source_bytes;
     CHECK(!sol_mir_runtime_values_validate(values, NULL));
     values->recipe_operations = records;
+    SolMirRuntimeAllocationPlan *plans = values->allocation_plans;
+    values->allocation_plans = (SolMirRuntimeAllocationPlan *)(void *)records;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    values->allocation_plans = (SolMirRuntimeAllocationPlan *)(void *)values;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    values->allocation_plans = (SolMirRuntimeAllocationPlan *)(void *)
+        program->layout.types;
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    values->allocation_plans = (SolMirRuntimeAllocationPlan *)(uintptr_t)
+        (UINTPTR_MAX - 1);
+    CHECK(!sol_mir_runtime_values_validate(values, NULL));
+    values->allocation_plans = plans;
     size_t saved_count = values->recipe_operation_count;
     size_t saved_capacity = values->recipe_operation_capacity;
     values->recipe_operation_count = SIZE_MAX;
@@ -537,6 +763,7 @@ static void test_bound_environment_exclusion(void) {
             CHECK((values[side].recipe_operations[i].demanded_operations
                 & SOL_MIR_LINKAGE_RUNTIME_BOUND_ENVIRONMENT) == 0);
         CHECK(sol_mir_runtime_values_validate(&values[side], NULL));
+        check_plan_layout_classification(&values[side]);
         rendered[side] = render_values(&values[side]);
         CHECK(rendered[side] != NULL);
     }
@@ -549,6 +776,95 @@ static void test_bound_environment_exclusion(void) {
         sol_mir_concrete_program_free(&programs[side]);
         text_compilation_free(&compilations[side]);
     }
+}
+
+static void test_plan_classification_fixture(void) {
+    static const char source[] =
+        "module runtime_values_plan_classes\n"
+        "record Empty {}\n"
+        "enum Void {}\n"
+        "record Pair { value: Int64 }\n"
+        "type ScalarWrap = distinct Int64\n"
+        "type TextWrap = distinct Text\n"
+        "type AggregateWrap = distinct Pair\n"
+        "capability Gate { function open() -> () effects { pure } }\n"
+        "function callback(value: Int64) -> Bool effects { pure } { return true }\n"
+        "function root(scalar: ScalarWrap, text: TextWrap, aggregate: AggregateWrap, "
+        "empty: Empty, impossible: Void, gate: capability Gate, "
+        "callback: function(Int64) -> Bool effects { pure }) -> () effects { pure } "
+        "{ return () }\n";
+    TextCompilation compilation;
+    SolMirConcreteProgram program;
+    SolMirRuntimeConventions conventions;
+    SolMirRuntimeValues values;
+    sol_mir_concrete_program_init(&program);
+    sol_mir_runtime_conventions_init(&conventions);
+    sol_mir_runtime_values_init(&values);
+    CHECK(compile_text(&compilation, "/fixture/runtime_values_plan_classes.sol",
+        source));
+    SolIrCallableId root = callable(&compilation.ir, "root",
+        SOL_IR_CALLABLE_FUNCTION);
+    SolMirProgramRoot root_request = {root,
+        SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    SolMirTargetDescriptor target = sol_mir_target_wasm32();
+    SolMirConcreteBuildRequest request = {&compilation.ir, &root_request, 1,
+        NULL, 0, &target, NULL};
+    bool built = root != SOL_IR_NONE
+        && sol_mir_concrete_program_build(&request, &program,
+            &compilation.diagnostics) == SOL_MIR_CONCRETE_BUILD_SUCCEEDED;
+    CHECK(built);
+    CHECK(built && build_values(&program, &compilation.diagnostics, &conventions,
+        &values));
+    if (values.conventions != NULL) {
+        check_plan_layout_classification(&values);
+        bool empty = false, uninhabited = false, scalar_wrapper = false;
+        bool text_wrapper = false, aggregate_wrapper = false;
+        bool callable_layout = false, capability_layout = false;
+        for (size_t i = 0; i < program.representation.recipe_count; ++i) {
+            const SolMirRecipe *recipe = &program.representation.recipes[i];
+            const SolMirRuntimeAllocationPlan *plan = &values.allocation_plans[i];
+            if (recipe->kind == SOL_MIR_RECIPE_RECORD
+                && recipe->fields.count == 0) {
+                empty = true;
+                CHECK(plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE);
+            }
+            if (recipe->kind == SOL_MIR_RECIPE_ENUM
+                && recipe->variants.count == 0) {
+                uninhabited = true;
+                CHECK(plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE);
+            }
+            if (recipe->kind == SOL_MIR_RECIPE_DISTINCT
+                && recipe->backing < program.representation.recipe_count) {
+                SolMirRecipeKind backing
+                    = program.representation.recipes[recipe->backing].kind;
+                if (backing == SOL_MIR_RECIPE_INT64) {
+                    scalar_wrapper = true;
+                    CHECK(plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE);
+                } else if (backing == SOL_MIR_RECIPE_TEXT) {
+                    text_wrapper = true;
+                    CHECK(plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_TEXT);
+                } else if (backing == SOL_MIR_RECIPE_RECORD) {
+                    aggregate_wrapper = true;
+                    CHECK(plan->kind
+                        == SOL_MIR_RUNTIME_ALLOCATION_PLAN_FIXED_OBJECT);
+                }
+            }
+            if (recipe->kind == SOL_MIR_RECIPE_FUNCTION) {
+                callable_layout = true;
+                CHECK(plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE);
+            }
+            if (recipe->kind == SOL_MIR_RECIPE_CAPABILITY) {
+                capability_layout = true;
+                CHECK(plan->kind == SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE);
+            }
+        }
+        CHECK(empty && uninhabited && scalar_wrapper && text_wrapper
+            && aggregate_wrapper && callable_layout && capability_layout);
+    }
+    sol_mir_runtime_values_free(&values);
+    sol_mir_runtime_conventions_free(&conventions);
+    sol_mir_concrete_program_free(&program);
+    text_compilation_free(&compilation);
 }
 
 int main(void) {
@@ -584,6 +900,7 @@ int main(void) {
     }
     compilation_free(&compilation);
     test_bound_environment_exclusion();
+    test_plan_classification_fixture();
     if (failures != 0) {
         fprintf(stderr, "%d runtime values test(s) failed\n", failures);
         return 1;

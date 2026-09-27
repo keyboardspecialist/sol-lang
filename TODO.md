@@ -12,7 +12,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 
 ## Execution Cursor
 
-- **Next overall and next production checkpoint: P3.2b.**
+- **Next overall and next production checkpoint: P3.2c.**
 - M1 is resolved through its infeasibility path: the
   [September 25 report](experiments/m1/README.md) records the missing independent
   governance and protected evaluation boundary.
@@ -21,7 +21,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 - One coordinator maintains this single next-overall cursor; parallel tracks do
   not create competing priority lists.
 
-## Completed Foundation Through E6, P1, P2, P3.1, and P3.2a
+## Completed Foundation Through E6, P1, P2, P3.1, P3.2a, and P3.2b
 
 - [x] Closed normalized effect rows, recursive SCC inference, higher-order calls,
       callback checking, and exact function and bound-operation effects.
@@ -83,7 +83,10 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
       mapping, exact bounded resources, independent validation, and rendering.
 - [x] Separate runtime-value operation-demand inventory over authenticated P3.1
       conventions, with one same-ID record per recipe and exact create/copy/drop/
-      equal import pairing, excluding bound-environment and executable value plans.
+       equal import pairing, excluding bound-environment and executable value plans.
+- [x] Target-parameterized runtime allocation plans over the same inventory, with
+      checked Text sizing, cumulative quotas, allocation-limit/failure outcomes,
+      independent validation, and canonical rendering, without allocation execution.
 
 ## Construct Coverage
 
@@ -112,8 +115,8 @@ deferred until a concrete core API requires their smallest coherent subset.
 
 ## End-to-End and Production Track
 
-E1-E6, P1, P2, P3.1, and P3.2a are complete for the frozen E6 profile. P3 is the
-current production milestone, with P3.2b next overall and as the next production checkpoint.
+E1-E6, P1, P2, P3.1, P3.2a, and P3.2b are complete for the frozen E6 profile. P3 is the
+current production milestone, with P3.2c next overall and as the next production checkpoint.
 Deferred language breadth is not a prerequisite for P2-P5 unless a
 milestone explicitly activates a bounded numbered-task slice. Existing numbered
 capability IDs remain stable; named slices such as `48A` account for completed portions
@@ -138,13 +141,13 @@ access for malformed IR/MIR mutation, phase-corruption assertions, differential
 evaluation, and trusted host-callback coverage.
 
 The production track is underway. P1, P2, and P3.1 are complete for the frozen E6
-profile; P3.2a is complete, and P3.2b is the next overall item and next production checkpoint:
+profile; P3.2a and P3.2b are complete, and P3.2c is the next overall item and next production checkpoint:
 
 | Done | Order | Milestone | Dependency and numbered-backlog scope |
 | --- | ---: | --- | --- |
 | [x] | P1 | Introduce ownership-explicit target-neutral CFG/MIR for the frozen executable core | E6; task 45 |
 | [x] | P2 | Define monomorphization, representation, target layout, symbols, and linkage | P1; P2.1-P2.8 complete for the frozen E6 profile |
-| [ ] | P3 | Define the target-independent runtime ABI and production panic/cleanup policy | P1, P2; P3.1 and P3.2a complete, P3.2b next; task 48B |
+| [ ] | P3 | Define the target-independent runtime ABI and production panic/cleanup policy | P1, P2; P3.1, P3.2a, and P3.2b complete, P3.2c next; task 48B |
 | [ ] | P4 | Integrate a WebAssembly backend and host adapter | P2, P3; task 47W and task 48C |
 | [ ] | P5 | Implement reproducible `sol build` artifacts and interpreter/Wasm differential tests | P4; task 49C |
 
@@ -221,9 +224,9 @@ external dependencies, public IR, concurrency, or broader handlers.
 | --- | ---: | --- | --- |
 | [x] | P3.1 | Freeze call, result, and failure conventions | A separate bounded `SolMirRuntimeConventions` owner borrows the immutable completed P2 concrete program; freezes receiver-first internal, host, and indirect-table signatures and calls with owned/shared/exclusive access, VALUE/UNIT/NEVER outcomes, failure edges, and normal-only exclusive writeback; maps entry results to E2 exits; derives collision-checked SHA-256 `sol.h1` host and `sol.r1` recipe-operation identities/symbols from exact P2 requirements; owns canonical source-aware failure sites and code masks; independently validates exact resources and aliases; and renders one canonical buffered form without choosing a physical ABI or Wasm index. |
 | [ ] | P3.W1 | Bounded Wasm ABI Integration Experiment | Timebox after P3.1 has tested conventions: record candidate tool versions, validate and execute a minimal scalar call/result/failure module, and report ABI/tool mismatches. Add allocation, cleanup, or host imports only after the relevant P3.2-P3.4 conventions are tested. Inform, but do not complete, P4.1, 47W, 48C, component support, E6 Wasm execution, backend integration, or build tooling. |
-| [ ] | P3.2 | Define bounded allocation and owned-value operations | P3.2a is complete; P3.2b-P3.2f remain required before this parent checkpoint is complete. Specify compiler-owned allocation for current `Text` and aggregate representations without introducing the user allocator/resource model from tasks 36-38. |
+| [ ] | P3.2 | Define bounded allocation and owned-value operations | P3.2a-P3.2b are complete; P3.2c-P3.2f remain required before this parent checkpoint is complete. Specify compiler-owned allocation for current `Text` and aggregate representations without introducing the user allocator/resource model from tasks 36-38. |
 | [x] | P3.2a | Inventory recipe operation demands | A separate bounded `SolMirRuntimeValues` owner borrows authenticated immutable P3.1 conventions and owns one same-ID record per concrete recipe. It strips bound-environment from linkage requirements and pairs every demanded create/copy/drop/equal bit with exactly one existing P3.1 import, while absent bits remain `NONE`; independent validation reconstructs masks, IDs, exact resources, complete arena consumption, and transitive anti-aliasing. This inventory defines no executable operations or allocation plans. |
-| [ ] | P3.2b | Define checked allocation and quota plans | Specify checked sizing, zero-length behavior, compiler-owned allocation, quotas, and allocation-limit/failure outcomes for current `Text` and aggregate representations. The approved implementation boundary and interruption-safe slices are recorded in the [P3.2b handoff](docs/p3.2b-handoff.md). |
+| [x] | P3.2b | Define checked allocation and quota plans | One same-ID target-parameterized plan per recipe classifies NONE, fixed aggregate outer objects, and Text headers; checked preflight covers zero-length Text, target/object bounds, cumulative request/byte quotas, and allocation-limit/failure outcomes. Independent validation and canonical rendering retain no physical allocation execution. |
 | [ ] | P3.2c | Define the ownership graph, move, and drop | Specify runtime ownership edges, moves, recursive destruction, and exact drop ordering for represented values. |
 | [ ] | P3.2d | Define transactional deep copy | Specify bounded deep copy with rollback and no partially published destination on failure. |
 | [ ] | P3.2e | Define allocation-free equality | Specify recursive represented-value equality without allocation and with bounded work/depth policy. |
@@ -249,9 +252,19 @@ each of the 21 E6 recipes, and records 17 recipes with demands: 16 create, 10 co
 17 drop, and 5 equal. The four host imports are not recipe plans, and
 bound-environment imports are intentionally excluded. The owner reuses P3.1 symbols
 and recipe digests in canonical output and duplicates no predecessor symbols,
-digests, layouts, recipes, or records. P3.2b-P3.2f remain open; therefore P3.2 and
-P3 remain incomplete, and no allocation plan, runtime value, move/drop, deep-copy,
-equality execution, or host-result transfer semantics are implemented here.
+digests, layouts, recipes, or records. P3.2c-P3.2f remain open; therefore P3.2 and
+P3 remain incomplete. P3.2b adds allocation plans and pure quota checking only;
+runtime allocation, move/drop, deep-copy, equality execution, and host-result
+transfer remain unimplemented.
+
+P3.2b adds one same-ID target-parameterized allocation plan per recipe: canonical
+NONE for uninhabited, zero-size, scalar, callable, and capability layouts; exact
+fixed aggregate outer objects; and exact Text headers. The E6 Wasm32 census is 21
+plans: eight fixed objects totaling 92 bytes, one Text header of eight bytes aligned
+to four, and twelve NONE plans. The allocation-free checker preflights zero-length
+Text and positive byte payloads against target/object bounds and cumulative
+request/byte quotas; it maps success, allocation-limit, and future physical failure
+to the existing P3.1 failure codes. It performs no allocation or value execution.
 
 The E6 all-roots census is exactly 18 signatures, 19 signature slots, 18 calls,
 24 operands, one writeback, one entry, 52 imports, and 29 failure sites. In field
