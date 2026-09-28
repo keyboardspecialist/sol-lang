@@ -1548,6 +1548,8 @@ static void test_invalid_derived_capabilities(void) {
         "        return source.read(path)\n"
         "    }\n"
         "}\n"
+        "capability NarrowFileSystem derives_from source: capability ReadFileSystem {}\n"
+        "capability ExactFileSystem derives_from source: capability FileSystem {}\n"
         "function wrong_source(fs: capability Other) -> capability ReadFileSystem {\n"
         "    return ReadFileSystem { source = fs }\n"
         "}\n"
@@ -1561,10 +1563,14 @@ static void test_invalid_derived_capabilities(void) {
         "}\n"
         "function nominal(fs: capability FileSystem) -> capability ReadFileSystem {\n"
         "    return fs\n"
+        "}\n"
+        "function derived_substitution(fs: capability FileSystem) -> capability ExactFileSystem {\n"
+        "    let narrow = NarrowFileSystem { source = ReadFileSystem { source = fs } }\n"
+        "    return ExactFileSystem { source = narrow }\n"
         "}\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, text));
-    CHECK(diagnostic_count(&compilation, "SOL-TYPE-015") >= 5);
+    CHECK(diagnostic_count(&compilation, "SOL-TYPE-015") >= 6);
     CHECK(has_diagnostic(&compilation, "SOL-TYPE-004"));
     free_compilation(&compilation);
 }
