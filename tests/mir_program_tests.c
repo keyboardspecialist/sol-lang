@@ -696,11 +696,15 @@ static void test_predicate_proof_and_handler_relations(void) {
         "function checked() -> Positive effects { pure } { "
         "while false invariant { proof_dependency(1) } decreases { 1 } {} "
         "return Positive(1) }\n"
-        "capability Source { function read() -> Int64 "
+        "capability Source { function read(value: Int64) -> Positive "
         "effects { service.read<Self> } }\n"
-        "capability Provider { function read() -> Int64 effects { pure } }\n"
+        "capability Provider { function read(value: Int64) -> Positive effects { pure } "
+        "requires { Positive(value) == Positive(value) } "
+        "ensures { result == Positive(old(value)) } { return Positive(value) } }\n"
+        "function direct(provider: capability Provider) -> Positive "
+        "{ return provider.read(1) }\n"
         "function handled(source: capability Source, provider: capability Provider) "
-        "-> Int64 { handle service.read<source> with provider { source.read() } }\n"));
+        "-> Positive { handle service.read<source> with provider { source.read(1) } }\n"));
     const SolIr *ir = &compilation.ir;
     SolIrCallableId checked = callable(ir, "checked", SOL_IR_CALLABLE_FUNCTION);
     SolIrCallableId predicate = callable(ir, "predicate_dependency",
@@ -730,6 +734,9 @@ static void test_predicate_proof_and_handler_relations(void) {
     CHECK(program.ir == NULL);
 
     SolIrCallableId source = callable(ir, "read", SOL_IR_CALLABLE_CAPABILITY);
+    CHECK(ir->callables[source].body == SOL_IR_NONE);
+    CHECK(ir->callables[source].receiver == SOL_IR_NONE);
+    CHECK(ir->callables[source].receiver_access == SOL_ACCESS_OWNED);
     SolIrCallableId provider = SOL_IR_NONE;
     for (SolIrCallableId id = source + 1; id < ir->callable_count; ++id) {
         if (ir->callables[id].kind == SOL_IR_CALLABLE_CAPABILITY
@@ -738,11 +745,33 @@ static void test_predicate_proof_and_handler_relations(void) {
             break;
         }
     }
-    SolIrCallableId approvals[] = {source, provider};
-    root.callable = callable(ir, "handled", SOL_IR_CALLABLE_FUNCTION);
-    CHECK(build(ir, &root, 1, approvals, 2, NULL, &program)
+    root.callable = callable(ir, "direct", SOL_IR_CALLABLE_FUNCTION);
+    CHECK(build(ir, &root, 1, NULL, 0, NULL, &program)
         == SOL_MIR_PROGRAM_BUILD_SUCCEEDED);
-    CHECK(program.import_count == 2);
+    CHECK(has_template(&program, provider));
+    CHECK(has_template(&program, predicate));
+    CHECK(!has_import(&program, provider));
+    sol_mir_program_free(&program);
+
+    SolIrCallable *provider_metadata = &compilation.ir.callables[provider];
+    SolIrLocalId saved_receiver = provider_metadata->receiver;
+    provider_metadata->receiver = SOL_IR_NONE;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    provider_metadata->receiver = saved_receiver;
+    SolIrExpressionId saved_body = provider_metadata->body;
+    provider_metadata->body = SOL_IR_NONE;
+    CHECK(!sol_ir_validate(&compilation.ir, NULL));
+    provider_metadata->body = saved_body;
+    CHECK(sol_ir_validate(&compilation.ir, NULL));
+
+    SolIrCallableId approvals[] = {source};
+    root.callable = callable(ir, "handled", SOL_IR_CALLABLE_FUNCTION);
+    CHECK(build(ir, &root, 1, approvals, 1, NULL, &program)
+        == SOL_MIR_PROGRAM_BUILD_SUCCEEDED);
+    CHECK(program.import_count == 1);
+    CHECK(has_template(&program, provider));
+    CHECK(has_template(&program, predicate));
+    CHECK(!has_import(&program, provider));
     size_t handler_sources = 0;
     size_t handler_providers = 0;
     for (size_t index = 0; index < program.reference_count; ++index) {
@@ -754,6 +783,25 @@ static void test_predicate_proof_and_handler_relations(void) {
     CHECK(handler_sources == 1);
     CHECK(handler_providers == 1);
     sol_mir_program_free(&program);
+    free_compilation(&compilation);
+}
+
+static void test_derived_bodyful_capability_is_transactionally_unsupported(void) {
+    Compilation compilation;
+    CHECK(compile_text(&compilation,
+        "module derived_bodyful\n"
+        "capability Source { function read() -> Int64 effects { source.read<Self> } }\n"
+        "capability Provider derives_from private_source: capability Source { "
+        "function read() -> Int64 effects { pure } { return 1 } }\n"
+        "function direct(provider: capability Provider) -> Int64 "
+        "{ return provider.read() }\n"));
+    SolMirProgram program;
+    sol_mir_program_init(&program);
+    SolMirProgramRoot root = {callable(&compilation.ir, "direct",
+        SOL_IR_CALLABLE_FUNCTION), SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    CHECK(build(&compilation.ir, &root, 1, NULL, 0, NULL, &program)
+        == SOL_MIR_PROGRAM_BUILD_UNSUPPORTED_CLOSURE);
+    CHECK(program.ir == NULL && program.templates == NULL && program.imports == NULL);
     free_compilation(&compilation);
 }
 
@@ -900,6 +948,7 @@ int main(void) {
     test_callback_source_limitations();
     test_import_policy_and_lifecycle();
     test_predicate_proof_and_handler_relations();
+    test_derived_bodyful_capability_is_transactionally_unsupported();
     test_malformed_owner();
     if (failures != 0) {
         fprintf(stderr, "%d MIR program test(s) failed\n", failures);

@@ -4287,8 +4287,8 @@ static bool sol_effect_validate_inputs(SolEffectChecker *checker) {
             || member->owner_item >= syntax->item_count) {
             return false;
         }
-        if ((syntax->items[member->owner_item].capability_source != SOL_AST_NONE)
-            != (member->body != SOL_AST_NONE)) return false;
+        if (syntax->items[member->owner_item].capability_source != SOL_AST_NONE
+            && member->body == SOL_AST_NONE) return false;
     }
     return sol_effect_validate_provenance(checker, true)
         && sol_effect_validate_provenance(checker, false);

@@ -129,6 +129,94 @@ static char *render(const SolMirMaterialization *materialization, size_t *length
     return text;
 }
 
+static void test_bodyful_capability_internal_bindings(void) {
+    Compilation compilation;
+    CHECK(compile_text(&compilation,
+        "module bodyful_capability\n"
+        "function predicate(value: Int64) -> Bool effects { pure } { return value > 0 }\n"
+        "type Positive = refined Int64 where predicate(self)\n"
+        "capability Source { function read(value: Int64) -> Positive "
+        "effects { source.read<Self> } }\n"
+        "capability Provider { function read(value: Int64) -> Positive effects { pure } "
+        "requires { Positive(value) == Positive(value) } "
+        "ensures { result == Positive(old(value)) } { return Positive(value) } }\n"
+        "function direct(provider: capability Provider) -> Positive { return provider.read(1) }\n"
+        "function handled(source: capability Source, provider: capability Provider) -> Positive "
+        "{ handle source.read<source> with provider { source.read(1) } }\n"));
+    SolIrCallableId source = callable(&compilation.ir, "read",
+        SOL_IR_CALLABLE_CAPABILITY);
+    SolIrCallableId provider = SOL_IR_NONE;
+    for (SolIrCallableId id = source + 1; id < compilation.ir.callable_count; ++id) {
+        if (compilation.ir.callables[id].kind == SOL_IR_CALLABLE_CAPABILITY
+            && strcmp(compilation.ir.callables[id].name, "read") == 0) {
+            provider = id;
+            break;
+        }
+    }
+    SolDiagnostics diagnostics;
+    sol_diagnostics_init(&diagnostics);
+    SolMirProgram program;
+    SolMirPlan plan;
+    SolMirMaterialization materialization;
+    sol_mir_program_init(&program);
+    sol_mir_plan_init(&plan);
+    sol_mir_materialization_init(&materialization);
+    SolMirMaterializeBuildOutcome outcome;
+    CHECK(provider != SOL_IR_NONE);
+    CHECK(build_all(&compilation.ir,
+        callable(&compilation.ir, "direct", SOL_IR_CALLABLE_FUNCTION), NULL, 0,
+        &program, &plan, &materialization, NULL, &diagnostics, &outcome));
+    CHECK(outcome == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED);
+    CHECK(materialization.import_count == 0);
+    bool direct_provider = false;
+    for (size_t i = 0; i < materialization.binding_count; ++i) {
+        const SolMirMaterializedBinding *binding = &materialization.bindings[i];
+        direct_provider = direct_provider || (binding->symbolic_callable == provider
+            && binding->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+            && materialization.images[binding->instance].source_callable == provider);
+    }
+    CHECK(direct_provider);
+    for (size_t i = 0; i < materialization.binding_count; ++i) {
+        SolMirMaterializedBinding *binding = &materialization.bindings[i];
+        if (binding->symbolic_callable != provider) continue;
+        SolMirMaterializedTargetKind saved_kind = binding->target_kind;
+        binding->target_kind = SOL_MIR_MATERIALIZED_TARGET_IMPORT;
+        CHECK(!sol_mir_materialization_validate(&materialization, NULL));
+        binding->target_kind = saved_kind;
+        break;
+    }
+    CHECK(sol_mir_materialization_validate(&materialization, NULL));
+    sol_mir_materialization_free(&materialization);
+    sol_mir_plan_free(&plan);
+    sol_mir_program_free(&program);
+
+    SolIrCallableId imports[] = {source};
+    sol_mir_program_init(&program);
+    sol_mir_plan_init(&plan);
+    sol_mir_materialization_init(&materialization);
+    CHECK(build_all(&compilation.ir,
+        callable(&compilation.ir, "handled", SOL_IR_CALLABLE_FUNCTION), imports, 1,
+        &program, &plan, &materialization, NULL, &diagnostics, &outcome));
+    CHECK(outcome == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED);
+    CHECK(materialization.import_count == 1 && materialization.handler_count == 1);
+    CHECK(materialization.imports[0].source_callable == source
+        && materialization.imports[0].receiver != SOL_MIR_MATERIALIZED_NONE
+        && materialization.imports[0].receiver_access == SOL_ACCESS_SHARED);
+    const SolMirMaterializedHandler *handler = &materialization.handlers[0];
+    const SolMirMaterializedBinding *provider_binding
+        = &materialization.bindings[handler->provider_binding];
+    CHECK(provider_binding->symbolic_callable == provider
+        && provider_binding->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+        && materialization.images[provider_binding->instance].source_callable == provider);
+    CHECK(handler->operation.target_kind == SOL_MIR_MATERIALIZED_TARGET_IMPORT);
+    CHECK(sol_mir_materialization_validate(&materialization, NULL));
+    sol_mir_materialization_free(&materialization);
+    sol_mir_plan_free(&plan);
+    sol_mir_program_free(&program);
+    sol_diagnostics_free(&diagnostics);
+    free_compilation(&compilation);
+}
+
 static void test_generic_recursion_lifecycle_limits_and_render(void) {
     Compilation compilation;
     CHECK(compile_text(&compilation,
@@ -1900,6 +1988,7 @@ static void test_e6_concrete_closure_and_determinism(void) {
 
 int main(void) {
     CHECK(sol_mir_materialization_test_callable_site_target_equality());
+    test_bodyful_capability_internal_bindings();
     test_generic_recursion_lifecycle_limits_and_render();
     test_evidence_and_import_bindings();
     test_handlers_are_materialized();

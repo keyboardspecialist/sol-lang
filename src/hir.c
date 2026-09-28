@@ -886,7 +886,7 @@ static bool sol_resolver_validate(SolResolver *resolver) {
             return false;
         }
         bool derived = syntax->items[member->owner_item].capability_source != SOL_AST_NONE;
-        if (derived != (member->body != SOL_AST_NONE)) {
+        if (derived && member->body == SOL_AST_NONE) {
             sol_resolver_malformed(resolver);
             return false;
         }

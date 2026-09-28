@@ -30,6 +30,7 @@ typedef struct {
     SolMirProgram *program;
     SolDiagnostics *diagnostics;
     CallableClass *classes;
+    unsigned char *active_refinements;
     IncomingContext *incoming;
     ForwardedUse *forwarded;
     size_t forwarded_count;
@@ -523,6 +524,28 @@ static bool scan_evidence(Builder *builder, SolIrCallableId source_callable,
 static bool scan_expression(Builder *builder, SolIrCallableId source_callable,
     SolIrExpressionId id, bool predicate, size_t depth);
 
+static bool scan_refinement_predicates(Builder *builder,
+    SolIrCallableId source_callable, SolIrDefinitionId definition,
+    size_t depth) {
+    const SolIr *ir = builder->program->ir;
+    if (definition >= ir->definition_count || builder->active_refinements == NULL) {
+        return false;
+    }
+    if (builder->active_refinements[definition]) return true;
+    builder->active_refinements[definition] = 1;
+    bool valid = true;
+    for (size_t index = 0; index < ir->obligation_count; ++index) {
+        if (!charge_work(builder, 1)) { valid = false; break; }
+        const SolIrObligation *obligation = &ir->obligations[index];
+        if (obligation->owner_kind == SOL_CONTRACT_OWNER_TYPE
+            && obligation->owner == definition
+            && !scan_expression(builder, source_callable, obligation->predicate,
+                true, depth + 1)) { valid = false; break; }
+    }
+    builder->active_refinements[definition] = 0;
+    return valid;
+}
+
 static bool scan_statement_expression(Builder *builder,
     SolIrCallableId source_callable, const SolIrStatement *statement,
     bool predicate, size_t depth) {
@@ -635,6 +658,13 @@ static bool scan_expression(Builder *builder, SolIrCallableId source_callable,
                 && expression->as.call.kind == SOL_IR_CALL_METHOD
                 && !scan_evidence(builder, source_callable, SOL_IR_NONE, id,
                     expression->span, evidence)) return false;
+            if (predicate
+                && expression->as.call.kind == SOL_IR_CALL_DISTINCT_CONSTRUCTOR
+                && expression->as.call.definition < ir->definition_count
+                && ir->definitions[expression->as.call.definition].kind
+                    == SOL_IR_DEFINITION_REFINED
+                && !scan_refinement_predicates(builder, source_callable,
+                    expression->as.call.definition, depth)) return false;
             /* A direct invoke already retains its callee site. Only values passed
                through operands are independent static callable producers. */
             if (expression->as.call.receiver != SOL_IR_NONE) SCAN(expression->as.call.receiver);
@@ -697,12 +727,13 @@ static bool scan_expression(Builder *builder, SolIrCallableId source_callable,
 static bool scan_predicates(Builder *builder, SolIrCallableId callable,
     const SolMir *mir) {
     const SolIr *ir = builder->program->ir;
-    SolIrDefinitionId owner = ir->callables[callable].owner;
     for (size_t index = 0; index < ir->obligation_count; ++index) {
         if (!charge_work(builder, 1)) return false;
         const SolIrObligation *obligation = &ir->obligations[index];
-        if (obligation->owner_kind == SOL_CONTRACT_OWNER_ITEM
-            && obligation->owner == owner) {
+        if ((obligation->owner_kind == SOL_CONTRACT_OWNER_ITEM
+                && obligation->owner == ir->callables[callable].owner)
+            || (obligation->owner_kind == SOL_CONTRACT_OWNER_CAPABILITY_MEMBER
+                && obligation->owner == callable)) {
             for (size_t snapshot = 0; snapshot < obligation->snapshots.count;
                 ++snapshot) {
                 SolIrSnapshotId id = obligation->snapshots.offset + snapshot;
@@ -862,9 +893,16 @@ static bool classify(Builder *builder, SolIrCallableId callable) {
         report(builder, "reachable bodyless callable is not an import or trait requirement");
         return false;
     }
+    bool bodyful_capability = metadata->kind == SOL_IR_CALLABLE_CAPABILITY
+        && metadata->generic_parameters.count == 0
+        && metadata->effect_parameters.count == 0
+        && metadata->effect_parameter == SOL_IR_NONE
+        && metadata->receiver != SOL_IR_NONE
+        && metadata->receiver_access == SOL_ACCESS_SHARED;
     if (metadata->kind != SOL_IR_CALLABLE_FUNCTION
         && metadata->kind != SOL_IR_CALLABLE_TEST
-        && metadata->kind != SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION) {
+        && metadata->kind != SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION
+        && !bodyful_capability) {
         builder->outcome = SOL_MIR_PROGRAM_BUILD_UNSUPPORTED_CLOSURE;
         report(builder, "reachable bodyful callable is outside symbolic production MIR");
         return false;
@@ -1019,6 +1057,10 @@ static SolMirProgramBuildOutcome build_scratch(
     builder.classes = array_allocate(scratch->ir->callable_count,
         sizeof(*builder.classes));
     if (scratch->ir->callable_count != 0 && builder.classes == NULL) goto done;
+    builder.active_refinements = array_allocate(scratch->ir->definition_count,
+        sizeof(*builder.active_refinements));
+    if (scratch->ir->definition_count != 0
+        && builder.active_refinements == NULL) goto done;
     for (size_t index = 0; index < scratch->root_count; ++index) {
         if (!enqueue(&builder, scratch->roots[index].callable)) goto done;
     }
@@ -1098,6 +1140,7 @@ static SolMirProgramBuildOutcome build_scratch(
     builder.outcome = SOL_MIR_PROGRAM_BUILD_SUCCEEDED;
 done:
     free(builder.classes);
+    free(builder.active_refinements);
     free(builder.incoming);
     free(builder.forwarded);
     return builder.outcome;

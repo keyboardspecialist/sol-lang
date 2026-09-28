@@ -1963,6 +1963,14 @@ static bool scan_import_contracts(Environment *parent,
     return true;
 }
 
+static bool contract_owned_by_callable(const SolIrObligation *obligation,
+    const SolIrCallable *callable, SolIrCallableId callable_id) {
+    return (obligation->owner_kind == SOL_CONTRACT_OWNER_ITEM
+            && obligation->owner == callable->owner)
+        || (obligation->owner_kind == SOL_CONTRACT_OWNER_CAPABILITY_MEMBER
+            && obligation->owner == callable_id);
+}
+
 static bool scan_instance(Builder *builder, SolMirPlanInstanceId instance_id) {
     RawInstance *instance = &builder->instances[instance_id];
     if (instance->scanned || instance->active) return true;
@@ -2058,8 +2066,7 @@ static bool scan_instance(Builder *builder, SolMirPlanInstanceId instance_id) {
     for (size_t obligation = 0; obligation < builder->ir->obligation_count;
         ++obligation) {
         const SolIrObligation *item = &builder->ir->obligations[obligation];
-        if (item->owner_kind != SOL_CONTRACT_OWNER_ITEM
-            || item->owner != callable->owner) continue;
+        if (!contract_owned_by_callable(item, callable, instance->callable)) continue;
         if (item->predicate >= builder->ir->expression_count) return false;
         Environment predicate = environment;
         SolMirPlanContext contract = {SOL_MIR_PLAN_CONTEXT_CONTRACT,

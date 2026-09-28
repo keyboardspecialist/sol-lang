@@ -1026,7 +1026,7 @@ static LoweredValue mir_lower_direct_call(MirLowerer *lowerer,
                 ? SOL_IR_CALLABLE_TRAIT_REQUIREMENT
                 : SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION))
             || (capability && target->kind != SOL_IR_CALLABLE_CAPABILITY)
-            || (!method && target->receiver != SOL_IR_NONE)
+            || (!method && !capability && target->receiver != SOL_IR_NONE)
             || (method && target->receiver == SOL_IR_NONE)
             || (!capability && target->capability_source != SOL_IR_NONE)
             || (target->generic_parameters.count == 0
@@ -1851,15 +1851,18 @@ static bool mir_emit_contract_check(MirLowerer *lowerer,
 }
 
 static bool mir_obligation_owned_by_callable(const SolIrObligation *obligation,
-    const SolIrCallable *callable) {
-    return obligation->owner_kind == SOL_CONTRACT_OWNER_ITEM
-        && obligation->owner == callable->owner;
+    const SolIrCallable *callable, SolIrCallableId callable_id) {
+    return (obligation->owner_kind == SOL_CONTRACT_OWNER_ITEM
+            && obligation->owner == callable->owner)
+        || (obligation->owner_kind == SOL_CONTRACT_OWNER_CAPABILITY_MEMBER
+            && obligation->owner == callable_id);
 }
 
 static bool mir_lower_contract_entry(MirLowerer *lowerer) {
     for (size_t id = 0; id < lowerer->ir->obligation_count; ++id) {
         const SolIrObligation *obligation = &lowerer->ir->obligations[id];
-        if (!mir_obligation_owned_by_callable(obligation, lowerer->callable)
+        if (!mir_obligation_owned_by_callable(obligation, lowerer->callable,
+                lowerer->mir->callable)
             || obligation->kind != SOL_CONTRACT_REQUIRES) continue;
         SolMirBlockId satisfied = mir_append_block(lowerer,
             lowerer->ir->expressions[obligation->predicate].span);
@@ -1873,7 +1876,7 @@ static bool mir_lower_contract_entry(MirLowerer *lowerer) {
         if (snapshot->obligation >= lowerer->ir->obligation_count
             || !mir_obligation_owned_by_callable(
                 &lowerer->ir->obligations[snapshot->obligation],
-                lowerer->callable)) continue;
+                lowerer->callable, lowerer->mir->callable)) continue;
         const SolIrExpression *read = &lowerer->ir->expressions[snapshot->read];
         if (mir_append_instruction(lowerer, (SolMirInstruction){
                 .kind = SOL_MIR_INST_CAPTURE_SNAPSHOT,
@@ -1891,7 +1894,8 @@ static bool mir_lower_contract_epilogue(MirLowerer *lowerer,
     SolMirValueId result) {
     for (size_t id = 0; id < lowerer->ir->obligation_count; ++id) {
         const SolIrObligation *obligation = &lowerer->ir->obligations[id];
-        if (!mir_obligation_owned_by_callable(obligation, lowerer->callable)
+        if (!mir_obligation_owned_by_callable(obligation, lowerer->callable,
+                lowerer->mir->callable)
             || obligation->kind != SOL_CONTRACT_ENSURES) continue;
         SolSpan span = lowerer->ir->expressions[obligation->predicate].span;
         SolMirBlockId satisfied = mir_append_block(lowerer, span);
@@ -5353,7 +5357,8 @@ static bool mir_validate_contract_envelope(const SolIr *ir, const SolMir *mir,
     size_t snapshot_count = 0;
     for (size_t id = 0; id < ir->obligation_count; ++id) {
         const SolIrObligation *obligation = &ir->obligations[id];
-        if (!mir_obligation_owned_by_callable(obligation, callable)) continue;
+        if (!mir_obligation_owned_by_callable(obligation, callable,
+                mir->callable)) continue;
         ++obligation_count;
         require_count += obligation->kind == SOL_CONTRACT_REQUIRES;
         ensure_count += obligation->kind == SOL_CONTRACT_ENSURES;
@@ -5414,7 +5419,8 @@ static bool mir_validate_contract_envelope(const SolIr *ir, const SolMir *mir,
     SolMirBlockId current = mir->entry;
     for (size_t id = 0; id < ir->obligation_count; ++id) {
         const SolIrObligation *obligation = &ir->obligations[id];
-        if (!mir_obligation_owned_by_callable(obligation, callable)
+        if (!mir_obligation_owned_by_callable(obligation, callable,
+                mir->callable)
             || obligation->kind != SOL_CONTRACT_REQUIRES) continue;
         const SolMirTerminator *term = &mir->blocks[current].terminator;
         if (term->kind != SOL_MIR_TERM_CHECK_CONTRACT
@@ -5454,7 +5460,8 @@ static bool mir_validate_contract_envelope(const SolIr *ir, const SolMir *mir,
         for (size_t id = 0; id < ir->snapshot_count; ++id) {
             if (ir->snapshots[id].obligation < ir->obligation_count
                 && mir_obligation_owned_by_callable(
-                    &ir->obligations[ir->snapshots[id].obligation], callable)) {
+                    &ir->obligations[ir->snapshots[id].obligation], callable,
+                    mir->callable)) {
                 if (ordinal++ == seen_snapshots) expected = id;
             }
         }
@@ -5481,7 +5488,8 @@ static bool mir_validate_contract_envelope(const SolIr *ir, const SolMir *mir,
         mir->blocks[current].parameters.offset];
     for (size_t id = 0; id < ir->obligation_count; ++id) {
         const SolIrObligation *obligation = &ir->obligations[id];
-        if (!mir_obligation_owned_by_callable(obligation, callable)
+        if (!mir_obligation_owned_by_callable(obligation, callable,
+                mir->callable)
             || obligation->kind != SOL_CONTRACT_ENSURES) continue;
         const SolMirTerminator *term = &mir->blocks[current].terminator;
         if (term->kind != SOL_MIR_TERM_CHECK_CONTRACT
@@ -6453,8 +6461,11 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                             == source->as.call.callable
                         && source->as.call.callable == term->as.invoke.callable
                         && target->kind == SOL_IR_CALLABLE_CAPABILITY
-                        && target->receiver == SOL_IR_NONE
-                        && source->as.call.receiver_access == SOL_ACCESS_SHARED
+                        && (target->body == SOL_IR_NONE
+                            ? target->receiver == SOL_IR_NONE
+                            : target->receiver != SOL_IR_NONE
+                                && source->as.call.receiver_access
+                                    == target->receiver_access)
                         && receiver->type < ir->type_count
                         && ir->types[receiver->type].kind == SOL_IR_TYPE_NOMINAL
                         && ir->types[receiver->type].definition == target->owner
@@ -7077,7 +7088,8 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 SolMirValueId result = term->as.check_contract.result;
                 bool valid = obligation != NULL && predicate != NULL
                     && obligation->id == id
-                    && mir_obligation_owned_by_callable(obligation, callable)
+                    && mir_obligation_owned_by_callable(obligation, callable,
+                        mir->callable)
                     && term->as.check_contract.phase == obligation->kind
                     && term->as.check_contract.outcome == obligation->outcome
                     && predicate->type < ir->type_count
@@ -7133,7 +7145,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 if (id >= ir->obligation_count
                     || ir->obligations[id].id != id
                     || !mir_obligation_owned_by_callable(&ir->obligations[id],
-                        callable)
+                        callable, mir->callable)
                     || block->terminator.span.start
                         != ir->expressions[ir->obligations[id].predicate].span.start
                     || block->terminator.span.end
@@ -7688,8 +7700,8 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 ? &ir->places[operand->as.place] : NULL;
             if (snapshot == NULL || snapshot->id != snapshot_id
                 || snapshot->obligation >= ir->obligation_count
-                || !mir_obligation_owned_by_callable(
-                    &ir->obligations[snapshot->obligation], callable)
+            || !mir_obligation_owned_by_callable(
+                &ir->obligations[snapshot->obligation], callable, mir->callable)
                 || snapshot->read != instruction->source_expression
                 || snapshot->read >= ir->expression_count
                 || snapshot->operand >= ir->expression_count
@@ -7900,8 +7912,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         SolIrLocalId expected = ordinal < receiver_count
             ? callable->receiver : ordinal - receiver_count
                     < callable->parameters.count
-                ? ir->roots[callable->parameters.offset + ordinal
-                    - receiver_count]
+                ? ir->roots[callable->parameters.offset + ordinal - receiver_count]
                 : SOL_IR_NONE;
         if (instruction->block != mir->entry
             || index < entry_instructions.offset
@@ -8033,9 +8044,8 @@ SolMirLowerOutcome sol_mir_lower_callable(const SolIr *ir,
     const SolIrCallable *callable = &ir->callables[callable_id];
     bool contracted = false;
     for (size_t index = 0; index < ir->obligation_count; ++index) {
-        contracted = contracted
-            || (ir->obligations[index].owner_kind == SOL_CONTRACT_OWNER_ITEM
-                && ir->obligations[index].owner == callable->owner);
+        contracted = contracted || mir_obligation_owned_by_callable(
+            &ir->obligations[index], callable, callable_id);
     }
     bool exclusive_contract_parameter = false;
     bool fallible_contract_snapshot = false;
@@ -8051,7 +8061,7 @@ SolMirLowerOutcome sol_mir_lower_callable(const SolIr *ir,
         const SolIrSnapshot *snapshot = &ir->snapshots[index];
         if (snapshot->obligation >= ir->obligation_count
             || !mir_obligation_owned_by_callable(
-                &ir->obligations[snapshot->obligation], callable)) continue;
+                &ir->obligations[snapshot->obligation], callable, callable_id)) continue;
         const SolIrExpression *operand = &ir->expressions[snapshot->operand];
         fallible_contract_snapshot = fallible_contract_snapshot
             || operand->kind != SOL_IR_EXPR_PLACE
@@ -8068,12 +8078,17 @@ SolMirLowerOutcome sol_mir_lower_callable(const SolIr *ir,
     }
     bool implementation
         = callable->kind == SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION;
+    bool capability = callable->kind == SOL_IR_CALLABLE_CAPABILITY;
     if ((callable->kind != SOL_IR_CALLABLE_FUNCTION
-            && callable->kind != SOL_IR_CALLABLE_TEST && !implementation)
+            && callable->kind != SOL_IR_CALLABLE_TEST && !implementation
+            && !capability)
         || callable->body == SOL_IR_NONE
         || (implementation
             ? callable->receiver == SOL_IR_NONE
-            : callable->receiver != SOL_IR_NONE)
+            : !capability && callable->receiver != SOL_IR_NONE)
+        || (capability && (callable->generic_parameters.count != 0
+            || callable->effect_parameters.count != 0
+            || callable->effect_parameter != SOL_IR_NONE))
         || callable->capability_source != SOL_IR_NONE
         || (contracted
             && (callable->generic_parameters.count != 0

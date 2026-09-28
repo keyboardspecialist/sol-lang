@@ -1119,7 +1119,7 @@ static void test_malformed_expression_delimiters(void) {
     sol_source_free(&source);
 }
 
-static void test_capability_member_body_rejected(void) {
+static void test_root_capability_member_body(void) {
     static const char source_text[] =
         "module capability_body\n"
         "capability Clock { function now() -> Int64 { return 1 } }\n";
@@ -1133,13 +1133,9 @@ static void test_capability_member_body_rejected(void) {
     sol_syntax_tree_init(&tree);
     CHECK(sol_lex(&source, &tokens, &diagnostics));
     CHECK(sol_parse(&source, &tokens, &tree, &diagnostics));
-    CHECK(sol_diagnostics_has_errors(&diagnostics));
-    CHECK(tree.expression_count == 0);
-    bool found = false;
-    for (size_t index = 0; index < diagnostics.count; ++index) {
-        found = found || strcmp(diagnostics.items[index].code, "SOL-PARSE-014") == 0;
-    }
-    CHECK(found);
+    CHECK(!sol_diagnostics_has_errors(&diagnostics));
+    CHECK(tree.capability_member_count == 1 && tree.expression_count != 0);
+    CHECK(tree.capability_members[0].body != SOL_AST_NONE);
 
     sol_syntax_tree_free(&tree);
     sol_diagnostics_free(&diagnostics);
@@ -2556,7 +2552,7 @@ int main(void) {
     test_nested_record_condition();
     test_expression_depth_limit();
     test_malformed_expression_delimiters();
-    test_capability_member_body_rejected();
+    test_root_capability_member_body();
     test_derived_capability_syntax();
     test_derived_capability_requires_member_bodies();
     test_failed_function_parameter_rollback();

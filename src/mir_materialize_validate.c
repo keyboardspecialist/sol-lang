@@ -27,6 +27,21 @@ static bool signatures_equal(const SolMirMaterialization *o,
     const SolMirMaterializedBinding *left,
     const SolMirMaterializedBinding *right);
 
+static bool contract_owned_by_image(const View *v,
+    const SolMirMaterializedTerminator *term) {
+    const SolIr *ir = v->owner->plan->program->ir;
+    if (v->image->source_callable >= ir->callable_count
+        || term->source_obligation >= ir->obligation_count) return false;
+    const SolIrCallable *callable = &ir->callables[v->image->source_callable];
+    const SolIrObligation *obligation = &ir->obligations[term->source_obligation];
+    return obligation->kind == term->contract_phase
+        && ((obligation->owner_kind == SOL_CONTRACT_OWNER_ITEM
+                && obligation->owner == callable->owner)
+            || (obligation->owner_kind
+                    == SOL_CONTRACT_OWNER_CAPABILITY_MEMBER
+                && obligation->owner == v->image->source_callable));
+}
+
 static bool operation_key_matches(const SolMirMaterializedOperationKey *key,
     const SolMirMaterializedBinding *binding, SolMirMaterializedTypeId receiver,
     SolMirMaterializedPlaceId root, SolMirMaterializedEffectRowId effects) {
@@ -1527,7 +1542,8 @@ static bool validate_storage_paths(const View *v,
                 switch (ins->kind) {
                     case SOL_MIR_INST_PARAMETER_LIVE:
                         valid = work[lr] == STORAGE_DEAD
-                            && o->locals[local].kind != SOL_MIR_MATERIALIZED_LOCAL_BODY;
+                            && o->locals[local].kind
+                                != SOL_MIR_MATERIALIZED_LOCAL_BODY;
                         if (valid) work[lr] = STORAGE_INITIALIZED; break;
                     case SOL_MIR_INST_STORAGE_LIVE:
                         valid = work[lr] == STORAGE_DEAD
@@ -1935,6 +1951,7 @@ static bool validate_contracts(const View *v) {
         const SolMirMaterializedBlock *block = &o->blocks[v->image->blocks.offset + b];
         const SolMirMaterializedTerminator *t = &block->terminator;
         if (t->kind == SOL_MIR_TERM_CHECK_CONTRACT) {
+            if (!contract_owned_by_image(v, t)) return false;
             if (t->contract_phase == SOL_CONTRACT_REQUIRES) ++requires;
             else if (t->contract_phase == SOL_CONTRACT_ENSURES) ++ensures;
             else return false;

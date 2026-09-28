@@ -958,8 +958,17 @@ static bool sol_ir_frontend_shape_valid(SolIrLowerer *lowerer) {
 
 static bool sol_ir_lower_locals(SolIrLowerer *lowerer) {
     size_t count = lowerer->hir->local_count;
-    if (count != 0) {
-        lowerer->ir->locals = sol_ir_allocate(count, sizeof(*lowerer->ir->locals), true);
+    size_t bodyful_capabilities = 0;
+    for (size_t index = 0; index < lowerer->syntax->capability_member_count;
+        ++index) {
+        bodyful_capabilities += lowerer->syntax->capability_members[index].body
+            != SOL_AST_NONE;
+    }
+    if (bodyful_capabilities > SIZE_MAX - count) return false;
+    size_t capacity = count + bodyful_capabilities;
+    if (capacity != 0) {
+        lowerer->ir->locals = sol_ir_allocate(capacity,
+            sizeof(*lowerer->ir->locals), true);
         if (lowerer->ir->locals == NULL) return false;
     }
     lowerer->ir->local_count = count;
@@ -1005,6 +1014,38 @@ static bool sol_ir_lower_locals(SolIrLowerer *lowerer) {
         if (local->name == NULL || local->type == SOL_IR_NONE) return false;
     }
     return !lowerer->failed;
+}
+
+/* Capability Self is an implicit receiver rather than a source parameter.
+   Reserve one canonical parameter local per member so its MIR/P2 signature can
+   carry the exact receiver before the declared private source and parameters. */
+static SolIrLocalId sol_ir_add_capability_receiver(SolIrLowerer *lowerer,
+    SolIrDefinitionId owner) {
+    if (owner >= lowerer->ir->definition_count
+        || lowerer->ir->local_count >= lowerer->hir->local_count
+            + lowerer->syntax->capability_member_count) {
+        sol_ir_error(lowerer->diagnostics, "capability receiver local capacity is invalid");
+        return SOL_IR_NONE;
+    }
+    SolIrLocal *local = &lowerer->ir->locals[lowerer->ir->local_count];
+    local->owner = owner;
+    local->kind = SOL_IR_LOCAL_PARAMETER;
+    local->access = SOL_ACCESS_SHARED;
+    local->mutable = false;
+    local->name = sol_ir_copy_text("$self", 5);
+    local->type = sol_ir_add_type(lowerer, (SolIrType){
+        .kind = SOL_IR_TYPE_NOMINAL,
+        .definition = owner,
+        .result = SOL_IR_NONE,
+        .effect_parameter = SOL_IR_NONE,
+    });
+    local->capability_roots = (SolIrSlice){0};
+    local->operation_roots = (SolIrSlice){0};
+    if (local->name == NULL || local->type == SOL_IR_NONE) {
+        sol_ir_error(lowerer->diagnostics, "capability receiver local type is invalid");
+        return SOL_IR_NONE;
+    }
+    return lowerer->ir->local_count++;
 }
 
 static bool sol_ir_lower_fields_variants(SolIrLowerer *lowerer) {
@@ -1086,7 +1127,12 @@ static SolIrCallableId sol_ir_add_callable(
     entry->name = sol_ir_copy_span(lowerer->source, name);
     entry->span = span;
     entry->receiver = SOL_IR_NONE;
-    entry->receiver_access = SOL_ACCESS_OWNED;
+    /* Capability members have an implicit Self receiver.  It is carried
+       receiver-first by MIR/P2 rather than duplicated in the ordinary
+       parameter slice. */
+    entry->receiver_access = kind == SOL_IR_CALLABLE_CAPABILITY
+            && body != SOL_IR_NONE
+        ? SOL_ACCESS_SHARED : SOL_ACCESS_OWNED;
     entry->capability_source = SOL_IR_NONE;
     entry->result_authority = SOL_IR_NONE;
     if (skip_first && parameters != SOL_AST_NONE) {
@@ -1316,6 +1362,9 @@ static bool sol_ir_lower_declarations(SolIrLowerer *lowerer) {
     }
     for (size_t index = 0; index < lowerer->syntax->capability_member_count; ++index) {
         const SolCapabilityMember *member = &lowerer->syntax->capability_members[index];
+        SolIrLocalId receiver = member->body == SOL_AST_NONE ? SOL_IR_NONE
+            : sol_ir_add_capability_receiver(lowerer, member->owner_item);
+        if (member->body != SOL_AST_NONE && receiver == SOL_IR_NONE) return false;
         SolIrCallableId callable = sol_ir_add_callable(lowerer, SOL_IR_CALLABLE_CAPABILITY,
             member->owner_item, member->name, member->span, member->first_parameter, false,
             lowerer->types->declared_types[member->return_type_id], member->body,
@@ -1323,6 +1372,10 @@ static bool sol_ir_lower_declarations(SolIrLowerer *lowerer) {
         SolIrDefinition *definition = &lowerer->ir->definitions[member->owner_item];
         if (definition->members.count == 0) definition->members.offset = lowerer->ir->member_count;
         if (callable == SOL_IR_NONE || !sol_ir_append_member(lowerer, callable)) return false;
+        lowerer->ir->callables[callable].receiver = receiver;
+        if (receiver != SOL_IR_NONE) {
+            lowerer->ir->callables[callable].receiver_access = SOL_ACCESS_SHARED;
+        }
         lowerer->member_callables[index] = callable;
         if (member->result_authority_from_self) {
             lowerer->ir->callables[callable].result_authority_kind
@@ -3028,9 +3081,16 @@ static bool sol_ir_callable_shapes_equal(
     if (left_id >= ir->callable_count || right_id >= ir->callable_count) return false;
     const SolIrCallable *left = &ir->callables[left_id];
     const SolIrCallable *right = &ir->callables[right_id];
+    bool bodyful_capability_provider = left->kind == SOL_IR_CALLABLE_CAPABILITY
+        && right->kind == SOL_IR_CALLABLE_CAPABILITY
+        && left->body == SOL_IR_NONE && right->body != SOL_IR_NONE
+        && left->receiver == SOL_IR_NONE && right->receiver != SOL_IR_NONE
+        && left->receiver_access == SOL_ACCESS_OWNED
+        && right->receiver_access == SOL_ACCESS_SHARED;
     if (left->parameters.count != right->parameters.count
         || left->result != right->result
-        || left->receiver_access != right->receiver_access) return false;
+        || (left->receiver_access != right->receiver_access
+            && !bodyful_capability_provider)) return false;
     for (size_t index = 0; index < left->parameters.count; ++index) {
         SolIrLocalId left_local = ir->roots[left->parameters.offset + index];
         SolIrLocalId right_local = ir->roots[right->parameters.offset + index];
@@ -5495,7 +5555,8 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                 && (callable->receiver >= ir->local_count
                     || ir->locals[callable->receiver].owner != callable->owner
                     || (callable->kind != SOL_IR_CALLABLE_TRAIT_REQUIREMENT
-                        && callable->kind != SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION)
+                        && callable->kind != SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION
+                        && callable->kind != SOL_IR_CALLABLE_CAPABILITY)
                     || ir->locals[callable->receiver].access
                         != callable->receiver_access))
             || (callable->receiver == SOL_IR_NONE
@@ -5522,6 +5583,26 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                 && (callable->kind != SOL_IR_CALLABLE_CAPABILITY
                     || !sol_ir_type_is_capability(ir, callable->result)))) {
             return sol_ir_error(diagnostics, "malformed IR callable result authority");
+        }
+        if (callable->kind == SOL_IR_CALLABLE_CAPABILITY
+            && ((callable->body == SOL_IR_NONE)
+                != (callable->receiver == SOL_IR_NONE))) {
+            return sol_ir_error(diagnostics,
+                "IR capability member receiver/body relation is malformed");
+        }
+        if (callable->kind == SOL_IR_CALLABLE_CAPABILITY
+            && callable->body != SOL_IR_NONE
+            && (callable->receiver_access != SOL_ACCESS_SHARED
+                || callable->receiver >= ir->local_count
+                || ir->locals[callable->receiver].kind
+                    != SOL_IR_LOCAL_PARAMETER
+                || ir->locals[callable->receiver].type >= ir->type_count
+                || ir->types[ir->locals[callable->receiver].type].kind
+                    != SOL_IR_TYPE_NOMINAL
+                || ir->types[ir->locals[callable->receiver].type].definition
+                    != callable->owner)) {
+            return sol_ir_error(diagnostics,
+                "IR bodyful capability receiver is malformed");
         }
         if (callable->kind == SOL_IR_CALLABLE_TEST
             && (ir->definitions[callable->owner].kind != SOL_IR_DEFINITION_TEST

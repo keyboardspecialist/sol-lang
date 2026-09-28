@@ -3150,17 +3150,7 @@ static bool sol_parser_function(
         }
     }
 
-    if (sol_parser_kind(parser) == SOL_TOKEN_LEFT_BRACE && member && !member_has_body) {
-        SolToken body_token = sol_parser_current(parser);
-        sol_diagnostics_add(
-            parser->diagnostics,
-            "SOL-PARSE-014",
-            SOL_SEVERITY_ERROR,
-            body_token.span,
-            "capability members declare signatures and cannot define function bodies"
-        );
-        sol_parser_balanced_block(parser, "expected a capability member body");
-    } else if (sol_parser_kind(parser) == SOL_TOKEN_LEFT_BRACE) {
+    if (sol_parser_kind(parser) == SOL_TOKEN_LEFT_BRACE) {
         *body = sol_parser_block_expression(parser);
         if (*body == SOL_AST_NONE) {
             return false;

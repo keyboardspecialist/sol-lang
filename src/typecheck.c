@@ -749,8 +749,8 @@ static bool sol_type_validate(SolTypeChecker *checker) {
             sol_type_malformed(checker);
             return false;
         }
-        if ((syntax->items[member->owner_item].capability_source != SOL_AST_NONE)
-            != (member->body != SOL_AST_NONE)) {
+        if (syntax->items[member->owner_item].capability_source != SOL_AST_NONE
+            && member->body == SOL_AST_NONE) {
             sol_type_malformed(checker);
             return false;
         }
