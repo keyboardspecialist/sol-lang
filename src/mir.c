@@ -10,6 +10,7 @@ typedef struct LoopContext LoopContext;
 struct Scope {
     const Scope *parent;
     SolIrSlice cleanup;
+    SolMirScope identity;
     SolIrStatementId region;
     bool cleanup_forward;
     bool cleanup_before_temporaries;
@@ -46,6 +47,7 @@ typedef struct {
     bool failed;
     bool contracted;
     SolMirBlockId contract_epilogue;
+    const Scope *callable_scope;
 } MirLowerer;
 
 static bool mir_error(SolDiagnostics *diagnostics, SolSpan span,
@@ -442,6 +444,9 @@ static SolMirInstructionId mir_append_instruction(MirLowerer *lowerer,
             break;
         case SOL_MIR_INST_CAPTURE_SNAPSHOT:
             stored->as.snapshot = instruction.as.snapshot; break;
+        case SOL_MIR_INST_SCOPE_ENTER:
+        case SOL_MIR_INST_SCOPE_EXIT:
+            stored->as.scope = instruction.as.scope; break;
         default: break;
     }
     ++mir->blocks[lowerer->current].instructions.count;
@@ -705,6 +710,19 @@ static bool mir_emit_local(MirLowerer *lowerer,
     }, false) != SOL_MIR_NONE;
 }
 
+static bool mir_emit_scope_enter(MirLowerer *lowerer, SolMirScope identity,
+    SolSpan span) {
+    return identity.kind != SOL_MIR_SCOPE_INVALID
+        && identity.kind <= SOL_MIR_SCOPE_REGION
+        && mir_append_instruction(lowerer, (SolMirInstruction){
+            .kind = SOL_MIR_INST_SCOPE_ENTER,
+            .type = SOL_IR_NONE,
+            .source_expression = SOL_IR_NONE,
+            .span = span,
+            .as.scope = identity,
+        }, false) != SOL_MIR_NONE;
+}
+
 static bool mir_emit_cleanup_slice(MirLowerer *lowerer,
     SolIrSlice cleanup, SolSpan span) {
     while (cleanup.count != 0) {
@@ -738,6 +756,15 @@ static bool mir_emit_scope_cleanup(MirLowerer *lowerer,
 static bool mir_emit_scope_exit(MirLowerer *lowerer,
     const Scope *scope, SolSpan span) {
     if (!mir_emit_scope_cleanup(lowerer, scope, span)) return false;
+    if (scope->identity.kind != SOL_MIR_SCOPE_INVALID
+        && scope->identity.kind <= SOL_MIR_SCOPE_REGION
+        && mir_append_instruction(lowerer, (SolMirInstruction){
+                .kind = SOL_MIR_INST_SCOPE_EXIT,
+                .type = SOL_IR_NONE,
+                .source_expression = SOL_IR_NONE,
+                .span = span,
+                .as.scope = scope->identity,
+            }, false) == SOL_MIR_NONE) return false;
     if (scope->region != SOL_IR_NONE
         && mir_append_instruction(lowerer, (SolMirInstruction){
                 .kind = SOL_MIR_INST_REGION_EXIT,
@@ -757,7 +784,7 @@ static bool mir_emit_scope_exit(MirLowerer *lowerer,
 
 static bool mir_emit_exit_cleanup_mode(MirLowerer *lowerer,
     const Scope *scope, SolSpan span, bool cleanup_parameters) {
-    const Scope *current = scope;
+    const Scope *current = scope == NULL ? lowerer->callable_scope : scope;
     size_t temporary_end = lowerer->pending_temporary_count;
     while (current != NULL) {
         const Scope *boundary = current;
@@ -771,9 +798,11 @@ static bool mir_emit_exit_cleanup_mode(MirLowerer *lowerer,
             return false;
         }
         while (current != boundary->parent) {
+            if (current->identity.kind == SOL_MIR_SCOPE_CALLABLE_ENVELOPE) break;
             if (!mir_emit_scope_exit(lowerer, current, span)) return false;
             current = current->parent;
         }
+        if (current != boundary->parent) break;
         if (!mir_emit_temporary_cleanup_range(lowerer,
             boundary->temporary_parent_boundary, temporary_boundary,
             boundary->temporary_parent_boundary, span)) return false;
@@ -783,7 +812,12 @@ static bool mir_emit_exit_cleanup_mode(MirLowerer *lowerer,
         temporary_end, 0, span)) {
         return false;
     }
+    const Scope *deferred_callable = NULL;
     for (; current != NULL; current = current->parent) {
+        if (current->identity.kind == SOL_MIR_SCOPE_CALLABLE_ENVELOPE) {
+            deferred_callable = current;
+            break;
+        }
         if (!mir_emit_scope_exit(lowerer, current, span)) return false;
     }
     SolIrSlice parameters = cleanup_parameters
@@ -804,6 +838,8 @@ static bool mir_emit_exit_cleanup_mode(MirLowerer *lowerer,
             || !mir_emit_local(lowerer, SOL_MIR_INST_STORAGE_DEAD,
                 local, span)) return false;
     }
+    if (cleanup_parameters && deferred_callable != NULL
+        && !mir_emit_scope_exit(lowerer, deferred_callable, span)) return false;
     return true;
 }
 
@@ -1609,15 +1645,17 @@ static LoweredValue mir_lower_match(MirLowerer *lowerer,
                     .pattern = arm->pattern,
                     .scrutinee = temporary,
                 },
-            }, false) == SOL_MIR_NONE
-            || !mir_emit_pattern_bindings(lowerer, id, arm_id, index,
-                arm->pattern, temporary, 0)) return mir_failure(lowerer);
+            }, false) == SOL_MIR_NONE) return mir_failure(lowerer);
         Scope arm_scope = {
             .parent = scope,
             .cleanup = arm->cleanup,
+            .identity = {SOL_MIR_SCOPE_MATCH_ARM, arm_id},
             .region = SOL_IR_NONE,
             .cleanup_forward = true,
         };
+        if (!mir_emit_scope_enter(lowerer, arm_scope.identity, arm->span)
+            || !mir_emit_pattern_bindings(lowerer, id, arm_id, index,
+                arm->pattern, temporary, 0)) return mir_failure(lowerer);
         if (arm->guard != SOL_IR_NONE) {
             Scope guard_scope = arm_scope;
             guard_scope.cleanup_before_temporaries = true;
@@ -1632,7 +1670,7 @@ static LoweredValue mir_lower_match(MirLowerer *lowerer,
                 || !mir_set_branch(lowerer, lowerer->current, guard.value,
                     accepted, rejected, arm->span)
                 || !mir_start_block(lowerer, rejected)
-                || !mir_emit_scope_cleanup(lowerer, &arm_scope, arm->span)
+                || !mir_emit_scope_exit(lowerer, &arm_scope, arm->span)
                 || !mir_set_goto(lowerer, lowerer->current, next,
                     SOL_MIR_NONE, false, arm->span)
                 || !mir_start_block(lowerer, accepted)) {
@@ -1645,7 +1683,7 @@ static LoweredValue mir_lower_match(MirLowerer *lowerer,
         lowerer->pending_temporary_count = operation_depth;
         LoweredValue body = mir_lower_expression(lowerer, arm->body, &arm_scope);
         if (body.reachable) {
-            if (!mir_emit_scope_cleanup(lowerer, &arm_scope, arm->span)) {
+            if (!mir_emit_scope_exit(lowerer, &arm_scope, arm->span)) {
                 return mir_failure(lowerer);
             }
             if (join == SOL_MIR_NONE) {
@@ -1708,10 +1746,13 @@ static LoweredValue mir_lower_handler(MirLowerer *lowerer,
         }, false) == SOL_MIR_NONE) return mir_failure(lowerer);
     Scope handler_scope = {
         .parent = scope,
+        .identity = {SOL_MIR_SCOPE_HANDLER, id},
         .region = SOL_IR_NONE,
         .exits_handler = true,
         .handler = id,
     };
+    if (!mir_emit_scope_enter(lowerer, handler_scope.identity,
+            expression->span)) return mir_failure(lowerer);
     LoweredValue body = mir_lower_expression(lowerer,
         expression->as.handler.body, &handler_scope);
     if (!body.reachable) return body;
@@ -2027,11 +2068,17 @@ static LoweredValue mir_lower_loop_statement(MirLowerer *lowerer,
 
 static LoweredValue mir_lower_block(MirLowerer *lowerer,
     const SolIrExpression *expression, const Scope *parent) {
+    SolIrExpressionId block_id
+        = (SolIrExpressionId)(expression - lowerer->ir->expressions);
     Scope scope = {
         .parent = parent,
         .cleanup = {.offset = expression->as.block.cleanup.offset, .count = 0},
+        .identity = {SOL_MIR_SCOPE_BLOCK, block_id},
         .region = SOL_IR_NONE,
     };
+    if (!mir_emit_scope_enter(lowerer, scope.identity, expression->span)) {
+        return mir_failure(lowerer);
+    }
     LoweredValue last = {.reachable = true, .value = SOL_MIR_NONE};
     for (size_t index = 0; index < expression->as.block.statements.count;
         ++index) {
@@ -2206,18 +2253,16 @@ static LoweredValue mir_lower_block(MirLowerer *lowerer,
                 Scope region_scope = {
                     .parent = &scope,
                     .cleanup = {0},
+                    .identity = {SOL_MIR_SCOPE_REGION, statement_id},
                     .region = statement_id,
                 };
+                if (!mir_emit_scope_enter(lowerer, region_scope.identity,
+                        statement->span)) return mir_failure(lowerer);
                 LoweredValue body = mir_lower_expression(lowerer,
                     statement->expression, &region_scope);
                 if (!body.reachable) return body;
-                if (mir_append_instruction(lowerer, (SolMirInstruction){
-                    .kind = SOL_MIR_INST_REGION_EXIT,
-                    .type = SOL_IR_NONE,
-                    .source_expression = SOL_IR_NONE,
-                    .span = statement->span,
-                    .as.region = statement_id,
-                }, false) == SOL_MIR_NONE) return mir_failure(lowerer);
+                if (!mir_emit_scope_exit(lowerer, &region_scope,
+                        statement->span)) return mir_failure(lowerer);
                 last = body;
                 break;
             }
@@ -2297,8 +2342,6 @@ static LoweredValue mir_lower_block(MirLowerer *lowerer,
         });
         if (last.value == SOL_MIR_NONE) return mir_failure(lowerer);
     }
-    SolIrExpressionId block_id
-        = (SolIrExpressionId)(expression - lowerer->ir->expressions);
     last.value = mir_instruction_result(lowerer, (SolMirInstruction){
         .kind = SOL_MIR_INST_EXPRESSION_RESULT,
         .type = expression->type,
@@ -2307,7 +2350,7 @@ static LoweredValue mir_lower_block(MirLowerer *lowerer,
         .as.operand = last.value,
     });
     if (last.value == SOL_MIR_NONE) return mir_failure(lowerer);
-    if (!mir_emit_cleanup_slice(lowerer, scope.cleanup, expression->span)) {
+    if (!mir_emit_scope_exit(lowerer, &scope, expression->span)) {
         return mir_failure(lowerer);
     }
     return last;
@@ -3800,6 +3843,542 @@ static bool mir_validate_paths(const SolIr *ir, const SolMir *mir,
         "MIR partial-move path transitions are inconsistent");
 }
 
+static bool mir_scope_equal(SolMirScope left, SolMirScope right) {
+    return left.kind == right.kind && left.source == right.source;
+}
+
+static bool mir_scope_basic_source_valid(const SolIr *ir, const SolMir *mir,
+    SolMirScope scope) {
+    switch (scope.kind) {
+        case SOL_MIR_SCOPE_CALLABLE_ENVELOPE: return scope.source == mir->callable;
+        case SOL_MIR_SCOPE_BLOCK: return scope.source < ir->expression_count
+                && ir->expressions[scope.source].kind == SOL_IR_EXPR_BLOCK;
+        case SOL_MIR_SCOPE_MATCH_ARM: return scope.source < ir->arm_count;
+        case SOL_MIR_SCOPE_HANDLER: return scope.source < ir->expression_count
+                && ir->expressions[scope.source].kind == SOL_IR_EXPR_HANDLE;
+        case SOL_MIR_SCOPE_REGION: return scope.source < ir->statement_count
+                && ir->statements[scope.source].kind == SOL_IR_STATEMENT_REGION;
+        case SOL_MIR_SCOPE_INVALID: return false;
+    }
+    return false;
+}
+
+static bool mir_collect_scope_chain_expression(const SolIr *ir,
+    SolIrExpressionId expression_id, SolIrExpressionId sought,
+    bool include_self, SolMirScope *chain, size_t *count, size_t capacity,
+    size_t depth);
+
+static bool mir_collect_scope_chain_statement(const SolIr *ir,
+    SolIrStatementId statement_id, SolIrExpressionId sought,
+    bool include_self, SolMirScope *chain, size_t *count, size_t capacity,
+    size_t depth) {
+    const SolIrStatement *statement = statement_id < ir->statement_count
+        ? &ir->statements[statement_id] : NULL;
+    if (statement == NULL) return false;
+    if (statement->target != SOL_IR_NONE && mir_collect_scope_chain_expression(
+        ir, statement->target, sought, include_self, chain, count, capacity,
+        depth + 1)) return true;
+    if (statement->condition != SOL_IR_NONE && mir_collect_scope_chain_expression(
+        ir, statement->condition, sought, include_self, chain, count, capacity,
+        depth + 1)) return true;
+    size_t saved = *count;
+    if (statement->kind == SOL_IR_STATEMENT_REGION) {
+        if (*count == capacity) return false;
+        chain[(*count)++] = (SolMirScope){SOL_MIR_SCOPE_REGION, statement_id};
+    }
+    if (statement->expression != SOL_IR_NONE && mir_collect_scope_chain_expression(
+        ir, statement->expression, sought, include_self, chain, count, capacity,
+        depth + 1)) return true;
+    *count = saved;
+    return false;
+}
+
+static bool mir_collect_scope_chain_expression(const SolIr *ir,
+    SolIrExpressionId expression_id, SolIrExpressionId sought,
+    bool include_self, SolMirScope *chain, size_t *count, size_t capacity,
+    size_t depth) {
+    if (expression_id >= ir->expression_count || depth > ir->expression_count) {
+        return false;
+    }
+    const SolIrExpression *expression = &ir->expressions[expression_id];
+    if (expression_id == sought) {
+        if (include_self && expression->kind == SOL_IR_EXPR_BLOCK) {
+            if (*count == capacity) return false;
+            chain[(*count)++] = (SolMirScope){SOL_MIR_SCOPE_BLOCK, expression_id};
+        }
+        return true;
+    }
+#define SCOPE_CHILD(child) mir_collect_scope_chain_expression(ir, (child), sought, \
+    include_self, chain, count, capacity, depth + 1)
+    switch (expression->kind) {
+        case SOL_IR_EXPR_UNARY: return SCOPE_CHILD(expression->as.unary.operand);
+        case SOL_IR_EXPR_PROPAGATE: return SCOPE_CHILD(expression->as.propagate.operand);
+        case SOL_IR_EXPR_BOUND_OPERATION: return SCOPE_CHILD(expression->as.operation.receiver);
+        case SOL_IR_EXPR_BINARY:
+            return SCOPE_CHILD(expression->as.binary.left)
+                || SCOPE_CHILD(expression->as.binary.right);
+        case SOL_IR_EXPR_HANDLE: {
+            if (SCOPE_CHILD(expression->as.handler.authority)
+                || SCOPE_CHILD(expression->as.handler.provider)) return true;
+            if (*count == capacity) return false;
+            size_t saved = *count;
+            chain[(*count)++] = (SolMirScope){SOL_MIR_SCOPE_HANDLER, expression_id};
+            if (SCOPE_CHILD(expression->as.handler.body)) return true;
+            *count = saved;
+            return false;
+        }
+        case SOL_IR_EXPR_CALL:
+            if (expression->as.call.kind == SOL_IR_CALL_METHOD
+                && SCOPE_CHILD(expression->as.call.receiver)) return true;
+            if ((expression->as.call.kind == SOL_IR_CALL_CALLBACK
+                    || expression->as.call.kind == SOL_IR_CALL_CAPABILITY)
+                && SCOPE_CHILD(expression->as.call.callee)) return true;
+            for (size_t i = 0; i < expression->as.call.operands.count; ++i)
+                if (SCOPE_CHILD(ir->operands[expression->as.call.operands.offset + i]
+                    .value)) return true;
+            return false;
+        case SOL_IR_EXPR_RECORD:
+        case SOL_IR_EXPR_TUPLE: {
+            SolIrSlice operands = expression->kind == SOL_IR_EXPR_RECORD
+                ? expression->as.record.fields : expression->as.tuple.operands;
+            for (size_t i = 0; i < operands.count; ++i)
+                if (SCOPE_CHILD(ir->operands[operands.offset + i].value)) return true;
+            return false;
+        }
+        case SOL_IR_EXPR_IF:
+            return SCOPE_CHILD(expression->as.if_expr.condition)
+                || SCOPE_CHILD(expression->as.if_expr.then_branch)
+                || SCOPE_CHILD(expression->as.if_expr.else_branch);
+        case SOL_IR_EXPR_MATCH:
+            if (SCOPE_CHILD(expression->as.match_expr.scrutinee)) return true;
+            for (size_t i = 0; i < expression->as.match_expr.arms.count; ++i) {
+                SolIrArmId arm = ir->arm_ids[expression->as.match_expr.arms.offset + i];
+                size_t saved = *count;
+                if (arm >= ir->arm_count || *count == capacity) return false;
+                chain[(*count)++] = (SolMirScope){SOL_MIR_SCOPE_MATCH_ARM, arm};
+                if ((ir->arms[arm].guard != SOL_IR_NONE
+                        && SCOPE_CHILD(ir->arms[arm].guard))
+                    || SCOPE_CHILD(ir->arms[arm].body)) return true;
+                *count = saved;
+            }
+            return false;
+        case SOL_IR_EXPR_BLOCK: {
+            size_t saved = *count;
+            if (*count == capacity) return false;
+            chain[(*count)++] = (SolMirScope){SOL_MIR_SCOPE_BLOCK, expression_id};
+            for (size_t i = 0; i < expression->as.block.statements.count; ++i)
+                if (mir_collect_scope_chain_statement(ir, ir->statement_ids[
+                    expression->as.block.statements.offset + i], sought, include_self,
+                    chain, count, capacity, depth + 1)) return true;
+            *count = saved;
+            return false;
+        }
+        default: return false;
+    }
+#undef SCOPE_CHILD
+}
+
+static bool mir_scope_stack_matches_expression(const SolIr *ir,
+    const SolMir *mir, const SolMirScope *stack, size_t depth,
+    SolIrExpressionId expression, bool include_self) {
+    SolMirScope *expected = depth ? malloc(depth * sizeof(*expected)) : NULL;
+    if (depth && expected == NULL) return false;
+    size_t count = 0;
+    if (depth) expected[count++] = (SolMirScope){SOL_MIR_SCOPE_CALLABLE_ENVELOPE,
+        mir->callable};
+    bool found = mir_collect_scope_chain_expression(ir,
+        ir->callables[mir->callable].body, expression, include_self, expected,
+        &count, depth, 0);
+    bool valid = found && count == depth;
+    for (size_t i = 0; valid && i < depth; ++i)
+        valid = mir_scope_equal(expected[i], stack[i]);
+    free(expected);
+    return valid;
+}
+
+static bool mir_collect_scope_chain_statement_target_expression(const SolIr *ir,
+    SolIrExpressionId expression_id, SolIrStatementId sought,
+    SolMirScope *chain, size_t *count, size_t capacity, size_t depth);
+
+static bool mir_collect_scope_chain_statement_target(const SolIr *ir,
+    SolIrStatementId statement_id, SolIrStatementId sought,
+    SolMirScope *chain, size_t *count, size_t capacity, size_t depth) {
+    if (statement_id >= ir->statement_count || depth > ir->expression_count) {
+        return false;
+    }
+    if (statement_id == sought) return true;
+    const SolIrStatement *statement = &ir->statements[statement_id];
+    if (statement->target != SOL_IR_NONE
+        && mir_collect_scope_chain_statement_target_expression(ir,
+            statement->target, sought, chain, count, capacity, depth + 1)) {
+        return true;
+    }
+    if (statement->condition != SOL_IR_NONE
+        && mir_collect_scope_chain_statement_target_expression(ir,
+            statement->condition, sought, chain, count, capacity, depth + 1)) {
+        return true;
+    }
+    size_t saved = *count;
+    if (statement->kind == SOL_IR_STATEMENT_REGION) {
+        if (*count == capacity) return false;
+        chain[(*count)++] = (SolMirScope){SOL_MIR_SCOPE_REGION, statement_id};
+    }
+    if (statement->expression != SOL_IR_NONE
+        && mir_collect_scope_chain_statement_target_expression(ir,
+            statement->expression, sought, chain, count, capacity, depth + 1)) {
+        return true;
+    }
+    *count = saved;
+    return false;
+}
+
+static bool mir_collect_scope_chain_statement_target_expression(const SolIr *ir,
+    SolIrExpressionId expression_id, SolIrStatementId sought,
+    SolMirScope *chain, size_t *count, size_t capacity, size_t depth) {
+    if (expression_id >= ir->expression_count || depth > ir->expression_count) {
+        return false;
+    }
+    const SolIrExpression *expression = &ir->expressions[expression_id];
+#define SCOPE_STATEMENT_CHILD(child) \
+    mir_collect_scope_chain_statement_target_expression(ir, (child), sought, \
+        chain, count, capacity, depth + 1)
+    switch (expression->kind) {
+        case SOL_IR_EXPR_UNARY: return SCOPE_STATEMENT_CHILD(expression->as.unary.operand);
+        case SOL_IR_EXPR_PROPAGATE: return SCOPE_STATEMENT_CHILD(expression->as.propagate.operand);
+        case SOL_IR_EXPR_BOUND_OPERATION: return SCOPE_STATEMENT_CHILD(expression->as.operation.receiver);
+        case SOL_IR_EXPR_BINARY:
+            return SCOPE_STATEMENT_CHILD(expression->as.binary.left)
+                || SCOPE_STATEMENT_CHILD(expression->as.binary.right);
+        case SOL_IR_EXPR_HANDLE: {
+            if (SCOPE_STATEMENT_CHILD(expression->as.handler.authority)
+                || SCOPE_STATEMENT_CHILD(expression->as.handler.provider)) return true;
+            if (*count == capacity) return false;
+            size_t saved = *count;
+            chain[(*count)++] = (SolMirScope){SOL_MIR_SCOPE_HANDLER, expression_id};
+            if (SCOPE_STATEMENT_CHILD(expression->as.handler.body)) return true;
+            *count = saved;
+            return false;
+        }
+        case SOL_IR_EXPR_CALL:
+            if (expression->as.call.kind == SOL_IR_CALL_METHOD
+                && SCOPE_STATEMENT_CHILD(expression->as.call.receiver)) return true;
+            if ((expression->as.call.kind == SOL_IR_CALL_CALLBACK
+                    || expression->as.call.kind == SOL_IR_CALL_CAPABILITY)
+                && SCOPE_STATEMENT_CHILD(expression->as.call.callee)) return true;
+            for (size_t i = 0; i < expression->as.call.operands.count; ++i)
+                if (SCOPE_STATEMENT_CHILD(ir->operands[
+                    expression->as.call.operands.offset + i].value)) return true;
+            return false;
+        case SOL_IR_EXPR_RECORD:
+        case SOL_IR_EXPR_TUPLE: {
+            SolIrSlice operands = expression->kind == SOL_IR_EXPR_RECORD
+                ? expression->as.record.fields : expression->as.tuple.operands;
+            for (size_t i = 0; i < operands.count; ++i)
+                if (SCOPE_STATEMENT_CHILD(ir->operands[operands.offset + i].value)) {
+                    return true;
+                }
+            return false;
+        }
+        case SOL_IR_EXPR_IF:
+            return SCOPE_STATEMENT_CHILD(expression->as.if_expr.condition)
+                || SCOPE_STATEMENT_CHILD(expression->as.if_expr.then_branch)
+                || SCOPE_STATEMENT_CHILD(expression->as.if_expr.else_branch);
+        case SOL_IR_EXPR_MATCH:
+            if (SCOPE_STATEMENT_CHILD(expression->as.match_expr.scrutinee)) return true;
+            for (size_t i = 0; i < expression->as.match_expr.arms.count; ++i) {
+                SolIrArmId arm = ir->arm_ids[expression->as.match_expr.arms.offset + i];
+                if (arm >= ir->arm_count || *count == capacity) return false;
+                size_t saved = *count;
+                chain[(*count)++] = (SolMirScope){SOL_MIR_SCOPE_MATCH_ARM, arm};
+                if ((ir->arms[arm].guard != SOL_IR_NONE
+                        && SCOPE_STATEMENT_CHILD(ir->arms[arm].guard))
+                    || SCOPE_STATEMENT_CHILD(ir->arms[arm].body)) return true;
+                *count = saved;
+            }
+            return false;
+        case SOL_IR_EXPR_BLOCK: {
+            if (*count == capacity) return false;
+            size_t saved = *count;
+            chain[(*count)++] = (SolMirScope){SOL_MIR_SCOPE_BLOCK, expression_id};
+            for (size_t i = 0; i < expression->as.block.statements.count; ++i)
+                if (mir_collect_scope_chain_statement_target(ir,
+                    ir->statement_ids[expression->as.block.statements.offset + i],
+                    sought, chain, count, capacity, depth + 1)) return true;
+            *count = saved;
+            return false;
+        }
+        default: return false;
+    }
+#undef SCOPE_STATEMENT_CHILD
+}
+
+static bool mir_scope_chain_for_statement(const SolIr *ir, const SolMir *mir,
+    SolIrStatementId statement, SolMirScope *chain, size_t *count,
+    size_t capacity) {
+    if (capacity == 0) return false;
+    *count = 1;
+    chain[0] = (SolMirScope){SOL_MIR_SCOPE_CALLABLE_ENVELOPE, mir->callable};
+    return mir_collect_scope_chain_statement_target_expression(ir,
+        ir->callables[mir->callable].body, statement, chain, count, capacity, 0);
+}
+
+static bool mir_scope_owns_local(const SolIr *ir, SolMirScope scope,
+    SolIrLocalId local) {
+    SolIrSlice cleanup = {0};
+    if (scope.kind == SOL_MIR_SCOPE_BLOCK)
+        cleanup = ir->expressions[scope.source].as.block.cleanup;
+    else if (scope.kind == SOL_MIR_SCOPE_MATCH_ARM)
+        cleanup = ir->arms[scope.source].cleanup;
+    else return false;
+    for (size_t i = 0; i < cleanup.count; ++i)
+        if (ir->cleanup_locals[cleanup.offset + i] == local) return true;
+    return false;
+}
+
+static bool mir_scope_stack_owns_local(const SolIr *ir,
+    const SolMirScope *stack, size_t depth, SolIrLocalId local) {
+    if (local >= ir->local_count) return false;
+    if (ir->locals[local].kind == SOL_IR_LOCAL_PARAMETER) {
+        return depth != 0 && stack[0].kind == SOL_MIR_SCOPE_CALLABLE_ENVELOPE;
+    }
+    for (size_t i = 0; i < depth; ++i)
+        if (mir_scope_owns_local(ir, stack[i], local)) return true;
+    return false;
+}
+
+static bool mir_validate_scopes(const SolIr *ir, const SolMir *mir,
+    SolDiagnostics *diagnostics) {
+    size_t width = mir->instruction_count;
+    if (width != 0 && mir->block_count > SIZE_MAX / width) return mir_error(
+        diagnostics, ir->callables[mir->callable].span,
+        "MIR scope validation domain is too large");
+    size_t total = mir->block_count * width;
+    SolMirScope *incoming = total ? malloc(total * sizeof(*incoming)) : NULL;
+    SolMirScope *working = width ? malloc(width * sizeof(*working)) : NULL;
+    SolMirScope *exited = width ? malloc(width * sizeof(*exited)) : NULL;
+    SolMirScope *statement_chain = width ? malloc(width * sizeof(*statement_chain)) : NULL;
+    size_t *depths = calloc(mir->block_count, sizeof(*depths));
+    bool *known = calloc(mir->block_count, sizeof(*known));
+    SolMirBlockId *queue = malloc(mir->block_count * sizeof(*queue));
+    unsigned char *blocks = calloc(ir->expression_count, 1);
+    unsigned char *arms = calloc(ir->arm_count, 1);
+    unsigned char *handlers = calloc(ir->expression_count, 1);
+    unsigned char *regions = calloc(ir->statement_count, 1);
+    size_t callable_entries = 0;
+    bool valid = (total == 0 || incoming != NULL) && (width == 0 || (working != NULL
+            && exited != NULL && statement_chain != NULL))
+        && depths != NULL && known != NULL && queue != NULL
+        && (ir->expression_count == 0 || (blocks != NULL && handlers != NULL))
+        && (ir->arm_count == 0 || arms != NULL)
+        && (ir->statement_count == 0 || regions != NULL);
+    if (!valid) goto done;
+    size_t first = 0, count = 1;
+    queue[0] = mir->entry; known[mir->entry] = true;
+    while (valid && first < count) {
+        SolMirBlockId block = queue[first++]; size_t depth = depths[block];
+        if (depth) memcpy(working, &incoming[block * width],
+            depth * sizeof(*working));
+        SolMirSlice instructions = mir->blocks[block].instructions;
+        size_t exited_count = 0;
+        for (size_t i = 0; valid && i < instructions.count; ++i) {
+            const SolMirInstruction *ins = &mir->instructions[instructions.offset + i];
+            if (ins->kind == SOL_MIR_INST_SCOPE_ENTER) {
+                valid = mir_scope_basic_source_valid(ir, mir, ins->as.scope)
+                    && depth < width;
+                if (valid) switch (ins->as.scope.kind) {
+                    case SOL_MIR_SCOPE_CALLABLE_ENVELOPE:
+                        valid = ++callable_entries == 1; break;
+                    case SOL_MIR_SCOPE_BLOCK:
+                        valid = ++blocks[ins->as.scope.source] == 1; break;
+                    case SOL_MIR_SCOPE_MATCH_ARM:
+                        valid = ++arms[ins->as.scope.source] == 1; break;
+                    case SOL_MIR_SCOPE_HANDLER:
+                        valid = ++handlers[ins->as.scope.source] == 1; break;
+                    case SOL_MIR_SCOPE_REGION:
+                        valid = ++regions[ins->as.scope.source] == 1; break;
+                    case SOL_MIR_SCOPE_INVALID: valid = false; break;
+                }
+                if (valid) working[depth++] = ins->as.scope;
+                if (valid && ins->as.scope.kind == SOL_MIR_SCOPE_BLOCK) {
+                    valid = mir_scope_stack_matches_expression(ir, mir, working,
+                        depth, ins->as.scope.source, true);
+                }
+            } else if (ins->kind == SOL_MIR_INST_SCOPE_EXIT) {
+                valid = depth != 0 && mir_scope_equal(working[depth - 1],
+                    ins->as.scope);
+                if (valid) exited[exited_count++] = working[--depth];
+            }
+            if (!valid) break;
+            if (ins->kind == SOL_MIR_INST_MATCH_ARM
+                || ins->kind == SOL_MIR_INST_HANDLER_ENTER
+                || ins->kind == SOL_MIR_INST_REGION_ENTER) {
+                SolMirScopeKind expected = ins->kind == SOL_MIR_INST_MATCH_ARM
+                    ? SOL_MIR_SCOPE_MATCH_ARM
+                    : ins->kind == SOL_MIR_INST_HANDLER_ENTER
+                    ? SOL_MIR_SCOPE_HANDLER : SOL_MIR_SCOPE_REGION;
+                size_t source = ins->kind == SOL_MIR_INST_MATCH_ARM
+                    ? ins->as.pattern.arm : ins->kind == SOL_MIR_INST_HANDLER_ENTER
+                    ? ins->source_expression : ins->as.region;
+                valid = i + 1 < instructions.count
+                    && mir->instructions[instructions.offset + i + 1].kind
+                        == SOL_MIR_INST_SCOPE_ENTER
+                    && mir->instructions[instructions.offset + i + 1].as.scope.kind
+                        == expected
+                    && mir->instructions[instructions.offset + i + 1].as.scope.source
+                        == source;
+            } else if (ins->kind == SOL_MIR_INST_SCOPE_EXIT
+                && (ins->as.scope.kind == SOL_MIR_SCOPE_HANDLER
+                    || ins->as.scope.kind == SOL_MIR_SCOPE_REGION)) {
+                SolMirInstructionKind expected = ins->as.scope.kind
+                    == SOL_MIR_SCOPE_HANDLER ? SOL_MIR_INST_HANDLER_EXIT
+                    : SOL_MIR_INST_REGION_EXIT;
+                valid = i + 1 < instructions.count
+                    && mir->instructions[instructions.offset + i + 1].kind == expected
+                    && (expected == SOL_MIR_INST_HANDLER_EXIT
+                        ? mir->instructions[instructions.offset + i + 1]
+                            .source_expression == ins->as.scope.source
+                        : mir->instructions[instructions.offset + i + 1]
+                            .as.region == ins->as.scope.source);
+            }
+            bool source_event = ins->source_expression != SOL_IR_NONE
+                && ins->kind != SOL_MIR_INST_CAPTURE_SNAPSHOT
+                && ins->kind != SOL_MIR_INST_MATCH_ARM
+                && ins->kind != SOL_MIR_INST_HANDLER_ENTER
+                && ins->kind != SOL_MIR_INST_HANDLER_EXIT;
+            if (valid && source_event) valid = ins->source_expression
+                < ir->expression_count;
+            if (valid && source_event) {
+                bool include_self = ins->kind != SOL_MIR_INST_STORE
+                    && ins->kind != SOL_MIR_INST_TEMPORARY_INIT
+                    && ins->kind != SOL_MIR_INST_COMPOUND_UPDATE;
+                if (ins->kind == SOL_MIR_INST_EXPRESSION_RESULT) {
+                    include_self = ir->expressions[ins->source_expression].kind
+                        == SOL_IR_EXPR_BLOCK;
+                }
+                valid = mir_scope_stack_matches_expression(ir, mir, working,
+                    depth, ins->source_expression, include_self);
+            }
+            if (valid && (ins->kind == SOL_MIR_INST_DROP_IF_INITIALIZED
+                || ins->kind == SOL_MIR_INST_STORAGE_DEAD)) {
+                valid = mir_scope_stack_owns_local(ir, working, depth,
+                    ins->as.local);
+            }
+        }
+        const SolMirTerminator *term = &mir->blocks[block].terminator;
+        SolIrExpressionId terminator_source = SOL_IR_NONE;
+        if (term->kind == SOL_MIR_TERM_INVOKE) {
+            terminator_source = term->as.invoke.source_expression;
+        } else if (term->kind == SOL_MIR_TERM_CHECK_REFINED) {
+            terminator_source = term->as.check_refined.source_expression;
+        } else if (term->kind == SOL_MIR_TERM_PROPAGATE) {
+            terminator_source = term->as.propagate.source_expression;
+        }
+        if (valid && terminator_source != SOL_IR_NONE) {
+            valid = terminator_source < ir->expression_count
+                && mir_scope_stack_matches_expression(ir, mir, working, depth,
+                    terminator_source, true);
+        }
+        if (valid && (term->kind == SOL_MIR_TERM_BREAK
+            || term->kind == SOL_MIR_TERM_CONTINUE)) {
+            size_t before_unwind = 0;
+            bool statement_found = term->as.transfer.statement < ir->statement_count
+                && mir_scope_chain_for_statement(ir, mir,
+                    term->as.transfer.statement, statement_chain, &before_unwind, width);
+            valid = statement_found
+                && before_unwind >= depth && exited_count >= before_unwind - depth;
+            for (size_t i = 0; valid && i < depth; ++i)
+                valid = mir_scope_equal(working[i], statement_chain[i]);
+            for (size_t i = 0; valid && i < before_unwind - depth; ++i)
+                valid = mir_scope_equal(exited[exited_count - (before_unwind - depth) + i],
+                    statement_chain[before_unwind - 1 - i]);
+            valid = valid && term->as.transfer.loop < mir->loop_count;
+            if (valid) {
+                SolIrStatementId loop_statement
+                    = mir->loops[term->as.transfer.loop].statement;
+                valid = loop_statement < ir->statement_count
+                    && ir->statements[loop_statement].expression
+                        < ir->expression_count
+                    && mir_scope_stack_matches_expression(ir, mir, working,
+                        depth, ir->statements[loop_statement].expression, false);
+            }
+        }
+        if (valid && term->kind == SOL_MIR_TERM_UNREACHABLE) {
+            size_t before_unwind = 0;
+            valid = term->as.unreachable.statement < ir->statement_count
+                && ir->statements[term->as.unreachable.statement].kind
+                    == SOL_IR_STATEMENT_UNREACHABLE
+                && mir_scope_chain_for_statement(ir, mir,
+                    term->as.unreachable.statement, statement_chain,
+                    &before_unwind, width)
+                && exited_count >= before_unwind && depth == 0;
+            for (size_t i = 0; valid && i < before_unwind; ++i)
+                valid = mir_scope_equal(exited[exited_count - before_unwind + i],
+                    statement_chain[before_unwind - 1 - i]);
+        }
+        bool terminal = term->kind == SOL_MIR_TERM_RETURN || term->kind == SOL_MIR_TERM_PANIC
+            || term->kind == SOL_MIR_TERM_RESUME_FAILURE || term->kind == SOL_MIR_TERM_MATCH_FAILURE
+            || term->kind == SOL_MIR_TERM_UNREACHABLE || term->kind == SOL_MIR_TERM_CONTRACT_VIOLATION;
+        if (valid && terminal && depth != 0) valid = false;
+        SolMirBlockId targets[3]; size_t target_count = 0;
+#define SCOPE_EDGE(edge) do { targets[target_count++] = (edge).block; } while (0)
+        if (valid && term->kind == SOL_MIR_TERM_GOTO) SCOPE_EDGE(term->as.go_to);
+        else if (valid && term->kind == SOL_MIR_TERM_BRANCH) {
+            SCOPE_EDGE(term->as.branch.true_edge); SCOPE_EDGE(term->as.branch.false_edge);
+        } else if (valid && term->kind == SOL_MIR_TERM_INVOKE) {
+            if (term->as.invoke.normal_edge.block != SOL_MIR_NONE) SCOPE_EDGE(term->as.invoke.normal_edge);
+            SCOPE_EDGE(term->as.invoke.failure_edge);
+        } else if (valid && term->kind == SOL_MIR_TERM_CHECK_REFINED) {
+            SCOPE_EDGE(term->as.check_refined.normal_edge); SCOPE_EDGE(term->as.check_refined.failure_edge);
+        } else if (valid && term->kind == SOL_MIR_TERM_PROPAGATE) {
+            SCOPE_EDGE(term->as.propagate.value_edge); SCOPE_EDGE(term->as.propagate.residual_edge);
+        } else if (valid && term->kind == SOL_MIR_TERM_CHECK_CONTRACT) {
+            SCOPE_EDGE(term->as.check_contract.satisfied_edge); SCOPE_EDGE(term->as.check_contract.violation_edge); SCOPE_EDGE(term->as.check_contract.failure_edge);
+        } else if (valid && (term->kind == SOL_MIR_TERM_BREAK || term->kind == SOL_MIR_TERM_CONTINUE)) SCOPE_EDGE(term->as.transfer.edge);
+#undef SCOPE_EDGE
+        for (size_t i = 0; valid && i < target_count; ++i) {
+            SolMirBlockId target = targets[i];
+            if (!known[target]) {
+                known[target] = true; depths[target] = depth;
+                if (depth) memcpy(&incoming[target * width], working,
+                    depth * sizeof(*working));
+                queue[count++] = target;
+            } else {
+                valid = depths[target] == depth;
+                for (size_t d = 0; valid && d < depth; ++d) valid
+                    = mir_scope_equal(incoming[target * width + d], working[d]);
+            }
+        }
+    }
+    for (size_t id = 0; valid && id < ir->expression_count; ++id) {
+        const SolIrExpression *expression = &ir->expressions[id];
+        if (expression->kind == SOL_IR_EXPR_BLOCK
+            && mir_source_reaches_match(ir, ir->callables[mir->callable].body,
+                id, 0)) valid = blocks[id] == 1;
+        if (expression->kind == SOL_IR_EXPR_HANDLE
+            && mir_source_reaches_match(ir, ir->callables[mir->callable].body,
+                id, 0)) valid = valid && handlers[id] == 1;
+        if (expression->kind == SOL_IR_EXPR_MATCH
+            && mir_source_reaches_match(ir, ir->callables[mir->callable].body,
+                id, 0)) for (size_t arm = 0; valid
+                    && arm < expression->as.match_expr.arms.count; ++arm) {
+            valid = arms[ir->arm_ids[expression->as.match_expr.arms.offset + arm]]
+                == 1;
+        }
+    }
+    for (size_t id = 0; valid && id < ir->statement_count; ++id) {
+        if (ir->statements[id].kind == SOL_IR_STATEMENT_REGION
+            && mir_expression_contains_statement(ir,
+                ir->callables[mir->callable].body, id, 0)) valid = regions[id] == 1;
+    }
+    valid = valid && callable_entries == 1;
+done:
+    free(incoming); free(working); free(depths); free(known); free(queue);
+    free(exited); free(statement_chain);
+    free(blocks); free(arms); free(handlers); free(regions);
+    return valid || mir_error(diagnostics, ir->callables[mir->callable].span,
+        "MIR lexical scope stack is inconsistent");
+}
+
 static bool mir_validate_regions(const SolIr *ir, const SolMir *mir,
     SolDiagnostics *diagnostics) {
     if (ir->statement_count != 0
@@ -4862,7 +5441,8 @@ static bool mir_validate_contract_envelope(const SolIr *ir, const SolMir *mir,
             = &mir->instructions[body_instructions.offset + index];
         if (instruction->kind != SOL_MIR_INST_CAPTURE_SNAPSHOT) {
             body_started = body_started
-                || instruction->kind != SOL_MIR_INST_PARAMETER_LIVE;
+                || (instruction->kind != SOL_MIR_INST_PARAMETER_LIVE
+                    && instruction->kind != SOL_MIR_INST_SCOPE_ENTER);
             continue;
         }
         if (body_started) {
@@ -6588,7 +7168,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || id - mir->blocks[instruction->block].instructions.offset
                 >= mir->blocks[instruction->block].instructions.count
             || (int)instruction->kind < 0
-            || instruction->kind > SOL_MIR_INST_CAPTURE_SNAPSHOT
+            || instruction->kind > SOL_MIR_INST_SCOPE_EXIT
             || !mir_span_valid(ir, instruction->span)) {
             return mir_error(diagnostics, instruction->span,
                 "malformed MIR instruction");
@@ -7131,6 +7711,32 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 return mir_error(diagnostics, instruction->span,
                     "malformed MIR callable snapshot capture");
             }
+        } else if (instruction->kind == SOL_MIR_INST_SCOPE_ENTER
+            || instruction->kind == SOL_MIR_INST_SCOPE_EXIT) {
+            SolMirScope scope = instruction->as.scope;
+            bool valid = instruction->source_expression == SOL_IR_NONE
+                && scope.kind != SOL_MIR_SCOPE_INVALID
+                && scope.kind <= SOL_MIR_SCOPE_REGION;
+            if (scope.kind == SOL_MIR_SCOPE_CALLABLE_ENVELOPE) {
+                valid = valid && scope.source == mir->callable;
+            } else if (scope.kind == SOL_MIR_SCOPE_BLOCK) {
+                valid = valid && scope.source < ir->expression_count
+                    && ir->expressions[scope.source].kind == SOL_IR_EXPR_BLOCK
+                    && mir_source_reaches_match(ir, callable->body, scope.source, 0);
+            } else if (scope.kind == SOL_MIR_SCOPE_MATCH_ARM) {
+                valid = valid && scope.source < ir->arm_count;
+            } else if (scope.kind == SOL_MIR_SCOPE_HANDLER) {
+                valid = valid && scope.source < ir->expression_count
+                    && ir->expressions[scope.source].kind == SOL_IR_EXPR_HANDLE
+                    && mir_source_reaches_match(ir, callable->body, scope.source, 0);
+            } else if (scope.kind == SOL_MIR_SCOPE_REGION) {
+                valid = valid && scope.source < ir->statement_count
+                    && ir->statements[scope.source].kind == SOL_IR_STATEMENT_REGION
+                    && mir_expression_contains_statement(ir, callable->body,
+                        scope.source, 0);
+            }
+            if (!valid) return mir_error(diagnostics, instruction->span,
+                "malformed MIR lexical scope marker");
         } else if (instruction->kind == SOL_MIR_INST_REGION_ENTER
             || instruction->kind == SOL_MIR_INST_REGION_EXIT) {
             if (instruction->source_expression != SOL_IR_NONE
@@ -7408,6 +8014,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
         && mir_validate_arena_ownership(mir, diagnostics, callable->span)
         && mir_validate_storage(ir, mir, diagnostics)
         && mir_validate_paths(ir, mir, diagnostics)
+        && mir_validate_scopes(ir, mir, diagnostics)
         && mir_validate_regions(ir, mir, diagnostics)
         && mir_validate_handlers(ir, mir, diagnostics)
         && mir_validate_storage_order(ir, mir, diagnostics)
@@ -7505,6 +8112,14 @@ SolMirLowerOutcome sol_mir_lower_callable(const SolIr *ir,
                 local, callable->span)) break;
         }
     }
+    Scope callable_scope = {
+        .parent = NULL,
+        .identity = {SOL_MIR_SCOPE_CALLABLE_ENVELOPE, callable_id},
+        .region = SOL_IR_NONE,
+    };
+    lowerer.callable_scope = &callable_scope;
+    if (!lowerer.failed && !mir_emit_scope_enter(&lowerer,
+            callable_scope.identity, callable->span)) lowerer.failed = true;
     SolMirValueId contract_result = SOL_MIR_NONE;
     if (contracted && !lowerer.failed) {
         lowerer.contract_epilogue = mir_append_block(&lowerer, callable->span);
@@ -7518,7 +8133,7 @@ SolMirLowerOutcome sol_mir_lower_callable(const SolIr *ir,
     }
     LoweredValue body = lowerer.failed || lowerer.unsupported
         ? mir_unreachable()
-        : mir_lower_expression(&lowerer, callable->body, NULL);
+        : mir_lower_expression(&lowerer, callable->body, &callable_scope);
     if (body.reachable && !lowerer.failed && !lowerer.unsupported) {
         if (!mir_finish_success(&lowerer, NULL, body.value, callable->span)) {
             lowerer.failed = true;

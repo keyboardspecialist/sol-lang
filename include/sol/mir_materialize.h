@@ -139,6 +139,8 @@ typedef struct {
     SolMirMaterializedTemporaryId pattern_scrutinee;
     SolIrSnapshotId source_snapshot;
     SolMirMaterializedHandlerId handler;
+    SolMirScopeKind scope_kind;
+    size_t scope_source;
     SolMirConstructKind construct_kind;
     SolIrDefinitionId construct_definition;
     SolIrVariantId construct_variant;

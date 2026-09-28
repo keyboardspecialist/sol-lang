@@ -2152,6 +2152,8 @@ static bool execute_instruction(MirEval *eval, MirFrame *frame,
         }
         case SOL_MIR_INST_REGION_ENTER:
         case SOL_MIR_INST_REGION_EXIT:
+        case SOL_MIR_INST_SCOPE_ENTER:
+        case SOL_MIR_INST_SCOPE_EXIT:
             break;
         case SOL_MIR_INST_TEMPORARY_INIT: {
             SolMirTemporaryId temporary = instruction->as.temporary_init.temporary;

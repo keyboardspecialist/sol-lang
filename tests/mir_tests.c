@@ -169,7 +169,7 @@ static char *render_mir(const SolIr *ir, const SolMir *mir, size_t *length) {
     return text;
 }
 
-static size_t rendered_instruction_kinds[SOL_MIR_INST_CAPTURE_SNAPSHOT + 1];
+static size_t rendered_instruction_kinds[SOL_MIR_INST_SCOPE_EXIT + 1];
 static size_t rendered_terminator_kinds[SOL_MIR_TERM_CONTRACT_VIOLATION + 1];
 static size_t rendered_value_kinds[SOL_MIR_VALUE_TERMINATOR + 1];
 static size_t rendered_construct_kinds[SOL_MIR_CONSTRUCT_DISTINCT + 1];
@@ -186,7 +186,7 @@ static SolMirLowerOutcome lower_and_render(const SolIr *ir,
     free(rendered);
     for (size_t id = 0; id < mir->instruction_count; ++id) {
         SolMirInstructionKind kind = mir->instructions[id].kind;
-        if ((size_t)kind <= SOL_MIR_INST_CAPTURE_SNAPSHOT) {
+        if ((size_t)kind <= SOL_MIR_INST_SCOPE_EXIT) {
             ++rendered_instruction_kinds[kind];
         }
         if (kind == SOL_MIR_INST_CONSTRUCT
@@ -226,7 +226,7 @@ static SolMirLowerOutcome lower_and_render(const SolIr *ir,
     lower_and_render((ir), (callable_id), (mir), (diagnostics))
 
 static void test_render_vocabulary_census(void) {
-    for (size_t kind = 0; kind <= SOL_MIR_INST_CAPTURE_SNAPSHOT; ++kind) {
+    for (size_t kind = 0; kind <= SOL_MIR_INST_SCOPE_EXIT; ++kind) {
         CHECK(rendered_instruction_kinds[kind] != 0);
     }
     for (size_t kind = SOL_MIR_TERM_GOTO;
@@ -426,14 +426,14 @@ static void test_initial_lowering_and_determinism(void) {
     CHECK(sol_mir_validate(&compilation.ir, &straight, NULL));
     CHECK(mir_equal(&straight, &repeated));
     CHECK(straight.block_count == 1);
-    CHECK(straight.instructions[0].kind == SOL_MIR_INST_CONST_INT64);
-    CHECK(straight.instructions[1].kind == SOL_MIR_INST_STORAGE_LIVE);
-    CHECK(straight.instructions[2].kind == SOL_MIR_INST_STORE);
-    CHECK(straight.instructions[3].kind == SOL_MIR_INST_LOAD_COPY);
-    CHECK(straight.instructions[4].kind == SOL_MIR_INST_CONST_INT64);
-    CHECK(straight.instructions[5].kind == SOL_MIR_INST_BINARY);
-    CHECK(straight.instructions[6].kind == SOL_MIR_INST_DROP_IF_INITIALIZED);
-    CHECK(straight.instructions[7].kind == SOL_MIR_INST_STORAGE_DEAD);
+    CHECK(straight.instructions[0].kind == SOL_MIR_INST_SCOPE_ENTER);
+    CHECK(straight.instructions[1].kind == SOL_MIR_INST_SCOPE_ENTER);
+    CHECK(straight.instructions[2].kind == SOL_MIR_INST_CONST_INT64);
+    CHECK(straight.instructions[3].kind == SOL_MIR_INST_STORAGE_LIVE);
+    CHECK(straight.instructions[4].kind == SOL_MIR_INST_STORE);
+    CHECK(straight.instructions[5].kind == SOL_MIR_INST_LOAD_COPY);
+    CHECK(straight.instructions[6].kind == SOL_MIR_INST_CONST_INT64);
+    CHECK(straight.instructions[7].kind == SOL_MIR_INST_BINARY);
     CHECK(straight.blocks[0].terminator.kind == SOL_MIR_TERM_RETURN);
     sol_mir_free(&straight);
     sol_mir_free(&repeated);
@@ -452,10 +452,8 @@ static void test_initial_lowering_and_determinism(void) {
     CHECK(choose.blocks[1].terminator.as.go_to.block == 3);
     CHECK(choose.blocks[2].terminator.as.go_to.block == 3);
     CHECK(choose.edge_value_count == 2);
-    CHECK(choose.instructions[choose.instruction_count - 2].kind
-        == SOL_MIR_INST_DROP_IF_INITIALIZED);
     CHECK(choose.instructions[choose.instruction_count - 1].kind
-        == SOL_MIR_INST_STORAGE_DEAD);
+        == SOL_MIR_INST_SCOPE_EXIT);
     sol_mir_free(&choose);
 
     SolMir assign;
@@ -534,10 +532,8 @@ static void test_initial_lowering_and_determinism(void) {
         callable(&compilation.ir, "fail"), &panic,
         &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
     CHECK(panic.blocks[0].terminator.kind == SOL_MIR_TERM_PANIC);
-    CHECK(panic.instructions[panic.instruction_count - 2].kind
-        == SOL_MIR_INST_DROP_IF_INITIALIZED);
     CHECK(panic.instructions[panic.instruction_count - 1].kind
-        == SOL_MIR_INST_STORAGE_DEAD);
+        == SOL_MIR_INST_SCOPE_EXIT);
     sol_mir_free(&panic);
     free_compilation(&compilation);
 }
@@ -687,6 +683,10 @@ static void test_callable_contract_envelope(void) {
     mir.instructions[snapshot].span = saved_span;
 
     SolMirInstructionId first_body = snapshot + 1;
+    while (first_body < mir.instruction_count
+        && mir.instructions[first_body].kind == SOL_MIR_INST_SCOPE_ENTER) {
+        ++first_body;
+    }
     CHECK(first_body < mir.instruction_count);
     CHECK(mir.instructions[first_body].block == mir.contract_body);
     SolMirInstruction moved_body = mir.instructions[first_body];
@@ -958,6 +958,23 @@ static void test_calls_and_remaining_local_control(void) {
     calls.instructions[dead[1] - 1].as.local = second_dead;
     calls.instructions[dead[1]].as.local = second_dead;
 
+    bool moved_scope_before_final_drop = false;
+    for (size_t index = 1; index < calls.instruction_count; ++index) {
+        if (calls.instructions[index - 1].kind != SOL_MIR_INST_STORAGE_DEAD
+            || calls.instructions[index].kind != SOL_MIR_INST_SCOPE_EXIT) continue;
+        SolMirInstruction dead_instruction = calls.instructions[index - 1];
+        SolMirInstruction scope_exit = calls.instructions[index];
+        calls.instructions[index - 1] = scope_exit;
+        calls.instructions[index] = dead_instruction;
+        CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
+        calls.instructions[index - 1] = dead_instruction;
+        calls.instructions[index] = scope_exit;
+        CHECK(sol_mir_validate(&compilation.ir, &calls, NULL));
+        moved_scope_before_final_drop = true;
+        break;
+    }
+    CHECK(moved_scope_before_final_drop);
+
     SolMirInstructionId region_enters[2] = {SOL_MIR_NONE, SOL_MIR_NONE};
     size_t region_enter_count = 0;
     for (size_t index = 0; index < calls.instruction_count
@@ -973,6 +990,40 @@ static void test_calls_and_remaining_local_control(void) {
         = calls.instructions[region_enters[1]].as.region;
     SolSpan first_region_span = calls.instructions[region_enters[0]].span;
     SolSpan second_region_span = calls.instructions[region_enters[1]].span;
+    SolMirInstructionId first_scope_enter = region_enters[0] + 1;
+    SolMirInstructionId first_scope_exit = SOL_MIR_NONE;
+    CHECK(first_scope_enter < calls.instruction_count
+        && calls.instructions[first_scope_enter].kind == SOL_MIR_INST_SCOPE_ENTER
+        && calls.instructions[first_scope_enter].as.scope.kind == SOL_MIR_SCOPE_REGION
+        && calls.instructions[first_scope_enter].as.scope.source == first_region);
+    for (size_t index = 0; index < calls.instruction_count; ++index) {
+        if (calls.instructions[index].kind == SOL_MIR_INST_REGION_EXIT
+            && calls.instructions[index].as.region == first_region) {
+            CHECK(index != 0 && calls.instructions[index - 1].kind
+                == SOL_MIR_INST_SCOPE_EXIT
+                && calls.instructions[index - 1].as.scope.kind
+                    == SOL_MIR_SCOPE_REGION
+                && calls.instructions[index - 1].as.scope.source == first_region);
+            first_scope_exit = index - 1;
+        }
+    }
+    CHECK(first_scope_exit != SOL_MIR_NONE);
+    if (first_scope_exit != SOL_MIR_NONE) {
+        calls.instructions[first_scope_enter].as.scope.source = second_region;
+        calls.instructions[first_scope_exit].as.scope.source = second_region;
+        CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
+        calls.instructions[first_scope_enter].as.scope.source = first_region;
+        calls.instructions[first_scope_exit].as.scope.source = first_region;
+        CHECK(sol_mir_validate(&compilation.ir, &calls, NULL));
+        SolMirInstruction scope_exit = calls.instructions[first_scope_exit];
+        SolMirInstruction region_exit = calls.instructions[first_scope_exit + 1];
+        calls.instructions[first_scope_exit] = region_exit;
+        calls.instructions[first_scope_exit + 1] = scope_exit;
+        CHECK(!sol_mir_validate(&compilation.ir, &calls, NULL));
+        calls.instructions[first_scope_exit] = scope_exit;
+        calls.instructions[first_scope_exit + 1] = region_exit;
+        CHECK(sol_mir_validate(&compilation.ir, &calls, NULL));
+    }
     for (size_t index = 0; index < calls.instruction_count; ++index) {
         if (calls.instructions[index].kind != SOL_MIR_INST_REGION_ENTER
             && calls.instructions[index].kind != SOL_MIR_INST_REGION_EXIT) {
@@ -1166,15 +1217,16 @@ static void test_validator_rejects_corruption(void) {
     CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
     mir.instructions[mir.instruction_count - 1].kind = final_kind;
 
-    SolMirValueId result = mir.instructions[2].result;
-    mir.instructions[2].result = mir.instructions[1].result;
+    size_t condition_instruction = mir.values[condition].definition;
+    SolMirValueId result = mir.instructions[condition_instruction].result;
+    mir.instructions[condition_instruction].result = SOL_MIR_NONE;
     CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
-    mir.instructions[2].result = result;
+    mir.instructions[condition_instruction].result = result;
 
-    SolMirInstructionKind load_kind = mir.instructions[1].kind;
-    mir.instructions[1].kind = SOL_MIR_INST_LOAD_MOVE;
+    SolMirInstructionKind load_kind = mir.instructions[condition_instruction].kind;
+    mir.instructions[condition_instruction].kind = SOL_MIR_INST_LOAD_MOVE;
     CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
-    mir.instructions[1].kind = load_kind;
+    mir.instructions[condition_instruction].kind = load_kind;
 
     SolMirValueKind value_kind = mir.values[condition].kind;
     mir.values[condition].kind = (SolMirValueKind)99;
@@ -2090,9 +2142,9 @@ static void test_compound_update_lowering(void) {
                     && item->source_expression != SOL_IR_NONE) rhs = instruction;
             }
             CHECK(load != SOL_MIR_NONE && initializer == load + 1
-                && rhs == initializer + 1);
+                && rhs > initializer);
             if (load != SOL_MIR_NONE && initializer == load + 1
-                && rhs == initializer + 1) {
+                && rhs > initializer) {
                 SolMirInstruction saved_load = mir.instructions[load];
                 SolMirInstruction saved_initializer
                     = mir.instructions[initializer];
@@ -3017,6 +3069,7 @@ static void test_handler_lowering(void) {
         CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
         size_t enters = 0;
         size_t exits = 0;
+        size_t scope_enters = 0;
         SolMirInstructionId first_enter = SOL_MIR_NONE;
         SolMirInstructionId second_enter = SOL_MIR_NONE;
         SolMirInstructionId first_exit = SOL_MIR_NONE;
@@ -3033,9 +3086,19 @@ static void test_handler_lowering(void) {
             } else if (instruction->kind == SOL_MIR_INST_HANDLER_EXIT) {
                 if (first_exit == SOL_MIR_NONE) first_exit = id;
                 ++exits;
+                CHECK(id != 0 && mir.instructions[id - 1].kind
+                    == SOL_MIR_INST_SCOPE_EXIT
+                    && mir.instructions[id - 1].as.scope.kind
+                        == SOL_MIR_SCOPE_HANDLER
+                    && mir.instructions[id - 1].as.scope.source
+                        == instruction->source_expression);
+            } else if (instruction->kind == SOL_MIR_INST_SCOPE_ENTER
+                && instruction->as.scope.kind == SOL_MIR_SCOPE_HANDLER) {
+                ++scope_enters;
             }
         }
         CHECK(enters == (name == 1 ? 2u : 1u));
+        CHECK(scope_enters == enters);
         CHECK(exits >= enters);
         CHECK(first_enter != SOL_MIR_NONE && first_exit != SOL_MIR_NONE);
         if (name == 0) {
@@ -3074,6 +3137,8 @@ static void test_handler_lowering(void) {
             CHECK(second_enter != SOL_MIR_NONE);
             SolIrExpressionId outer
                 = mir.instructions[first_enter].source_expression;
+            SolIrExpressionId inner
+                = mir.instructions[second_enter].source_expression;
             SolSpan outer_span = mir.instructions[first_enter].span;
             mir.instructions[first_enter].source_expression
                 = mir.instructions[second_enter].source_expression;
@@ -3082,6 +3147,32 @@ static void test_handler_lowering(void) {
             mir.instructions[second_enter].source_expression = outer;
             mir.instructions[second_enter].span = outer_span;
             CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            mir.instructions[first_enter].source_expression = outer;
+            mir.instructions[first_enter].span = outer_span;
+            mir.instructions[second_enter].source_expression = inner;
+            mir.instructions[second_enter].span
+                = compilation.ir.expressions[inner].span;
+            SolMirInstructionId outer_scope_enter = SOL_MIR_NONE;
+            SolMirInstructionId outer_scope_exit = SOL_MIR_NONE;
+            for (size_t id = 0; id < mir.instruction_count; ++id) {
+                const SolMirInstruction *instruction = &mir.instructions[id];
+                if ((instruction->kind != SOL_MIR_INST_SCOPE_ENTER
+                        && instruction->kind != SOL_MIR_INST_SCOPE_EXIT)
+                    || instruction->as.scope.kind != SOL_MIR_SCOPE_HANDLER
+                    || instruction->as.scope.source != outer) continue;
+                if (instruction->kind == SOL_MIR_INST_SCOPE_ENTER)
+                    outer_scope_enter = id;
+                if (instruction->kind == SOL_MIR_INST_SCOPE_EXIT)
+                    outer_scope_exit = id;
+            }
+            CHECK(outer_scope_enter != SOL_MIR_NONE
+                && outer_scope_exit != SOL_MIR_NONE);
+            if (outer_scope_enter != SOL_MIR_NONE
+                && outer_scope_exit != SOL_MIR_NONE) {
+                mir.instructions[outer_scope_enter].as.scope.source = inner;
+                mir.instructions[outer_scope_exit].as.scope.source = inner;
+                CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            }
         }
         sol_mir_free(&mir);
     }
@@ -3514,9 +3605,311 @@ static void test_generic_evidence_and_implementation_checkpoint(void) {
     free_compilation(&compilation);
 }
 
+static void test_lexical_scope_markers(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module scopes\n"
+        "function empty() -> () { return {} }\n"
+        "function nested(flag: Bool) -> Int64 { return { if flag { 1 } else { 2 } } }\n"
+        "function arms(value: Bool) -> Int64 { return match value { true if value == true => 1 true => 0 false => 2 } }\n"
+        "function siblings() -> Int64 { { 1 } { 2 } 3 }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    const char *names[] = {"empty", "nested", "arms", "siblings"};
+    for (size_t n = 0; n < sizeof(names) / sizeof(names[0]); ++n) {
+        SolMir mir;
+        sol_mir_init(&mir);
+        SolIrCallableId id = callable(&compilation.ir, names[n]);
+        CHECK(sol_mir_lower_callable(&compilation.ir, id, &mir,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        size_t enters = 0, exits = 0, blocks = 0, arms = 0;
+        size_t envelopes = 0;
+        SolMirInstruction *first_exit = NULL;
+        for (size_t i = 0; i < mir.instruction_count; ++i) {
+            SolMirInstruction *ins = &mir.instructions[i];
+            if (ins->kind == SOL_MIR_INST_SCOPE_ENTER) {
+                ++enters;
+                blocks += ins->as.scope.kind == SOL_MIR_SCOPE_BLOCK;
+                arms += ins->as.scope.kind == SOL_MIR_SCOPE_MATCH_ARM;
+                envelopes += ins->as.scope.kind == SOL_MIR_SCOPE_CALLABLE_ENVELOPE;
+            } else if (ins->kind == SOL_MIR_INST_SCOPE_EXIT) {
+                ++exits;
+                if (first_exit == NULL) first_exit = ins;
+            }
+        }
+        CHECK(enters != 0 && exits >= enters && blocks != 0 && envelopes == 1);
+        if (strcmp(names[n], "arms") == 0) CHECK(arms == 3);
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        if (first_exit != NULL) {
+            size_t source = first_exit->as.scope.source;
+            first_exit->as.scope.source = SIZE_MAX;
+            CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+            first_exit->as.scope.source = source;
+            CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        }
+        if (strcmp(names[n], "siblings") == 0) {
+            SolMirInstructionId enters[2] = {SOL_MIR_NONE, SOL_MIR_NONE};
+            SolMirInstructionId exits[2] = {SOL_MIR_NONE, SOL_MIR_NONE};
+            size_t count = 0, block_entry_count = 0;
+            for (size_t i = 0; i < mir.instruction_count && count < 2; ++i) {
+                if (mir.instructions[i].kind == SOL_MIR_INST_SCOPE_ENTER
+                    && mir.instructions[i].as.scope.kind == SOL_MIR_SCOPE_BLOCK) {
+                    if (block_entry_count++ != 0) enters[count++] = i;
+                }
+            }
+            CHECK(enters[0] != SOL_MIR_NONE && enters[1] != SOL_MIR_NONE);
+            for (size_t i = 0; i < mir.instruction_count; ++i) {
+                if (mir.instructions[i].kind != SOL_MIR_INST_SCOPE_EXIT) continue;
+                for (size_t j = 0; j < 2; ++j)
+                    if (mir.instructions[i].as.scope.kind == SOL_MIR_SCOPE_BLOCK
+                        && mir.instructions[i].as.scope.source
+                            == mir.instructions[enters[j]].as.scope.source) exits[j] = i;
+            }
+            CHECK(exits[0] != SOL_MIR_NONE && exits[1] != SOL_MIR_NONE);
+            if (exits[0] != SOL_MIR_NONE && exits[1] != SOL_MIR_NONE) {
+                SolMirScope first = mir.instructions[enters[0]].as.scope;
+                SolMirScope second = mir.instructions[enters[1]].as.scope;
+                mir.instructions[enters[0]].as.scope = second;
+                mir.instructions[exits[0]].as.scope = second;
+                mir.instructions[enters[1]].as.scope = first;
+                mir.instructions[exits[1]].as.scope = first;
+                CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+                mir.instructions[enters[0]].as.scope = first;
+                mir.instructions[exits[0]].as.scope = first;
+                mir.instructions[enters[1]].as.scope = second;
+                mir.instructions[exits[1]].as.scope = second;
+                CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+            }
+        }
+        if (strcmp(names[n], "arms") == 0) {
+            SolMirInstructionId enters[2] = {SOL_MIR_NONE, SOL_MIR_NONE};
+            SolMirInstructionId exits[2] = {SOL_MIR_NONE, SOL_MIR_NONE};
+            size_t count = 0;
+            for (size_t i = 0; i < mir.instruction_count && count < 2; ++i)
+                if (mir.instructions[i].kind == SOL_MIR_INST_SCOPE_ENTER
+                    && mir.instructions[i].as.scope.kind == SOL_MIR_SCOPE_MATCH_ARM) {
+                    enters[count++] = i;
+                }
+            for (size_t i = 0; i < mir.instruction_count; ++i) {
+                if (mir.instructions[i].kind != SOL_MIR_INST_SCOPE_EXIT) continue;
+                for (size_t j = 0; j < 2; ++j)
+                    if (mir.instructions[i].as.scope.kind == SOL_MIR_SCOPE_MATCH_ARM
+                        && mir.instructions[i].as.scope.source
+                            == mir.instructions[enters[j]].as.scope.source) exits[j] = i;
+            }
+            CHECK(enters[0] != SOL_MIR_NONE && enters[1] != SOL_MIR_NONE
+                && exits[0] != SOL_MIR_NONE && exits[1] != SOL_MIR_NONE);
+            if (exits[0] != SOL_MIR_NONE && exits[1] != SOL_MIR_NONE) {
+                SolMirScope first = mir.instructions[enters[0]].as.scope;
+                SolMirScope second = mir.instructions[enters[1]].as.scope;
+                mir.instructions[enters[0]].as.scope = second;
+                mir.instructions[exits[0]].as.scope = second;
+                mir.instructions[enters[1]].as.scope = first;
+                mir.instructions[exits[1]].as.scope = first;
+                CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+                mir.instructions[enters[0]].as.scope = first;
+                mir.instructions[exits[0]].as.scope = first;
+                mir.instructions[enters[1]].as.scope = second;
+                mir.instructions[exits[1]].as.scope = second;
+                CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+            }
+        }
+        sol_mir_free(&mir);
+    }
+    free_compilation(&compilation);
+}
+
+static void test_scope_terminator_provenance(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module scope_terminators\n"
+        "function target() -> Int64 { 1 }\n"
+        "function calls(flag: Bool) -> Int64 { "
+        "if flag { return target() } else { return target() } }\n"
+        "function breaks(flag: Bool) -> () { "
+        "loop { if flag { break } else { break } } }\n"
+        "function unreachable_blocks(flag: Bool) -> Int64 { "
+        "if flag { unreachable because { flag } } else { "
+        "unreachable because { flag == false } } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    SolMir mir;
+    sol_mir_init(&mir);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "calls"), &mir, &compilation.diagnostics)
+        == SOL_MIR_LOWER_SUCCEEDED);
+    size_t invokes = 0, count = 0, block_entries = 0;
+    SolMirInstructionId enters[2] = {SOL_MIR_NONE, SOL_MIR_NONE};
+    size_t scope_exits[2] = {0, 0};
+    for (size_t i = 0; i < mir.block_count; ++i)
+        invokes += mir.blocks[i].terminator.kind == SOL_MIR_TERM_INVOKE;
+    for (size_t i = 0; i < mir.instruction_count && count < 2; ++i) {
+        if (mir.instructions[i].kind == SOL_MIR_INST_SCOPE_ENTER
+            && mir.instructions[i].as.scope.kind == SOL_MIR_SCOPE_BLOCK) {
+            if (block_entries++ != 0) enters[count++] = i;
+        }
+    }
+    for (size_t i = 0; i < mir.instruction_count; ++i) {
+        if (mir.instructions[i].kind != SOL_MIR_INST_SCOPE_EXIT) continue;
+        for (size_t j = 0; j < 2; ++j)
+            if (mir.instructions[i].as.scope.kind == SOL_MIR_SCOPE_BLOCK
+                && mir.instructions[i].as.scope.source
+                    == mir.instructions[enters[j]].as.scope.source) ++scope_exits[j];
+    }
+    CHECK(invokes == 2 && enters[0] != SOL_MIR_NONE
+        && enters[1] != SOL_MIR_NONE && scope_exits[0] >= 2
+        && scope_exits[1] >= 2 && sol_mir_validate(&compilation.ir, &mir, NULL));
+    if (scope_exits[0] != 0 && scope_exits[1] != 0) {
+        SolMirScope first = mir.instructions[enters[0]].as.scope;
+        SolMirScope second = mir.instructions[enters[1]].as.scope;
+        mir.instructions[enters[0]].as.scope = second;
+        mir.instructions[enters[1]].as.scope = first;
+        for (size_t i = 0; i < mir.instruction_count; ++i) {
+            if (mir.instructions[i].kind != SOL_MIR_INST_SCOPE_EXIT
+                || mir.instructions[i].as.scope.kind != SOL_MIR_SCOPE_BLOCK) continue;
+            if (mir.instructions[i].as.scope.source == first.source)
+                mir.instructions[i].as.scope = second;
+            else if (mir.instructions[i].as.scope.source == second.source)
+                mir.instructions[i].as.scope = first;
+        }
+        CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+        mir.instructions[enters[0]].as.scope = first;
+        mir.instructions[enters[1]].as.scope = second;
+        for (size_t i = 0; i < mir.instruction_count; ++i) {
+            if (mir.instructions[i].kind != SOL_MIR_INST_SCOPE_EXIT
+                || mir.instructions[i].as.scope.kind != SOL_MIR_SCOPE_BLOCK) continue;
+            if (mir.instructions[i].as.scope.source == first.source)
+                mir.instructions[i].as.scope = second;
+            else if (mir.instructions[i].as.scope.source == second.source)
+                mir.instructions[i].as.scope = first;
+        }
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+    }
+    sol_mir_free(&mir);
+    SolMir breaks;
+    sol_mir_init(&breaks);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "breaks"), &breaks, &compilation.diagnostics)
+        == SOL_MIR_LOWER_SUCCEEDED);
+    size_t transfers = 0, entries = 0, sibling_count = 0;
+    SolMirInstructionId sibling_enters[2] = {SOL_MIR_NONE, SOL_MIR_NONE};
+    size_t sibling_exits[2] = {0, 0};
+    for (size_t i = 0; i < breaks.block_count; ++i)
+        transfers += breaks.blocks[i].terminator.kind == SOL_MIR_TERM_BREAK;
+    for (size_t i = 0; i < breaks.instruction_count && sibling_count < 2; ++i) {
+        if (breaks.instructions[i].kind == SOL_MIR_INST_SCOPE_ENTER
+            && breaks.instructions[i].as.scope.kind == SOL_MIR_SCOPE_BLOCK
+            && entries++ >= 2) sibling_enters[sibling_count++] = i;
+    }
+    for (size_t i = 0; i < breaks.instruction_count; ++i) {
+        if (breaks.instructions[i].kind != SOL_MIR_INST_SCOPE_EXIT
+            || breaks.instructions[i].as.scope.kind != SOL_MIR_SCOPE_BLOCK) continue;
+        for (size_t j = 0; j < 2; ++j)
+            if (breaks.instructions[i].as.scope.source
+                == breaks.instructions[sibling_enters[j]].as.scope.source) {
+                ++sibling_exits[j];
+            }
+    }
+    CHECK(transfers == 2 && sibling_enters[0] != SOL_MIR_NONE
+        && sibling_enters[1] != SOL_MIR_NONE && sibling_exits[0] != 0
+        && sibling_exits[1] != 0 && sol_mir_validate(&compilation.ir, &breaks, NULL));
+    if (sibling_exits[0] != 0 && sibling_exits[1] != 0) {
+        SolMirScope first = breaks.instructions[sibling_enters[0]].as.scope;
+        SolMirScope second = breaks.instructions[sibling_enters[1]].as.scope;
+        breaks.instructions[sibling_enters[0]].as.scope = second;
+        breaks.instructions[sibling_enters[1]].as.scope = first;
+        for (size_t i = 0; i < breaks.instruction_count; ++i) {
+            if (breaks.instructions[i].kind != SOL_MIR_INST_SCOPE_EXIT
+                || breaks.instructions[i].as.scope.kind != SOL_MIR_SCOPE_BLOCK) continue;
+            if (breaks.instructions[i].as.scope.source == first.source)
+                breaks.instructions[i].as.scope = second;
+            else if (breaks.instructions[i].as.scope.source == second.source)
+                breaks.instructions[i].as.scope = first;
+        }
+        CHECK(!sol_mir_validate(&compilation.ir, &breaks, NULL));
+        breaks.instructions[sibling_enters[0]].as.scope = first;
+        breaks.instructions[sibling_enters[1]].as.scope = second;
+        for (size_t i = 0; i < breaks.instruction_count; ++i) {
+            if (breaks.instructions[i].kind != SOL_MIR_INST_SCOPE_EXIT
+                || breaks.instructions[i].as.scope.kind != SOL_MIR_SCOPE_BLOCK) continue;
+            if (breaks.instructions[i].as.scope.source == first.source)
+                breaks.instructions[i].as.scope = second;
+            else if (breaks.instructions[i].as.scope.source == second.source)
+                breaks.instructions[i].as.scope = first;
+        }
+        CHECK(sol_mir_validate(&compilation.ir, &breaks, NULL));
+    }
+    sol_mir_free(&breaks);
+    SolMir unreachable;
+    sol_mir_init(&unreachable);
+    CHECK(sol_mir_lower_callable(&compilation.ir,
+        callable(&compilation.ir, "unreachable_blocks"), &unreachable,
+        &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+    SolMirInstructionId sibling_enters_unreachable[2] = {SOL_MIR_NONE,
+        SOL_MIR_NONE};
+    size_t sibling_sources[2] = {SOL_MIR_NONE, SOL_MIR_NONE};
+    size_t unreachable_count = 0;
+    for (size_t block = 0; block < unreachable.block_count; ++block) {
+        if (unreachable.blocks[block].terminator.kind != SOL_MIR_TERM_UNREACHABLE
+            || unreachable_count == 2) {
+            continue;
+        }
+        SolMirSlice slice = unreachable.blocks[block].instructions;
+        for (size_t i = 0; i < slice.count; ++i) {
+            const SolMirInstruction *instruction
+                = &unreachable.instructions[slice.offset + i];
+            if (instruction->kind == SOL_MIR_INST_SCOPE_EXIT
+                && instruction->as.scope.kind == SOL_MIR_SCOPE_BLOCK) {
+                sibling_sources[unreachable_count++] = instruction->as.scope.source;
+                break;
+            }
+        }
+    }
+    for (size_t i = 0; i < unreachable.instruction_count; ++i) {
+        if (unreachable.instructions[i].kind != SOL_MIR_INST_SCOPE_ENTER
+            || unreachable.instructions[i].as.scope.kind != SOL_MIR_SCOPE_BLOCK) {
+            continue;
+        }
+        for (size_t j = 0; j < 2; ++j)
+            if (unreachable.instructions[i].as.scope.source == sibling_sources[j]) {
+                sibling_enters_unreachable[j] = i;
+            }
+    }
+    CHECK(unreachable_count == 2 && sibling_sources[0] != sibling_sources[1]
+        && sibling_enters_unreachable[0] != SOL_MIR_NONE
+        && sibling_enters_unreachable[1] != SOL_MIR_NONE
+        && sol_mir_validate(&compilation.ir, &unreachable, NULL));
+    if (unreachable_count == 2 && sibling_sources[0] != sibling_sources[1]) {
+        for (size_t i = 0; i < unreachable.instruction_count; ++i) {
+            SolMirInstruction *instruction = &unreachable.instructions[i];
+            if ((instruction->kind != SOL_MIR_INST_SCOPE_ENTER
+                    && instruction->kind != SOL_MIR_INST_SCOPE_EXIT)
+                || instruction->as.scope.kind != SOL_MIR_SCOPE_BLOCK) continue;
+            if (instruction->as.scope.source == sibling_sources[0])
+                instruction->as.scope.source = sibling_sources[1];
+            else if (instruction->as.scope.source == sibling_sources[1])
+                instruction->as.scope.source = sibling_sources[0];
+        }
+        CHECK(!sol_mir_validate(&compilation.ir, &unreachable, NULL));
+        for (size_t i = 0; i < unreachable.instruction_count; ++i) {
+            SolMirInstruction *instruction = &unreachable.instructions[i];
+            if ((instruction->kind != SOL_MIR_INST_SCOPE_ENTER
+                    && instruction->kind != SOL_MIR_INST_SCOPE_EXIT)
+                || instruction->as.scope.kind != SOL_MIR_SCOPE_BLOCK) continue;
+            if (instruction->as.scope.source == sibling_sources[0])
+                instruction->as.scope.source = sibling_sources[1];
+            else if (instruction->as.scope.source == sibling_sources[1])
+                instruction->as.scope.source = sibling_sources[0];
+        }
+        CHECK(sol_mir_validate(&compilation.ir, &unreachable, NULL));
+    }
+    sol_mir_free(&unreachable);
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_canonical_rendering();
     test_initial_lowering_and_determinism();
+    test_lexical_scope_markers();
+    test_scope_terminator_provenance();
     test_transactional_unsupported();
     test_callable_contract_envelope();
     test_calls_and_remaining_local_control();

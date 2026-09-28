@@ -421,7 +421,7 @@ static void test_valid_owner_work_deltas(void) {
                 &owners[side]));
         }
         if (built[0] && built[1]) {
-            static const size_t expected_deltas[] = {3651, 663, 16428};
+            static const size_t expected_deltas[] = {3883, 747, 24532};
             CHECK(owners[1].usage.validation_work
                     - owners[0].usage.validation_work == expected_deltas[pair]);
             if (pair == 0) {
@@ -626,8 +626,8 @@ static void test_e6(const SolMirConcreteProgram *program,
         .operands = 24, .writebacks = 1, .entries = 1, .imports = 52,
         .failure_sites = 29, .owned_bytes = 16328,
         .build_scratch_bytes = 21, .build_work = 9427,
-        .validation_scratch_bytes = 584692564,
-        .validation_work = 73649839,
+        .validation_scratch_bytes = 762459316,
+        .validation_work = 95865687,
     };
     CHECK(memcmp(origins, expected_origins, sizeof(origins)) == 0);
     CHECK(memcmp(targets, expected_targets, sizeof(targets)) == 0);

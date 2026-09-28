@@ -1465,6 +1465,199 @@ static size_t concrete_invokes(const SolMirMaterialization *owner) {
     return count;
 }
 
+static void test_terminator_scope_topology_provenance(void) {
+    Compilation compilation;
+    CHECK(compile_text(&compilation,
+        "module materialized_scope_terminators\n"
+        "function target() -> Int64 { 1 }\n"
+        "function calls(flag: Bool) -> Int64 { "
+        "if flag { return target() } else { return target() } }\n"
+        "function unreachable_blocks(flag: Bool) -> Int64 { "
+        "if flag { unreachable because { flag } } else { "
+        "unreachable because { flag == false } } }\n"));
+    SolDiagnostics diagnostics;
+    sol_diagnostics_init(&diagnostics);
+    SolMirProgram program; SolMirPlan plan; SolMirMaterialization materialization;
+    sol_mir_program_init(&program); sol_mir_plan_init(&plan);
+    sol_mir_materialization_init(&materialization);
+    SolMirMaterializeBuildOutcome outcome = SOL_MIR_MATERIALIZE_BUILD_INTERNAL_FAILED;
+    SolIrCallableId root = callable(&compilation.ir, "calls",
+        SOL_IR_CALLABLE_FUNCTION);
+    CHECK(root != SOL_IR_NONE && build_all(&compilation.ir, root, NULL, 0,
+        &program, &plan, &materialization, NULL, &diagnostics, &outcome)
+        && outcome == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED);
+    SolMirMaterializedImage *image = NULL;
+    for (size_t i = 0; i < materialization.image_count; ++i)
+        if (materialization.images[i].source_callable == root) {
+            image = &materialization.images[i]; break;
+        }
+    CHECK(image != NULL && sol_mir_materialization_validate_concrete(
+        &materialization, NULL));
+    if (image != NULL) {
+        size_t invokes = 0, entries = 0, count = 0;
+        size_t enters[2] = {SOL_MIR_MATERIALIZED_NONE,
+            SOL_MIR_MATERIALIZED_NONE};
+        size_t scope_exits[2] = {0, 0};
+        for (size_t i = 0; i < image->blocks.count; ++i)
+            invokes += materialization.blocks[image->blocks.offset + i]
+                .terminator.kind == SOL_MIR_TERM_INVOKE;
+        for (size_t i = 0; i < image->instructions.count && count < 2; ++i) {
+            size_t id = image->instructions.offset + i;
+            if (materialization.instructions[id].kind == SOL_MIR_INST_SCOPE_ENTER
+                && materialization.instructions[id].scope_kind == SOL_MIR_SCOPE_BLOCK) {
+                if (entries++ != 0) enters[count++] = id;
+            }
+        }
+        for (size_t i = 0; i < image->instructions.count; ++i) {
+            size_t id = image->instructions.offset + i;
+            if (materialization.instructions[id].kind != SOL_MIR_INST_SCOPE_EXIT) continue;
+            for (size_t j = 0; j < 2; ++j)
+                if (materialization.instructions[id].scope_kind == SOL_MIR_SCOPE_BLOCK
+                    && materialization.instructions[id].scope_source
+                        == materialization.instructions[enters[j]].scope_source) {
+                    ++scope_exits[j];
+                }
+        }
+        CHECK(invokes == 2 && enters[0] != SOL_MIR_MATERIALIZED_NONE
+            && enters[1] != SOL_MIR_MATERIALIZED_NONE
+            && scope_exits[0] >= 2 && scope_exits[1] >= 2);
+        if (scope_exits[0] != 0 && scope_exits[1] != 0) {
+            size_t first = materialization.instructions[enters[0]].scope_source;
+            size_t second = materialization.instructions[enters[1]].scope_source;
+            size_t first_enter = enters[0] - image->instructions.offset;
+            size_t second_enter = enters[1] - image->instructions.offset;
+            materialization.instructions[enters[0]].scope_source = second;
+            materialization.instructions[enters[1]].scope_source = first;
+            image->topology.instructions[first_enter].as.scope.source = second;
+            image->topology.instructions[second_enter].as.scope.source = first;
+            for (size_t i = 0; i < image->instructions.count; ++i) {
+                size_t id = image->instructions.offset + i;
+                if (materialization.instructions[id].kind != SOL_MIR_INST_SCOPE_EXIT
+                    || materialization.instructions[id].scope_kind
+                        != SOL_MIR_SCOPE_BLOCK) continue;
+                if (materialization.instructions[id].scope_source == first) {
+                    materialization.instructions[id].scope_source = second;
+                    image->topology.instructions[i].as.scope.source = second;
+                } else if (materialization.instructions[id].scope_source == second) {
+                    materialization.instructions[id].scope_source = first;
+                    image->topology.instructions[i].as.scope.source = first;
+                }
+            }
+            CHECK(!sol_mir_materialization_validate_concrete(&materialization, NULL));
+            materialization.instructions[enters[0]].scope_source = first;
+            materialization.instructions[enters[1]].scope_source = second;
+            image->topology.instructions[first_enter].as.scope.source = first;
+            image->topology.instructions[second_enter].as.scope.source = second;
+            for (size_t i = 0; i < image->instructions.count; ++i) {
+                size_t id = image->instructions.offset + i;
+                if (materialization.instructions[id].kind != SOL_MIR_INST_SCOPE_EXIT
+                    || materialization.instructions[id].scope_kind
+                        != SOL_MIR_SCOPE_BLOCK) continue;
+                if (materialization.instructions[id].scope_source == first) {
+                    materialization.instructions[id].scope_source = second;
+                    image->topology.instructions[i].as.scope.source = second;
+                } else if (materialization.instructions[id].scope_source == second) {
+                    materialization.instructions[id].scope_source = first;
+                    image->topology.instructions[i].as.scope.source = first;
+                }
+            }
+            CHECK(sol_mir_materialization_validate_concrete(&materialization, NULL));
+        }
+    }
+    sol_mir_materialization_free(&materialization); sol_mir_plan_free(&plan);
+    sol_mir_program_free(&program); sol_diagnostics_free(&diagnostics);
+
+    SolMirProgram unreachable_program;
+    SolMirPlan unreachable_plan;
+    SolMirMaterialization unreachable_materialization;
+    sol_mir_program_init(&unreachable_program);
+    sol_mir_plan_init(&unreachable_plan);
+    sol_mir_materialization_init(&unreachable_materialization);
+    sol_diagnostics_init(&diagnostics);
+    outcome = SOL_MIR_MATERIALIZE_BUILD_INTERNAL_FAILED;
+    SolIrCallableId unreachable_root = callable(&compilation.ir,
+        "unreachable_blocks", SOL_IR_CALLABLE_FUNCTION);
+    CHECK(unreachable_root != SOL_IR_NONE && build_all(&compilation.ir,
+        unreachable_root, NULL, 0, &unreachable_program, &unreachable_plan,
+        &unreachable_materialization, NULL, &diagnostics, &outcome)
+        && outcome == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED);
+    SolMirMaterializedImage *unreachable_image = NULL;
+    for (size_t i = 0; i < unreachable_materialization.image_count; ++i)
+        if (unreachable_materialization.images[i].source_callable == unreachable_root) {
+            unreachable_image = &unreachable_materialization.images[i]; break;
+        }
+    size_t unreachable_sources[2] = {SOL_MIR_MATERIALIZED_NONE,
+        SOL_MIR_MATERIALIZED_NONE};
+    size_t unreachable_count = 0;
+    if (unreachable_image != NULL) {
+        for (size_t block = 0; block < unreachable_image->blocks.count
+            && unreachable_count < 2; ++block) {
+            const SolMirMaterializedBlock *item = &unreachable_materialization.blocks[
+                unreachable_image->blocks.offset + block];
+            if (item->terminator.kind != SOL_MIR_TERM_UNREACHABLE) continue;
+            for (size_t i = 0; i < item->instructions.count; ++i) {
+                const SolMirMaterializedInstruction *instruction
+                    = &unreachable_materialization.instructions[
+                        item->instructions.offset + i];
+                if (instruction->kind == SOL_MIR_INST_SCOPE_EXIT
+                    && instruction->scope_kind == SOL_MIR_SCOPE_BLOCK) {
+                    unreachable_sources[unreachable_count++] = instruction->scope_source;
+                    break;
+                }
+            }
+        }
+    }
+    CHECK(unreachable_image != NULL && unreachable_count == 2
+        && unreachable_sources[0] != unreachable_sources[1]
+        && sol_mir_materialization_validate_concrete(
+            &unreachable_materialization, NULL));
+    if (unreachable_image != NULL && unreachable_count == 2
+        && unreachable_sources[0] != unreachable_sources[1]) {
+        for (size_t i = 0; i < unreachable_image->instructions.count; ++i) {
+            size_t id = unreachable_image->instructions.offset + i;
+            SolMirMaterializedInstruction *instruction
+                = &unreachable_materialization.instructions[id];
+            if ((instruction->kind != SOL_MIR_INST_SCOPE_ENTER
+                    && instruction->kind != SOL_MIR_INST_SCOPE_EXIT)
+                || instruction->scope_kind != SOL_MIR_SCOPE_BLOCK) continue;
+            if (instruction->scope_source == unreachable_sources[0]) {
+                instruction->scope_source = unreachable_sources[1];
+                unreachable_image->topology.instructions[i].as.scope.source
+                    = unreachable_sources[1];
+            } else if (instruction->scope_source == unreachable_sources[1]) {
+                instruction->scope_source = unreachable_sources[0];
+                unreachable_image->topology.instructions[i].as.scope.source
+                    = unreachable_sources[0];
+            }
+        }
+        CHECK(!sol_mir_materialization_validate_concrete(
+            &unreachable_materialization, NULL));
+        for (size_t i = 0; i < unreachable_image->instructions.count; ++i) {
+            size_t id = unreachable_image->instructions.offset + i;
+            SolMirMaterializedInstruction *instruction
+                = &unreachable_materialization.instructions[id];
+            if ((instruction->kind != SOL_MIR_INST_SCOPE_ENTER
+                    && instruction->kind != SOL_MIR_INST_SCOPE_EXIT)
+                || instruction->scope_kind != SOL_MIR_SCOPE_BLOCK) continue;
+            if (instruction->scope_source == unreachable_sources[0]) {
+                instruction->scope_source = unreachable_sources[1];
+                unreachable_image->topology.instructions[i].as.scope.source
+                    = unreachable_sources[1];
+            } else if (instruction->scope_source == unreachable_sources[1]) {
+                instruction->scope_source = unreachable_sources[0];
+                unreachable_image->topology.instructions[i].as.scope.source
+                    = unreachable_sources[0];
+            }
+        }
+        CHECK(sol_mir_materialization_validate_concrete(
+            &unreachable_materialization, NULL));
+    }
+    sol_mir_materialization_free(&unreachable_materialization);
+    sol_mir_plan_free(&unreachable_plan); sol_mir_program_free(&unreachable_program);
+    sol_diagnostics_free(&diagnostics);
+    free_compilation(&compilation);
+}
+
 static void test_e6_concrete_closure_and_determinism(void) {
     Compilation compilation;
     SolPackage package;
@@ -1527,7 +1720,7 @@ static void test_e6_concrete_closure_and_determinism(void) {
     CHECK(sol_mir_materialization_validation_work(&all, &recomputed_work)
         && recomputed_work == all.usage.validation_work
         && recomputed_work >= storage_cardinality);
-    size_t instruction_kinds[SOL_MIR_INST_CAPTURE_SNAPSHOT + 1] = {0};
+    size_t instruction_kinds[SOL_MIR_INST_SCOPE_EXIT + 1] = {0};
     size_t terminator_kinds[SOL_MIR_TERM_CONTRACT_VIOLATION + 1] = {0};
     size_t demand_kinds[SOL_MIR_PLAN_DEMAND_PREDICATE_FUNCTION_VALUE + 1] = {0};
     for (size_t i = 0; i < all.instruction_count; ++i)
@@ -1537,11 +1730,12 @@ static void test_e6_concrete_closure_and_determinism(void) {
     for (size_t i = 0; i < all.binding_count; ++i)
         ++demand_kinds[all.bindings[i].kind];
     const size_t expected_instructions[] = {22, 5, 7, 2, 12, 15, 111, 111,
-        26, 0, 1, 16, 0, 16, 1, 1, 1, 50, 5, 4, 3, 3, 3, 1, 0, 0, 28, 1};
+        26, 0, 1, 16, 0, 16, 1, 1, 1, 50, 5, 4, 3, 3, 3, 1, 0, 0, 28, 1,
+        37, 101};
     const size_t expected_terminators[] = {0, 11, 12, 17, 1, 18, 22, 0, 0,
         0, 1, 1, 2, 3, 3};
     const size_t expected_demands[] = {5, 18, 0, 0, 0, 0, 0, 0, 0};
-    CHECK(all.instruction_count == 445 && all.block_count == 91
+    CHECK(all.instruction_count == 583 && all.block_count == 91
         && all.binding_count == 23);
     CHECK(memcmp(instruction_kinds, expected_instructions,
         sizeof(expected_instructions)) == 0);
@@ -1559,6 +1753,59 @@ static void test_e6_concrete_closure_and_determinism(void) {
         corrupted_temp_suffix = true; break;
     }
     CHECK(corrupted_temp_suffix);
+    bool corrupted_scope = false;
+    for (size_t i = 0; i < all.instruction_count; ++i) {
+        SolMirMaterializedInstruction *instruction = &all.instructions[i];
+        if (instruction->kind != SOL_MIR_INST_SCOPE_EXIT) continue;
+        size_t saved = instruction->scope_source;
+        size_t replacement = SOL_MIR_MATERIALIZED_NONE;
+        for (size_t q = 0; q < all.instruction_count; ++q) {
+            const SolMirMaterializedInstruction *candidate = &all.instructions[q];
+            if (candidate->kind == SOL_MIR_INST_SCOPE_EXIT
+                && candidate->scope_kind == instruction->scope_kind
+                && candidate->scope_source != saved) {
+                replacement = candidate->scope_source;
+                break;
+            }
+        }
+        instruction->scope_source = replacement;
+        CHECK(!sol_mir_materialization_validate_concrete(&all, NULL));
+        instruction->scope_source = saved;
+        corrupted_scope = true; break;
+    }
+    CHECK(corrupted_scope);
+    bool corrupted_topology_scope = false;
+    for (size_t image = 0; image < all.image_count && !corrupted_topology_scope;
+        ++image) {
+        SolMirMaterializedImage *item = &all.images[image];
+        size_t enters[2] = {SOL_MIR_MATERIALIZED_NONE,
+            SOL_MIR_MATERIALIZED_NONE};
+        size_t count = 0;
+        for (size_t i = 0; i < item->instructions.count && count < 2; ++i) {
+            size_t id = item->instructions.offset + i;
+            if (all.instructions[id].kind == SOL_MIR_INST_SCOPE_ENTER
+                && all.instructions[id].scope_kind == SOL_MIR_SCOPE_BLOCK) {
+                enters[count++] = id;
+            }
+        }
+        if (count != 2) continue;
+        size_t first = enters[0] - item->instructions.offset;
+        size_t second = enters[1] - item->instructions.offset;
+        size_t first_source = all.instructions[enters[0]].scope_source;
+        size_t second_source = all.instructions[enters[1]].scope_source;
+        all.instructions[enters[0]].scope_source = second_source;
+        all.instructions[enters[1]].scope_source = first_source;
+        item->topology.instructions[first].as.scope.source = second_source;
+        item->topology.instructions[second].as.scope.source = first_source;
+        CHECK(!sol_mir_materialization_validate_concrete(&all, NULL));
+        all.instructions[enters[0]].scope_source = first_source;
+        all.instructions[enters[1]].scope_source = second_source;
+        item->topology.instructions[first].as.scope.source = first_source;
+        item->topology.instructions[second].as.scope.source = second_source;
+        CHECK(sol_mir_materialization_validate_concrete(&all, NULL));
+        corrupted_topology_scope = true;
+    }
+    CHECK(corrupted_topology_scope);
     bool corrupted_propagate = false, corrupted_panic = false;
     for (size_t image = 0; image < all.image_count; ++image) {
         const SolMirMaterializedImage *item = &all.images[image];
@@ -1664,6 +1911,7 @@ int main(void) {
     test_refinement_predicate_site_and_temp_suffix();
     test_non_cfg_predicate_function_site();
     test_multiple_predicate_dependencies();
+    test_terminator_scope_topology_provenance();
     test_e6_concrete_closure_and_determinism();
     if (failures != 0) {
         fprintf(stderr, "%d MIR materialization test(s) failed\n", failures);

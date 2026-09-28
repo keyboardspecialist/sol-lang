@@ -12,6 +12,23 @@ typedef size_t SolMirValueId;
 typedef size_t SolMirLoopId;
 typedef size_t SolMirTemporaryId;
 
+/* Concrete lexical ownership identity.  Symbolic topology remains provenance
+   only after materialization; these markers are executable no-ops. */
+typedef enum {
+    SOL_MIR_SCOPE_INVALID,
+    SOL_MIR_SCOPE_CALLABLE_ENVELOPE,
+    SOL_MIR_SCOPE_BLOCK,
+    SOL_MIR_SCOPE_MATCH_ARM,
+    SOL_MIR_SCOPE_HANDLER,
+    SOL_MIR_SCOPE_REGION,
+} SolMirScopeKind;
+
+typedef struct {
+    SolMirScopeKind kind;
+    /* Callable id, block-expression id, or match-arm id, selected by kind. */
+    size_t source;
+} SolMirScope;
+
 #define SOL_MIR_NONE SIZE_MAX
 
 typedef struct {
@@ -79,6 +96,8 @@ typedef enum {
     /* Captures one infallible logical copy in the callable contract envelope.
        Every terminal exit destroys all captured snapshots implicitly. */
     SOL_MIR_INST_CAPTURE_SNAPSHOT,
+    SOL_MIR_INST_SCOPE_ENTER,
+    SOL_MIR_INST_SCOPE_EXIT,
 } SolMirInstructionKind;
 
 typedef enum {
@@ -156,6 +175,7 @@ typedef struct {
             SolIrSlice operation_roots;
         } construct;
         SolIrSnapshotId snapshot;
+        SolMirScope scope;
     } as;
 } SolMirInstruction;
 

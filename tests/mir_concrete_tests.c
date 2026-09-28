@@ -305,21 +305,21 @@ static const SolMirPlanUsage expected_plan_usage = {
 
 /* Follows the declaration order in SolMirMaterialization. */
 static const size_t expected_materialization_counts[] = {
-    14, 21, 5, 3, 39, 17, 738, 18, 27, 48, 5, 173, 445, 50, 27,
+    14, 21, 5, 3, 39, 17, 738, 18, 27, 48, 5, 173, 583, 50, 27,
     18, 91, 86, 40, 32, 0, 23, 23, 0, 4, 0, 1, 7, 9, 10, 164, 60,
 };
 static const SolMirMaterializeUsage expected_materialization_usage = {
-    14, 1125, 761, 1904, 345028, 3019, 185, 73043442,
+    14, 1263, 761, 2042, 411764, 3295, 185, 95255944,
 };
 
 static const size_t expected_representation_counts[] = {21, 11, 9, 3, 3, 0, 0};
 static const SolMirRepresentationUsage expected_representation_usage = {
-    21, 11, 9, 3, 0, 0, 3348, 63, 385, 73105056, 584692564,
+    21, 11, 9, 3, 0, 0, 3348, 63, 385, 95318662, 762459316,
 };
 
 static const size_t expected_layout_counts[] = {21, 11, 9, 5};
 static const SolMirLayoutUsage expected_layout_usage = {
-    21, 11, 9, 5, 4232, 21, 87, 584692564, 73105190,
+    21, 11, 9, 5, 4232, 21, 87, 762459316, 95318796,
 };
 
 /* Follows SOL_MIR_OPERATIONS_ARENAS order. */
@@ -343,13 +343,13 @@ static const SolMirOperationsUsage expected_operations_usage = {
     .predicate_pattern_nodes = 0, .import_envelopes = 4,
     .import_contract_references = 0, .literal_bytes = 0,
     .import_snapshots = 0, .owned_bytes = 20960,
-    .build_scratch_bytes = 2679, .build_work = 9111,
-    .validation_scratch_bytes = 584692564, .validation_work = 73141706,
+    .build_scratch_bytes = 2679, .build_work = 10525,
+    .validation_scratch_bytes = 762459316, .validation_work = 95357416,
 };
 
 static const size_t expected_linkage_counts[] = {14, 23, 1, 0, 0, 4, 17};
 static const SolMirLinkageUsage expected_linkage_usage = {
-    14, 23, 1, 0, 0, 4, 17, 4648, 0, 77697, 584692564, 73227371,
+    14, 23, 1, 0, 0, 4, 17, 4648, 0, 77697, 762459316, 95443081,
 };
 
 static void check_e6_census_and_closure(const Compilation *c,
@@ -508,7 +508,7 @@ static void check_e6_census_and_closure(const Compilation *c,
             represented |= p->materialization.images[q].source_callable == i;
         CHECK(represented);
     }
-    size_t instruction_kinds[SOL_MIR_INST_CAPTURE_SNAPSHOT + 1] = {0};
+    size_t instruction_kinds[SOL_MIR_INST_SCOPE_EXIT + 1] = {0};
     size_t terminator_kinds[SOL_MIR_TERM_CONTRACT_VIOLATION + 1] = {0};
     for (size_t i = 0; i < p->materialization.instruction_count; ++i)
         ++instruction_kinds[p->materialization.instructions[i].kind];

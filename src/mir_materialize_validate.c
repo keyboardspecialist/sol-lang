@@ -858,6 +858,38 @@ static bool instruction_semantics(const View *view,
             return false;
         case SOL_MIR_INST_REGION_ENTER: case SOL_MIR_INST_REGION_EXIT:
             return true;
+        case SOL_MIR_INST_SCOPE_ENTER: case SOL_MIR_INST_SCOPE_EXIT:
+            {
+            size_t id = (size_t)(ins - o->instructions);
+            if (!in(view->image->instructions, id)) return false;
+            const SolMirInstruction *source = &view->image->topology.instructions[
+                id - view->image->instructions.offset];
+            if (source->kind != ins->kind
+                || source->as.scope.kind != ins->scope_kind
+                || source->as.scope.source != ins->scope_source) return false;
+            }
+            if (ins->scope_kind == SOL_MIR_SCOPE_CALLABLE_ENVELOPE) {
+                return ins->scope_source == view->image->source_callable;
+            }
+            if (ins->scope_kind == SOL_MIR_SCOPE_BLOCK) {
+                const SolIr *ir = o->plan->program->ir;
+                return ins->scope_source < ir->expression_count
+                    && ir->expressions[ins->scope_source].kind == SOL_IR_EXPR_BLOCK;
+            }
+            if (ins->scope_kind == SOL_MIR_SCOPE_MATCH_ARM) {
+                return ins->scope_source < o->plan->program->ir->arm_count;
+            }
+            if (ins->scope_kind == SOL_MIR_SCOPE_HANDLER) {
+                const SolIr *ir = o->plan->program->ir;
+                return ins->scope_source < ir->expression_count
+                    && ir->expressions[ins->scope_source].kind == SOL_IR_EXPR_HANDLE;
+            }
+            if (ins->scope_kind == SOL_MIR_SCOPE_REGION) {
+                const SolIr *ir = o->plan->program->ir;
+                return ins->scope_source < ir->statement_count
+                    && ir->statements[ins->scope_source].kind == SOL_IR_STATEMENT_REGION;
+            }
+            return false;
     }
     return false;
 }
@@ -1613,7 +1645,8 @@ static bool validate_storage_paths(const View *v,
 static bool stack_flow(const View *v, int kind, SolDiagnostics *diagnostics) {
     const SolMirMaterialization *o = v->owner;
     size_t width = kind == 0 ? v->image->temporaries.count
-        : kind == 1 ? v->image->instructions.count : v->image->handlers.count;
+        : kind == 1 || kind == 3 ? v->image->instructions.count
+        : v->image->handlers.count;
     if (width && (v->block_count > SIZE_MAX / width
             || v->block_count * width > SIZE_MAX / sizeof(size_t))) return false;
     size_t total = width * v->block_count;
@@ -1676,11 +1709,26 @@ static bool stack_flow(const View *v, int kind, SolDiagnostics *diagnostics) {
                     valid = depth && working[depth - 1] == ins->source_statement;
                     if (valid) --depth;
                 }
-            } else {
+            } else if (kind == 2) {
                 if (ins->kind == SOL_MIR_INST_HANDLER_ENTER) {
                     valid = depth < width; if (valid) working[depth++] = ins->handler;
                 } else if (ins->kind == SOL_MIR_INST_HANDLER_EXIT) {
                     valid = depth && working[depth - 1] == ins->handler;
+                    if (valid) --depth;
+                }
+            } else {
+                if (ins->kind == SOL_MIR_INST_SCOPE_ENTER) {
+                    valid = ins->scope_kind != SOL_MIR_SCOPE_INVALID
+                        && ins->scope_kind <= SOL_MIR_SCOPE_REGION && depth < width;
+                    if (valid) working[depth++] = block->instructions.offset + i;
+                } else if (ins->kind == SOL_MIR_INST_SCOPE_EXIT) {
+                    valid = depth != 0;
+                    if (valid) {
+                        const SolMirMaterializedInstruction *enter
+                            = &o->instructions[working[depth - 1]];
+                        valid = enter->scope_kind == ins->scope_kind
+                            && enter->scope_source == ins->scope_source;
+                    }
                     if (valid) --depth;
                 }
             }
@@ -1729,7 +1777,8 @@ static bool stack_flow(const View *v, int kind, SolDiagnostics *diagnostics) {
             }
             if (valid) depth -= consumed;
         }
-        if (valid && terminal(term->kind) && depth != 0) valid = false;
+        if (valid && terminal(term->kind) && depth != 0
+            && (kind == 0 || kind == 3)) valid = false;
         SolMirMaterializedEdgeId edges[3]; size_t edge_count;
         valid = valid && block_edges(v, b, edges, &edge_count);
         for (size_t e = 0; valid && e < edge_count; ++e) {
@@ -1983,7 +2032,8 @@ static bool validate_contracts(const View *v) {
             = &o->instructions[body->instructions.offset + i];
         if (ins->kind == SOL_MIR_INST_CAPTURE_SNAPSHOT) {
             if (started || !instruction_semantics(v, ins)) return false;
-        } else if (ins->kind != SOL_MIR_INST_PARAMETER_LIVE) started = true;
+        } else if (ins->kind != SOL_MIR_INST_PARAMETER_LIVE
+            && ins->kind != SOL_MIR_INST_SCOPE_ENTER) started = true;
     }
     if (snapshots != snapshot_overlays) return false;
     current = v->image->contract_epilogue;
@@ -2695,6 +2745,11 @@ bool sol_mir_materialization_validate_concrete(
         if (!valid) break;
         View view = {owner, im, i, im->blocks.count, im->values.count,
             im->locals.count, im->places.count};
+        /* Authenticate the deep-owned symbolic topology before accepting any
+           concrete overlay that claims to reproduce it. */
+        if (!sol_mir_validate(owner->plan->program->ir, &im->topology, NULL)) {
+            return error(diagnostics, "concrete MIR symbolic topology validation failed");
+        }
         if (!concrete_types(&view)) return error(diagnostics,
             "concrete MIR type/place validation failed");
         if (!validate_ssa(&view, diagnostics)) return error(diagnostics,
@@ -2711,6 +2766,8 @@ bool sol_mir_materialization_validate_concrete(
             "concrete MIR region validation failed");
         if (!stack_flow(&view, 2, diagnostics)) return error(diagnostics,
             "concrete MIR handler validation failed");
+        if (!stack_flow(&view, 3, diagnostics)) return error(diagnostics,
+            "concrete MIR lexical scope validation failed");
         if (!validate_contracts(&view)) return error(diagnostics,
             "concrete MIR contract validation failed");
         if (!validate_loops(&view)) return error(diagnostics,

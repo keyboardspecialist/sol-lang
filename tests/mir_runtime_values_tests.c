@@ -780,8 +780,8 @@ static void test_inventory(SolMirConcreteProgram *program,
         && values->usage.owned_bytes == 4432
         && values->usage.build_scratch_bytes == 94
         && values->usage.build_work == 357
-        && values->usage.validation_scratch_bytes == 584692564
-        && values->usage.validation_work == 73655017);
+        && values->usage.validation_scratch_bytes == 762459316
+        && values->usage.validation_work == 95870865);
     test_allocation_plans(values);
     test_host_result_transfer_model(values);
     check_ownership_plans(values);

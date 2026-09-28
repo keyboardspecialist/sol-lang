@@ -180,6 +180,20 @@ static const char *instruction_kind_name(SolMirInstructionKind kind) {
         case SOL_MIR_INST_HANDLER_EXIT: return "handler_exit";
         case SOL_MIR_INST_CONSTRUCT: return "construct";
         case SOL_MIR_INST_CAPTURE_SNAPSHOT: return "capture_snapshot";
+        case SOL_MIR_INST_SCOPE_ENTER: return "scope_enter";
+        case SOL_MIR_INST_SCOPE_EXIT: return "scope_exit";
+    }
+    return NULL;
+}
+
+static const char *scope_kind_name(SolMirScopeKind kind) {
+    switch (kind) {
+        case SOL_MIR_SCOPE_CALLABLE_ENVELOPE: return "callable_envelope";
+        case SOL_MIR_SCOPE_BLOCK: return "block";
+        case SOL_MIR_SCOPE_MATCH_ARM: return "match_arm";
+        case SOL_MIR_SCOPE_HANDLER: return "handler";
+        case SOL_MIR_SCOPE_REGION: return "region";
+        case SOL_MIR_SCOPE_INVALID: break;
     }
     return NULL;
 }
@@ -739,6 +753,21 @@ static bool collect_direct_relations(MirRenderer *renderer) {
             case SOL_MIR_INST_CAPTURE_SNAPSHOT:
                 if (!mark_snapshot(renderer, instruction->as.snapshot,
                     &changed)) return false;
+                break;
+            case SOL_MIR_INST_SCOPE_ENTER:
+            case SOL_MIR_INST_SCOPE_EXIT:
+                if (instruction->as.scope.kind == SOL_MIR_SCOPE_BLOCK
+                    && !mark_expression(renderer, instruction->as.scope.source,
+                        &changed)) return false;
+                if (instruction->as.scope.kind == SOL_MIR_SCOPE_MATCH_ARM
+                    && !mark_arm(renderer, instruction->as.scope.source,
+                        &changed)) return false;
+                if (instruction->as.scope.kind == SOL_MIR_SCOPE_HANDLER
+                    && !mark_expression(renderer, instruction->as.scope.source,
+                        &changed)) return false;
+                if (instruction->as.scope.kind == SOL_MIR_SCOPE_REGION
+                    && !mark_statement(renderer, instruction->as.scope.source,
+                        &changed)) return false;
                 break;
             default: break;
         }
@@ -1812,6 +1841,28 @@ static void render_instruction(MirRenderer *renderer, size_t id) {
         case SOL_MIR_INST_CAPTURE_SNAPSHOT:
             render_text(output, " snapshot=");
             render_id(output, "snapshot", instruction->as.snapshot, SOL_IR_NONE);
+            break;
+        case SOL_MIR_INST_SCOPE_ENTER:
+        case SOL_MIR_INST_SCOPE_EXIT:
+            render_text(output, " scope_kind=");
+            render_enum(output, scope_kind_name(instruction->as.scope.kind));
+            render_text(output, " scope=");
+            if (instruction->as.scope.kind == SOL_MIR_SCOPE_CALLABLE_ENVELOPE) {
+                render_id(output, "callable", instruction->as.scope.source,
+                    SOL_IR_NONE);
+            } else if (instruction->as.scope.kind == SOL_MIR_SCOPE_BLOCK) {
+                render_id(output, "expr", instruction->as.scope.source,
+                    SOL_IR_NONE);
+            } else if (instruction->as.scope.kind == SOL_MIR_SCOPE_MATCH_ARM) {
+                render_id(output, "arm", instruction->as.scope.source,
+                    SOL_IR_NONE);
+            } else if (instruction->as.scope.kind == SOL_MIR_SCOPE_HANDLER) {
+                render_id(output, "expr", instruction->as.scope.source,
+                    SOL_IR_NONE);
+            } else {
+                render_id(output, "stmt", instruction->as.scope.source,
+                    SOL_IR_NONE);
+            }
             break;
         case SOL_MIR_INST_CONST_UNIT:
         case SOL_MIR_INST_HANDLER_ENTER:

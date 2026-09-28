@@ -697,6 +697,8 @@ static bool translate_instruction(SolMirMaterialization *out,
         = target->handler = SOL_MIR_MATERIALIZED_NONE;
     target->source_statement = target->match_expression = target->source_arm
         = target->source_pattern = target->source_snapshot = SOL_IR_NONE;
+    target->scope_kind = SOL_MIR_SCOPE_INVALID;
+    target->scope_source = SOL_MIR_MATERIALIZED_NONE;
     target->construct_definition = target->construct_variant = SOL_IR_NONE;
     target->source_expression = source->source_expression;
     target->span = source->span;
@@ -794,6 +796,10 @@ static bool translate_instruction(SolMirMaterialization *out,
                 if (snapshot == NULL) return false;
                 target->type = snapshot->type;
             }
+            break;
+        case SOL_MIR_INST_SCOPE_ENTER: case SOL_MIR_INST_SCOPE_EXIT:
+            target->scope_kind = source->as.scope.kind;
+            target->scope_source = source->as.scope.source;
             break;
         default: break;
     }
