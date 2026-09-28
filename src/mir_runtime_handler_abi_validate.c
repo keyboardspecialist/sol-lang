@@ -1,5 +1,6 @@
 #include "sol/mir_runtime_handler_abi.h"
 #include "mir_runtime_handler_abi_internal.h"
+#include "mir_runtime_arena_internal.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -12,24 +13,21 @@ static bool range(const void*p,size_t n,size_t z,SolMirRuntimeHandlerAbiWorkMete
 static bool overlap(const void*a,size_t an,size_t az,const void*b,size_t bn,size_t bz,SolMirRuntimeHandlerAbiWorkMeter*m) { size_t ab,bb;bool left,right;if(!tick(m)||!an||!bn)return false;if(!tick(m)||!mul(an,az,&ab)||!tick(m)||!mul(bn,bz,&bb))return false;if(!tick(m))return false;left=(uintptr_t)a<(uintptr_t)b+bb;if(!tick(m))return false;right=(uintptr_t)b<(uintptr_t)a+ab;return left&&right; }
 static bool aliases(const SolMirRuntimeHandlerAbi*o,const void*p,size_t n,size_t z,SolMirRuntimeHandlerAbiWorkMeter*m) { return overlap(o->frames,o->frame_count,sizeof(*o->frames),p,n,z,m)||overlap(o->exit_markers,o->exit_marker_count,sizeof(*o->exit_markers),p,n,z,m)||overlap(o->cleanup_exits,o->cleanup_exit_count,sizeof(*o->cleanup_exits),p,n,z,m); }
 
-/* Enumerate every borrowed arena before a predecessor validator can traverse
- * it.  Each arena comparison is charged through aliases()/overlap(). */
+typedef struct { const SolMirRuntimeHandlerAbi *owner; SolMirRuntimeHandlerAbiWorkMeter *meter; } HandlerAliasContext;
+static SolMirRuntimeTextGuardResult handler_text_guard(uintptr_t address,uintptr_t *boundary,void *opaque) { HandlerAliasContext*x=opaque;const void*p[]={x->owner->frames,x->owner->exit_markers,x->owner->cleanup_exits};size_t n[]={x->owner->frame_count,x->owner->exit_marker_count,x->owner->cleanup_exit_count},z[]={sizeof(*x->owner->frames),sizeof(*x->owner->exit_markers),sizeof(*x->owner->cleanup_exits)};uintptr_t next=UINTPTR_MAX;bool hit=false;for(size_t i=0;i<3;i++){size_t bytes;if(!tick(x->meter)||!mul(n[i],z[i],&bytes))return SOL_MIR_RUNTIME_TEXT_EXHAUSTED;if(!n[i])continue;uintptr_t start=(uintptr_t)p[i],end=start+bytes;hit|=address>=start&&address<end;if(start>address&&start<next)next=start;}if(hit)return SOL_MIR_RUNTIME_TEXT_OVERLAP;*boundary=next;return SOL_MIR_RUNTIME_TEXT_SAFE;}
+static bool visit_handler_alias(const void *pointer,size_t count,size_t size,void *context) {
+    HandlerAliasContext *x=context;
+    if(pointer==NULL&&count==0&&size==0)return tick(x->meter);
+    return tick(x->meter) && !aliases(x->owner,pointer,count,size,x->meter);
+}
+/* The shared raw census includes all nested P2 MIR and IR text arenas. */
 static bool aliases_transitive(const SolMirRuntimeHandlerAbi*o,SolMirRuntimeHandlerAbiWorkMeter*m) {
-    const SolMirConcreteProgram*c=o->conventions->concrete;const SolMirProgram*p=&c->program;const SolMirPlan*n=&c->plan;const SolMirMaterialization*x=&c->materialization;const SolMirRepresentation*r=&c->representation;const SolMirLayout*y=&c->layout;const SolMirOperations*ops=&c->operations;const SolMirLinkage*l=&c->linkage;const SolIr*ir=p->ir;
-#define MATRIX(owner,member,count) do { if(!tick(m))return false; if(aliases(o,(owner)->member,(owner)->count,sizeof(*(owner)->member),m))return true; } while(0)
-    MATRIX(p,roots,root_count);MATRIX(p,approved_imports,approved_import_count);MATRIX(p,templates,template_count);MATRIX(p,imports,import_count);MATRIX(p,specializations,specialization_count);MATRIX(p,references,reference_count);
-    MATRIX(n,types,type_count);MATRIX(n,type_components,type_component_count);MATRIX(n,type_parameter_accesses,type_parameter_access_count);MATRIX(n,effect_atoms,effect_atom_count);MATRIX(n,effect_rows,effect_row_count);MATRIX(n,effect_row_atoms,effect_row_atom_count);MATRIX(n,instances,instance_count);MATRIX(n,instance_type_ids,instance_type_id_count);MATRIX(n,instance_accesses,instance_access_count);MATRIX(n,dictionary_entries,dictionary_entry_count);MATRIX(n,imports,import_count);MATRIX(n,typed_uses,typed_use_count);MATRIX(n,contexts,context_count);MATRIX(n,demands,demand_count);
-    MATRIX(x,images,image_count);MATRIX(x,types,type_count);MATRIX(x,shape_fields,shape_field_count);MATRIX(x,shape_variants,shape_variant_count);MATRIX(x,type_ids,type_id_count);MATRIX(x,accesses,access_count);MATRIX(x,overlays,overlay_count);MATRIX(x,contexts,context_count);MATRIX(x,locals,local_count);MATRIX(x,places,place_count);MATRIX(x,projections,projection_count);MATRIX(x,values,value_count);MATRIX(x,instructions,instruction_count);MATRIX(x,temporaries,temporary_count);MATRIX(x,construct_operands,construct_operand_count);MATRIX(x,call_arguments,call_argument_count);MATRIX(x,blocks,block_count);MATRIX(x,edges,edge_count);MATRIX(x,edge_values,edge_value_count);MATRIX(x,parameter_values,parameter_value_count);MATRIX(x,loops,loop_count);MATRIX(x,bindings,binding_count);MATRIX(x,semantic_sites,semantic_site_count);MATRIX(x,receiver_roots,receiver_root_count);MATRIX(x,imports,import_count);MATRIX(x,handlers,handler_count);MATRIX(x,writebacks,writeback_count);MATRIX(x,effect_rows,effect_row_count);MATRIX(x,effect_atoms,effect_atom_count);MATRIX(x,effect_row_atoms,effect_row_atom_count);MATRIX(x,effect_names,effect_name_count);MATRIX(x,literal_bytes,literal_byte_count);
-    MATRIX(r,recipes,recipe_count);MATRIX(r,fields,field_count);MATRIX(r,variants,variant_count);MATRIX(r,recipe_ids,recipe_id_count);MATRIX(r,accesses,access_count);MATRIX(r,receiver_roots,receiver_root_count);MATRIX(r,callable_producers,callable_producer_count);MATRIX(y,types,type_count);MATRIX(y,fields,field_count);MATRIX(y,variants,variant_count);MATRIX(y,projections,projection_count);
-#define OP_MATRIX(member,type,singular) MATRIX(ops,member,singular##_count);
-    SOL_MIR_OPERATIONS_ARENAS(OP_MATRIX)
-#undef OP_MATRIX
-#define LINK_MATRIX(member,type,singular) MATRIX(l,member,singular##_count);
-    SOL_MIR_LINKAGE_ARENAS(LINK_MATRIX)
-#undef LINK_MATRIX
-    if(!tick(m)||!ir)return true;if(!tick(m))return false;if(aliases(o,ir->source_path,ir->source_path?1:0,sizeof(*ir->source_path),m))return true;MATRIX(ir,source_bytes,source_length);MATRIX(ir,types,type_count);MATRIX(ir,type_ids,type_id_count);MATRIX(ir,accesses,access_count);MATRIX(ir,definitions,definition_count);MATRIX(ir,callables,callable_count);MATRIX(ir,members,member_count);MATRIX(ir,evidence,evidence_count);MATRIX(ir,locals,local_count);MATRIX(ir,fields,field_count);MATRIX(ir,variants,variant_count);MATRIX(ir,expressions,expression_count);MATRIX(ir,places,place_count);MATRIX(ir,projections,projection_count);MATRIX(ir,statements,statement_count);MATRIX(ir,statement_ids,statement_id_count);MATRIX(ir,arms,arm_count);MATRIX(ir,arm_ids,arm_id_count);MATRIX(ir,patterns,pattern_count);MATRIX(ir,pattern_children,pattern_child_count);MATRIX(ir,operands,operand_count);MATRIX(ir,roots,root_count);MATRIX(ir,cleanup_locals,cleanup_local_count);MATRIX(ir,effects,effect_count);MATRIX(ir,generic_parameters,generic_parameter_count);MATRIX(ir,effect_parameters,effect_parameter_count);MATRIX(ir,obligations,obligation_count);MATRIX(ir,snapshots,snapshot_count);MATRIX(ir,loop_obligations,loop_obligation_count);MATRIX(ir,unreachable_obligations,unreachable_obligation_count);MATRIX(ir,files,file_count);
-#undef MATRIX
-    return false;
+    HandlerAliasContext context={o,m};
+    SolMirRuntimeTextGuard saved_guard=sol_mir_runtime_text_guard;void *saved_context=sol_mir_runtime_text_guard_context;
+    sol_mir_runtime_text_guard=handler_text_guard;sol_mir_runtime_text_guard_context=&context;
+    SolMirRuntimeArenaVisit result=sol_mir_runtime_visit_concrete_arenas(o->conventions->concrete,visit_handler_alias,&context);
+    sol_mir_runtime_text_guard=saved_guard;sol_mir_runtime_text_guard_context=saved_context;
+    return result != SOL_MIR_RUNTIME_ARENA_VISIT_OK;
 }
 static bool aliases_predecessor(const SolMirRuntimeHandlerAbi*o,SolMirRuntimeHandlerAbiWorkMeter*m) {
 #define CONVENTION_ARENA(member,type,singular) do { if(!tick(m))return false; if(aliases(o,o->conventions->member,o->conventions->singular##_count,sizeof(type),m))return true; } while(0);

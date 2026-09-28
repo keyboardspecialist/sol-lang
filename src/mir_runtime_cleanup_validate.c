@@ -1,5 +1,6 @@
 #include "sol/mir_runtime_cleanup.h"
 #include "mir_runtime_cleanup_internal.h"
+#include "mir_runtime_arena_internal.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -21,6 +22,16 @@ static bool scan_meter_tick(void) {
     return true;
 }
 #define METER() scan_meter_tick()
+static _Thread_local size_t *alias_meter_work;
+static _Thread_local size_t alias_meter_limit;
+static _Thread_local bool alias_meter_exhausted;
+static bool alias_meter_tick(void) {
+    if (alias_meter_work == NULL) return true;
+    if (*alias_meter_work == SIZE_MAX || *alias_meter_work >= alias_meter_limit) {
+        alias_meter_exhausted=true; return false;
+    }
+    ++*alias_meter_work; return true;
+}
 
 /* This file deliberately has its own CFG replay.  Do not call construction or
  * its usage reconstruction here: validation must detect a valid-shaped but
@@ -53,8 +64,10 @@ static bool validation_overlaps(const void *a, size_t ac, size_t as,
     if (ac == 0 || bc == 0) return false;
     if (!validation_mul(ac, as, &ab) || !validation_mul(bc, bs, &bb)) return true;
     uintptr_t ap = (uintptr_t)a, bp = (uintptr_t)b;
-    return ap > UINTPTR_MAX - ab || bp > UINTPTR_MAX - bb
-        || (ap < bp + bb && bp < ap + ab);
+    if (ap > UINTPTR_MAX - ab || bp > UINTPTR_MAX - bb) return true;
+    if (!alias_meter_tick() || !alias_meter_tick()) return true;
+    bool left=ap < bp + bb, right=bp < ap + ab;
+    return left && right;
 }
 
 static bool validation_full_limits(SolMirRuntimeCleanupLimits limits) {
@@ -76,110 +89,103 @@ typedef struct { const void *pointer; size_t count, size; } ValidationRange;
 /* Predecessor validators establish their internal raw ranges before this walks
  * the complete borrowed graph.  Every cleanup arena is compared with every
  * owned predecessor arena, including all transitive concrete stages. */
+typedef struct { const ValidationRange *owned; size_t count; bool measurement; } CleanupAliasContext;
+static _Thread_local bool cleanup_alias_measurement;
+static SolMirRuntimeTextGuardResult cleanup_text_guard(uintptr_t address,
+    uintptr_t *boundary, void *opaque) {
+    const CleanupAliasContext *x=opaque; uintptr_t next=UINTPTR_MAX; bool overlap=false;
+    for(size_t i=0;i<x->count;i++) { size_t bytes;
+        if(!alias_meter_tick()||!validation_mul(x->owned[i].count,x->owned[i].size,&bytes)) return SOL_MIR_RUNTIME_TEXT_EXHAUSTED;
+        if(!x->owned[i].count) continue;
+        uintptr_t start=(uintptr_t)x->owned[i].pointer,end=start+bytes;
+        if(!x->measurement) { overlap |= address>=start && address<end;
+            if(start>address&&start<next) next=start; }
+    }
+    if(overlap)return SOL_MIR_RUNTIME_TEXT_OVERLAP;
+    *boundary=x->measurement ? UINTPTR_MAX : next;return SOL_MIR_RUNTIME_TEXT_SAFE;
+}
+static bool validation_against_cleanup(const void *pointer,size_t count,size_t size,
+    void *context) {
+    const CleanupAliasContext *x=context;
+    if (!alias_meter_tick()) return false;
+    if(pointer==NULL&&count==0&&size==0)return true;
+    if (!sol_mir_runtime_arena_range(pointer,count,size)) return false;
+    for (size_t i=0;i<x->count;++i) {
+        if (!sol_mir_runtime_arena_range(x->owned[i].pointer,x->owned[i].count,
+                x->owned[i].size)) return false;
+        bool overlap=validation_overlaps(x->owned[i].pointer,x->owned[i].count,
+            x->owned[i].size,pointer,count,size);
+        if (!x->measurement && overlap) return false;
+        if (alias_meter_exhausted) return false;
+    }
+    return true;
+}
+
+/* Use raw capacities throughout: the local owner was range-authenticated before
+ * this scan, and its predecessor headers are authenticated before typed local
+ * record traversal begins. */
 static bool validation_predecessor_alias(const SolMirRuntimeCleanup *cleanup) {
     ValidationRange owned[] = {
         {cleanup->events, cleanup->event_capacity, sizeof(*cleanup->events)},
         {cleanup->actions, cleanup->action_capacity, sizeof(*cleanup->actions)},
         {cleanup->transitions, cleanup->transition_capacity, sizeof(*cleanup->transitions)},
-        {cleanup->supplemental_sites, cleanup->supplemental_site_capacity,
-            sizeof(*cleanup->supplemental_sites)},
+        {cleanup->supplemental_sites, cleanup->supplemental_site_capacity, sizeof(*cleanup->supplemental_sites)},
         {cleanup->drop_paths, cleanup->drop_path_capacity, sizeof(*cleanup->drop_paths)},
     };
-    for (size_t i = 0; i < sizeof(owned) / sizeof(owned[0]); ++i)
-        for (size_t j = i + 1; j < sizeof(owned) / sizeof(owned[0]); ++j)
-            if (validation_overlaps(owned[i].pointer, owned[i].count, owned[i].size,
-                    owned[j].pointer, owned[j].count, owned[j].size)) return true;
-    const SolMirRuntimeConventions *runtime = cleanup->conventions;
-    const SolMirRuntimeValues *values = cleanup->values;
-#define AGAINST(candidate_pointer, candidate_count, candidate_type) do { \
-    for (size_t ai = 0; ai < sizeof(owned) / sizeof(owned[0]); ++ai) \
-        if (validation_overlaps(owned[ai].pointer, owned[ai].count, owned[ai].size, \
-                (candidate_pointer), (candidate_count), sizeof(candidate_type))) return true; \
-} while (0)
-#define RUNTIME(member, type, singular) AGAINST(runtime->member, runtime->singular##_capacity, type);
-    AGAINST(runtime, 1, SolMirRuntimeConventions);
+    CleanupAliasContext context={owned,sizeof(owned)/sizeof(*owned),cleanup_alias_measurement};
+    SolMirRuntimeTextGuard saved_guard=sol_mir_runtime_text_guard;
+    void *saved_context=sol_mir_runtime_text_guard_context;
+    sol_mir_runtime_text_guard=cleanup_text_guard;
+    sol_mir_runtime_text_guard_context=&context;
+#define CLEANUP_ALIAS_RETURN(value) do { sol_mir_runtime_text_guard=saved_guard; sol_mir_runtime_text_guard_context=saved_context; return (value); } while (0)
+    for (size_t i=0;i<context.count;++i) {
+        if (!alias_meter_tick()) CLEANUP_ALIAS_RETURN(true);
+        for (size_t j=i+1;j<context.count;++j) {
+            if (!alias_meter_tick()) CLEANUP_ALIAS_RETURN(true);
+            if (!validation_against_cleanup(owned[j].pointer,owned[j].count,
+                    owned[j].size,&(CleanupAliasContext){&owned[i],1,context.measurement})) CLEANUP_ALIAS_RETURN(true);
+        }
+    }
+#define AGAINST(pointer, count, type) \
+    if (!validation_against_cleanup((pointer),(count),sizeof(type),&context)) CLEANUP_ALIAS_RETURN(true)
+    const SolMirRuntimeConventions *runtime=cleanup->conventions;
+    const SolMirRuntimeValues *values=cleanup->values;
+    AGAINST(runtime,1,SolMirRuntimeConventions); AGAINST(values,1,SolMirRuntimeValues);
+#define RUNTIME(member,type,singular) AGAINST(runtime->member,runtime->singular##_capacity,type);
     SOL_MIR_RUNTIME_CONVENTIONS_ARENAS(RUNTIME)
 #undef RUNTIME
-#define VALUE(member, type, singular) AGAINST(values->member, values->singular##_capacity, type);
-    AGAINST(values, 1, SolMirRuntimeValues);
-    AGAINST(values->recipe_operations, values->recipe_operation_capacity, SolMirRuntimeRecipeOperations);
-    AGAINST(values->allocation_plans, values->allocation_plan_capacity, SolMirRuntimeAllocationPlan);
-    AGAINST(values->copy_plans, values->copy_plan_capacity, SolMirRuntimeCopyPlan);
-    AGAINST(values->equality_plans, values->equality_plan_capacity, SolMirRuntimeEqualityPlan);
-    AGAINST(values->host_result_plans, values->host_result_plan_capacity, SolMirRuntimeHostResultPlan);
-    AGAINST(values->host_result_requirements, values->host_result_requirement_capacity, SolMirRuntimeHostResultRequirement);
-    AGAINST(values->ownership_plans, values->ownership_plan_capacity, SolMirRuntimeOwnershipPlan);
-    AGAINST(values->ownership_variants, values->ownership_variant_capacity, SolMirRuntimeOwnershipVariant);
-    AGAINST(values->owned_edges, values->owned_edge_capacity, SolMirRuntimeOwnedEdge);
-#undef VALUE
-    const SolMirConcreteProgram *c = runtime->concrete;
-    AGAINST(c, 1, SolMirConcreteProgram);
-#define FIELD(object, member, type, singular) AGAINST((object).member, (object).singular##_capacity, type)
-    AGAINST(c->program.roots, c->program.root_count, SolMirProgramRoot);
-    AGAINST(c->program.approved_imports, c->program.approved_import_count, SolIrCallableId);
-    AGAINST(c->program.templates, c->program.template_count, SolMirProgramTemplate);
-    AGAINST(c->program.imports, c->program.import_count, SolMirProgramImport);
-    AGAINST(c->program.specializations, c->program.specialization_count, SolMirProgramSpecialization);
-    AGAINST(c->program.references, c->program.reference_count, SolMirProgramReference);
-    const SolMirPlan *plan = &c->plan;
-    FIELD((*plan), types, SolMirPlanType, type); FIELD((*plan), type_components, SolMirPlanTypeId, type_component);
-    FIELD((*plan), type_parameter_accesses, SolAccessMode, type_parameter_access); FIELD((*plan), effect_atoms, SolMirPlanEffectAtom, effect_atom);
-    FIELD((*plan), effect_rows, SolMirPlanEffectRow, effect_row); FIELD((*plan), effect_row_atoms, size_t, effect_row_atom);
-    FIELD((*plan), instances, SolMirPlanInstance, instance); FIELD((*plan), instance_type_ids, SolMirPlanTypeId, instance_type_id);
-    FIELD((*plan), instance_accesses, SolAccessMode, instance_access); FIELD((*plan), dictionary_entries, SolMirPlanDictionaryEntry, dictionary_entry);
-    FIELD((*plan), imports, SolMirPlanImport, import); FIELD((*plan), typed_uses, SolMirPlanTypedUse, typed_use);
-    FIELD((*plan), contexts, SolMirPlanContext, context); FIELD((*plan), demands, SolMirPlanDemand, demand);
-    const SolMirMaterialization *m = &c->materialization;
-FIELD((*m), images, SolMirMaterializedImage, image); FIELD((*m), types, SolMirMaterializedType, type);
-    FIELD((*m), shape_fields, SolMirMaterializedShapeField, shape_field); FIELD((*m), shape_variants, SolMirMaterializedShapeVariant, shape_variant);
-    FIELD((*m), type_ids, SolMirMaterializedTypeId, type_id); FIELD((*m), accesses, SolAccessMode, access);
-    FIELD((*m), overlays, SolMirMaterializedTypeOverlay, overlay); FIELD((*m), contexts, SolMirPlanContext, context);
-    FIELD((*m), locals, SolMirMaterializedLocal, local); FIELD((*m), places, SolMirMaterializedPlace, place);
-    FIELD((*m), projections, SolMirMaterializedProjection, projection); FIELD((*m), values, SolMirMaterializedValue, value);
-    FIELD((*m), instructions, SolMirMaterializedInstruction, instruction); FIELD((*m), temporaries, SolMirMaterializedTemporary, temporary);
-    FIELD((*m), construct_operands, SolMirMaterializedConstructOperand, construct_operand); FIELD((*m), call_arguments, SolMirMaterializedCallArgument, call_argument);
-    FIELD((*m), blocks, SolMirMaterializedBlock, block); FIELD((*m), edges, SolMirMaterializedEdge, edge);
-    FIELD((*m), edge_values, SolMirMaterializedValueId, edge_value); FIELD((*m), parameter_values, SolMirMaterializedValueId, parameter_value);
-    FIELD((*m), loops, SolMirMaterializedLoop, loop); FIELD((*m), bindings, SolMirMaterializedBinding, binding);
-    FIELD((*m), semantic_sites, SolMirMaterializedSemanticSite, semantic_site); FIELD((*m), receiver_roots, SolMirMaterializedLocalId, receiver_root);
-    FIELD((*m), imports, SolMirMaterializedImport, import); FIELD((*m), handlers, SolMirMaterializedHandler, handler);
-    FIELD((*m), writebacks, SolMirMaterializedWriteback, writeback); FIELD((*m), effect_rows, SolMirMaterializedEffectRow, effect_row);
-    FIELD((*m), effect_atoms, SolMirMaterializedEffectAtom, effect_atom); FIELD((*m), effect_row_atoms, size_t, effect_row_atom);
-    FIELD((*m), effect_names, char, effect_name); FIELD((*m), literal_bytes, char, literal_byte);
-    const SolMirRepresentation *representation = &c->representation;
-FIELD((*representation), recipes, SolMirRecipe, recipe); FIELD((*representation), fields, SolMirRecipeField, field);
-    FIELD((*representation), variants, SolMirRecipeVariant, variant); FIELD((*representation), recipe_ids, SolMirRecipeId, recipe_id);
-    FIELD((*representation), accesses, SolAccessMode, access); FIELD((*representation), receiver_roots, SolMirMaterializedLocalId, receiver_root);
-    FIELD((*representation), callable_producers, SolMirCallableProducer, callable_producer);
-    const SolMirLayout *layout = &c->layout;
-FIELD((*layout), types, SolMirTypeLayout, type); FIELD((*layout), fields, SolMirFieldLayout, field);
-    FIELD((*layout), variants, SolMirVariantLayout, variant); FIELD((*layout), projections, SolMirProjectionMap, projection);
-#define OPERATION(member, type, singular) FIELD(c->operations, member, type, singular);
-    SOL_MIR_OPERATIONS_ARENAS(OPERATION)
-#undef OPERATION
-#define LINKAGE(member, type, singular) FIELD(c->linkage, member, type, singular);
-    SOL_MIR_LINKAGE_ARENAS(LINKAGE)
-#undef LINKAGE
-    const SolIr *ir = c->program.ir;
-    AGAINST(ir, 1, SolIr);
-#define IR(member, count, type) AGAINST(ir->member, ir->count, type);
-    IR(definitions, definition_count, SolIrDefinition) IR(callables, callable_count, SolIrCallable)
-    IR(types, type_count, SolIrType) IR(type_ids, type_id_count, SolIrTypeId) IR(accesses, access_count, SolAccessMode)
-    IR(members, member_count, SolIrMember) IR(evidence, evidence_count, SolIrDispatchEvidence) IR(locals, local_count, SolIrLocal)
-    IR(fields, field_count, SolIrField) IR(variants, variant_count, SolIrVariant) IR(expressions, expression_count, SolIrExpression)
-    IR(places, place_count, SolIrPlace) IR(projections, projection_count, SolIrProjection) IR(statements, statement_count, SolIrStatement)
-    IR(statement_ids, statement_id_count, SolIrStatementId) IR(arms, arm_count, SolIrArm) IR(arm_ids, arm_id_count, SolIrArmId)
-    IR(patterns, pattern_count, SolIrPattern) IR(pattern_children, pattern_child_count, SolIrPatternChild) IR(operands, operand_count, SolIrOperand)
-    IR(roots, root_count, SolIrLocalId) IR(obligations, obligation_count, SolIrObligation) IR(snapshots, snapshot_count, SolIrSnapshot)
-    IR(cleanup_locals, cleanup_local_count, SolIrLocalId) IR(effects, effect_count, SolIrEffect)
-    IR(generic_parameters, generic_parameter_count, SolIrGenericParameter) IR(effect_parameters, effect_parameter_count, SolIrEffectParameter)
-    IR(loop_obligations, loop_obligation_count, SolObligationId) IR(unreachable_obligations, unreachable_obligation_count, SolObligationId)
-    IR(files, file_count, SolIrSourceFile)
-#undef IR
-#undef FIELD
+    AGAINST(values->recipe_operations,values->recipe_operation_capacity,SolMirRuntimeRecipeOperations);
+    AGAINST(values->allocation_plans,values->allocation_plan_capacity,SolMirRuntimeAllocationPlan);
+    AGAINST(values->copy_plans,values->copy_plan_capacity,SolMirRuntimeCopyPlan);
+    AGAINST(values->equality_plans,values->equality_plan_capacity,SolMirRuntimeEqualityPlan);
+    AGAINST(values->host_result_plans,values->host_result_plan_capacity,SolMirRuntimeHostResultPlan);
+    AGAINST(values->host_result_requirements,values->host_result_requirement_capacity,SolMirRuntimeHostResultRequirement);
+    AGAINST(values->ownership_plans,values->ownership_plan_capacity,SolMirRuntimeOwnershipPlan);
+    AGAINST(values->ownership_variants,values->ownership_variant_capacity,SolMirRuntimeOwnershipVariant);
+    AGAINST(values->owned_edges,values->owned_edge_capacity,SolMirRuntimeOwnedEdge);
+    if (sol_mir_runtime_visit_concrete_arenas(runtime->concrete,
+            validation_against_cleanup,&context) != SOL_MIR_RUNTIME_ARENA_VISIT_OK) CLEANUP_ALIAS_RETURN(true);
 #undef AGAINST
-    return false;
+    CLEANUP_ALIAS_RETURN(false);
+#undef CLEANUP_ALIAS_RETURN
 }
+
+bool sol_mir_runtime_cleanup_internal_alias_work(const SolMirRuntimeCleanup *cleanup,
+    size_t *out) {
+    if (!cleanup || !out) return false;
+    size_t work=0;
+    alias_meter_work=&work; alias_meter_limit=SIZE_MAX; alias_meter_exhausted=false;
+    cleanup_alias_measurement=true;
+    bool invalid=validation_predecessor_alias(cleanup);
+    cleanup_alias_measurement=false;
+    alias_meter_work=NULL;
+    if (invalid || alias_meter_exhausted) return false;
+    *out=work; return true;
+}
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+bool sol_mir_runtime_cleanup_test_alias_work(const SolMirRuntimeCleanup *cleanup,
+    size_t *out) { return sol_mir_runtime_cleanup_internal_alias_work(cleanup,out); }
+#endif
 
 typedef enum { DEAD, UNINITIALIZED, INITIALIZED, MAYBE } IndependentStorage;
 typedef enum { INDEPENDENT_HOLE_ABSENT, INDEPENDENT_HOLE_MUST, INDEPENDENT_HOLE_MAY } IndependentHole;
@@ -831,7 +837,7 @@ static bool independent_usage(const SolMirRuntimeCleanup *cleanup,
 }
 static bool independent_replay_matches(const SolMirRuntimeCleanup *cleanup,
     ValidationWorkspace *workspace, SolMirRuntimeCleanupUsage *usage,
-    bool *work_exhausted) {
+    size_t initial_validation_work, bool *work_exhausted) {
     /* Reconstruct all three builder phases with this file's replay and
      * counters.  The first two are the census and emission-prediction passes;
      * the third is the write pass and therefore enumerates drop holes.  Do not
@@ -878,21 +884,23 @@ static bool independent_replay_matches(const SolMirRuntimeCleanup *cleanup,
     /* Validation itself performs two complete owner comparisons.  Its budget
      * remains independently reconstructed rather than inferred from build. */
     workspace->used = 0;
+    size_t combined_validation_work=initial_validation_work;
+    size_t first_validation_work=combined_validation_work;
     IndependentSink sink = {.owner = cleanup, .check_drop_paths = true};
-    sink.work = &sink.count.validation_work;
+    sink.work = &combined_validation_work;
     if (!scan(&sink, cleanup, workspace, cleanup->limits.max_validation_work, &exhausted)
         || sink.have_event || sink.event_index != cleanup->event_count
         || sink.action_index != cleanup->action_count
         || sink.transition_index != cleanup->transition_count
         || sink.supplemental_index != cleanup->supplemental_site_count
-        || sink.count.validation_work < cleanup->event_count) {
+        || combined_validation_work < first_validation_work
+        || combined_validation_work-first_validation_work < cleanup->event_count) {
         if (work_exhausted != NULL) *work_exhausted = exhausted;
         return false;
     }
-    usage->validation_work = sink.count.validation_work;
     workspace->used = 0;
     IndependentSink validation_prediction = {.owner = cleanup, .check_drop_paths = true};
-    validation_prediction.work = &validation_prediction.count.validation_work;
+    validation_prediction.work = &combined_validation_work;
     if (!scan(&validation_prediction, cleanup, workspace,
             cleanup->limits.max_validation_work, &exhausted) || validation_prediction.have_event
         || validation_prediction.event_index != cleanup->event_count
@@ -902,7 +910,7 @@ static bool independent_replay_matches(const SolMirRuntimeCleanup *cleanup,
         if (work_exhausted != NULL) *work_exhausted = exhausted;
         return false;
     }
-    if (!add(&usage->validation_work, validation_prediction.count.validation_work)) return false;
+    usage->validation_work = combined_validation_work;
     if (work_exhausted != NULL) *work_exhausted = false;
     return true;
 }
@@ -1087,6 +1095,27 @@ SolMirRuntimeCleanupBuildOutcome sol_mir_runtime_cleanup_internal_validate(
         validation_bad(diagnostics, "runtime cleanup arena range is invalid");
         return SOL_MIR_RUNTIME_CLEANUP_BUILD_INTERNAL_FAILED;
     }
+    /* The raw shared census structurally checks borrowed descriptors and
+     * rejects local overlap before either predecessor authentication or local
+     * typed-record traversal. */
+    size_t alias_work=0;
+    alias_meter_work=&alias_work; alias_meter_limit=cleanup->limits.max_validation_work;
+    alias_meter_exhausted=false;
+    bool alias_invalid=validation_predecessor_alias(cleanup);
+    alias_meter_work=NULL;
+    if (alias_meter_exhausted) {
+        validation_bad(diagnostics, "runtime cleanup validation work limit exceeded");
+        return SOL_MIR_RUNTIME_CLEANUP_BUILD_RESOURCE_EXHAUSTED;
+    }
+    if (alias_invalid) {
+        validation_bad(diagnostics, "runtime cleanup predecessor or alias is invalid");
+        return SOL_MIR_RUNTIME_CLEANUP_BUILD_INVALID_PREDECESSOR;
+    }
+    if (!sol_mir_runtime_conventions_validate(cleanup->conventions, diagnostics)
+        || !sol_mir_runtime_values_validate(cleanup->values, diagnostics)) {
+        validation_bad(diagnostics, "runtime cleanup predecessor is invalid");
+        return SOL_MIR_RUNTIME_CLEANUP_BUILD_INVALID_PREDECESSOR;
+    }
     /* Validate every slice before replay dereferences an action, transition, or path. */
     for (size_t i = 0; i < cleanup->event_count; ++i)
         if (cleanup->events[i].actions.offset > cleanup->action_count
@@ -1117,12 +1146,6 @@ SolMirRuntimeCleanupBuildOutcome sol_mir_runtime_cleanup_internal_validate(
             validation_bad(diagnostics, "runtime cleanup drop path slice is invalid");
             return SOL_MIR_RUNTIME_CLEANUP_BUILD_INTERNAL_FAILED;
         }
-    if (!sol_mir_runtime_conventions_validate(cleanup->conventions, diagnostics)
-        || !sol_mir_runtime_values_validate(cleanup->values, diagnostics)
-        || validation_predecessor_alias(cleanup)) {
-        validation_bad(diagnostics, "runtime cleanup predecessor or alias is invalid");
-        return SOL_MIR_RUNTIME_CLEANUP_BUILD_INVALID_PREDECESSOR;
-    }
     SolMirRuntimeCleanupUsage expected_usage;
     if (!independent_usage(cleanup, &expected_usage)
         || expected_usage.validation_scratch_bytes > cleanup->limits.max_validation_scratch_bytes) {
@@ -1144,7 +1167,7 @@ SolMirRuntimeCleanupBuildOutcome sol_mir_runtime_cleanup_internal_validate(
         cleanup->usage.validation_scratch_bytes, 0};
     bool work_exhausted = false;
     bool matches = independent_replay_matches(cleanup, &workspace, &expected_usage,
-        &work_exhausted);
+        alias_work, &work_exhausted);
     if (matches) {
         const SolMirOperations *ops = &cleanup->conventions->concrete->operations;
         for (size_t i = 0; i < cleanup->action_count; ++i) {

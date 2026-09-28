@@ -477,6 +477,23 @@ static void check_reduced_validation_work_rejects_without_write(
     CHECK(sol_mir_runtime_cleanup_validate(cleanup, NULL));
 }
 
+static void check_cleanup_arena_alias(SolMirRuntimeCleanup *cleanup,
+    const void *replacement) {
+    SolMirRuntimeCleanupEvent *saved = cleanup->events;
+    cleanup->events = (SolMirRuntimeCleanupEvent *)(void *)replacement;
+    CHECK(!sol_mir_runtime_cleanup_validate(cleanup, NULL));
+    FILE *stream = tmpfile();
+    CHECK(stream != NULL);
+    if (stream != NULL) {
+        CHECK(!sol_mir_runtime_cleanup_render(stream, cleanup));
+        CHECK(fflush(stream) == 0 && fseek(stream, 0, SEEK_END) == 0
+            && ftell(stream) == 0);
+        fclose(stream);
+    }
+    cleanup->events = saved;
+    CHECK(sol_mir_runtime_cleanup_validate(cleanup, NULL));
+}
+
 /* This source-owned pair is intentionally not selected by arena order.  The
  * host call and the failure-result ensure must share an image; its named normal
  * edge reaches the check while its named failure edge reaches RESUME_FAILURE
@@ -612,8 +629,17 @@ int main(void) {
         && cleanup.usage.drop_paths == 262 && cleanup.usage.owned_bytes == 121792
         && cleanup.usage.build_scratch_bytes == 246744 && cleanup.usage.build_work == 72327
         && cleanup.usage.validation_scratch_bytes == 246744
-        && cleanup.usage.validation_work == 48218);
+        && cleanup.usage.validation_work == 54643);
     CHECK(sol_mir_runtime_cleanup_validate(&cleanup,NULL));
+    /* Prediction is address-independent: a deliberately overlapping synthetic
+     * placement cannot alter the successful-disjoint alias-work census. */
+    size_t alias_work=0, overlapped_alias_work=0;
+    CHECK(sol_mir_runtime_cleanup_test_alias_work(&cleanup,&alias_work));
+    SolMirRuntimeCleanupEvent *saved_alias_events=cleanup.events;
+    cleanup.events=(SolMirRuntimeCleanupEvent *)(void *)conventions.signatures;
+    CHECK(sol_mir_runtime_cleanup_test_alias_work(&cleanup,&overlapped_alias_work)
+        && alias_work==overlapped_alias_work);
+    cleanup.events=saved_alias_events;
     check_failure_propagation_is_final(&cleanup, &program);
     check_eight_fixture_groups(&cleanup, &program);
     check_owner_snapshot_contract_and_selector(&cleanup, &program, &conventions);
@@ -1080,9 +1106,21 @@ int main(void) {
         cleanup.supplemental_sites[0].allowed_codes^=UINT32_C(1);
         CHECK(!sol_mir_runtime_cleanup_validate(&cleanup,NULL)); cleanup.supplemental_sites[0]=saved_site;
     }
-    SolMirRuntimeCleanupEvent *saved_events=cleanup.events;
-    cleanup.events=(SolMirRuntimeCleanupEvent *)conventions.signatures;
-    CHECK(!sol_mir_runtime_cleanup_validate(&cleanup,NULL)); cleanup.events=saved_events;
+    /* Full predecessor-category alias census: P3.1/P3.2 arenas, P2 top-level
+     * storage, per-template MIR, materialized topology, and IR source bytes. */
+    check_cleanup_arena_alias(&cleanup, conventions.signatures);
+    check_cleanup_arena_alias(&cleanup, values.ownership_plans);
+    check_cleanup_arena_alias(&cleanup, program.program.roots);
+    check_cleanup_arena_alias(&cleanup, program.program.templates[0].mir.instructions);
+    check_cleanup_arena_alias(&cleanup, program.materialization.images[0].topology.blocks);
+    check_cleanup_arena_alias(&cleanup, program.program.ir->source_bytes);
+    check_cleanup_arena_alias(&cleanup, program.program.ir->source_bytes + 1);
+    check_cleanup_arena_alias(&cleanup, program.program.ir->definitions[0].name + 1);
+    SolMirInstruction *saved_template_instructions=program.program.templates[0].mir.instructions;
+    program.program.templates[0].mir.instructions=NULL;
+    CHECK(!sol_mir_runtime_cleanup_validate(&cleanup,NULL));
+    program.program.templates[0].mir.instructions=saved_template_instructions;
+    CHECK(sol_mir_runtime_cleanup_validate(&cleanup,NULL));
     /* Count/capacity pairs can be range-shaped but undersized.  Validation must
        reject their slices before dereferencing a missing action, transition, or
        path; these mutations are ASan-safe because the backing allocation stays

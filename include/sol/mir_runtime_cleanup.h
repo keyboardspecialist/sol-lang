@@ -333,6 +333,7 @@ void sol_mir_runtime_cleanup_test_force_validation_scratch_failure_attempt(size_
 size_t sol_mir_runtime_cleanup_test_build_scratch_attempts(void);
 size_t sol_mir_runtime_cleanup_test_persistent_allocation_attempts(void);
 size_t sol_mir_runtime_cleanup_test_validation_scratch_attempts(void);
+bool sol_mir_runtime_cleanup_test_alias_work(const SolMirRuntimeCleanup *, size_t *);
 bool sol_mir_runtime_cleanup_test_reconstruct_usage(const SolMirRuntimeConventions *,
     const SolMirRuntimeValues *, const SolMirRuntimeCleanupLimits *, SolMirRuntimeCleanupUsage *);
 #endif

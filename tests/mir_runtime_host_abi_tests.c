@@ -418,7 +418,7 @@ int main(void){Fixture f;CHECK(setup(&f));SolMirConcreteProgram p;sol_mir_concre
         &&a.usage.shape_cases==0&&a.usage.requirements==5&&a.usage.grants==4
         &&a.usage.owned_bytes==1816&&a.usage.build_scratch_bytes==185
            &&a.usage.build_work==27868&&a.usage.validation_scratch_bytes==77
-           &&a.usage.validation_work==8347);SolMirRuntimeHostAbiWorkCensus meter=sol_mir_runtime_host_abi_test_work_census();CHECK(meter.dry_work==meter.actual_work&&meter.census_work+meter.dry_work+meter.actual_work==a.usage.build_work&&meter.validation_audit_work+meter.validation_replay_work==meter.validation_work&&meter.validation_work==a.usage.validation_work);
+            &&a.usage.validation_work==15916);SolMirRuntimeHostAbiWorkCensus meter=sol_mir_runtime_host_abi_test_work_census();CHECK(meter.dry_work==meter.actual_work&&meter.census_work+meter.dry_work+meter.actual_work==a.usage.build_work&&meter.validation_audit_work+meter.validation_replay_work==meter.validation_work&&meter.validation_work==a.usage.validation_work);
     /* A one-below total reaches the final persistent replay tick.  It has made
      * persistent allocation attempts, but cannot publish any partial owner. */
     SolMirRuntimeHostAbi final_write;sol_mir_runtime_host_abi_init(&final_write);
@@ -481,7 +481,23 @@ int main(void){Fixture f;CHECK(setup(&f));SolMirConcreteProgram p;sol_mir_concre
     REJECT_ARENA_ALIAS(capabilities,SolMirRuntimeHostCapabilityPlan,c.imports);
     REJECT_ARENA_ALIAS(operations,SolMirRuntimeHostOperation,v.host_result_plans);
     REJECT_ARENA_ALIAS(requirements,SolMirRuntimeHostRequirement,cl.transitions);
+    /* Keep the full borrowed-range category census visible: nested template
+     * MIR, image topology, source storage, P2, and immediate predecessors. */
+    REJECT_ARENA_ALIAS(capabilities,SolMirRuntimeHostCapabilityPlan,
+        p.program.templates[0].mir.instructions);
+    REJECT_ARENA_ALIAS(capabilities,SolMirRuntimeHostCapabilityPlan,
+        p.materialization.images[0].topology.blocks);
+    REJECT_ARENA_ALIAS(capabilities,SolMirRuntimeHostCapabilityPlan,p.program.ir->source_bytes);
+    REJECT_ARENA_ALIAS(capabilities,SolMirRuntimeHostCapabilityPlan,p.program.ir->source_bytes+1);
+    REJECT_ARENA_ALIAS(capabilities,SolMirRuntimeHostCapabilityPlan,p.program.ir->definitions[0].name+1);
+    REJECT_ARENA_ALIAS(capabilities,SolMirRuntimeHostCapabilityPlan,p.program.roots);
+    REJECT_ARENA_ALIAS(capabilities,SolMirRuntimeHostCapabilityPlan,cl.events);
 #undef REJECT_ARENA_ALIAS
+    SolMirInstruction *saved_template_instructions=p.program.templates[0].mir.instructions;
+    p.program.templates[0].mir.instructions=NULL;
+    CHECK(!sol_mir_runtime_host_abi_validate(&a,NULL));check_render_rejects_mutation(&a);
+    p.program.templates[0].mir.instructions=saved_template_instructions;
+    CHECK(sol_mir_runtime_host_abi_validate(&a,NULL));
     test_exact_host_abi_limits(&c,&v,&cl,&a,&f.d);
 /* Preflight is O(1) and allocation-free after successful construction.  Its
  * immutable-owner prerequisite covers semantic arena bytes; header changes are

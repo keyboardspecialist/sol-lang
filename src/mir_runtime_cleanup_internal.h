@@ -8,4 +8,6 @@ bool sol_mir_runtime_cleanup_internal_reconstruct(const SolMirRuntimeConventions
     SolMirRuntimeCleanupUsage *);
 void *sol_mir_runtime_cleanup_internal_validation_scratch_allocate(size_t);
 void sol_mir_runtime_cleanup_internal_validation_scratch_free(void *);
+bool sol_mir_runtime_cleanup_internal_alias_work(const SolMirRuntimeCleanup *,
+    size_t *);
 #endif
