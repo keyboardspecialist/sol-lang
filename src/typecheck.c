@@ -5012,17 +5012,98 @@ static bool sol_type_projected_assignment_has_authority(
     SolTypeChecker *checker, SolType type
 ) {
     if (type.kind == SOL_TYPE_SELF || type.kind == SOL_TYPE_CAPABILITY_OPERATION
-        || type.kind == SOL_TYPE_FUNCTION
-        || type.kind == SOL_TYPE_FUNCTION_SIGNATURE) return true;
+        || type.kind == SOL_TYPE_FUNCTION || type.kind == SOL_TYPE_FUNCTION_SIGNATURE) return true;
     SolType expanded[256] = {0};
-    return sol_type_representation_has_capability(
-        checker, type, 0, expanded, true, false);
+    return sol_type_representation_has_capability(checker, type, 0, expanded, true, false);
+}
+
+/* This is intentionally narrower than ordinary place equivalence: it is used
+ * only for the one-statement callable restoration rule.  Both expressions
+ * must name the same resolved local and spell the same field/tuple path. */
+static bool sol_type_same_local_projection(SolTypeChecker *checker,
+    SolExprId left_id, SolExprId right_id) {
+    size_t left_steps = 0, right_steps = 0;
+    SolExprId left = left_id, right = right_id;
+    while (left < checker->syntax->expression_count
+        && checker->syntax->expressions[left].kind == SOL_EXPR_FIELD) {
+        ++left_steps; left = checker->syntax->expressions[left].as.field.base;
+    }
+    while (right < checker->syntax->expression_count
+        && checker->syntax->expressions[right].kind == SOL_EXPR_FIELD) {
+        ++right_steps; right = checker->syntax->expressions[right].as.field.base;
+    }
+    if (left_steps == 0 || left_steps != right_steps
+        || left >= checker->syntax->expression_count
+        || right >= checker->syntax->expression_count
+        || checker->syntax->expressions[left].kind != SOL_EXPR_PATH
+        || checker->syntax->expressions[right].kind != SOL_EXPR_PATH
+        || checker->hir->resolutions[left].kind != SOL_RESOLUTION_LOCAL
+        || checker->hir->resolutions[left].target != checker->hir->resolutions[right].target)
+        return false;
+    left = left_id; right = right_id;
+    while (checker->syntax->expressions[left].kind == SOL_EXPR_FIELD) {
+        if (checker->types->field_resolutions[left] != checker->types->field_resolutions[right]
+            || checker->types->tuple_projections[left] != checker->types->tuple_projections[right])
+            return false;
+        left = checker->syntax->expressions[left].as.field.base;
+        right = checker->syntax->expressions[right].as.field.base;
+    }
+    return true;
+}
+
+static bool sol_type_closed_authority_free_callable(SolTypeChecker *checker,
+    SolType type, size_t depth) {
+    if (depth >= 256) return false;
+    if (type.kind == SOL_TYPE_INT64 || type.kind == SOL_TYPE_BOOL
+        || type.kind == SOL_TYPE_TEXT || type.kind == SOL_TYPE_UNIT
+        || type.kind == SOL_TYPE_NEVER) return true;
+    if (type.kind != SOL_TYPE_FUNCTION_SIGNATURE
+        || type.definition >= checker->types->function_type_count) return false;
+    const SolFunctionType *function = &checker->types->function_types[type.definition];
+    if (function->effect_parameter != SOL_AST_NONE) return false;
+    for (size_t i = 0; i < function->effects.count; ++i)
+        if (function->effects.atoms[i].argument_kind != SOL_EFFECT_ATOM_NO_ARGUMENT)
+            return false;
+    if (!sol_type_closed_authority_free_callable(checker, function->result, depth + 1))
+        return false;
+    for (size_t i = 0; i < function->parameter_count; ++i) {
+        if (!sol_type_closed_authority_free_callable(checker,
+                function->parameters[i], depth + 1)) return false;
+    }
+    return true;
+}
+
+static bool sol_type_callable_projection_restore(SolTypeChecker *checker,
+    const SolStatement *assignment, SolStatementId previous_id) {
+    SolExprId target = assignment->as.assignment.target;
+    SolExprId value = assignment->as.assignment.value;
+    if (assignment->as.assignment.operator_kind != SOL_TOKEN_EQUAL
+        || previous_id == SOL_AST_NONE || target >= checker->syntax->expression_count
+        || value >= checker->syntax->expression_count
+        || checker->syntax->expressions[value].kind != SOL_EXPR_PATH) return false;
+    const SolStatement *previous = &checker->syntax->statements[previous_id];
+    if (previous->kind != SOL_STATEMENT_LET) return false;
+    SolLocalId saved = checker->hir->resolutions[value].target;
+    if (saved >= checker->hir->local_count) return false;
+    const SolHirLocal *binding = &checker->hir->locals[saved];
+    SolExprId initializer = previous->as.let_statement.value;
+    return binding->kind == SOL_LOCAL_BINDING && binding->access == SOL_ACCESS_OWNED
+        && !binding->mutable && binding->syntax_id == previous_id
+        && initializer != SOL_AST_NONE
+        && sol_type_same_local_projection(checker, target, initializer)
+        && checker->types->expression_capability_origins[target] == SOL_PROVENANCE_NONE
+        && checker->types->expression_operation_origins[target] == SOL_PROVENANCE_NONE
+        && checker->types->expression_capability_origins[value] == SOL_PROVENANCE_NONE
+        && checker->types->expression_operation_origins[value] == SOL_PROVENANCE_NONE
+        && sol_type_closed_authority_free_callable(checker, checker->types->expressions[target], 0)
+        && sol_type_closed_authority_free_callable(checker, checker->types->expressions[value], 0);
 }
 
 static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
     SolType result = {.kind = SOL_TYPE_UNIT};
     bool terminated = false;
     SolStatementId statement_id = block->as.block.first_statement;
+    SolStatementId previous_id = SOL_AST_NONE;
     size_t traversed = 0;
     while (statement_id != SOL_AST_NONE && traversed++ < checker->syntax->statement_count) {
         const SolStatement *statement = &checker->syntax->statements[statement_id];
@@ -5285,6 +5366,8 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
                 sol_type_error(checker, "SOL-TYPE-002", statement->span,
                     "assignment value is not assignable to the mutable local's fixed type");
             }
+            bool callable_projection_restore = projected
+                && sol_type_callable_projection_restore(checker, statement, previous_id);
             if (assignable && !projected
                 && value.kind != SOL_TYPE_NEVER
                 && (sol_type_projected_assignment_has_authority(checker, target_type)
@@ -5300,15 +5383,12 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
                 sol_type_error(checker, "SOL-AUTHORITY-001", statement->span,
                     "whole assignment cannot replace untracked nested authority");
             } else if (assignable && projected && value.kind != SOL_TYPE_NEVER
+                && !callable_projection_restore
                 && (sol_type_projected_assignment_has_authority(checker, target_type)
                     || sol_type_projected_assignment_has_authority(checker, value)
                     || checker->types->expression_capability_origins[target_id]
                         != SOL_PROVENANCE_NONE
-                    || checker->types->expression_operation_origins[target_id]
-                        != SOL_PROVENANCE_NONE
                     || checker->types->expression_capability_origins[value_id]
-                        != SOL_PROVENANCE_NONE
-                    || checker->types->expression_operation_origins[value_id]
                         != SOL_PROVENANCE_NONE)) {
                 sol_type_error(checker, "SOL-AUTHORITY-001", statement->span,
                     "projected assignment of authority-bearing values is unsupported");
@@ -5449,6 +5529,7 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
         if (unreachable_loop_transfer && checker->loop_count != 0) {
             checker->loops[checker->loop_count - 1] = saved_loop;
         }
+        previous_id = statement_id;
         statement_id = statement->next;
     }
     if (statement_id != SOL_AST_NONE) {

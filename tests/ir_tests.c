@@ -3593,6 +3593,57 @@ static void test_entrypoint_metadata_validation(void) {
     free_compilation(&compilation);
 }
 
+static void test_forged_callable_restore_authority_components(void) {
+    TestCompilation compilation;
+    CHECK(compile_ir(&compilation,
+        "module forged_callable_restore_authority\n"
+        "capability Token {}\n"
+        "record Plain {}\n"
+        "record Carries { token: capability Token }\n"
+        "enum Choice { empty, token(value: capability Token) }\n"
+        "type Wrapped = distinct Int64\n"
+        "type Positive = refined Int64 where self > 0\n"
+        "record Slot { callback: function() -> Int64 effects { pure } }\n"
+        "function restore(callback: function() -> Int64 effects { pure }) -> () effects { pure } "
+        "{ var slot = Slot { callback = callback } let saved = slot.callback slot.callback = saved }\n"));
+    SolIrType *signature = NULL;
+    for (size_t i = 0; i < compilation.ir.type_count; ++i) {
+        SolIrType *candidate = &compilation.ir.types[i];
+        if (candidate->kind == SOL_IR_TYPE_FUNCTION && candidate->parameter_count == 0
+            && candidate->result < compilation.ir.type_count
+            && compilation.ir.types[candidate->result].kind == SOL_IR_TYPE_INT64) {
+            signature = candidate;
+            break;
+        }
+    }
+    CHECK(signature != NULL);
+    if (signature != NULL) {
+        SolIrTypeId saved = signature->result;
+        const SolIrDefinitionKind forbidden[] = {
+            SOL_IR_DEFINITION_RECORD, SOL_IR_DEFINITION_ENUM,
+            SOL_IR_DEFINITION_DISTINCT, SOL_IR_DEFINITION_REFINED,
+            SOL_IR_DEFINITION_CAPABILITY,
+        };
+        for (size_t kind = 0; kind < sizeof(forbidden) / sizeof(forbidden[0]); ++kind) {
+            bool tested = false;
+            for (size_t type = 0; type < compilation.ir.type_count; ++type) {
+                const SolIrType *candidate = &compilation.ir.types[type];
+                if (candidate->kind != SOL_IR_TYPE_NOMINAL
+                    || candidate->definition >= compilation.ir.definition_count
+                    || compilation.ir.definitions[candidate->definition].kind != forbidden[kind])
+                    continue;
+                signature->result = type;
+                CHECK(!sol_ir_validate(&compilation.ir, NULL));
+                tested = true;
+            }
+            CHECK(tested);
+        }
+        signature->result = saved;
+        CHECK(sol_ir_validate(&compilation.ir, NULL));
+    }
+    free_compilation(&compilation);
+}
+
 int main(void) {
     test_geometric_growth();
     test_complete_ir_and_lifetime();
@@ -3621,6 +3672,7 @@ int main(void) {
     test_recursive_pattern_ir_and_guards();
     test_recursive_uninhabited_ir_coverage();
     test_entrypoint_metadata_validation();
+    test_forged_callable_restore_authority_components();
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }

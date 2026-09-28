@@ -7,11 +7,11 @@ This relocates the detailed baseline README documentation, reconciled with the
 approved ledger. It is not a second checklist, a new test report, or a stable ABI
 specification. [TODO.md](../TODO.md) alone owns live work status and order.
 
-**Current-worktree addendum, September 26, 2026:** P2.7, P2.8, P3.1, and P3.2a-P3.2f are
+**Current-worktree addendum, September 26, 2026:** P2.7, P2.8, P3.1, P3.2a-P3.2f, and P3.3 are
 independently approved and complete in the current worktree, completing P2 and the
 all six runtime-value checkpoints for the frozen E6 profile. The baseline hash above remains the
 historical September 9 snapshot; no post-baseline commit hash is asserted here. M1
-completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. P3.2 is complete; P3.3 is next overall and the next production checkpoint.
+completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. P3.3 is complete; P3.4 is next overall and the next production checkpoint.
 
 Use the [README](../README.md) for onboarding and runnable examples, and
 [project analysis](project-analysis.md) for the dated product assessment. The
@@ -27,7 +27,7 @@ The implemented CLI provides `check`, `test`, `run`, `effects`, `inspect`, and
 `fmt`. Reference execution uses owning typed IR, not the separate experimental
 MIR/P2/P3 owners. There is no backend, complete production runtime ABI,
 `sol build`, full public IR, or SMT discharge. P3.1 supplies target-independent
-call/result/failure conventions, P3.2a adds a recipe operation-demand inventory, P3.2b adds independently validated allocation plans and pure quota checking, P3.2c adds static ownership plans, P3.2d adds static copy plans, and P3.2e adds static equality plans with allocation-free bounded test modeling, and P3.2f adds static E3 host-result transfer plans: there is no physical ABI, allocation execution, production value-operation executor, or complete runtime lowering. Wasm is the first planned production target; native
+call/result/failure conventions, P3.2a adds a recipe operation-demand inventory, P3.2b adds independently validated allocation plans and pure quota checking, P3.2c adds static ownership plans, P3.2d adds static copy plans, and P3.2e adds static equality plans with allocation-free bounded test modeling, and P3.2f adds static E3 host-result transfer plans, and P3.3 adds static cleanup/panic/failure policy: there is no physical ABI, allocation execution, production value-operation executor, cleanup executor, or complete runtime lowering. Wasm is the first planned production target; native
 output is deferred and Component Model integration is not implemented.
 
 Compilation sessions use configurable deterministic ceilings for per-file and package source bytes, source files, directory depth and entries, tokens, persistent arena entries, diagnostics, cumulative allocation bytes, and allocation requests. Disk packages are discovered relative to verified open directory descriptors; source reads reject symbolic links, non-regular or duplicate identities, growth, truncation, replacement, and metadata changes. Raw interpreter host failures are copied through interpreter-owned length-delimited storage rather than borrowed C strings.
@@ -953,8 +953,7 @@ must match one owned site and its allowed code; panic text and host bytes are bo
 to 191 non-NUL bytes, while other codes carry no detail. After full owner
 authentication, failure-record validation and exit mapping are allocation-free and
 do not revalidate predecessors. The complete symbolic failure taxonomy is frozen,
-but allocation/resource and cleanup-policy producers assigned to P3.2/P3.3 remain
-deferred rather than becoming executable merely because their codes have names.
+but P3.1 itself does not own later allocation/resource cleanup policy; P3.3 subsequently supplies supplemental sites only for uncovered allocation/resource producers, without making execution available merely because codes have names.
 
 The validator is in a separate translation unit and reconstructs signatures, calls,
 operands, writebacks, entries, imports, failure sites, collision checks, exact arena
@@ -1050,14 +1049,22 @@ P3.2e adds 21 static same-ID equality plans: unreachable 1, forbidden 7, trivial
 
 P3.2f closes P3.2 with 21 static E3 host-result plans: one unreachable, 14 forbidden, one each for `Int64`, `Bool`, `Text`, and `Unit`, two `Option`, and zero `Result`; the plans cover four host requirements. Test-modeled checked borrowed-view-to-fresh-owned transfer uses full shape preflight and checker-composed quotas before private staging, postorder rollback, nonrefunded successful quota charges, and single publication. Exact E6 usage is 4,432 owned bytes, build scratch 94, build work 357, validation scratch 584,692,564, and validation work 73,655,017; prior counts are unchanged. The full Debug suite passed 50/50 and focused ASan passed. P3.2a-P3.2f collectively define and test-model allocation, ownership, move/drop, copy, equality, and host-result transfer, not production execution. They add no production executor, adapter, authority handling, or failure sites.
 
+## Runtime Cleanup, Panic, and Failure Policy (P3.3 Current-Worktree Addendum)
+
+`SolMirRuntimeCleanup` is a separate bounded static owner borrowing authenticated immutable P3.1 conventions and P3.2 values. It owns five arenas: same-ID events, ordered actions, outcome transitions, drop paths, and sites. It replays exact P1/P2 CFG cleanup and drop paths, including prerequisite executable lexical scope markers; a narrowly sound immediate callable-field hole repair closes the remaining represented-place case without broadening value semantics.
+
+Actions encode normal-only receiver/formal-order writeback, contract gates, reverse temporary and place drops, lexical-scope and nested-region exits, reverse snapshot and owned-parameter drops, and final failure propagation. Sites retain exact inherited P3.1 provenance; supplemental sites cover only uncovered allocation/resource producers. The producing panic/host detail is captured before cleanup; cleanup cannot replace it. A normal contract/refinement failure becomes primary before cleanup, while an authenticated later contract failure is suppressed and the pre-existing primary failure is retained.
+
+The E6 census is exactly 368 events, 622 actions, 452 transitions, 262 drop paths, and 44 sites; usage is 121792 owned bytes, 246744 build scratch bytes, 72327 build work, 246744 validation scratch bytes, and 48218 validation work. Construction and independent reconstruction are bounded, transactional, and anti-aliased; canonical rendering declares policy without execution. A test-only finite trace models selected transitions/actions/failure detail and does not execute drops, values, hosts, ABI marshalling, storage, or allocation. There is no cleanup executor, backend, or compiled execution. Full Debug validation passed 51/51 and focused ASan passed.
+
 ## Remaining Boundary
 
-P2, P3.1, and P3.2 are complete for the frozen E6 profile. They select no physical ABI,
+P2, P3.1, P3.2, and P3.3 are complete for the frozen E6 profile. They select no physical ABI,
 concrete table indices, wrappers/adapters, Wasm linkage/emission or execution,
 allocation or cleanup operations, build artifact, or public format. Those boundaries, reproducible
 artifacts, and interpreter/Wasm differential execution remain later tracks. No
 internal census is an empirical maintenance advantage, user-facing performance
 guarantee, or proof of application behavior. The proposed M experiment is not
-implemented by these compiler owners. P3.3 cleanup/panic/failure policy is the next production checkpoint.
+implemented by these compiler owners. P3.4 capability/trusted-host ABI is the next production checkpoint.
 Consult [TODO.md](../TODO.md#execution-cursor) for the single active cursor and
 [the analysis](project-analysis.md) for the experiment rationale.

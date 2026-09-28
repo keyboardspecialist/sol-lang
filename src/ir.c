@@ -3311,6 +3311,81 @@ static bool sol_ir_local_place(
     return true;
 }
 
+static bool sol_ir_same_local_projection(const SolIr *ir, const SolIrPlace *left,
+    const SolIrPlace *right) {
+    if (left == NULL || right == NULL || left->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+        || right->root_kind != SOL_IR_PLACE_ROOT_LOCAL || left->local != right->local
+        || left->projections.count == 0
+        || left->projections.count != right->projections.count) return false;
+    for (size_t i = 0; i < left->projections.count; ++i) {
+        const SolIrProjection *a = &ir->projections[left->projections.offset + i];
+        const SolIrProjection *b = &ir->projections[right->projections.offset + i];
+        if (a->kind != b->kind || a->type != b->type || a->field != b->field
+            || a->ordinal != b->ordinal || a->index != b->index) return false;
+    }
+    return true;
+}
+
+static bool sol_ir_closed_authority_free_callable(const SolIr *ir, SolIrTypeId id,
+    size_t depth) {
+    if (id >= ir->type_count || depth >= 256) return false;
+    const SolIrType *type = &ir->types[id];
+    /* This is the deliberately narrow exception for an immediate restoration
+     * of a moved callable field.  Do not expand nominal representations here:
+     * even an apparently empty nominal is an authority boundary the local
+     * proof does not own. */
+    if (type->kind == SOL_IR_TYPE_INT64 || type->kind == SOL_IR_TYPE_BOOL
+        || type->kind == SOL_IR_TYPE_TEXT || type->kind == SOL_IR_TYPE_UNIT
+        || type->kind == SOL_IR_TYPE_NEVER) return true;
+    if (type->kind == SOL_IR_TYPE_FUNCTION) {
+        if (type->effect_parameter != SOL_IR_NONE) return false;
+        if (!sol_ir_slice_valid(type->effects, ir->effect_count)) return false;
+        for (size_t i = 0; i < type->effects.count; ++i)
+            if (ir->effects[type->effects.offset + i].authority_kind
+                != SOL_IR_AUTHORITY_NONE) return false;
+        if (!sol_ir_closed_authority_free_callable(ir, type->result, depth + 1)) return false;
+        for (size_t i = 0; i < type->parameter_count; ++i)
+            if (!sol_ir_closed_authority_free_callable(ir,
+                    ir->type_ids[type->parameter_offset + i], depth + 1)) return false;
+        return true;
+    }
+    return false;
+}
+
+static bool sol_ir_exact_callable_restore(const SolIr *ir,
+    const SolIrStatement *assignment) {
+    if (assignment->operator_kind != SOL_TOKEN_EQUAL
+        || assignment->target >= ir->expression_count
+        || assignment->expression >= ir->expression_count) return false;
+    const SolIrExpression *target = &ir->expressions[assignment->target];
+    const SolIrExpression *value = &ir->expressions[assignment->expression];
+    const SolIrPlace *target_place = sol_ir_expression_place(ir, assignment->target);
+    const SolIrPlace *value_place = sol_ir_expression_place(ir, assignment->expression);
+    if (target_place == NULL || value_place == NULL || target_place->projections.count == 0
+        || value_place->projections.count != 0 || target->type >= ir->type_count
+        || value->type != target->type || ir->types[target->type].kind != SOL_IR_TYPE_FUNCTION
+        || !sol_ir_closed_authority_free_callable(ir, target->type, 0)
+        || value_place->local >= ir->local_count) return false;
+    const SolIrLocal *saved = &ir->locals[value_place->local];
+    if (saved->kind != SOL_IR_LOCAL_BINDING || saved->access != SOL_ACCESS_OWNED
+        || saved->mutable) return false;
+    for (size_t expression = 0; expression < ir->expression_count; ++expression) {
+        const SolIrExpression *block = &ir->expressions[expression];
+        if (block->kind != SOL_IR_EXPR_BLOCK) continue;
+        for (size_t i = 1; i < block->as.block.statements.count; ++i) {
+            SolIrStatementId current = ir->statement_ids[block->as.block.statements.offset + i];
+            if (current >= ir->statement_count || &ir->statements[current] != assignment) continue;
+            const SolIrStatement *previous = &ir->statements[ir->statement_ids[
+                block->as.block.statements.offset + i - 1]];
+            if (previous->kind != SOL_IR_STATEMENT_LET || previous->local != value_place->local
+                || previous->expression >= ir->expression_count) return false;
+            const SolIrPlace *moved = sol_ir_expression_place(ir, previous->expression);
+            return sol_ir_same_local_projection(ir, target_place, moved);
+        }
+    }
+    return false;
+}
+
 static bool sol_ir_place_types_valid(
     const SolIr *ir, SolIrExpressionId expression_id
 ) {
@@ -6340,6 +6415,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                     && (local->access == SOL_ACCESS_EXCLUSIVE
                         || local->access == SOL_ACCESS_OWNED));
             bool compound = statement->operator_kind != SOL_TOKEN_EQUAL;
+            bool projected_callable_restore = sol_ir_exact_callable_restore(ir, statement);
             if (statement->target == statement->expression
                 || !sol_ir_slice_valid(local->capability_roots, ir->root_count)
                 || !sol_ir_slice_valid(local->operation_roots, ir->root_count)
@@ -6362,7 +6438,7 @@ static bool sol_ir_validate_impl(const SolIr *ir, SolDiagnostics *diagnostics,
                     && ir->types[value->type].kind != SOL_IR_TYPE_NEVER)
                 || target->capability_roots.count != local->capability_roots.count
                 || target->operation_roots.count != local->operation_roots.count
-                || (place->projections.count != 0
+                || (place->projections.count != 0 && !projected_callable_restore
                     && (target->capability_roots.count != 0
                         || target->operation_roots.count != 0
                         || sol_ir_type_may_carry_authority(

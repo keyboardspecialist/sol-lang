@@ -205,6 +205,42 @@ static bool paths_overlap(const SolIr *ir, SolIrExpressionId left,
 }
 
 static bool path_available(Ownership *analysis, SolIrExpressionId id,
+    const bool *unavailable);
+
+static bool exact_projection(const SolIr *ir, const SolIrPlace *left,
+    const SolIrPlace *right) {
+    if (left == NULL || right == NULL || left->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+        || right->root_kind != SOL_IR_PLACE_ROOT_LOCAL || left->local != right->local
+        || left->projections.count == 0 || left->projections.count != right->projections.count)
+        return false;
+    for (size_t i = 0; i < left->projections.count; ++i) {
+        const SolIrProjection *a = &ir->projections[left->projections.offset + i];
+        const SolIrProjection *b = &ir->projections[right->projections.offset + i];
+        if (a->kind != b->kind || a->type != b->type || a->field != b->field
+            || a->ordinal != b->ordinal || a->index != b->index) return false;
+    }
+    return true;
+}
+
+static bool callable_restore(Ownership *analysis, const SolIrStatement *statement,
+    const SolIrStatement *previous, const bool *unavailable) {
+    const SolIr *ir = analysis->ir;
+    const SolIrPlace *target = expression_place(ir, statement->target);
+    const SolIrPlace *value = expression_place(ir, statement->expression);
+    if (previous == NULL || statement->operator_kind != SOL_TOKEN_EQUAL
+        || target == NULL || value == NULL || target->projections.count == 0
+        || value->projections.count != 0 || target->type >= ir->type_count
+        || ir->types[target->type].kind != SOL_IR_TYPE_FUNCTION
+        || value->local >= ir->local_count || path_available(analysis, statement->target, unavailable))
+        return false;
+    const SolIrLocal *saved = &ir->locals[value->local];
+    if (saved->kind != SOL_IR_LOCAL_BINDING || saved->access != SOL_ACCESS_OWNED
+        || saved->mutable || previous->kind != SOL_IR_STATEMENT_LET
+        || previous->local != value->local) return false;
+    return exact_projection(ir, target, expression_place(ir, previous->expression));
+}
+
+static bool path_available(Ownership *analysis, SolIrExpressionId id,
     const bool *unavailable) {
     for (size_t place = 0; place < analysis->ir->place_count; ++place) {
         if (!unavailable[place]) continue;
@@ -266,7 +302,7 @@ static void clear_local_paths(Ownership *analysis, bool *unavailable,
 }
 
 static bool analyze_assignment(Ownership *analysis, const SolIrStatement *statement,
-    bool *unavailable, bool *reachable) {
+    const SolIrStatement *previous, bool *unavailable, bool *reachable) {
     SolIrLocalId target_local = SOL_IR_NONE;
     if (!local_place(analysis->ir, statement->target, &target_local)) {
         return ownership_internal(analysis, statement->span,
@@ -292,6 +328,12 @@ static bool analyze_assignment(Ownership *analysis, const SolIrStatement *statem
     }
     const SolIrPlace *place = expression_place(analysis->ir, statement->target);
     bool compound = statement->operator_kind != SOL_TOKEN_EQUAL;
+    if (place->projections.count != 0 && target->type < analysis->ir->type_count
+        && analysis->ir->types[target->type].kind == SOL_IR_TYPE_FUNCTION
+        && !callable_restore(analysis, statement, previous, unavailable)) {
+        return ownership_internal(analysis, statement->span,
+            "callable field restoration is not an immediate exact move repair");
+    }
     if ((compound || place->projections.count != 0)
         && !analysis->initialized[target_local]) {
         return ownership_error_code(analysis, statement->span,
@@ -1076,7 +1118,9 @@ call_complete:
                 if (statement->kind == SOL_IR_STATEMENT_DECLARE) {
                     valid_statement = true;
                 } else if (statement->kind == SOL_IR_STATEMENT_ASSIGNMENT) {
-                    valid_statement = analyze_assignment(analysis, statement,
+                    const SolIrStatement *previous = index == 0 ? NULL : &analysis->ir->statements[
+                        analysis->ir->statement_ids[expression->as.block.statements.offset + index - 1]];
+                    valid_statement = analyze_assignment(analysis, statement, previous,
                         unavailable, reachable);
                 } else if (statement->kind == SOL_IR_STATEMENT_MODIFY) {
                     valid_statement = analyze_modify(analysis, statement,

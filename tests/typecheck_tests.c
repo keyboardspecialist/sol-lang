@@ -1729,6 +1729,8 @@ static void test_traits_bounds_and_method_metadata(void) {
         "function instantiate(value: Int64) -> Text effects { pure } { return render(value) }\n";
     TestCompilation compilation;
     CHECK(compile_source(&compilation, valid));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics))
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
     CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
     size_t requirements = 0;
     size_t implementations = 0;
@@ -2510,8 +2512,46 @@ static void test_tuple_types_expressions_and_projections(void) {
     free_compilation(&compilation);
 }
 
+static void test_exact_callable_field_restore(void) {
+    static const char prefix[] =
+        "record Pair { left: function() -> Int64 effects { pure }, right: function() -> Int64 effects { pure } }\n"
+        "record Outer { inner: Pair }\n"
+        "function source() -> Int64 effects { pure } { return 1 }\n";
+    static const char valid[] =
+        "module callable_restore_valid\n"
+        "record Pair { left: function() -> Int64 effects { pure } }\n"
+        "record Outer { inner: Pair }\n"
+        "function exact(left: function() -> Int64 effects { pure }) -> () effects { pure } { var pair = Pair { left = left } let saved = pair.left pair.left = saved }\n"
+        "function nested(left: function() -> Int64 effects { pure }) -> () effects { pure } { var outer = Outer { inner = Pair { left = left } } let saved = outer.inner.left outer.inner.left = saved }\n";
+    TestCompilation compilation;
+    CHECK(compile_source(&compilation, valid));
+    if (sol_diagnostics_has_errors(&compilation.diagnostics))
+        sol_diagnostics_render_human(stderr, &compilation.source, &compilation.diagnostics);
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+    free_compilation(&compilation);
+    static const char *const invalid_bodies[] = {
+        "let saved = pair.left let other = source pair.left = other", /* unrelated */
+        "let moved = pair.left let saved = pair.right pair.left = saved", /* sibling */
+        "let saved = pair.left let forwarded = saved pair.left = forwarded", /* forwarded */
+        "let saved = pair.left let mark = false pair.left = saved", /* intervening */
+        "let saved = pair.left pair.left = saved pair.left = saved", /* double */
+        "let saved = pair.left pair.left += saved", /* compound */
+    };
+    for (size_t i = 0; i < sizeof(invalid_bodies) / sizeof(invalid_bodies[0]); ++i) {
+        char source[2048];
+        int written = snprintf(source, sizeof(source),
+            "module callable_restore_invalid%zu\n%sfunction bad(source: function() -> Int64 effects { pure }) -> () effects { pure } { var pair = Pair { left = source, right = source } %s }\n",
+            i, prefix, invalid_bodies[i]);
+        CHECK(written > 0 && (size_t)written < sizeof(source));
+        CHECK(compile_source(&compilation, source));
+        CHECK(sol_diagnostics_has_errors(&compilation.diagnostics));
+        free_compilation(&compilation);
+    }
+}
+
 int main(void) {
     test_tuple_types_expressions_and_projections();
+    test_exact_callable_field_restore();
     test_valid_types();
     test_invalid_operator();
     test_invalid_return_and_condition();
