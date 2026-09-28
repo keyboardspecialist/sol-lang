@@ -12,7 +12,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 
 ## Execution Cursor
 
-- **Next overall and next production checkpoint: P3.5.**
+- **Next overall and next production checkpoint: P3.6.**
 - M1 is resolved through its infeasibility path: the
   [September 25 report](experiments/m1/README.md) records the missing independent
   governance and protected evaluation boundary.
@@ -21,7 +21,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 - One coordinator maintains this single next-overall cursor; parallel tracks do
   not create competing priority lists.
 
-## Completed Foundation Through E6, P1, P2, P3.1-P3.4
+## Completed Foundation Through E6, P1, P2, P3.1-P3.5
 
 - [x] Closed normalized effect rows, recursive SCC inference, higher-order calls,
       callback checking, and exact function and bound-operation effects.
@@ -91,6 +91,10 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
       root/private-source lineage, the frozen four-operation E3 surface,
       allocation-free root-specific grant preflight, and test-only bounded host
       transfer/failure selection, without adapters, tokens, or execution.
+- [x] Separate bounded `SolMirRuntimeHandlerAbi` over P3.1-P3.4, with exact
+      source operation/root/closed-effect interception, provider place/value/internal
+      operation/receiver-first signature provenance, lexical parents, complete P2 and
+      P3.3 handler exits, and test-only caller-storage activation modeling.
 
 ## Construct Coverage
 
@@ -105,7 +109,7 @@ surface form requires either a prioritized row below or an explicit deferral her
 | Expressions | Bootstrap primitive/unit/path literals; structural tuple literals and numeric projections; unary/binary operators; calls and type applications; fields/method calls; records/variants; direct checked distinct/refined construction; `if`; `match`; blocks; `?`; exact handlers; contract `result`/`old`; canonical local/computed-root places with flattened field/tuple projections | Operational arrays/indexing (34); lifetime-bearing views and safe reference relationships (35, 38); raw-pointer dereference and unsafe pointer operations (44); closures/method values (28-29); refinement projection and pattern reasoning (50); unsafe assumptions/establishments (44); async/protocol expressions (59); general resumptive handlers (61) |
 | Patterns | Recursive wildcard, Boolean, binding, positional enum-variant, nominal-record, and structural-tuple patterns; pure guards; nested usefulness/exhaustiveness for `Bool`, records, tuples, and closed/open generic enums | Refined patterns (50); protocol-state patterns (59) |
 | Types and callable structure | `Int64`, `Bool`, `Text`, `Unit`, and `Never`; structural tuples of arity 2 through 16; nominal applications; `Option`/`Result`; capability and structural function types; bounded type/effect parameters; one trait bound; `borrow`/`inout` parameters | Richer traits/generic methods and required associated items (30); constants and constrained const parameters (31, 33); remaining numeric/byte/rune primitives and units/dimensions (32); arrays/collections (34, 38); lifetime relationships/views (35); resource/allocator and cost types/clauses (36-38); general effect rows/aliases (42); raw pointers/ABI types (44, 46); concurrency traits/types (59) |
-| Cross-cutting representation | Every successful-program AST statement/expression/pattern kind is parsed, structurally traversed, semantically analyzed, relocated, lowered through owning IR, and executable or explicitly non-runtime; discriminants, spans, linked-arena ownership, current executable type relations, callable context, canonical place/projection ownership, per-kind censuses, and composite relocation fixtures are independently validated. Separately, P1 lowers and validates every bodyful E6 callable into unstable target-neutral CFG MIR, with canonical rendering and bounded evaluation. P2 completes concrete monomorphic planning/materialization, representation, target layout, source-independent operation plans, whole-program symbols/linkage, and the validated/rendered complete concrete-program owner for the frozen E6 profile. P3.1 freezes a separate target-independent call/result/failure conventions owner over that immutable P2 program; P3.2a-P3.2f add static allocation, ownership, move/drop, copy, equality, and host-result transfer plans; P3.3 adds static cleanup/failure policy. | Per-form cross-phase acceptance coverage (43); remaining value semantics, capability/trusted-host and handler ABI, complete runtime lowering, and WebAssembly lowering/adapters (P3.4-P4 and tasks 47-48); reproducible artifacts and interpreter/Wasm differential testing (P5 and task 49) |
+| Cross-cutting representation | Every successful-program AST statement/expression/pattern kind is parsed, structurally traversed, semantically analyzed, relocated, lowered through owning IR, and executable or explicitly non-runtime; discriminants, spans, linked-arena ownership, current executable type relations, callable context, canonical place/projection ownership, per-kind censuses, and composite relocation fixtures are independently validated. Separately, P1 lowers and validates every bodyful E6 callable into unstable target-neutral CFG MIR, with canonical rendering and bounded evaluation. P2 completes concrete monomorphic planning/materialization, representation, target layout, source-independent operation plans, whole-program symbols/linkage, and the validated/rendered complete concrete-program owner for the frozen E6 profile. P3.1 freezes a separate target-independent call/result/failure conventions owner over that immutable P2 program; P3.2a-P3.2f add static allocation, ownership, move/drop, copy, equality, and host-result transfer plans; P3.3 adds static cleanup/failure policy; P3.4 and P3.5 add static trusted-host and exact-handler ABI policy. | Per-form cross-phase acceptance coverage (43); remaining value semantics, complete runtime lowering, and WebAssembly lowering/adapters (P3.6-P4 and tasks 47-48); reproducible artifacts and interpreter/Wasm differential testing (P5 and task 49) |
 
 Unchecked exceptions and `throw`/`catch` are not planned; recoverable failure remains
 typed through `Result`, and cancellation remains typed. Unrestricted token/text macros
@@ -119,8 +123,8 @@ deferred until a concrete core API requires their smallest coherent subset.
 
 ## End-to-End and Production Track
 
-E1-E6, P1, P2, P3.1, P3.2a-P3.2f, P3.3, and P3.4 are complete for the frozen E6 profile. P3 remains the
-current production milestone, with P3.5 next overall and as the next production checkpoint.
+E1-E6, P1, P2, P3.1, P3.2a-P3.2f, P3.3, P3.4, and P3.5 are complete for the frozen E6 profile. P3 remains the
+current production milestone, with P3.6 next overall and as the next production checkpoint.
 Deferred language breadth is not a prerequisite for P2-P5 unless a
 milestone explicitly activates a bounded numbered-task slice. Existing numbered
 capability IDs remain stable; named slices such as `48A` account for completed portions
@@ -145,13 +149,13 @@ access for malformed IR/MIR mutation, phase-corruption assertions, differential
 evaluation, and trusted host-callback coverage.
 
 The production track is underway. P1, P2, and P3.1 are complete for the frozen E6
-profile; P3.2a-P3.2f, P3.3, and P3.4 are complete, and P3.5 is the next overall item and next production checkpoint:
+profile; P3.2a-P3.2f, P3.3, P3.4, and P3.5 are complete, and P3.6 is the next overall item and next production checkpoint:
 
 | Done | Order | Milestone | Dependency and numbered-backlog scope |
 | --- | ---: | --- | --- |
 | [x] | P1 | Introduce ownership-explicit target-neutral CFG/MIR for the frozen executable core | E6; task 45 |
 | [x] | P2 | Define monomorphization, representation, target layout, symbols, and linkage | P1; P2.1-P2.8 complete for the frozen E6 profile |
-| [ ] | P3 | Define the target-independent runtime ABI and production panic/cleanup policy | P1, P2; P3.1-P3.4 complete; P3.5 next; task 48B |
+| [ ] | P3 | Define the target-independent runtime ABI and production panic/cleanup policy | P1, P2; P3.1-P3.5 complete; P3.6 next; task 48B |
 | [ ] | P4 | Integrate a WebAssembly backend and host adapter | P2, P3; task 47W and task 48C |
 | [ ] | P5 | Implement reproducible `sol build` artifacts and interpreter/Wasm differential tests | P4; task 49C |
 
@@ -237,7 +241,7 @@ external dependencies, public IR, concurrency, or broader handlers.
 | [x] | P3.2f | Define host-result transfer and closure | `SolMirRuntimeValues` owns static E3 host-result plans with checked borrowed-view-to-fresh-owned transfer, full shape preflight, checker-composed quotas, private staging, postorder rollback, nonrefunded quota charges, and single publication. No production executor, adapter, authority handling, or failure sites are introduced. |
 | [x] | P3.3 | Freeze cleanup, panic, and failure policy | `SolMirRuntimeCleanup` borrows immutable P3.1 conventions and P3.2 values to own static event, action, transition, drop-path, and site policy. It replays exact P1/P2 CFG cleanup/drop paths and executable lexical scope markers, with narrowly sound immediate callable-field hole repair; orders scope/temp/region/snapshot/parameter actions; retains exact inherited P3.1 sites plus supplemental sites only for uncovered allocation/resource producers, panic/host detail, and first-failure precedence; and remains test-modeled with no cleanup executor or backend. |
 | [x] | P3.4 | Define capability and trusted-host ABI | `SolMirRuntimeHostAbi` statically owns exact P2 capability root/derived/private-source lineage, four frozen E3 host profiles (`Console.write`, `Arguments.count`, `Arguments.get`, `Configuration.read`), entry-root/formal closure, E3 shapes, root-specific requirements/grants, allocation-free sealed preflight, and test-only bounded host-result transfer/P3.3 failure selection; no adapter, tokens, or execution |
-| [ ] | P3.5 | Define exact handler ABI | Specify handler frames containing source operation, root, provider operation/value, and parent; intercept only exact operation/root/effect matches; hide the current frame during provider invocation; preserve nested LIFO behavior; and remove frames on every normal, transfer, and failure path |
+| [x] | P3.5 | Define exact handler ABI | `SolMirRuntimeHandlerAbi` borrows P3.1-P3.4 and statically owns bodyful root-capability provider/value/place/internal-operation/receiver-first-signature plans with lexical parents. It requires exact source operation, root, and closed-effect matching; pairs every P2 enter/exit marker and P3.3 cleanup exit; and test-models caller-owned activation storage, matched-plus-younger hidden suffixes, and exact LIFO restoration on provider success/failure, including nested older-provider invocation under an already hidden suffix. No executor, adapter, storage ownership, tokens, backend, or production execution. |
 | [ ] | P3.6 | Freeze the runtime-lowered program | Validate and canonically render every runtime operation, import, call signature, allocation, cleanup action, failure edge, capability grant, and handler frame; add table-driven ABI conformance and malformed-program tests over the complete P2 graph; retain backend-independent types and symbols; complete task 48B |
 
 P3.1 owns its arenas independently and borrows one authenticated, immutable
@@ -295,6 +299,9 @@ P3.3 adds a separate static `SolMirRuntimeCleanup` owner borrowing immutable P3.
 
 P3.4 adds a separate static, backend-independent `SolMirRuntimeHostAbi` owner borrowing authenticated immutable P3.1 conventions, P3.2 values, and P3.3 cleanup policy. It retains exact P2 capability construction lineage: distinct entry roots, `BASE_SOURCE` derived closure, and private-source metadata; the exact-source correction is frozen, so a derived capability cannot substitute for its declared private source and `PRIVATE_SOURCE` construction is not source-reachable. The sealed E3 surface has exactly four approved profiles: `Console.write(Text) -> Unit`, `Arguments.count() -> Int64`, `Arguments.get(Int64) -> Option<Text>`, and `Configuration.read(Text) -> Option<Text>`, each preserving its exact P3.1 identity/import/symbol and root-specific receiver provenance. It owns entry-formal root descriptors, E3 formal/shape forests, exact requirements, and root-specific grants. After authentication, pure preflight is allocation-free and non-mutating: it checks the complete root/grant/import/descriptor/result closure before any model callback, allocation, quota charge, token/object creation, cleanup, or transfer. Test-only bounded invocation borrows only data views, uses the P3.2f transfer plan for fresh-owned result staging/rollback/publication, and selects existing P3.3 first-failure policy for bounded `HOST_ERROR` detail. It adds no production adapter, capability token/object, raw IR, private-source exposure, physical ABI, host-function pointer, runtime execution, or new failure code/site. The exact E6 census is 3 capability plans, 3 roots, 4 host operations, 3 arguments, 3 formals, 3 shapes, 0 shape cases, 5 requirements, and 4 grants; usage is 1816 owned bytes, 185 build scratch bytes, 27868 build work, 77 validation scratch bytes, and 8347 validation work. Final Debug and ASan/UBSan validation each passed 52/52.
 
+
+P3.5 adds a separate bounded, backend-independent `SolMirRuntimeHandlerAbi` owner borrowing authenticated immutable P3.1 conventions, P3.2 values, P3.3 cleanup policy, and P3.4 host ABI. Prerequisite commit `c6c6041` narrowly supports bodyful root-capability members internally with receiver-first signatures/contracts; derived/private-source bodyful members remain unsupported and bodyless members remain imports. The owner retains same-ID bodyful provider place/value/internal-operation/receiver-first-signature plans, exact source operation/root/closed-effect interception, lexical parents, every P2 enter/exit marker, and every P3.3 cleanup exit. Its test-only caller-storage activation model evaluates before push, selects only exact matches, hides the matched frame plus complete younger suffix during provider invocation, and restores that exact suffix in LIFO order before either success or failure proceeds, including for nested older-provider invocation under an already hidden suffix. It adds no executor, adapter, storage ownership, tokens, backend, or production execution. The focused census is 7 frames, 14 exit markers, 8 cleanup exits, 29 marker references, stack depth 7, test work 7, 2152 owned bytes, build scratch 56, build work 7809, validation scratch 56, and validation work 12251. Empty E6 has all counts/storage/scratch zero, build work 22, and validation work 2707. Final Debug and ASan/UBSan each passed 53/53.
+
 The E6 all-roots census is exactly 18 signatures, 19 signature slots, 18 calls,
 24 operands, one writeback, one entry, 52 imports, and 29 failure sites. In field
 order `(signatures, signature slots, calls, operands, writebacks, entries, imports,
@@ -310,10 +317,11 @@ boundary, and source-level `Never` callables still fail with `SOL-TYPE-009`; bou
 tests cover both while directly exercising reachable direct/host and indirect-table
 target logic, access classes, result classes, failure masks, provenance, and exits.
 
-These completed checkpoints define no physical backend ABI or Wasm indices and add no
-executable allocation/value operations, cleanup/unwind lowering, production host adapter or execution, handler ABI,
-complete runtime-lowered program, compiled `sol build`, or backend-backed `sol run`.
-The P3.3 policy retains exact inherited P3.1 sites and adds supplemental sites only for uncovered allocation/resource producers. The P3.W1 experiment remains bounded and does not replace the P3.5 cursor.
+These completed checkpoints define static/test-only handler ABI policy but no physical
+backend ABI or Wasm indices, executable allocation/value operations, cleanup/unwind
+lowering, production host adapter, runtime handler stack/execution, complete
+runtime-lowered program, compiled `sol build`, or backend-backed `sol run`.
+The P3.3 policy retains exact inherited P3.1 sites and adds supplemental sites only for uncovered allocation/resource producers. The P3.W1 experiment remains bounded and does not replace the P3.6 cursor.
 
 ### P4 - WebAssembly Backend and Host Adapter
 
