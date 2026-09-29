@@ -11,6 +11,7 @@ typedef enum {
     SOL_MIR_RUNTIME_ARENA_VISIT_OK,
     SOL_MIR_RUNTIME_ARENA_VISIT_STOPPED,
     SOL_MIR_RUNTIME_ARENA_VISIT_MALFORMED,
+    SOL_MIR_RUNTIME_ARENA_VISIT_EXHAUSTED,
 } SolMirRuntimeArenaVisit;
 typedef enum { SOL_MIR_RUNTIME_TEXT_SAFE, SOL_MIR_RUNTIME_TEXT_OVERLAP,
     SOL_MIR_RUNTIME_TEXT_MALFORMED, SOL_MIR_RUNTIME_TEXT_EXHAUSTED } SolMirRuntimeTextGuardResult;
@@ -53,6 +54,7 @@ static inline SolMirRuntimeArenaVisit sol_mir_runtime_visit_text(
         }
         SolMirRuntimeTextGuardResult guarded=sol_mir_runtime_text_guard(address,&boundary,
             sol_mir_runtime_text_guard_context);
+        if (guarded==SOL_MIR_RUNTIME_TEXT_EXHAUSTED) return SOL_MIR_RUNTIME_ARENA_VISIT_EXHAUSTED;
         if (guarded==SOL_MIR_RUNTIME_TEXT_MALFORMED) return SOL_MIR_RUNTIME_ARENA_VISIT_MALFORMED;
         if (guarded!=SOL_MIR_RUNTIME_TEXT_SAFE) return SOL_MIR_RUNTIME_ARENA_VISIT_STOPPED;
         if (boundary<=address) return SOL_MIR_RUNTIME_ARENA_VISIT_MALFORMED;

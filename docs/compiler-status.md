@@ -7,11 +7,12 @@ This relocates the detailed baseline README documentation, reconciled with the
 approved ledger. It is not a second checklist, a new test report, or a stable ABI
 specification. [TODO.md](../TODO.md) alone owns live work status and order.
 
-**Current-worktree addendum, September 26, 2026:** P2.7, P2.8, P3.1, P3.2a-P3.2f, P3.3, P3.4, and P3.5 are
-independently approved and complete in the current worktree, completing P2 and the
-all six runtime-value checkpoints for the frozen E6 profile. The baseline hash above remains the
+**Current-worktree addendum, September 29, 2026:** P2.7, P2.8, and P3.1-P3.6 are
+independently approved and complete in the current worktree, completing P2 and P3
+for the frozen E6 profile. The baseline hash above remains the
 historical September 9 snapshot; no post-baseline commit hash is asserted here. M1
-completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. P3.5 is complete; P3.6 is next overall and the next production checkpoint.
+completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. P4.1 is
+next overall and the next production checkpoint.
 
 Use the [README](../README.md) for onboarding and runnable examples, and
 [project analysis](project-analysis.md) for the dated product assessment. The
@@ -25,9 +26,9 @@ every target-language form is executable or that a fresh full suite was rerun.
 
 The implemented CLI provides `check`, `test`, `run`, `effects`, `inspect`, and
 `fmt`. Reference execution uses owning typed IR, not the separate experimental
-MIR/P2/P3 owners. There is no backend, complete production runtime ABI,
+MIR/P2/P3 owners. There is no backend, physical ABI,
 `sol build`, full public IR, or SMT discharge. P3.1 supplies target-independent
-call/result/failure conventions, P3.2a adds a recipe operation-demand inventory, P3.2b adds independently validated allocation plans and pure quota checking, P3.2c adds static ownership plans, P3.2d adds static copy plans, and P3.2e adds static equality plans with allocation-free bounded test modeling, P3.2f adds static E3 host-result transfer plans, P3.3 adds static cleanup/panic/failure policy, and P3.4 adds static capability/trusted-host ABI policy, and P3.5 adds static exact-handler ABI policy: there is no physical ABI, allocation execution, production value-operation executor, cleanup executor, production host adapter, or complete runtime lowering. Wasm is the first planned production target; native
+call/result/failure conventions, P3.2a adds a recipe operation-demand inventory, P3.2b adds independently validated allocation plans and pure quota checking, P3.2c adds static ownership plans, P3.2d adds static copy plans, and P3.2e adds static equality plans with allocation-free bounded test modeling, P3.2f adds static E3 host-result transfer plans, P3.3 adds static cleanup/panic/failure policy, P3.4 adds static capability/trusted-host ABI policy, P3.5 adds static exact-handler ABI policy, and P3.6 joins the complete authenticated runtime-lowered graph: there is no executor, physical ABI, allocation implementation, production host adapter, Wasm, CLI/build artifact, or tokens. Wasm is the first planned production target; native
 output is deferred and Component Model integration is not implemented.
 
 Compilation sessions use configurable deterministic ceilings for per-file and package source bytes, source files, directory depth and entries, tokens, persistent arena entries, diagnostics, cumulative allocation bytes, and allocation requests. Disk packages are discovered relative to verified open directory descriptors; source reads reject symbolic links, non-regular or duplicate identities, growth, truncation, replacement, and metadata changes. Raw interpreter host failures are copied through interpreter-owned length-delimited storage rather than borrowed C strings.
@@ -1055,7 +1056,7 @@ P3.2f closes P3.2 with 21 static E3 host-result plans: one unreachable, 14 forbi
 
 Actions encode normal-only receiver/formal-order writeback, contract gates, reverse temporary and place drops, lexical-scope and nested-region exits, reverse snapshot and owned-parameter drops, and final failure propagation. Sites retain exact inherited P3.1 provenance; supplemental sites cover only uncovered allocation/resource producers. The producing panic/host detail is captured before cleanup; cleanup cannot replace it. A normal contract/refinement failure becomes primary before cleanup, while an authenticated later contract failure is suppressed and the pre-existing primary failure is retained.
 
-The E6 census is exactly 368 events, 622 actions, 452 transitions, 262 drop paths, and 44 sites; usage is 121792 owned bytes, 246744 build scratch bytes, 72327 build work, 246744 validation scratch bytes, and 48218 validation work. Construction and independent reconstruction are bounded, transactional, and anti-aliased; canonical rendering declares policy without execution. A test-only finite trace models selected transitions/actions/failure detail and does not execute drops, values, hosts, ABI marshalling, storage, or allocation. There is no cleanup executor, backend, or compiled execution. Full Debug validation passed 51/51 and focused ASan passed.
+The E6 census is exactly 368 events, 622 actions, 452 transitions, 262 drop paths, and 44 sites; usage is 121792 owned bytes, 246744 build scratch bytes, 72327 build work, 246744 validation scratch bytes, and 54643 validation work. Construction and independent reconstruction are bounded, transactional, and anti-aliased; canonical rendering declares policy without execution. A test-only finite trace models selected transitions/actions/failure detail and does not execute drops, values, hosts, ABI marshalling, storage, or allocation. There is no cleanup executor, backend, or compiled execution. Full Debug validation passed 51/51 and focused ASan passed.
 
 ## Runtime Capability and Trusted-Host ABI (P3.4 Current-Worktree Addendum)
 
@@ -1065,7 +1066,7 @@ The frozen exact-source correction is preserved: the frontend/IR require the exa
 
 After owner authentication, sealed entry/grant preflight is pure, allocation-free, and non-mutating. It verifies complete root binding, exact root-specific grants, host imports, receiver/formal E3 descriptor closure, P3.2f result-plan eligibility, effects, and failure masks before any model callback, allocation, quota charge, cleanup, token/object creation, or transfer. The separate test-only bounded model borrows data-only argument views, invokes only the exact root-specific fixture callback, transfers a successful result through P3.2f fresh-owned staging/rollback/publication, and selects the existing P3.3 first-failure policy for bounded `HOST_ERROR` detail. It does not expose raw IR, callables, arbitrary pointers, roots/tokens, private sources, layouts, or live values, and adds no adapter, capability token/object, production executor, physical ABI, or failure code/site.
 
-The exact E6 census is 3 capability plans, 3 roots, 4 host operations, 3 arguments, 3 formals, 3 shapes, 0 shape cases, 5 requirements, and 4 grants; usage is 1816 owned bytes, 185 build-scratch bytes, 27868 build work, 77 validation-scratch bytes, and 8347 validation work. Construction and independent reconstruction are bounded, transactional, anti-aliased, and canonically rendered. Final Debug and ASan/UBSan validation each passed 52/52.
+The exact E6 census is 3 capability plans, 3 roots, 4 host operations, 3 arguments, 3 formals, 3 shapes, 0 shape cases, 5 requirements, and 4 grants; usage is 1816 owned bytes, 185 build-scratch bytes, 27868 build work, 77 validation-scratch bytes, and 15916 validation work. Construction and independent reconstruction are bounded, transactional, anti-aliased, and canonically rendered. Final Debug and ASan/UBSan validation each passed 52/52.
 
 ## Runtime Exact-Handler ABI (P3.5 Current-Worktree Addendum)
 
@@ -1075,16 +1076,44 @@ The owner statically retains one same-ID frame plan per reachable P2 concrete ha
 
 The test-only model uses caller-owned bounded activation storage. It evaluates a provider before pushing, selects the innermost exact match, hides the matched frame plus the complete younger suffix while invoking the retained provider target, and restores that identical suffix in LIFO order before either success or failure continues, including nested older-provider invocation under an already hidden suffix. It introduces no executor, adapter, storage ownership, capability tokens, backend, runtime values, or production execution.
 
-Focused census: 7 frames, 14 exit markers, 8 cleanup exits, 29 marker references, maximum stack depth 7, test work 7, 2152 owned bytes, build scratch 56, build work 7809, validation scratch 56, and validation work 12251. Empty E6 has zero frames, markers, cleanup exits, marker references, owned bytes, and scratch; build work is 22 and validation work is 2707. Construction and independent reconstruction are transactional, bounded, anti-aliased, and canonically rendered. Final Debug and ASan/UBSan validation each passed 53/53.
+Focused census: 7 frames, 14 exit markers, 8 cleanup exits, 29 marker references, maximum stack depth 7, test work 7, 2152 owned bytes, build scratch 56, build work 7809, validation scratch 56, and validation work 15296. Empty E6 has zero frames, markers, cleanup exits, marker references, owned bytes, and scratch; build work is 22 and validation work is 6358. Construction and independent reconstruction are transactional, bounded, anti-aliased, and canonically rendered. Final Debug and ASan/UBSan validation each passed 53/53.
+
+## Runtime-Lowered Program (P3.6 Current-Worktree Addendum)
+
+`SolMirRuntimeLoweredProgram` is a separate address-stable, backend-independent
+owner borrowing authenticated immutable P3.1-P3.5/P2 owners. It owns typed same-ID
+complete-graph joins for image/predicate CFG and semantic operations; P3.1
+calls/signatures/imports/failures; P3.2 recipe/value demands; P3.3 cleanup/failure;
+P3.4 requirements, distinct root grants, and incidence; and P3.5 frames/exits. A
+separate hostile validator authenticates predecessor chains, reconstructs the closure,
+and proves full transitive anti-aliasing before typed traversal. Draft-first build,
+validation, and rendering have exact resource limits; rendering validates first,
+buffers the complete typed semantic canonical form, and performs one caller-visible
+write. This adds no executor, physical ABI, Wasm, adapter, allocator implementation,
+CLI/build artifact, or tokens.
+
+The frozen E6 census is image 471/65/64/64/64/65; predicate 4/6/4/0/0/0/4;
+semantic plans 75, calls 12, signatures 12, imports 48, recipes 20, value plans 20,
+recipe demands 295, cleanup failures 1426, host requirements/grants/incidences 5/4/5,
+and handlers 0/0/0. Usage is 481520 owned bytes, 482098 build-scratch bytes,
+1175568 build work, 5466 validation-scratch bytes, 842837 validation work, 11195392
+render bytes, and 11216232 render-scratch bytes. `p35` is image 198/16/10/10/10/16,
+predicate all zero, semantic/calls/signatures/imports 28/5/7/10, recipes/value
+plans/demands 7/7/54, cleanup 401, host 0/0/0, handlers 7/14/8, with
+140960/141174/304979/1616/250947/3310592/3316032 owned/build-scratch/build-work/
+validation-scratch/validation-work/render-bytes/render-scratch bytes. `p35_reordered`
+uses 253227 validation work because authenticated borrowed path text is exact-work
+input; canonical rendered bytes remain path-independent. Conformance includes generic,
+copy, and indirect fixtures. Final Debug and ASan/UBSan validation each passed 54/54.
 
 ## Remaining Boundary
 
-P2, P3.1, P3.2, P3.3, P3.4, and P3.5 are complete for the frozen E6 profile. They select no physical ABI,
+P2 and P3 are complete for the frozen E6 profile. They select no physical ABI,
 concrete table indices, wrappers/adapters, Wasm linkage/emission or execution,
-allocation or cleanup operations, build artifact, or public format. Those boundaries, reproducible
+runtime executor or allocator implementation, build artifact, or public format. Those boundaries, reproducible
 artifacts, and interpreter/Wasm differential execution remain later tracks. No
 internal census is an empirical maintenance advantage, user-facing performance
 guarantee, or proof of application behavior. The proposed M experiment is not
-implemented by these compiler owners. P3.6 complete runtime-lowered owner is the next production checkpoint.
+implemented by these compiler owners. P4.1 is the next production checkpoint.
 Consult [TODO.md](../TODO.md#execution-cursor) for the single active cursor and
 [the analysis](project-analysis.md) for the experiment rationale.

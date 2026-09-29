@@ -8,13 +8,13 @@ effects, explicit capability authority, executable contracts, and semantic ident
 The aim is to make important assumptions inspectable rather than reconstructing
 them from conventions and repository history.
 
-**Status, September 26, 2026:** the September 9 baseline at `6ec4ba9` has an
+**Status, September 29, 2026:** the September 9 baseline at `6ec4ba9` has an
 executable reference interpreter and CLI, not a production-ready compiler or stable
-toolchain. The current worktree completes E1-E6, P1, P2, P3.1-P3.5 for the frozen E6 profile; P3.5 is complete and P3.6 is the next overall item and production
-checkpoint. M1 evaluated an
+toolchain. The current worktree completes E1-E6, P1, P2, and P3 for the frozen E6
+profile; P4.1 is the next overall item and production checkpoint. M1 evaluated an
 unvalidated candidate and stopped as infeasible because independent governance and
 protected evaluation material are unavailable. There is no backend, production
-physical ABI, complete runtime lowering, `sol build`, full public IR, or SMT proof
+physical ABI, `sol build`, full public IR, or SMT proof
 discharge.
 
 [TODO.md](TODO.md) is the sole live status and execution-order ledger.
@@ -127,7 +127,7 @@ The current edition-2027 subset is deliberately bounded. See the
 | Execution | `check`, `test`, `run`, `effects`, `inspect`, `fmt`; deterministic resource limits and bounded explicit hosting |
 | Contracts | Typed pure templates, runtime callable CHECK policy, entry-state `old`, applicable `ensures`, and executable direct refined construction |
 | Tool interfaces | Structured diagnostics, package-local stable top-level identities, selected versioned inspection projections |
-| Experimental internals | Full frozen-E6 callable CFG MIR; complete P2 `SolMirConcreteProgram`; separate P3.1 `SolMirRuntimeConventions`, P3.3 `SolMirRuntimeCleanup`, P3.4 `SolMirRuntimeHostAbi`, and P3.5 `SolMirRuntimeHandlerAbi` owners for target-independent call/failure, cleanup, trusted-host, and exact-handler ABI policy, with independent validation and canonical rendering |
+| Experimental internals | Full frozen-E6 callable CFG MIR; complete P2 `SolMirConcreteProgram`; separate P3 runtime owners including `SolMirRuntimeLoweredProgram`, which joins the authenticated complete P2/P3.1-P3.5 closure with independent validation and canonical rendering |
 
 Important boundaries are part of the behavior, not incidental missing polish:
 
@@ -177,12 +177,14 @@ This orientation mirrors the [live execution cursor](TODO.md#execution-cursor),
 not a second checklist. E1-E6 established bounded application execution; P1
 completed frozen-core CFG MIR; P2 completed concrete planning through the
 validated, canonically rendered whole-program owner for the frozen E6 profile;
-P3.1 froze the separate target-independent call/result/failure contract; P3.3 freezes static cleanup, panic-detail, and failure-transition policy; P3.4 freezes static capability and trusted-host ABI policy; P3.5 freezes static exact-handler ABI policy.
+P3 freezes the separate target-independent runtime-lowered closure: call/result/failure,
+value-demand, cleanup/failure, trusted-host, and exact-handler policy are joined by
+`SolMirRuntimeLoweredProgram` without selecting a physical ABI or backend.
 
 1. **M1 (completed as infeasible):** evaluated an unvalidated expense-policy candidate and stopped because no independent participant, protected held-out material, externally controlled verifier, or independent adjudicator exists.
 2. **P2 (complete):** P2.8 froze, validated, rendered, and censused the complete concrete-program contract without selecting a runtime ABI or emitting Wasm.
 3. **P3.1 (complete):** froze target-independent receiver-first signatures, direct/indirect calls, access/result/failure conventions, stable runtime-import identities, canonical failure provenance, and E2 exit mapping over the immutable P2 owner.
-4. **P3.5 (complete):** `SolMirRuntimeHandlerAbi` borrows P3.1-P3.4 and statically owns bodyful root-capability provider/value/place/internal-operation plans with exact receiver-first P3.1 signatures and lexical parents. Dispatch requires exact source operation, root, and closed-effect identity; provider invocation hides the matched frame and younger suffix, then restores that exact suffix in LIFO order on success or failure, including nested older-provider invocation under an already hidden suffix. Every P2 marker and P3.3 cleanup exit is paired. Its bounded test-only caller-storage activation model adds no executor, adapter, storage ownership, tokens, backend, or execution. Focused census: 7 frames, 14 exit markers, 8 cleanup exits, 29 marker references, stack depth 7, test work 7, 2152 owned bytes, build scratch/work 56/7809, validation scratch/work 56/12251; empty E6 has zero counts/storage/scratch, build work 22, validation work 2707. Final Debug and ASan/UBSan each passed 53/53. **P3.6 runtime-lowered owner is next.**
+4. **P3 (complete):** Address-stable `SolMirRuntimeLoweredProgram` borrows authenticated P2/P3.1-P3.5 owners and makes typed same-ID joins across image/predicate CFGs, semantic operations, calls/signatures/imports/failures, recipe/value demands, cleanup/failure, requirements/distinct root grants/incidence, and handler frames/exits. Its hostile validator proves full transitive anti-aliasing; draft-first exact-limit build/validation/rendering emits one canonical semantic rendering. It adds no executor, physical ABI, Wasm, adapter, allocator implementation, CLI/build artifact, or tokens. E6 uses image 471/65/64/64/64/65, predicate 4/6/4/0/0/0/4, 75 semantic plans, 12 calls/signatures, 48 imports, 20 recipes/value plans, 295 demands, 1426 cleanup failures, host 5/4/5, and no handlers; final Debug and ASan/UBSan each passed 54/54. `p35` covers handler joins; `p35_reordered` validates at 253227 work because authenticated borrowed path text differs while canonical bytes do not. **P4.1 is next.**
 5. **P4-P5:** integrate a pinned Wasm backend/host adapter, then reproducible `sol build` artifacts and interpreter/Wasm differential conformance.
 
 **M2-M5 remain gated** unless M1 is reopened and completed feasibly with independent
@@ -194,7 +196,7 @@ comparison against source-only work. M4E would remain an optional basic editor
 slice after M1/M2 projection feasibility, not full LSP or an M5 prerequisite.
 
 The early **P3.W1** Wasm ABI integration experiment is eligible only because P3.1
-has tested call/result/failure conventions, but it does not replace the current P3.6 cursor.
+has tested call/result/failure conventions, but it does not replace the current P4.1 cursor.
 Allocation, cleanup, and host imports
 enter only after the relevant P3.2-P3.4 conventions are tested. It informs the
 backend choice; it does not complete P4, component support, E6 Wasm execution, or
@@ -214,10 +216,10 @@ boundaries remain solely in TODO.
 | Document | How to use it |
 | --- | --- |
 | [TODO](TODO.md) | Sole live work status, dependencies, acceptance criteria, and execution cursor |
-| [Compiler status](docs/compiler-status.md) | Detailed `6ec4ba9` snapshot plus current-worktree P2.7-P3.5 addenda: APIs, packages, ownership, effects, inspection, MIR, complete concrete-program ownership, runtime conventions/value/host/handler-ABI plans, validation/rendering, and limitations |
+| [Compiler status](docs/compiler-status.md) | Detailed `6ec4ba9` snapshot plus current-worktree P2.7-P3.6 addenda: APIs, packages, ownership, effects, inspection, MIR, complete concrete-program and runtime-lowered ownership, validation/rendering, and limitations |
 | [Project analysis](docs/project-analysis.md) | Dated document-based assessment and proposed maintenance-workflow evaluation, not a fresh implementation audit |
 | [AI-native workflow review notes](sol_ai_native_workflow_notes.pdf) | Advisory external review input incorporated into the live roadmap; not a status, execution-order, specification, or implementation authority |
-| [Design Specification v0.2 PDF](Sol_Programming_Language_Design_Specification_v0.2.pdf) / [Typst source](docs/specification.typ) | September 26, 2026 source revision; September 9, 2026 implementation baseline `6ec4ba9` through P2.6. The source has clearly marked current-worktree P2.7-P3.5 addenda; the unchanged checked PDF remains pre-P2.8 until Typst 0.15.1 is available to regenerate it. Target-language design with explicit implementation boundaries; not all examples are executable. |
+| [Design Specification v0.2 PDF](Sol_Programming_Language_Design_Specification_v0.2.pdf) / [Typst source](docs/specification.typ) | September 29, 2026 source revision; September 9, 2026 implementation baseline `6ec4ba9` through P2.6. The source has clearly marked current-worktree P2.7-P3.6 addenda; the unchanged checked PDF remains pre-P2.8 until Typst 0.15.1 is available to regenerate it. Target-language design with explicit implementation boundaries; not all examples are executable. |
 | [Current-State Audit PDF](Sol_Current_State_Audit.pdf) / [Typst source](docs/current-state-audit.typ) | September 9, 2026 document-based assessment of `6ec4ba9` through P2.6, replacing the August 25 assessment; not a fresh full-suite test report |
 
 Both documents' authoritative editable sources are Typst; generated PDFs are
