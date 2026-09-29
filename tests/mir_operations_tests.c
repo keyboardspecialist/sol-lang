@@ -496,6 +496,9 @@ static void reject_forged_predicate_propagation(SolMirOperations *o) {
     forged.failure_kind = SOL_MIR_PREDICATE_FAILURE_CALL;
     *term = forged;
     CHECK(!sol_mir_operations_validate(o, NULL));
+    /* PROPAGATE owns normal_edge/failure_edge; the legacy jump edge is inactive. */
+    term->edge = 0;
+    CHECK(!sol_mir_operations_validate(o, NULL));
     *term = saved;
     CHECK(sol_mir_operations_validate(o, NULL));
 }

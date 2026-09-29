@@ -88,6 +88,27 @@ static bool occurrence_for_transition(const SolMirRuntimeCleanup *cleanup,
     }
     return false;
 }
+/* Predicate propagation has no source spelling.  Keep its P3.3 edge schema
+ * covered with a bounded P2-shaped terminator instead of inventing a source
+ * fixture or extending the language contract. */
+static void check_predicate_propagate_schema(void) {
+    SolMirPredicateTerminator term;
+    memset(&term, 0, sizeof(term));
+    term.kind = SOL_MIR_PREDICATE_TERM_PROPAGATE;
+    term.edge = SOL_MIR_OPERATION_NONE;
+    term.normal_edge = 41;
+    term.failure_edge = 73;
+    size_t edges[2] = {SOL_MIR_RUNTIME_NONE, SOL_MIR_RUNTIME_NONE};
+    SolMirRuntimeCleanupEdgeRole roles[2] = {
+        SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO, SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO,
+    };
+    CHECK(sol_mir_runtime_cleanup_test_predicate_propagate_schema(&term, edges, roles));
+    CHECK(edges[0] == term.normal_edge && edges[1] == term.failure_edge);
+    CHECK(roles[0] == SOL_MIR_RUNTIME_CLEANUP_EDGE_PROPAGATE_VALUE
+        && roles[1] == SOL_MIR_RUNTIME_CLEANUP_EDGE_PROPAGATE_RESIDUAL);
+    term.edge = 0;
+    CHECK(!sol_mir_runtime_cleanup_test_predicate_propagate_schema(&term, edges, roles));
+}
 /* The E6 program deliberately contains all finite policy shapes used here:
  * owned and borrowed formals, projected Result/Option propagation, contracts
  * and snapshots, calls/branches/returns, arithmetic and capability failures.
@@ -563,6 +584,7 @@ static void check_authenticated_contract_suppression(const SolMirRuntimeCleanup 
 }
 
 int main(void) {
+    check_predicate_propagate_schema();
     SolMirRuntimeCleanup cleanup;
     sol_mir_runtime_cleanup_init(&cleanup);
     CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));

@@ -487,7 +487,10 @@ static size_t predicate_edges(const SolMirPredicateTerminator *term, size_t resu
         case SOL_MIR_PREDICATE_TERM_BRANCH: result[n++] = term->true_edge; result[n++] = term->false_edge; break;
         case SOL_MIR_PREDICATE_TERM_INVOKE: case SOL_MIR_PREDICATE_TERM_CHECK_REFINED:
             result[n++] = term->normal_edge; result[n++] = term->failure_edge; break;
-        case SOL_MIR_PREDICATE_TERM_PROPAGATE: result[n++] = term->edge; break;
+        case SOL_MIR_PREDICATE_TERM_PROPAGATE:
+            result[n++] = term->normal_edge;
+            result[n++] = term->failure_edge;
+            break;
         default: break;
     }
     return n;
@@ -700,6 +703,10 @@ static SolMirRuntimeCleanupEdgeRole cleanup_role(const SolMirRuntimeCleanupEvent
         if (term->kind == SOL_MIR_PREDICATE_TERM_CHECK_REFINED)
             return transition->continuation == term->normal_edge
                 ? SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_SATISFIED : SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_FAILURE;
+        if (term->kind == SOL_MIR_PREDICATE_TERM_PROPAGATE)
+            return transition->continuation == term->normal_edge
+                ? SOL_MIR_RUNTIME_CLEANUP_EDGE_PROPAGATE_VALUE
+                : SOL_MIR_RUNTIME_CLEANUP_EDGE_PROPAGATE_RESIDUAL;
     }
     return SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO;
 }
@@ -945,6 +952,31 @@ static bool keyed_u64(const char *domain, uint64_t value, SolMirLinkageDigest *o
 static bool keyed_source(SolMirRuntimeSource source, SolMirLinkageDigest *out) { SolMirLinkageSha256 s; sol_mir_linkage_internal_sha256_init(&s); sol_mir_linkage_internal_sha256_write(&s, "source", 6); digest_u64(&s, source.file); digest_u64(&s, source.start); digest_u64(&s, source.end); return sol_mir_linkage_internal_sha256_finish(&s, out); }
 bool sol_mir_runtime_cleanup_render(FILE*stream,const SolMirRuntimeCleanup*c){if(!stream||!sol_mir_runtime_cleanup_validate(c,NULL))return false;Buffer b={0};put(&b,"mir_runtime_cleanup\ndeclaration.kind=cleanup-policy cleanup-policy=true cleanup-execution=false\n");for(size_t i=0;i<c->event_count;i++){const SolMirRuntimeCleanupEvent*event=&c->events[i];SolMirLinkageDigest key,source_key;if(!cleanup_digest(c,i,&key)||!keyed_source(event->source,&source_key)){b.bad=true;break;}put(&b,"event key=");render_digest(&b,&key);put(&b," producer=%s capture-detail=%s source-key=",producer_name(event->producer),event->captures_failure_detail?"before-cleanup":"none");render_digest(&b,&source_key);put(&b," failure-precedence=first\n");if(event->supplemental_site!=SOL_MIR_RUNTIME_NONE){const SolMirRuntimeCleanupSupplementalSite *site=&c->supplemental_sites[event->supplemental_site];SolMirLinkageDigest site_key,site_source;if(!keyed_u64("supplemental-site",event->supplemental_site,&site_key)||!keyed_source(site->source,&site_source)){b.bad=true;break;}put(&b,"site key=");render_digest(&b,&site_key);put(&b," origin=supplemental source-key=");render_digest(&b,&site_source);put(&b," code-mask=%08x\n",site->allowed_codes);}for(size_t j=0;j<event->transitions.count;j++){const SolMirRuntimeCleanupTransition*t=&c->transitions[event->transitions.offset+j];SolMirLinkageDigest edge_key,destination_key,site_key;if(!keyed_u64("edge",t->source_edge,&edge_key)||!keyed_u64("destination",t->destination,&destination_key)||!keyed_u64("failure-site",t->failure_site,&site_key)){b.bad=true;break;}put(&b,"transition event=");render_digest(&b,&key);put(&b," role=%s edge-key=",role_name(t->edge_role));render_digest(&b,&edge_key);put(&b," destination-key=");render_digest(&b,&destination_key);put(&b," failure-source=%s failure-site-key=",failure_source_name(t->failure_source));render_digest(&b,&site_key);put(&b," code-mask=%08x flags=%s\n",t->failure_mask,t->primary_failure_wins?"primary-wins":"none");for(size_t q=0;q<t->actions.count;q++){const SolMirRuntimeCleanupAction*a=&c->actions[t->actions.offset+q];SolMirLinkageDigest action_key,target_key,recipe_key,path_key;if(!cleanup_action_digest(c,a,&action_key)||!keyed_u64("target",a->target,&target_key)||!keyed_u64("recipe",a->recipe,&recipe_key)||!keyed_u64("path",a->drop_path,&path_key)){b.bad=true;break;}put(&b,"action key=");render_digest(&b,&action_key);put(&b," kind=%s target=%s:",action_name(a->kind),target_class(a->kind));render_digest(&b,&target_key);put(&b," recipe-key=");render_digest(&b,&recipe_key);put(&b," guard=%s path-slice-key=",(a->flags&SOL_MIR_RUNTIME_CLEANUP_ACTION_GUARDED)?"conditional":"definite");render_digest(&b,&path_key);put(&b,"\n");}if(b.bad)break;}if(b.bad)break;}bool ok=!b.bad&&fwrite(b.p,1,b.n,stream)==b.n;free(b.p);return ok;}
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
+bool sol_mir_runtime_cleanup_test_predicate_propagate_schema(
+    const SolMirPredicateTerminator *term, size_t edges[2],
+    SolMirRuntimeCleanupEdgeRole roles[2]) {
+    if (term == NULL || edges == NULL || roles == NULL
+        || term->kind != SOL_MIR_PREDICATE_TERM_PROPAGATE
+        || term->edge != SOL_MIR_OPERATION_NONE
+        || term->normal_edge == SOL_MIR_OPERATION_NONE
+        || term->failure_edge == SOL_MIR_OPERATION_NONE
+        || term->normal_edge == term->failure_edge
+        || predicate_edges(term, edges) != 2) return false;
+    SolMirPredicateBlock block = {0};
+    SolMirOperations operations = {0};
+    SolMirRuntimeCleanupEvent event = {0};
+    SolMirRuntimeCleanupTransition transition = {0};
+    block.terminator = *term;
+    operations.predicate_blocks = &block;
+    operations.predicate_block_count = 1;
+    event.kind = SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR;
+    transition.continuation = edges[0];
+    roles[0] = cleanup_role(&event, &transition, NULL, &operations);
+    transition.continuation = edges[1];
+    roles[1] = cleanup_role(&event, &transition, NULL, &operations);
+    return roles[0] == SOL_MIR_RUNTIME_CLEANUP_EDGE_PROPAGATE_VALUE
+        && roles[1] == SOL_MIR_RUNTIME_CLEANUP_EDGE_PROPAGATE_RESIDUAL;
+}
 bool sol_mir_runtime_cleanup_test_reconstruct_usage(const SolMirRuntimeConventions*c,const SolMirRuntimeValues*v,const SolMirRuntimeCleanupLimits*l,SolMirRuntimeCleanupUsage*u){if(!c||!v||v->conventions!=c||!l||!u||!complete(*l))return false;SolMirRuntimeCleanup x;sol_mir_runtime_cleanup_init(&x);x.conventions=c;x.values=v;x.limits=*l;size_t bytes; if(!scratch_bytes(&x,&bytes))return false; Workspace w={(unsigned char*)scratch_allocate(bytes),bytes,0};if(bytes&&!w.bytes)return false;Sink s={0};s.work=&s.count.build_work;bool ok=usage(&x,&s,&w)&&fit(&s.count,l);free(w.bytes);if(!ok)return false;*u=s.count;return true;}
 static bool occurrence_detail_valid(const SolMirRuntimeCleanupFailureOccurrence *x) {
     if (x->detail_length > SOL_MIR_RUNTIME_HOST_DETAIL_MAX) return false;

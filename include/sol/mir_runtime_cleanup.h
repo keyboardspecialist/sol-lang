@@ -336,5 +336,11 @@ size_t sol_mir_runtime_cleanup_test_validation_scratch_attempts(void);
 bool sol_mir_runtime_cleanup_test_alias_work(const SolMirRuntimeCleanup *, size_t *);
 bool sol_mir_runtime_cleanup_test_reconstruct_usage(const SolMirRuntimeConventions *,
     const SolMirRuntimeValues *, const SolMirRuntimeCleanupLimits *, SolMirRuntimeCleanupUsage *);
+/* Predicate propagation is currently not generated from source.  This bounded
+ * schema hook covers its two authoritative P2 continuations without extending
+ * the source-language contract. */
+bool sol_mir_runtime_cleanup_test_predicate_propagate_schema(
+    const SolMirPredicateTerminator *, size_t edges[2],
+    SolMirRuntimeCleanupEdgeRole roles[2]);
 #endif
 #endif

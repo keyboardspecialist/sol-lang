@@ -684,7 +684,10 @@ static size_t predicate_edges(const SolMirPredicateTerminator *term, size_t resu
         case SOL_MIR_PREDICATE_TERM_BRANCH: result[n++] = term->true_edge; result[n++] = term->false_edge; break;
         case SOL_MIR_PREDICATE_TERM_INVOKE: case SOL_MIR_PREDICATE_TERM_CHECK_REFINED:
             result[n++] = term->normal_edge; result[n++] = term->failure_edge; break;
-        case SOL_MIR_PREDICATE_TERM_PROPAGATE: result[n++] = term->edge; break;
+        case SOL_MIR_PREDICATE_TERM_PROPAGATE:
+            result[n++] = term->normal_edge;
+            result[n++] = term->failure_edge;
+            break;
         default: break;
     }
     return n;
@@ -958,6 +961,10 @@ static SolMirRuntimeCleanupEdgeRole validation_role(const SolMirRuntimeCleanupEv
         if (term->kind == SOL_MIR_PREDICATE_TERM_CHECK_REFINED)
             return transition->continuation == term->normal_edge
                 ? SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_SATISFIED : SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_FAILURE;
+        if (term->kind == SOL_MIR_PREDICATE_TERM_PROPAGATE)
+            return transition->continuation == term->normal_edge
+                ? SOL_MIR_RUNTIME_CLEANUP_EDGE_PROPAGATE_VALUE
+                : SOL_MIR_RUNTIME_CLEANUP_EDGE_PROPAGATE_RESIDUAL;
     }
     return SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO;
 }
