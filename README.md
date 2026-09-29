@@ -11,7 +11,7 @@ them from conventions and repository history.
 **Status, September 29, 2026:** the September 9 baseline at `6ec4ba9` has an
 executable reference interpreter and CLI, not a production-ready compiler or stable
 toolchain. The current worktree completes E1-E6, P1, P2, and P3 for the frozen E6
-profile; P4.1 is the next overall item and production checkpoint. M1 evaluated an
+profile; P4.1 completes the opt-in pinned WebAssembly toolchain probe and P4.2 is the next overall item and production checkpoint. M1 evaluated an
 unvalidated candidate and stopped as infeasible because independent governance and
 protected evaluation material are unavailable. There is no backend, production
 physical ABI, `sol build`, full public IR, or SMT proof
@@ -19,7 +19,7 @@ discharge.
 
 [TODO.md](TODO.md) is the sole live status and execution-order ledger.
 [Compiler status](docs/compiler-status.md) records the detailed baseline,
-current-worktree P2.7-P3.5 addenda, and compatibility limits;
+current-worktree P2.7-P4.1 addenda, toolchain boundary, and compatibility limits;
 [project analysis](docs/project-analysis.md) explains the product hypothesis,
 risks, and proposed experiments.
 
@@ -184,8 +184,9 @@ value-demand, cleanup/failure, trusted-host, and exact-handler policy are joined
 1. **M1 (completed as infeasible):** evaluated an unvalidated expense-policy candidate and stopped because no independent participant, protected held-out material, externally controlled verifier, or independent adjudicator exists.
 2. **P2 (complete):** P2.8 froze, validated, rendered, and censused the complete concrete-program contract without selecting a runtime ABI or emitting Wasm.
 3. **P3.1 (complete):** froze target-independent receiver-first signatures, direct/indirect calls, access/result/failure conventions, stable runtime-import identities, canonical failure provenance, and E2 exit mapping over the immutable P2 owner.
-4. **P3 (complete):** Address-stable `SolMirRuntimeLoweredProgram` borrows authenticated P2/P3.1-P3.5 owners and makes typed same-ID joins across image/predicate CFGs, semantic operations, calls/signatures/imports/failures, recipe/value demands, cleanup/failure, requirements/distinct root grants/incidence, and handler frames/exits. Its hostile validator proves full transitive anti-aliasing; draft-first exact-limit build/validation/rendering emits one canonical semantic rendering. It adds no executor, physical ABI, Wasm, adapter, allocator implementation, CLI/build artifact, or tokens. E6 uses image 471/65/64/64/64/65, predicate 4/6/4/0/0/0/4, 75 semantic plans, 12 calls/signatures, 48 imports, 20 recipes/value plans, 295 demands, 1426 cleanup failures, host 5/4/5, and no handlers; final Debug and ASan/UBSan each passed 54/54. `p35` covers handler joins; `p35_reordered` validates at 253227 work because authenticated borrowed path text differs while canonical bytes do not. **P4.1 is next.**
-5. **P4-P5:** integrate a pinned Wasm backend/host adapter, then reproducible `sol build` artifacts and interpreter/Wasm differential conformance.
+4. **P3 (complete):** Address-stable `SolMirRuntimeLoweredProgram` borrows authenticated P2/P3.1-P3.5 owners and makes typed same-ID joins across image/predicate CFGs, semantic operations, calls/signatures/imports/failures, recipe/value demands, cleanup/failure, requirements/distinct root grants/incidence, and handler frames/exits. Its hostile validator proves full transitive anti-aliasing; draft-first exact-limit build/validation/rendering emits one canonical semantic rendering. It adds no executor, physical ABI, Wasm, adapter, allocator implementation, CLI/build artifact, or tokens. E6 uses image 471/65/64/64/64/65, predicate 4/6/4/0/0/0/4, 75 semantic plans, 12 calls/signatures, 48 imports, 20 recipes/value plans, 295 demands, 1426 cleanup failures, host 5/4/5, and no handlers; final Debug and ASan/UBSan each passed 54/54. `p35` covers handler joins; `p35_reordered` validates at 253227 work because authenticated borrowed path text differs while canonical bytes do not. **P4.1 is complete; P4.2 is next.**
+5. **P4.1 (complete):** Binaryen 129 C API and Wasmtime 49.0.1 C API are pinned behind opt-in root-only CMake discovery; the Darwin arm64 probe emits/validates/optimizes deterministic core Wasm bytes and independently validates, instantiates, and runs them. OFF + Werror passed 54/54; ON + Werror and ON + ASan/UBSan each passed 56/56. This is not CFG lowering, a stable ABI, adapter, Sol execution, artifact, or `sol build`; see [Wasm toolchain](docs/wasm-toolchain.md). **P4.2 is next:** lower scalar CFG and ordinary calls; P4 remains open.
+6. **P5:** reproducible `sol build` artifacts and interpreter/Wasm differential conformance remain open.
 
 **M2-M5 remain gated** unless M1 is reopened and completed feasibly with independent
 governance and protected evaluation inputs. If that occurs, M2 would create
@@ -196,11 +197,12 @@ comparison against source-only work. M4E would remain an optional basic editor
 slice after M1/M2 projection feasibility, not full LSP or an M5 prerequisite.
 
 The early **P3.W1** Wasm ABI integration experiment is eligible only because P3.1
-has tested call/result/failure conventions, but it does not replace the current P4.1 cursor.
+has tested call/result/failure conventions, but it remains unperformed historical/optional proposed work and does not replace the current P4.2 cursor.
 Allocation, cleanup, and host imports
-enter only after the relevant P3.2-P3.4 conventions are tested. It informs the
-backend choice; it does not complete P4, component support, E6 Wasm execution, or
-build tooling. One coordinator maintains the sole next-overall cursor in TODO.
+enter only after the relevant P3.2-P3.4 conventions are tested. If separately
+activated, it could inform later ABI/backend integration; it did not influence the
+already-completed P4.1 selection and does not complete P4, component support, E6
+Wasm execution, or build tooling. One coordinator maintains the sole next-overall cursor in TODO.
 
 A feasibly reopened M track would require a protected external experiment contract,
 existing inspection, ordinary edits, independent verification, and
@@ -216,10 +218,11 @@ boundaries remain solely in TODO.
 | Document | How to use it |
 | --- | --- |
 | [TODO](TODO.md) | Sole live work status, dependencies, acceptance criteria, and execution cursor |
-| [Compiler status](docs/compiler-status.md) | Detailed `6ec4ba9` snapshot plus current-worktree P2.7-P3.6 addenda: APIs, packages, ownership, effects, inspection, MIR, complete concrete-program and runtime-lowered ownership, validation/rendering, and limitations |
+| [Compiler status](docs/compiler-status.md) | Detailed `6ec4ba9` snapshot plus current-worktree P2.7-P4.1 addenda: compiler boundaries, runtime-lowered ownership, Wasm probe validation, and limitations |
+| [Wasm toolchain](docs/wasm-toolchain.md) | P4.1 technical authority: Binaryen/Wasmtime versions, opt-in root-only configuration, probe namespace contract, validation, and provenance limits |
 | [Project analysis](docs/project-analysis.md) | Dated document-based assessment and proposed maintenance-workflow evaluation, not a fresh implementation audit |
 | [AI-native workflow review notes](sol_ai_native_workflow_notes.pdf) | Advisory external review input incorporated into the live roadmap; not a status, execution-order, specification, or implementation authority |
-| [Design Specification v0.2 PDF](Sol_Programming_Language_Design_Specification_v0.2.pdf) / [Typst source](docs/specification.typ) | September 29, 2026 source revision; September 9, 2026 implementation baseline `6ec4ba9` through P2.6. The source has clearly marked current-worktree P2.7-P3.6 addenda; the unchanged checked PDF remains pre-P2.8 until Typst 0.15.1 is available to regenerate it. Target-language design with explicit implementation boundaries; not all examples are executable. |
+| [Design Specification v0.2 PDF](Sol_Programming_Language_Design_Specification_v0.2.pdf) / [Typst source](docs/specification.typ) | September 29, 2026 source revision; September 9, 2026 implementation baseline `6ec4ba9` through P2.6. The source has clearly marked current-worktree P2.7-P4.1 addenda; generated PDFs were not changed by this documentation update and remain historical renderings. Target-language design with explicit implementation boundaries; not all examples are executable. |
 | [Current-State Audit PDF](Sol_Current_State_Audit.pdf) / [Typst source](docs/current-state-audit.typ) | September 9, 2026 document-based assessment of `6ec4ba9` through P2.6, replacing the August 25 assessment; not a fresh full-suite test report |
 
 Both documents' authoritative editable sources are Typst; generated PDFs are

@@ -7,6 +7,15 @@ set(CMAKE_C_EXTENSIONS OFF)
 option(SOL_ENABLE_SANITIZERS "Enable address and undefined behavior sanitizers" OFF)
 option(SOL_ENABLE_WERROR "Treat compiler warnings as errors" OFF)
 option(SOL_BUILD_FUZZERS "Build Clang libFuzzer targets" OFF)
+option(SOL_ENABLE_WASM_BACKEND "Enable the opt-in Binaryen/Wasmtime Wasm backend bootstrap" OFF)
+set(SOL_BINARYEN_ROOT "" CACHE PATH
+    "Absolute root of the exact Binaryen 129 installation (Wasm backend only)")
+set(SOL_WASMTIME_ROOT "" CACHE PATH
+    "Absolute root of the exact Wasmtime 49.0.1 installation (Wasm backend only)")
+
+if(SOL_ENABLE_WASM_BACKEND)
+    include(cmake/SolWasmDependencies.cmake)
+endif()
 
 if(SOL_ENABLE_WERROR)
     if(MSVC)
@@ -102,9 +111,15 @@ add_library(sol_compiler STATIC
     src/source.c
     src/syntax.c
     src/typecheck.c
+    $<$<BOOL:${SOL_ENABLE_WASM_BACKEND}>:src/wasm_backend.c>
 )
 
 target_include_directories(sol_compiler PUBLIC include)
+
+if(SOL_ENABLE_WASM_BACKEND)
+    target_link_libraries(sol_compiler PRIVATE
+        sol_binaryen_dependency sol_wasmtime_dependency)
+endif()
 
 if(SOL_BUILD_FUZZERS)
     target_compile_options(sol_compiler PRIVATE
@@ -267,6 +282,11 @@ if(BUILD_TESTING)
     target_link_libraries(sol_inspection_tests PRIVATE sol_compiler)
     add_executable(sol_test_declaration_tests tests/test_declaration_tests.c)
     target_link_libraries(sol_test_declaration_tests PRIVATE sol_compiler)
+    if(SOL_ENABLE_WASM_BACKEND)
+        add_executable(sol_wasm_backend_tests tests/wasm_backend_tests.c)
+        target_link_libraries(sol_wasm_backend_tests PRIVATE sol_compiler)
+        target_include_directories(sol_wasm_backend_tests PRIVATE src)
+    endif()
     if(UNIX)
         add_executable(sol_cli_io_helper tests/cli_io_helper.c)
         set(SOL_CLI_IO_HELPER $<TARGET_FILE:sol_cli_io_helper>)
@@ -308,6 +328,9 @@ if(BUILD_TESTING)
         target_compile_options(sol_interpreter_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_inspection_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_test_declaration_tests PRIVATE /std:c17 /W4)
+        if(SOL_ENABLE_WASM_BACKEND)
+            target_compile_options(sol_wasm_backend_tests PRIVATE /std:c17 /W4)
+        endif()
         if(UNIX)
             target_compile_options(sol_cli_io_helper PRIVATE /std:c17 /W4)
         endif()
@@ -340,6 +363,9 @@ if(BUILD_TESTING)
         target_compile_options(sol_interpreter_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_inspection_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         target_compile_options(sol_test_declaration_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
+        if(SOL_ENABLE_WASM_BACKEND)
+            target_compile_options(sol_wasm_backend_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
+        endif()
         if(UNIX)
             target_compile_options(sol_cli_io_helper PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
         endif()
@@ -349,6 +375,10 @@ if(BUILD_TESTING)
             C_STANDARD_REQUIRED ON
             C_EXTENSIONS OFF
         )
+        if(SOL_ENABLE_WASM_BACKEND)
+            set_target_properties(sol_wasm_backend_tests PROPERTIES
+                C_STANDARD 17 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+        endif()
     endif()
 
     if(SOL_ENABLE_SANITIZERS AND CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
@@ -408,6 +438,10 @@ if(BUILD_TESTING)
         target_link_options(sol_inspection_tests PRIVATE -fsanitize=address,undefined)
         target_compile_options(sol_test_declaration_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
         target_link_options(sol_test_declaration_tests PRIVATE -fsanitize=address,undefined)
+        if(SOL_ENABLE_WASM_BACKEND)
+            target_compile_options(sol_wasm_backend_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+            target_link_options(sol_wasm_backend_tests PRIVATE -fsanitize=address,undefined)
+        endif()
     endif()
 
     add_test(NAME frontend COMMAND sol_frontend_tests)
@@ -438,6 +472,19 @@ if(BUILD_TESTING)
     add_test(NAME interpreter COMMAND sol_interpreter_tests)
     add_test(NAME inspection COMMAND sol_inspection_tests)
     add_test(NAME test_declarations COMMAND sol_test_declaration_tests)
+    if(SOL_ENABLE_WASM_BACKEND)
+        add_test(NAME wasm_backend COMMAND sol_wasm_backend_tests)
+        if(UNIX)
+            add_test(NAME wasm_backend_config_rejections
+                COMMAND ${CMAKE_COMMAND}
+                    -DSOL_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
+                    -DSOL_CMAKE_GENERATOR=${CMAKE_GENERATOR}
+                    -DSOL_SHARED_LIBRARY_PREFIX=${CMAKE_SHARED_LIBRARY_PREFIX}
+                    -DSOL_SHARED_LIBRARY_SUFFIX=${CMAKE_SHARED_LIBRARY_SUFFIX}
+                    -DTEST_DIR=${CMAKE_CURRENT_BINARY_DIR}/tests/wasm_backend_config_rejections
+                    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/wasm_backend_config_rejections.cmake)
+        endif()
+    endif()
     add_test(NAME cli_valid COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/valid.sol)
     add_test(NAME cli_mutable COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/mutable.sol)
     add_test(

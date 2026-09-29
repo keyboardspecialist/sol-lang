@@ -7,12 +7,12 @@ This relocates the detailed baseline README documentation, reconciled with the
 approved ledger. It is not a second checklist, a new test report, or a stable ABI
 specification. [TODO.md](../TODO.md) alone owns live work status and order.
 
-**Current-worktree addendum, September 29, 2026:** P2.7, P2.8, and P3.1-P3.6 are
-independently approved and complete in the current worktree, completing P2 and P3
-for the frozen E6 profile. The baseline hash above remains the
-historical September 9 snapshot; no post-baseline commit hash is asserted here. M1
-completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. P4.1 is
-next overall and the next production checkpoint.
+**Current-worktree addendum, September 29, 2026:** P2.7, P2.8, P3.1-P3.6, and P4.1 are
+independently approved and complete in the current worktree. P4.1 pins Binaryen 129
+and Wasmtime 49.0.1 for an opt-in, root-contained Wasm probe; P4 remains open and
+P4.2 is next. The baseline hash above remains the historical September 9 snapshot;
+no post-baseline commit hash is asserted here. M1 completed as infeasible and M2-M5
+remain gated unless it is reopened feasibly.
 
 Use the [README](../README.md) for onboarding and runnable examples, and
 [project analysis](project-analysis.md) for the dated product assessment. The
@@ -28,8 +28,7 @@ The implemented CLI provides `check`, `test`, `run`, `effects`, `inspect`, and
 `fmt`. Reference execution uses owning typed IR, not the separate experimental
 MIR/P2/P3 owners. There is no backend, physical ABI,
 `sol build`, full public IR, or SMT discharge. P3.1 supplies target-independent
-call/result/failure conventions, P3.2a adds a recipe operation-demand inventory, P3.2b adds independently validated allocation plans and pure quota checking, P3.2c adds static ownership plans, P3.2d adds static copy plans, and P3.2e adds static equality plans with allocation-free bounded test modeling, P3.2f adds static E3 host-result transfer plans, P3.3 adds static cleanup/panic/failure policy, P3.4 adds static capability/trusted-host ABI policy, P3.5 adds static exact-handler ABI policy, and P3.6 joins the complete authenticated runtime-lowered graph: there is no executor, physical ABI, allocation implementation, production host adapter, Wasm, CLI/build artifact, or tokens. Wasm is the first planned production target; native
-output is deferred and Component Model integration is not implemented.
+call/result/failure conventions, P3.2a adds a recipe operation-demand inventory, P3.2b adds independently validated allocation plans and pure quota checking, P3.2c adds static ownership plans, P3.2d adds static copy plans, and P3.2e adds static equality plans with allocation-free bounded test modeling, P3.2f adds static E3 host-result transfer plans, P3.3 adds static cleanup/panic/failure policy, P3.4 adds static capability/trusted-host ABI policy, P3.5 adds static exact-handler ABI policy, and P3.6 joins the complete authenticated runtime-lowered graph: there is no executor, physical ABI, allocation implementation, production host adapter, Sol execution, CLI/build artifact, or tokens. P4.1 adds only the opt-in Binaryen 129/Wasmtime 49.0.1 core-Wasm probe: it emits, validates, explicitly optimizes, independently validates, instantiates, and invokes a fixed `[] -> [i32]` module returning 4. OFF + Werror passed 54/54; ON + Werror and ON + ASan/UBSan each passed 56/56. It is not CFG lowering, an adapter, production optimizer policy, or a stable public ABI. Wasm is the first production target; native output is deferred and Component Model integration is not implemented. See [Wasm toolchain](wasm-toolchain.md).
 
 Compilation sessions use configurable deterministic ceilings for per-file and package source bytes, source files, directory depth and entries, tokens, persistent arena entries, diagnostics, cumulative allocation bytes, and allocation requests. Disk packages are discovered relative to verified open directory descriptors; source reads reject symbolic links, non-regular or duplicate identities, growth, truncation, replacement, and metadata changes. Raw interpreter host failures are copied through interpreter-owned length-delimited storage rather than borrowed C strings.
 
@@ -1114,6 +1113,6 @@ runtime executor or allocator implementation, build artifact, or public format. 
 artifacts, and interpreter/Wasm differential execution remain later tracks. No
 internal census is an empirical maintenance advantage, user-facing performance
 guarantee, or proof of application behavior. The proposed M experiment is not
-implemented by these compiler owners. P4.1 is the next production checkpoint.
+implemented by these compiler owners. P4.1 is complete; P4.2 is the next production checkpoint.
 Consult [TODO.md](../TODO.md#execution-cursor) for the single active cursor and
 [the analysis](project-analysis.md) for the experiment rationale.
