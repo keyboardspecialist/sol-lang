@@ -65,6 +65,48 @@ static bool build_affine_pair_fixture(Compilation *c, SolMirConcreteProgram *p) 
     return sol_mir_concrete_program_build(&request, p, &c->diagnostics)
         == SOL_MIR_CONCRETE_BUILD_SUCCEEDED;
 }
+static void check_zero_supplemental_alias_preflight(void) {
+    Compilation c; SolMirConcreteProgram program; SolMirRuntimeConventions conventions;
+    SolMirRuntimeValues values; SolMirRuntimeCleanup cleanup, rebuilt;
+    sol_mir_concrete_program_init(&program); sol_mir_runtime_conventions_init(&conventions);
+    sol_mir_runtime_values_init(&values); sol_mir_runtime_cleanup_init(&cleanup);
+    sol_mir_runtime_cleanup_init(&rebuilt);
+    bool compiled = compile_directory(&c,
+        SOL_TEST_SOURCE_DIR "/tests/conformance/p33_alias_zero");
+    CHECK(compiled);
+    SolIrCallableId choose = compiled
+        ? callable(&c.ir, "choose", SOL_IR_CALLABLE_CAPABILITY) : SOL_IR_NONE;
+    SolIrCallableId root = compiled
+        ? callable(&c.ir, "root", SOL_IR_CALLABLE_FUNCTION) : SOL_IR_NONE;
+    SolMirProgramRoot fixture_root = {root, SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    SolMirTargetDescriptor target = sol_mir_target_wasm32();
+    bool built = compiled && choose != SOL_IR_NONE && root != SOL_IR_NONE
+        && sol_mir_concrete_program_build(&(SolMirConcreteBuildRequest){&c.ir,
+            &fixture_root, 1, &choose, 1, &target, NULL}, &program, &c.diagnostics)
+            == SOL_MIR_CONCRETE_BUILD_SUCCEEDED
+        && sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){&program,
+            NULL}, &conventions, &c.diagnostics) == SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED
+        && sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){&conventions,
+            NULL}, &values, &c.diagnostics) == SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED
+        && sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){&conventions,
+            &values, NULL}, &cleanup, &c.diagnostics) == SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED;
+    CHECK(built);
+    if (built) {
+        CHECK(cleanup.supplemental_site_count == 0
+            && cleanup.supplemental_site_capacity == 0 && cleanup.supplemental_sites == NULL
+            && sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+        cleanup.supplemental_sites = (SolMirRuntimeCleanupSupplementalSite *)cleanup.events;
+        CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+        cleanup.supplemental_sites = NULL;
+        CHECK(sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){&conventions,
+            &values, NULL}, &rebuilt, &c.diagnostics) == SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED
+            && sol_mir_runtime_cleanup_validate(&rebuilt, NULL)
+            && memcmp(&cleanup.usage, &rebuilt.usage, sizeof(cleanup.usage)) == 0);
+    }
+    sol_mir_runtime_cleanup_free(&rebuilt); sol_mir_runtime_cleanup_free(&cleanup);
+    sol_mir_runtime_values_free(&values); sol_mir_runtime_conventions_free(&conventions);
+    sol_mir_concrete_program_free(&program); compilation_free(&c);
+}
 static bool occurrence_for_transition(const SolMirRuntimeCleanup *cleanup,
     const SolMirRuntimeConventions *conventions, const SolMirRuntimeCleanupTransition *transition,
     SolMirRuntimeCleanupFailureOccurrence *occurrence) {
@@ -585,6 +627,7 @@ static void check_authenticated_contract_suppression(const SolMirRuntimeCleanup 
 
 int main(void) {
     check_predicate_propagate_schema();
+    check_zero_supplemental_alias_preflight();
     SolMirRuntimeCleanup cleanup;
     sol_mir_runtime_cleanup_init(&cleanup);
     CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
