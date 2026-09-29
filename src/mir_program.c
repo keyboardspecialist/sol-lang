@@ -524,6 +524,35 @@ static bool scan_evidence(Builder *builder, SolIrCallableId source_callable,
 static bool scan_expression(Builder *builder, SolIrCallableId source_callable,
     SolIrExpressionId id, bool predicate, size_t depth);
 
+/* A callable local is statically finite only when its sole immutable binding
+   retains one exact callable expression.  Do not infer through arbitrary
+   callable-valued expressions: the P2 producer must retain its capture site. */
+static SolIrExpressionId local_callable_initializer(const SolIr *ir,
+    SolIrExpressionId expression_id) {
+    if (expression_id >= ir->expression_count) return SOL_IR_NONE;
+    const SolIrExpression *expression = &ir->expressions[expression_id];
+    if (expression->kind != SOL_IR_EXPR_PLACE
+        || expression->as.place >= ir->place_count) return SOL_IR_NONE;
+    const SolIrPlace *place = &ir->places[expression->as.place];
+    if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+        || place->projections.count != 0 || place->local >= ir->local_count)
+        return SOL_IR_NONE;
+    SolIrExpressionId initializer = SOL_IR_NONE;
+    for (size_t index = 0; index < ir->statement_count; ++index) {
+        const SolIrStatement *statement = &ir->statements[index];
+        if (statement->kind != SOL_IR_STATEMENT_LET
+            || statement->local != place->local) continue;
+        if (initializer != SOL_IR_NONE || statement->expression >= ir->expression_count)
+            return SOL_IR_NONE;
+        initializer = statement->expression;
+    }
+    if (initializer == SOL_IR_NONE || ir->expressions[initializer].type != expression->type)
+        return SOL_IR_NONE;
+    SolIrExpressionKind kind = ir->expressions[initializer].kind;
+    return kind == SOL_IR_EXPR_DEFINITION || kind == SOL_IR_EXPR_BOUND_OPERATION
+        ? initializer : SOL_IR_NONE;
+}
+
 static bool scan_refinement_predicates(Builder *builder,
     SolIrCallableId source_callable, SolIrDefinitionId definition,
     size_t depth) {
@@ -569,6 +598,12 @@ static bool scan_static_callable(Builder *builder,
         || depth > ir->expression_count) return true;
     if (!charge_work(builder, 1)) return false;
     const SolIrExpression *expression = &ir->expressions[id];
+    if (expression->kind == SOL_IR_EXPR_PLACE) {
+        SolIrExpressionId initializer = local_callable_initializer(ir, id);
+        if (initializer == SOL_IR_NONE) return true;
+        return scan_static_callable(builder, source_callable, initializer,
+            predicate, depth + 1, finite);
+    }
     if (expression->kind == SOL_IR_EXPR_DEFINITION) {
         SolIrDefinitionId definition = expression->as.definition;
         if (definition >= ir->definition_count

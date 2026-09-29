@@ -670,7 +670,7 @@ int main(void) {
         && conventions.usage.owned_bytes == 16328
         && conventions.usage.build_scratch_bytes == 21
         && conventions.usage.build_work == 9427
-        && conventions.usage.validation_scratch_bytes == 762459316
+        && conventions.usage.validation_scratch_bytes == 762459500
         && conventions.usage.validation_work == 95865687);
     CHECK(values.recipe_operation_count == 21 && values.allocation_plan_count == 21
         && values.copy_plan_count == 21 && values.equality_plan_count == 21
@@ -683,7 +683,7 @@ int main(void) {
         && values.usage.ownership_plans == 21 && values.usage.ownership_variants == 9
         && values.usage.owned_edges == 12 && values.usage.owned_bytes == 4432
         && values.usage.build_scratch_bytes == 94 && values.usage.build_work == 357
-        && values.usage.validation_scratch_bytes == 762459316
+        && values.usage.validation_scratch_bytes == 762459500
         && values.usage.validation_work == 95870865);
     /* Final P3.3 E6 all-roots cleanup-policy census and exact metering. */
     CHECK(cleanup.event_count == 368 && cleanup.action_count == 622

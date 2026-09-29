@@ -597,6 +597,174 @@ static void test_dynamic_predicate_callback_rejection(void) {
     sol_mir_program_free(&program); free_text(&c);
 }
 
+static void test_predicate_local_bound_capability_producer(void) {
+    static const char source[] =
+        "module predicate_local_bound_capability\n"
+        "function free_choose(value: Int64) -> Bool effects { pure } "
+        "{ return value > 0 }\n"
+        "capability Provider { function choose(value: Int64) -> Bool effects { pure } "
+        "{ return value > 0 } }\n"
+        "function root(provider: capability Provider) -> Bool effects { pure } "
+        "requires { { let free_bound = free_choose let bound = provider.choose "
+        "free_bound(1) && bound(1) } } { return true }\n";
+    Compilation c; bool compiled = compile_text(&c, source); CHECK(compiled);
+    if (!compiled) {
+        sol_diagnostics_render_human(stderr, &c.source, &c.diagnostics);
+        free_text(&c); return;
+    }
+    SolIrCallableId root_id = callable(&c.ir, "root", SOL_IR_CALLABLE_FUNCTION);
+    SolIrCallableId provider = callable(&c.ir, "choose", SOL_IR_CALLABLE_CAPABILITY);
+    SolMirProgramRoot root = {root_id, SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    Pipeline p; pipeline_init(&p);
+    bool built = build_pipeline(&c.ir, &root, 1, NULL, 0, &p, NULL);
+    CHECK(built);
+    size_t provider_instances = 0;
+    SolMirPlanInstanceId provider_instance = SOL_MIR_PLAN_NONE;
+    for (size_t i = 0; i < p.plan.instance_count; ++i) {
+        const SolMirPlanInstance *instance = &p.plan.instances[i];
+        if (instance->callable != provider) continue;
+        ++provider_instances;
+        provider_instance = i;
+        CHECK(instance->receiver != SOL_MIR_PLAN_NONE);
+    }
+    CHECK(provider_instances == 1 && provider_instance != SOL_MIR_PLAN_NONE);
+    size_t bound_sites = 0;
+    for (size_t i = 0; i < p.materialization.semantic_site_count; ++i) {
+        const SolMirMaterializedSemanticSite *site = &p.materialization.semantic_sites[i];
+        if (site->kind != SOL_MIR_PLAN_DEMAND_BOUND_OPERATION) continue;
+        const SolMirMaterializedBinding *binding
+            = &p.materialization.bindings[site->binding];
+        if (binding->symbolic_callable != provider) continue;
+        ++bound_sites;
+        CHECK(binding->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+            && binding->instance == provider_instance
+            && site->captured_receiver_kind == SOL_MIR_MATERIALIZED_RECEIVER_PLACE
+            && site->captured_receiver_place != SOL_MIR_MATERIALIZED_NONE);
+    }
+    CHECK(bound_sites == 1);
+    size_t bound_callables = 0;
+    for (size_t i = 0; i < p.operations.callable_count; ++i) {
+        const SolMirOperationCallablePlan *plan = &p.operations.callables[i];
+        if (plan->kind != SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION
+            || plan->target_instance != provider_instance) continue;
+        ++bound_callables;
+        CHECK(plan->capture_kind == SOL_MIR_OPERATION_CAPTURE_PLACE
+            && plan->capture_access != SOL_MIR_OPERATION_NONE);
+    }
+    CHECK(bound_callables == 1 && sol_mir_plan_validate(&p.plan, NULL)
+        && sol_mir_materialization_validate(&p.materialization, NULL)
+        && sol_mir_operations_validate(&p.operations, NULL));
+    pipeline_free(&p);
+
+    static const char bodyless[] =
+        "module predicate_local_host_bound\n"
+        "capability Provider { function choose(value: Int64) -> Bool effects { pure } }\n"
+        "function root(provider: capability Provider) -> Bool effects { pure } "
+        "requires { { let bound = provider.choose bound(1) } } { return true }\n";
+    Compilation hosted; compiled = compile_text(&hosted, bodyless); CHECK(compiled);
+    if (compiled) {
+        SolIrCallableId host_choose = callable(&hosted.ir, "choose",
+            SOL_IR_CALLABLE_CAPABILITY);
+        SolMirProgramRoot host_root = {callable(&hosted.ir, "root",
+            SOL_IR_CALLABLE_FUNCTION), SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+        Pipeline host; pipeline_init(&host);
+        CHECK(build_pipeline(&hosted.ir, &host_root, 1, &host_choose, 1, &host, NULL));
+        CHECK(host.plan.import_count == 1 && host.plan.instance_count == 1
+            && host.operations.callable_count == 1
+            && host.operations.callables[0].kind
+                == SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION
+            && host.operations.callables[0].target_import == 0
+            && host.operations.callables[0].capture_kind
+                == SOL_MIR_OPERATION_CAPTURE_PLACE);
+        pipeline_free(&host);
+    }
+    free_text(&hosted);
+
+    static const char twin_receivers[] =
+        "module predicate_local_twin_receivers\n"
+        "capability Provider { function choose(value: Int64) -> Bool effects { pure } "
+        "{ return value > 0 } }\n"
+        "function root(first: capability Provider, second: capability Provider) "
+        "-> Bool effects { pure } requires { { let first_bound = first.choose "
+        "let second_bound = second.choose first_bound(1) } } { return true }\n";
+    Compilation twins; compiled = compile_text(&twins, twin_receivers); CHECK(compiled);
+    if (compiled) {
+        SolMirProgramRoot twin_root = {callable(&twins.ir, "root",
+            SOL_IR_CALLABLE_FUNCTION), SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+        Pipeline twin; pipeline_init(&twin);
+        CHECK(build_pipeline(&twins.ir, &twin_root, 1, NULL, 0, &twin, NULL));
+        SolMirMaterializedSemanticSite *first = NULL;
+        SolMirMaterializedSemanticSite *second = NULL;
+        for (size_t i = 0; i < twin.materialization.semantic_site_count; ++i) {
+            SolMirMaterializedSemanticSite *site = &twin.materialization.semantic_sites[i];
+            if (site->kind != SOL_MIR_PLAN_DEMAND_BOUND_OPERATION
+                || site->captured_receiver_kind
+                    != SOL_MIR_MATERIALIZED_RECEIVER_PLACE) continue;
+            if (first == NULL) first = site;
+            else if (site->captured_receiver_local != first->captured_receiver_local) {
+                second = site; break;
+            }
+        }
+        CHECK(first != NULL && second != NULL
+            && first->captured_receiver_local != SOL_IR_NONE
+            && second->captured_receiver_local != SOL_IR_NONE
+            && first->captured_receiver_local != second->captured_receiver_local
+            && twin.materialization.places[first->captured_receiver_place].final_type
+                == twin.materialization.places[second->captured_receiver_place].final_type);
+        if (first != NULL && second != NULL) {
+            SolMirMaterializedPlaceId place = first->captured_receiver_place;
+            SolMirMaterializedPlaceId root_place = first->operation.root;
+            first->captured_receiver_place = second->captured_receiver_place;
+            first->operation.root = second->operation.root;
+            CHECK(!sol_mir_materialization_validate(&twin.materialization, NULL));
+            first->captured_receiver_place = place;
+            first->operation.root = root_place;
+            CHECK(sol_mir_materialization_validate(&twin.materialization, NULL));
+
+            SolIrExpressionId expression = first->captured_receiver_expression;
+            SolIrLocalId local = first->captured_receiver_local;
+            first->captured_receiver_expression = second->captured_receiver_expression;
+            first->captured_receiver_local = second->captured_receiver_local;
+            first->captured_receiver_place = second->captured_receiver_place;
+            first->operation.root = second->operation.root;
+            CHECK(!sol_mir_materialization_validate(&twin.materialization, NULL));
+            first->captured_receiver_expression = expression;
+            first->captured_receiver_local = local;
+            first->captured_receiver_place = place;
+            first->operation.root = root_place;
+            CHECK(sol_mir_materialization_validate(&twin.materialization, NULL));
+        }
+        pipeline_free(&twin);
+    }
+    free_text(&twins);
+
+    static const char ambiguous[] =
+        "module ambiguous_predicate_local_bound\n"
+        "capability Provider { function choose(value: Int64) -> Bool effects { pure } "
+        "{ return value > 0 } }\n"
+        "function root(flag: Bool, provider: capability Provider) -> Bool effects { pure } "
+        "requires { { let bound = if flag { provider.choose } else { provider.choose } "
+        "bound(1) } } { return true }\n";
+    Compilation rejected; compiled = compile_text(&rejected, ambiguous); CHECK(compiled);
+    if (compiled) {
+        SolMirProgram program; sol_mir_program_init(&program);
+        SolMirPlan plan; sol_mir_plan_init(&plan);
+        SolMirProgramRoot rejected_root = {callable(&rejected.ir, "root",
+            SOL_IR_CALLABLE_FUNCTION), SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+        SolMirProgramBuildRequest request = {&rejected.ir, &rejected_root, 1,
+            NULL, 0, NULL};
+        CHECK(sol_mir_program_build(&request, &program, &rejected.diagnostics)
+            == SOL_MIR_PROGRAM_BUILD_SUCCEEDED);
+        SolMirPlanBuildRequest plan_request = {&program, NULL};
+        CHECK(sol_mir_plan_build(&plan_request, &plan, &rejected.diagnostics)
+            == SOL_MIR_PLAN_BUILD_UNSUPPORTED_OR_UNRESOLVED);
+        CHECK(plan.program == NULL && plan.instances == NULL && plan.demands == NULL);
+        sol_mir_plan_free(&plan);
+        sol_mir_program_free(&program);
+    }
+    free_text(&rejected); free_text(&c);
+}
+
 static bool collect_pattern_bindings(const SolIr *ir, size_t pattern_id,
     size_t depth, size_t ids[2], size_t *count) {
     if (pattern_id >= ir->pattern_count || depth > ir->pattern_count) return false;
@@ -2060,6 +2228,7 @@ int main(void) {
     test_predicate_body_count_wrap_rejection();
     test_contract_propagation_rejection();
     test_dynamic_predicate_callback_rejection();
+    test_predicate_local_bound_capability_producer();
     test_match_binding_dfs_authentication();
     test_p2_6b2_rich_predicates();
     test_exact_nested_refinement_context();

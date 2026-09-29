@@ -626,7 +626,7 @@ static void test_e6(const SolMirConcreteProgram *program,
         .operands = 24, .writebacks = 1, .entries = 1, .imports = 52,
         .failure_sites = 29, .owned_bytes = 16328,
         .build_scratch_bytes = 21, .build_work = 9427,
-        .validation_scratch_bytes = 762459316,
+        .validation_scratch_bytes = 762459500,
         .validation_work = 95865687,
     };
     CHECK(memcmp(origins, expected_origins, sizeof(origins)) == 0);

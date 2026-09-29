@@ -312,6 +312,8 @@ typedef struct {
     SolMirMaterializedTypeId captured_receiver_type;
     SolMirMaterializedReceiverKind captured_receiver_kind;
     SolIrExpressionId captured_receiver_expression;
+    /* Exact source local selected by a direct bound-operation receiver. */
+    SolIrLocalId captured_receiver_local;
     SolMirMaterializedPlaceId captured_receiver_place;
     SolMirMaterializedTemporaryId captured_receiver_temporary;
     SolMirMaterializedValueId captured_receiver_value;

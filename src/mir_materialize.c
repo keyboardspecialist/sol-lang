@@ -972,6 +972,53 @@ static bool add_count(size_t *total, size_t amount) {
     *total += amount; return true;
 }
 
+/* Predicate CFGs do not contribute their own source places to an image.  A
+   predicate-local bound operation still captures a root receiver at its let
+   initializer, so retain one concrete root place when the executable body did
+   not already materialize it. */
+static bool predicate_receiver_place_needed(const SolMirPlan *plan,
+    const SolMirPlanDemand *demand) {
+    if (demand->kind != SOL_MIR_PLAN_DEMAND_BOUND_OPERATION
+        || demand->parent >= plan->instance_count
+        || demand->context >= plan->context_count
+        || (plan->contexts[demand->context].kind != SOL_MIR_PLAN_CONTEXT_CONTRACT
+            && plan->contexts[demand->context].kind
+                != SOL_MIR_PLAN_CONTEXT_REFINEMENT)
+        || demand->source.expression >= plan->program->ir->expression_count)
+        return false;
+    const SolIrExpression *operation = &plan->program->ir->expressions[
+        demand->source.expression];
+    if (operation->kind != SOL_IR_EXPR_BOUND_OPERATION
+        || operation->as.operation.receiver >= plan->program->ir->expression_count)
+        return false;
+    const SolIrExpression *receiver = &plan->program->ir->expressions[
+        operation->as.operation.receiver];
+    if (receiver->kind != SOL_IR_EXPR_PLACE
+        || receiver->as.place >= plan->program->ir->place_count) return false;
+    const SolIrPlace *source = &plan->program->ir->places[receiver->as.place];
+    if (source->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+        || source->projections.count != 0) return false;
+    const SolMirPlanInstance *instance = &plan->instances[demand->parent];
+    for (size_t use = 0; use < instance->typed_uses.count; ++use) {
+        const SolMirPlanTypedUse *item = &plan->typed_uses[
+            instance->typed_uses.offset + use];
+        if (item->context == instance->contexts.offset
+            && item->kind == SOL_MIR_PLAN_USE_PLACE_ROOT
+            && item->source == receiver->as.place) return false;
+    }
+    const SolMirProgramTemplate *template = find_template(plan, instance->callable);
+    if (template == NULL) return false;
+    for (size_t instruction = 0; instruction < template->mir.instruction_count;
+        ++instruction) {
+        SolMirPlace place;
+        if (instruction_place(&template->mir.instructions[instruction], &place)
+            && ((place.source_place == receiver->as.place)
+                || (place.source_place == SOL_IR_NONE && place.local == source->local)))
+            return false;
+    }
+    return true;
+}
+
 static bool build_scratch(Builder *b) {
     SolMirMaterialization *out = b->out;
     const SolMirPlan *plan = out->plan;
@@ -1067,6 +1114,8 @@ static bool build_scratch(Builder *b) {
         const SolIrExpression *receiver = &plan->program->ir->expressions[
             operation->as.operation.receiver];
         if (!add_count(&receiver_roots, receiver->capability_roots.count)) return false;
+        if (predicate_receiver_place_needed(plan, demand) && !add_count(&places, 1))
+            return false;
     }
     for (size_t i = 0; i < plan->type_count; ++i) {
         const SolMirPlanType *type = &plan->types[i];
@@ -1382,6 +1431,25 @@ static bool build_scratch(Builder *b) {
             out->places[out->place_count++] = (SolMirMaterializedPlace){id,
                 SOL_IR_NONE, local, type->type, {out->projection_count, 0}, type->type};
         }
+        for (size_t demand = 0; demand < plan->demand_count; ++demand) {
+            const SolMirPlanDemand *source = &plan->demands[demand];
+            if (source->parent != id || !predicate_receiver_place_needed(plan, source))
+                continue;
+            const SolIrExpression *operation = &plan->program->ir->expressions[
+                source->source.expression];
+            const SolIrExpression *receiver = &plan->program->ir->expressions[
+                operation->as.operation.receiver];
+            const SolIrPlace *source_place = &plan->program->ir->places[receiver->as.place];
+            const SolMirPlanTypedUse *type = find_use(plan, instance,
+                SOL_MIR_PLAN_USE_PLACE_ROOT, receiver->as.place, 0, source->context);
+            SolMirMaterializedLocalId local = local_for(out, image, source_place->local);
+            if (type == NULL || local == SOL_MIR_MATERIALIZED_NONE
+                || place_for(out, image, (SolMirPlace){source_place->local,
+                    receiver->as.place}) != SOL_MIR_MATERIALIZED_NONE) return false;
+            out->places[out->place_count++] = (SolMirMaterializedPlace){id,
+                receiver->as.place, local, type->type,
+                {out->projection_count, 0}, type->type};
+        }
         image->places.count = out->place_count - image->places.offset;
         image->blocks = (SolMirPlanSlice){out->block_count, mir->block_count};
         image->loops = (SolMirPlanSlice){out->loop_count, mir->loop_count};
@@ -1578,6 +1646,7 @@ static bool build_scratch(Builder *b) {
         site->captured_receiver_type = SOL_MIR_MATERIALIZED_NONE;
         site->captured_receiver_kind = SOL_MIR_MATERIALIZED_RECEIVER_NONE;
         site->captured_receiver_expression = SOL_IR_NONE;
+        site->captured_receiver_local = SOL_IR_NONE;
         site->captured_receiver_place = SOL_MIR_MATERIALIZED_NONE;
         site->captured_receiver_temporary = SOL_MIR_MATERIALIZED_NONE;
         site->captured_receiver_value = SOL_MIR_MATERIALIZED_NONE;
@@ -1639,9 +1708,11 @@ static bool build_scratch(Builder *b) {
                 if (receiver->kind == SOL_IR_EXPR_PLACE
                     && receiver->as.place < ir->place_count) {
                     const SolIrPlace *place = &ir->places[receiver->as.place];
-                    if (place->root_kind == SOL_IR_PLACE_ROOT_LOCAL)
+                    if (place->root_kind == SOL_IR_PLACE_ROOT_LOCAL) {
+                        site->captured_receiver_local = place->local;
                         root = place_for(out, image,
                             (SolMirPlace){place->local, receiver->as.place});
+                    }
                     if (root == SOL_MIR_MATERIALIZED_NONE
                         && place->root_kind == SOL_IR_PLACE_ROOT_LOCAL) {
                         SolMirMaterializedLocalId local
@@ -2347,13 +2418,14 @@ bool sol_mir_materialization_render(FILE *stream,
     }
     for (size_t i = 0; i < owner->semantic_site_count; ++i) {
         const SolMirMaterializedSemanticSite *item = &owner->semantic_sites[i];
-        format(&out, "semantic_site s%zu kind=%d binding=d%zu owner=%d:%zu:%zu context=%zu definition=%zu obligation=%zu block=%zu instruction=%zu handler=%zu function_type=%zu receiver_type=%zu receiver_kind=%d receiver_expression=%zu receiver_place=%zu receiver_temporary=%zu receiver_value=%zu receiver_instruction=%zu receiver_roots=[%zu,%zu]",
+        format(&out, "semantic_site s%zu kind=%d binding=d%zu owner=%d:%zu:%zu context=%zu definition=%zu obligation=%zu block=%zu instruction=%zu handler=%zu function_type=%zu receiver_type=%zu receiver_kind=%d receiver_expression=%zu receiver_local=%zu receiver_place=%zu receiver_temporary=%zu receiver_value=%zu receiver_instruction=%zu receiver_roots=[%zu,%zu]",
             i, (int)item->kind, item->binding, (int)item->owner_kind,
             item->parent, item->parent_import, item->context,
             item->source_definition, item->source_obligation, item->block,
             item->instruction, item->handler, item->produced_function_type,
             item->captured_receiver_type, (int)item->captured_receiver_kind,
-            item->captured_receiver_expression, item->captured_receiver_place,
+            item->captured_receiver_expression, item->captured_receiver_local,
+            item->captured_receiver_place,
             item->captured_receiver_temporary, item->captured_receiver_value,
             item->captured_receiver_instruction,
             item->captured_receiver_roots.offset,

@@ -343,9 +343,27 @@ static bool shallow_ranges(const SolMirMaterialization *o) {
                     <= SOL_MIR_MATERIALIZED_RECEIVER_NONE
                 || site->captured_receiver_kind
                     > SOL_MIR_MATERIALIZED_RECEIVER_VALUE
-                || site->captured_receiver_expression >= o->plan->program->ir->expression_count
-                || !slice(site->captured_receiver_roots, o->receiver_root_count)
-                || site->captured_receiver_roots.count == 0)) return false;
+                 || site->captured_receiver_expression >= o->plan->program->ir->expression_count
+                 || !slice(site->captured_receiver_roots, o->receiver_root_count)
+                 || site->captured_receiver_roots.count == 0)) return false;
+        if (site->kind == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION) {
+            const SolIr *ir = o->plan->program->ir;
+            if (site->source.expression >= ir->expression_count) return false;
+            const SolIrExpression *producer = &ir->expressions[site->source.expression];
+            if (producer->kind != SOL_IR_EXPR_BOUND_OPERATION
+                || producer->as.operation.receiver
+                    != site->captured_receiver_expression) return false;
+            const SolIrExpression *receiver = &ir->expressions[
+                producer->as.operation.receiver];
+            bool direct_local = receiver->kind == SOL_IR_EXPR_PLACE
+                && receiver->as.place < ir->place_count
+                && ir->places[receiver->as.place].root_kind
+                    == SOL_IR_PLACE_ROOT_LOCAL;
+            if ((direct_local && site->captured_receiver_local
+                    != ir->places[receiver->as.place].local)
+                || (!direct_local && site->captured_receiver_local != SOL_IR_NONE))
+                return false;
+        } else if (site->captured_receiver_local != SOL_IR_NONE) return false;
         for (size_t r = 0; r < site->captured_receiver_roots.count; ++r)
             if (o->receiver_roots[site->captured_receiver_roots.offset + r]
                 >= o->local_count) return false;
@@ -2363,6 +2381,10 @@ static bool validate_semantic_sites(const SolMirMaterialization *o,
                     capture = in(image->places, site->captured_receiver_place)
                         && o->places[site->captured_receiver_place].final_type
                             == site->captured_receiver_type
+                        && site->captured_receiver_local != SOL_IR_NONE
+                        && o->places[site->captured_receiver_place].local < o->local_count
+                        && o->locals[o->places[site->captured_receiver_place].local]
+                            .source_local == site->captured_receiver_local
                         && site->captured_receiver_temporary
                             == SOL_MIR_MATERIALIZED_NONE
                         && site->captured_receiver_value

@@ -1472,6 +1472,35 @@ static const SolMirProgramReference *find_program_reference(
     return NULL;
 }
 
+/* Retain the initializer as the authenticated producer.  A local place alone
+   has no receiver capture, so accepting anything other than one exact let-bound
+   function or bound operation would manufacture an unproven callable handle. */
+static SolIrExpressionId local_callable_initializer(const SolIr *ir,
+    SolIrExpressionId expression_id) {
+    if (expression_id >= ir->expression_count) return SOL_IR_NONE;
+    const SolIrExpression *expression = &ir->expressions[expression_id];
+    if (expression->kind != SOL_IR_EXPR_PLACE
+        || expression->as.place >= ir->place_count) return SOL_IR_NONE;
+    const SolIrPlace *place = &ir->places[expression->as.place];
+    if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
+        || place->projections.count != 0 || place->local >= ir->local_count)
+        return SOL_IR_NONE;
+    SolIrExpressionId initializer = SOL_IR_NONE;
+    for (size_t index = 0; index < ir->statement_count; ++index) {
+        const SolIrStatement *statement = &ir->statements[index];
+        if (statement->kind != SOL_IR_STATEMENT_LET
+            || statement->local != place->local) continue;
+        if (initializer != SOL_IR_NONE || statement->expression >= ir->expression_count)
+            return SOL_IR_NONE;
+        initializer = statement->expression;
+    }
+    if (initializer == SOL_IR_NONE || ir->expressions[initializer].type != expression->type)
+        return SOL_IR_NONE;
+    SolIrExpressionKind kind = ir->expressions[initializer].kind;
+    return kind == SOL_IR_EXPR_DEFINITION || kind == SOL_IR_EXPR_BOUND_OPERATION
+        ? initializer : SOL_IR_NONE;
+}
+
 static bool plan_callable_value(Environment *environment,
     SolIrExpressionId expression_id, bool predicate, bool bound_operation) {
     Builder *builder = environment->builder;
@@ -1555,13 +1584,45 @@ static bool plan_call(Environment *environment, SolMirPlanDemandKind kind,
     SolIrCallableId target = static_override != SOL_IR_NONE
         ? static_override : expression->as.call.callable;
     SolIrExpressionId receiver_expression = expression->as.call.receiver;
+    if (call_kind == SOL_IR_CALL_CALLBACK) {
+        SolIrExpressionId producer = expression->as.call.callee;
+        if (producer < builder->ir->expression_count
+            && builder->ir->expressions[producer].kind == SOL_IR_EXPR_PLACE)
+            producer = local_callable_initializer(builder->ir, producer);
+        if (producer >= builder->ir->expression_count) return fail(builder,
+                SOL_MIR_PLAN_BUILD_UNSUPPORTED_OR_UNRESOLVED,
+                "callback has no exact static callable producer");
+        const SolIrExpression *value = &builder->ir->expressions[producer];
+        SolIrCallableId resolved = SOL_IR_NONE;
+        if (value->kind == SOL_IR_EXPR_DEFINITION
+            && value->as.definition < builder->ir->definition_count) {
+            resolved = builder->ir->definitions[value->as.definition].callable;
+        } else if (value->kind == SOL_IR_EXPR_BOUND_OPERATION) {
+            resolved = value->as.operation.callable;
+            receiver_expression = value->as.operation.receiver;
+        }
+        if (resolved == SOL_IR_NONE || (static_override != SOL_IR_NONE
+                && static_override != resolved)) return fail(builder,
+                SOL_MIR_PLAN_BUILD_UNSUPPORTED_OR_UNRESOLVED,
+                "callback has no exact static callable producer");
+        target = resolved;
+    }
     if (call_kind == SOL_IR_CALL_CAPABILITY
         && expression->as.call.callee < builder->ir->expression_count) {
-        const SolIrExpression *operation
-            = &builder->ir->expressions[expression->as.call.callee];
-        if (operation->kind == SOL_IR_EXPR_BOUND_OPERATION) {
-            receiver_expression = operation->as.operation.receiver;
+        SolIrExpressionId producer = expression->as.call.callee;
+        const SolIrExpression *operation = &builder->ir->expressions[producer];
+        if (operation->kind == SOL_IR_EXPR_PLACE) {
+            producer = local_callable_initializer(builder->ir, producer);
+            if (producer == SOL_IR_NONE) return fail(builder,
+                    SOL_MIR_PLAN_BUILD_UNSUPPORTED_OR_UNRESOLVED,
+                    "capability call has no exact static bound-operation producer");
+            operation = &builder->ir->expressions[producer];
         }
+        if (operation->kind != SOL_IR_EXPR_BOUND_OPERATION
+            || operation->as.operation.callable != target) return fail(builder,
+                SOL_MIR_PLAN_BUILD_UNSUPPORTED_OR_UNRESOLVED,
+                "capability call has no exact static bound-operation producer");
+        receiver_expression = operation->as.operation.receiver;
     }
     SolMirPlanInstanceId child;
     SolMirPlanImportId imported;
@@ -1697,6 +1758,14 @@ static bool scan_expression(Environment *environment, SolIrExpressionId id,
                     if (expression->as.call.callee >= ir->expression_count) return false;
                     const SolIrExpression *callee
                         = &ir->expressions[expression->as.call.callee];
+                    SolIrExpressionId producer = expression->as.call.callee;
+                    if (callee->kind == SOL_IR_EXPR_PLACE) {
+                        producer = local_callable_initializer(ir, producer);
+                        if (producer == SOL_IR_NONE) return fail(builder,
+                                SOL_MIR_PLAN_BUILD_UNSUPPORTED_OR_UNRESOLVED,
+                                "predicate callback has no exact static producer");
+                        callee = &ir->expressions[producer];
+                    }
                     if (callee->kind == SOL_IR_EXPR_DEFINITION
                         && callee->as.definition < ir->definition_count) {
                         override = ir->definitions[callee->as.definition].callable;
@@ -2047,6 +2116,13 @@ static bool scan_instance(Builder *builder, SolMirPlanInstanceId instance_id) {
                 = mir->temporaries[term->as.invoke.callee].source_expression;
             if (producer >= builder->ir->expression_count) return false;
             const SolIrExpression *source = &builder->ir->expressions[producer];
+            if (source->kind == SOL_IR_EXPR_PLACE) {
+                producer = local_callable_initializer(builder->ir, producer);
+                if (producer == SOL_IR_NONE) return fail(builder,
+                        SOL_MIR_PLAN_BUILD_UNSUPPORTED_OR_UNRESOLVED,
+                        "callback invoke has no exact static producer");
+                source = &builder->ir->expressions[producer];
+            }
             if (source->kind == SOL_IR_EXPR_DEFINITION
                 && source->as.definition < builder->ir->definition_count) {
                 override = builder->ir->definitions[source->as.definition].callable;
