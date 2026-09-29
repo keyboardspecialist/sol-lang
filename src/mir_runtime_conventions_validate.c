@@ -501,6 +501,17 @@ static bool validate_signature_record(const SolMirRuntimeConventions *owner,
     return true;
 }
 
+static bool predicate_indirect(const SolMirOperations *operations,
+    const SolMirPredicateTerminator *term) {
+    if (term->call_kind == SOL_IR_CALL_CALLBACK) return true;
+    if (term->callee >= operations->predicate_value_count) return false;
+    const SolMirPredicateValue *value = &operations->predicate_values[term->callee];
+    return value->kind == SOL_MIR_PREDICATE_VALUE_INSTRUCTION
+        && value->definition < operations->predicate_instruction_count
+        && operations->predicate_instructions[value->definition].kind
+            == SOL_MIR_PREDICATE_INST_BOUND_OPERATION;
+}
+
 static bool validate_signatures(const SolMirRuntimeConventions *owner) {
     const SolMirConcreteProgram *c = owner->concrete;
     const SolMirMaterialization *m = &c->materialization;
@@ -551,7 +562,7 @@ static bool validate_signatures(const SolMirRuntimeConventions *owner) {
             const SolMirPredicateTerminator *term
                 = &c->operations.predicate_blocks[i].terminator;
             used |= term->kind == SOL_MIR_PREDICATE_TERM_INVOKE
-                && term->call_kind == SOL_IR_CALL_CALLBACK
+                && predicate_indirect(&c->operations, term)
                 && c->operations.predicate_values[term->callee].recipe == recipe;
         }
         const SolMirRecipe *f = &r->recipes[recipe];
@@ -795,7 +806,7 @@ static bool validate_predicate_call(const SolMirRuntimeConventions *owner,
     if (call_id >= owner->call_count
         || term->kind != SOL_MIR_PREDICATE_TERM_INVOKE) return false;
     const SolMirRuntimeCall *call = &owner->calls[call_id];
-    bool indirect = term->call_kind == SOL_IR_CALL_CALLBACK;
+    bool indirect = predicate_indirect(o, term);
     size_t signature = indirect
         ? function_signature(owner, o->predicate_values[term->callee].recipe)
         : direct_signature(owner, term->binding);
@@ -836,8 +847,8 @@ static bool validate_predicate_call(const SolMirRuntimeConventions *owner,
             return false;
     }
     size_t ordinal = 0;
-    if (term->receiver != SOL_MIR_OPERATION_NONE
-        || term->call_kind == SOL_IR_CALL_CAPABILITY) {
+    if (!indirect && (term->receiver != SOL_MIR_OPERATION_NONE
+        || term->call_kind == SOL_IR_CALL_CAPABILITY)) {
         size_t receiver = term->call_kind == SOL_IR_CALL_CAPABILITY
             ? term->callee : term->receiver;
         SolMirRuntimeValueKind kind = term->call_kind == SOL_IR_CALL_CAPABILITY
@@ -1664,7 +1675,7 @@ static bool recipe_is_indirect(const SolMirConcreteProgram *c,
         const SolMirPredicateTerminator *term
             = &o->predicate_blocks[i].terminator;
         if (term->kind == SOL_MIR_PREDICATE_TERM_INVOKE
-            && term->call_kind == SOL_IR_CALL_CALLBACK
+            && predicate_indirect(o, term)
             && o->predicate_values[term->callee].recipe == recipe) {
             *result = true;
             return true;
@@ -2103,7 +2114,7 @@ static bool shallow_predecessor_headers(const SolMirConcreteProgram *c) {
                     || term->call_kind == SOL_IR_CALL_CAPABILITY)
                 && term->callee >= c->operations.predicate_value_count))
             return false;
-        if (term->call_kind == SOL_IR_CALL_CALLBACK) {
+        if (predicate_indirect(&c->operations, term)) {
             const SolMirPredicateValue *value
                 = &c->operations.predicate_values[term->callee];
             if (!preflight_step()
@@ -2327,7 +2338,7 @@ static bool indirect_recipe_requirement(const SolMirConcreteProgram *c,
         const SolMirPredicateTerminator *term
             = &c->operations.predicate_blocks[i].terminator;
         if (term->kind == SOL_MIR_PREDICATE_TERM_INVOKE
-            && term->call_kind == SOL_IR_CALL_CALLBACK
+            && predicate_indirect(&c->operations, term)
             && c->operations.predicate_values[term->callee].recipe == recipe) {
             *used = true;
             return true;
@@ -2419,7 +2430,7 @@ static bool local_validation_requirement(const SolMirConcreteProgram *c,
             const SolMirPredicateTerminator *term
                 = &o->predicate_blocks[blocks.offset + q].terminator;
             if (term->kind != SOL_MIR_PREDICATE_TERM_INVOKE) continue;
-            if (term->call_kind == SOL_IR_CALL_CALLBACK) {
+            if (predicate_indirect(o, term)) {
                 size_t position = direct;
                 SolMirRecipeId target = o->predicate_values[term->callee].recipe;
                 for (size_t recipe = 0; recipe < r->recipe_count; ++recipe) {
@@ -2722,10 +2733,10 @@ static bool reconstruct_build(const SolMirConcreteProgram *concrete,
         ok = count_add(&counts.calls, 1)
             && count_add(&counts.failure_sites, 1)
             && count_add(&counts.operands, term->arguments.count);
-        if (ok && (term->receiver != SOL_MIR_OPERATION_NONE
+        if (ok && !predicate_indirect(o, term) && (term->receiver != SOL_MIR_OPERATION_NONE
                 || term->call_kind == SOL_IR_CALL_CAPABILITY))
             ok = count_add(&counts.operands, 1);
-        if (ok && term->call_kind == SOL_IR_CALL_CALLBACK) {
+        if (ok && predicate_indirect(o, term)) {
             SolMirRecipeId recipe = o->predicate_values[term->callee].recipe;
             if (recipe >= r->recipe_count) ok = false;
             else (void)recipe;
@@ -2832,13 +2843,13 @@ static bool reconstruct_build(const SolMirConcreteProgram *concrete,
             const SolMirPredicateTerminator *term
                 = &o->predicate_blocks[blocks.offset + q].terminator;
             if (!ok || term->kind != SOL_MIR_PREDICATE_TERM_INVOKE) continue;
-            if (term->call_kind == SOL_IR_CALL_CALLBACK)
+            if (predicate_indirect(o, term))
                 ok = indirect_signature_work(c, direct_count,
                         o->predicate_values[term->callee].recipe,
                         &work)
                     && table_predicate_work(c, term->callee, &work);
             else ok = build_work_add(&work, 2);
-            if (ok && (term->receiver != SOL_MIR_OPERATION_NONE
+            if (ok && !predicate_indirect(o, term) && (term->receiver != SOL_MIR_OPERATION_NONE
                     || term->call_kind == SOL_IR_CALL_CAPABILITY))
                 ok = build_work_add(&work, 1);
             for (size_t a = 0; ok && a < term->arguments.count; ++a)

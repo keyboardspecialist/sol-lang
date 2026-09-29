@@ -1,4 +1,7 @@
 #include "sol/mir_runtime_conventions.h"
+
+static bool predicate_indirect(const SolMirOperations *,
+    const SolMirPredicateTerminator *);
 #include "mir_linkage_internal.h"
 #include "mir_runtime_conventions_internal.h"
 
@@ -478,11 +481,11 @@ unsupported_entry:
             || !add_resource_size(&counts->failure_sites, 1)
             || !add_resource_size(&counts->operands, term->arguments.count))
             return false;
-        if (term->receiver != SOL_MIR_OPERATION_NONE
-            || term->call_kind == SOL_IR_CALL_CAPABILITY) {
+        if (!predicate_indirect(o, term) && (term->receiver != SOL_MIR_OPERATION_NONE
+            || term->call_kind == SOL_IR_CALL_CAPABILITY)) {
             if (!add_resource_size(&counts->operands, 1)) return false;
         }
-        if (term->call_kind == SOL_IR_CALL_CALLBACK) {
+        if (predicate_indirect(o, term)) {
             SolMirRecipeId recipe = o->predicate_values[term->callee].recipe;
             if (recipe >= r->recipe_count) return false;
             indirect[recipe] = 1;
@@ -690,6 +693,17 @@ static bool table_for_predicate_value(const SolMirConcreteProgram *c,
     return false;
 }
 
+static bool predicate_indirect(const SolMirOperations *operations,
+    const SolMirPredicateTerminator *term) {
+    if (term->call_kind == SOL_IR_CALL_CALLBACK) return true;
+    if (term->callee >= operations->predicate_value_count) return false;
+    const SolMirPredicateValue *value = &operations->predicate_values[term->callee];
+    return value->kind == SOL_MIR_PREDICATE_VALUE_INSTRUCTION
+        && value->definition < operations->predicate_instruction_count
+        && operations->predicate_instructions[value->definition].kind
+            == SOL_MIR_PREDICATE_INST_BOUND_OPERATION;
+}
+
 static bool set_direct_target(const SolMirRuntimeConventions *out,
     SolMirMaterializedBindingId binding, SolMirRuntimeCall *call) {
     if (!build_category_event(SOL_MIR_RUNTIME_BUILD_TEST_TARGET, 1)) return false;
@@ -837,7 +851,7 @@ static bool populate_predicate_calls(SolMirRuntimeConventions *out) {
             call.normal_edge = term->normal_edge;
             call.failure_edge = term->failure_edge;
             call.failure_site = out->call_count;
-            if (term->call_kind == SOL_IR_CALL_CALLBACK) {
+            if (predicate_indirect(o, term)) {
                 SolMirRecipeId recipe = o->predicate_values[term->callee].recipe;
                 if (!indirect_signature(out, recipe, &call.signature))
                     return false;
@@ -854,13 +868,13 @@ static bool populate_predicate_calls(SolMirRuntimeConventions *out) {
                     return false;
             }
             if (call.signature >= out->signature_count
-                || (term->call_kind == SOL_IR_CALL_CALLBACK
+                || (predicate_indirect(o, term)
                     && call.table >= c->linkage.table_entry_count)) return false;
             const SolMirRuntimeSignature *signature
                 = &out->signatures[call.signature];
             size_t ordinal = 0;
-            if (term->receiver != SOL_MIR_OPERATION_NONE
-                || term->call_kind == SOL_IR_CALL_CAPABILITY) {
+            if (!predicate_indirect(o, term) && (term->receiver != SOL_MIR_OPERATION_NONE
+                || term->call_kind == SOL_IR_CALL_CAPABILITY)) {
                 size_t receiver = term->call_kind == SOL_IR_CALL_CAPABILITY
                     ? term->callee : term->receiver;
                 SolMirRuntimeValueKind kind = term->call_kind

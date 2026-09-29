@@ -1312,6 +1312,225 @@ static void test_indirect_predicate_and_bound_environment(void) {
     sol_mir_concrete_program_free(&program); text_compilation_free(&c);
 }
 
+static void test_bodyful_bound_capability_predicate_conventions(void) {
+    static const char source[] =
+        "module bodyful_bound_capability_predicate\n"
+        "capability Internal { function internal_choose(value: Int64) -> Bool effects { pure } "
+        "{ return value > 0 } }\n"
+        "capability Host { function host_choose(value: Int64) -> Bool effects { pure } }\n"
+        "function root(internal: capability Internal, host: capability Host) -> Bool effects { pure } "
+        "requires { { let bound = internal.internal_choose bound(1) } } "
+        "{ return internal.internal_choose(1) && host.host_choose(1) }\n";
+    TextCompilation c; CHECK(compile_text(&c, source));
+    SolIrCallableId internal_choose = callable(&c.ir, "internal_choose",
+        SOL_IR_CALLABLE_CAPABILITY);
+    SolIrCallableId host_choose = callable(&c.ir, "host_choose",
+        SOL_IR_CALLABLE_CAPABILITY);
+    SolMirConcreteProgram program; sol_mir_concrete_program_init(&program);
+    bool built = internal_choose != SOL_IR_NONE && host_choose != SOL_IR_NONE
+        && build_text_concrete(&c, "root", &host_choose, 1, &program);
+    if (!built) sol_diagnostics_render_human(stderr, &c.source, &c.diagnostics);
+    CHECK(built);
+    SolMirRuntimeConventions owner; sol_mir_runtime_conventions_init(&owner);
+    SolMirRuntimeConventionsBuildRequest request = {&program, NULL};
+    CHECK(built && sol_mir_runtime_conventions_build(&request, &owner,
+        &c.diagnostics) == SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED);
+
+    size_t bound_call_id = SOL_MIR_RUNTIME_NONE;
+    size_t internal_call_id = SOL_MIR_RUNTIME_NONE;
+    size_t host_call_id = SOL_MIR_RUNTIME_NONE;
+    for (size_t i = 0; i < owner.call_count; ++i) {
+        const SolMirRuntimeCall *call = &owner.calls[i];
+        if (call->owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE
+            && call->block < program.operations.predicate_block_count) {
+            const SolMirPredicateTerminator *term
+                = &program.operations.predicate_blocks[call->block].terminator;
+            if (term->kind == SOL_MIR_PREDICATE_TERM_INVOKE
+                && term->callee < program.operations.predicate_value_count) {
+                const SolMirPredicateValue *value
+                    = &program.operations.predicate_values[term->callee];
+                if (value->kind == SOL_MIR_PREDICATE_VALUE_INSTRUCTION
+                    && value->definition
+                        < program.operations.predicate_instruction_count
+                    && program.operations.predicate_instructions[value->definition]
+                        .kind == SOL_MIR_PREDICATE_INST_BOUND_OPERATION)
+                    bound_call_id = i;
+            }
+        }
+        if (call->owner_kind != SOL_MIR_RUNTIME_CALL_OWNER_IMAGE
+            || call->block >= program.materialization.block_count) continue;
+        const SolMirMaterializedTerminator *term
+            = &program.materialization.blocks[call->block].terminator;
+        if (term->kind != SOL_MIR_TERM_INVOKE
+            || term->binding >= program.materialization.binding_count) continue;
+        SolIrCallableId symbolic
+            = program.materialization.bindings[term->binding].symbolic_callable;
+        if (symbolic == internal_choose) internal_call_id = i;
+        if (symbolic == host_choose) host_call_id = i;
+    }
+    CHECK(bound_call_id != SOL_MIR_RUNTIME_NONE
+        && internal_call_id != SOL_MIR_RUNTIME_NONE
+        && host_call_id != SOL_MIR_RUNTIME_NONE);
+    if (bound_call_id != SOL_MIR_RUNTIME_NONE) {
+        const SolMirRuntimeCall *call = &owner.calls[bound_call_id];
+        const SolMirPredicateTerminator *term
+            = &program.operations.predicate_blocks[call->block].terminator;
+        const SolMirPredicateValue *value
+            = &program.operations.predicate_values[term->callee];
+        const SolMirPredicateInstruction *instruction
+            = &program.operations.predicate_instructions[value->definition];
+        CHECK(term->call_kind == SOL_IR_CALL_CAPABILITY);
+        size_t expected_table = SOL_MIR_LINKAGE_NONE;
+        size_t matching_callable = 0;
+        for (size_t i = 0; i < program.operations.callable_count; ++i) {
+            const SolMirOperationCallablePlan *plan
+                = &program.operations.callables[i];
+            if (plan->function_recipe != value->recipe
+                || plan->semantic_site
+                    >= program.materialization.semantic_site_count
+                || program.materialization.semantic_sites[plan->semantic_site]
+                    .binding != instruction->binding) continue;
+            ++matching_callable;
+            if (i < program.linkage.callable_value_count
+                && program.linkage.callable_values[i].callable_plan == i)
+                expected_table = program.linkage.callable_values[i].table;
+        }
+        size_t expected_operand_offset = 0, expected_writeback_offset = 0;
+        for (size_t i = 0; i < bound_call_id; ++i) {
+            expected_operand_offset += owner.calls[i].operands.count;
+            expected_writeback_offset += owner.calls[i].writebacks.count;
+        }
+        size_t bound_environment_imports = 0;
+        for (size_t i = 0; i < owner.import_count; ++i)
+            bound_environment_imports += owner.imports[i].kind
+                    == SOL_MIR_RUNTIME_IMPORT_RECIPE_BOUND_ENVIRONMENT
+                && owner.imports[i].recipe == value->recipe;
+        SolMirRuntimeSource expected_source = {0};
+        const SolMirMaterializedBinding *binding
+            = term->binding < program.materialization.binding_count
+            ? &program.materialization.bindings[term->binding] : NULL;
+        CHECK(call->owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE
+            && call->image == SOL_MIR_RUNTIME_NONE
+            && call->predicate < program.operations.predicate_body_count
+            && call->block >= program.operations.predicate_bodies[call->predicate]
+                .blocks.offset
+            && call->block < program.operations.predicate_bodies[call->predicate]
+                .blocks.offset + program.operations.predicate_bodies[call->predicate]
+                    .blocks.count
+            && call->call_kind == term->call_kind
+            && call->target_kind == SOL_MIR_RUNTIME_TARGET_INDIRECT_TABLE
+            && call->internal == SOL_MIR_LINKAGE_NONE
+            && call->host == SOL_MIR_LINKAGE_NONE
+            && matching_callable == 1 && call->table == expected_table
+            && call->table < program.linkage.table_entry_count
+            && program.linkage.table_entries[call->table].target_kind
+                == SOL_MIR_LINKAGE_TARGET_INTERNAL
+            && program.linkage.table_entries[call->table].internal
+                != SOL_MIR_LINKAGE_NONE
+            && program.linkage.table_entries[call->table].host
+                == SOL_MIR_LINKAGE_NONE
+            && instruction->binding < program.linkage.binding_count
+            && program.linkage.table_entries[call->table].internal
+                == program.linkage.bindings[instruction->binding].internal
+            && call->callee.kind == SOL_MIR_RUNTIME_VALUE_PREDICATE_VALUE
+            && call->callee.id == term->callee
+            && call->signature < owner.signature_count
+            && owner.signatures[call->signature].origin
+                == SOL_MIR_RUNTIME_SIGNATURE_FUNCTION_RECIPE
+            && owner.signatures[call->signature].function_recipe == value->recipe
+            && owner.signatures[call->signature].internal == SOL_MIR_LINKAGE_NONE
+            && owner.signatures[call->signature].host == SOL_MIR_LINKAGE_NONE
+            && bound_environment_imports == 1
+            && call->operands.offset == expected_operand_offset
+            && call->operands.count == term->arguments.count
+            && owner.signatures[call->signature].slots.count == term->arguments.count
+            && call->writebacks.offset == expected_writeback_offset
+            && call->writebacks.count == 0
+            && call->result.kind == SOL_MIR_RUNTIME_VALUE_PREDICATE_VALUE
+            && call->result.id == term->result
+            && call->normal_edge == term->normal_edge
+            && call->failure_edge == term->failure_edge
+            && call->failure_site == bound_call_id
+            && call->failure_site < owner.failure_site_count
+            && owner.failure_sites[call->failure_site].origin_kind
+                == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_CALL
+            && owner.failure_sites[call->failure_site].owner == call->predicate
+            && owner.failure_sites[call->failure_site].block == call->block
+            && owner.failure_sites[call->failure_site].instruction
+                == SOL_MIR_RUNTIME_NONE
+            && owner.failure_sites[call->failure_site].allowed_codes
+                == (UINT32_C(1) << (SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT - 1))
+            && binding != NULL
+            && expression_source(&c.ir, binding->source.callable,
+                binding->source.expression, &expected_source)
+            && memcmp(&owner.failure_sites[call->failure_site].source,
+                &expected_source, sizeof(expected_source)) == 0);
+        for (size_t i = 0; i < call->operands.count; ++i) {
+            const SolMirRuntimeOperand *operand
+                = &owner.operands[call->operands.offset + i];
+            const SolMirPredicateOperand *argument
+                = &program.operations.predicate_operands[term->arguments.offset + i];
+            CHECK(operand->signature_slot
+                    == owner.signatures[call->signature].slots.offset + i
+                && owner.signature_slots[operand->signature_slot].role
+                    == SOL_MIR_RUNTIME_SLOT_PARAMETER
+                && operand->value.kind == SOL_MIR_RUNTIME_VALUE_PREDICATE_VALUE
+                && operand->value.id == argument->value);
+        }
+
+        SolMirRuntimeCall saved = owner.calls[bound_call_id];
+        owner.calls[bound_call_id].target_kind
+            = SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL;
+        CHECK(!sol_mir_runtime_conventions_validate(&owner, NULL));
+        owner.calls[bound_call_id] = saved;
+        owner.calls[bound_call_id].table = SOL_MIR_LINKAGE_NONE;
+        CHECK(!sol_mir_runtime_conventions_validate(&owner, NULL));
+        owner.calls[bound_call_id] = saved;
+        owner.calls[bound_call_id].callee.id = SOL_MIR_RUNTIME_NONE;
+        CHECK(!sol_mir_runtime_conventions_validate(&owner, NULL));
+        owner.calls[bound_call_id] = saved;
+        if (internal_call_id != SOL_MIR_RUNTIME_NONE) {
+            CHECK(owner.calls[internal_call_id].signature != saved.signature);
+            owner.calls[bound_call_id].signature
+                = owner.calls[internal_call_id].signature;
+            CHECK(!sol_mir_runtime_conventions_validate(&owner, NULL));
+            owner.calls[bound_call_id] = saved;
+        }
+        if (saved.operands.count != 0) {
+            SolMirRuntimeOperand saved_operand
+                = owner.operands[saved.operands.offset];
+            owner.operands[saved.operands.offset].value.id = SOL_MIR_RUNTIME_NONE;
+            CHECK(!sol_mir_runtime_conventions_validate(&owner, NULL));
+            owner.operands[saved.operands.offset] = saved_operand;
+        }
+    }
+    if (internal_call_id != SOL_MIR_RUNTIME_NONE) {
+        const SolMirRuntimeCall *call = &owner.calls[internal_call_id];
+        CHECK(call->call_kind == SOL_IR_CALL_CAPABILITY
+            && call->target_kind == SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL
+            && call->internal != SOL_MIR_LINKAGE_NONE
+            && call->host == SOL_MIR_LINKAGE_NONE
+            && call->table == SOL_MIR_LINKAGE_NONE
+            && call->signature < owner.signature_count
+            && owner.signatures[call->signature].origin
+                == SOL_MIR_RUNTIME_SIGNATURE_INTERNAL);
+    }
+    if (host_call_id != SOL_MIR_RUNTIME_NONE) {
+        const SolMirRuntimeCall *call = &owner.calls[host_call_id];
+        CHECK(call->call_kind == SOL_IR_CALL_CAPABILITY
+            && call->target_kind == SOL_MIR_RUNTIME_TARGET_DIRECT_HOST
+            && call->internal == SOL_MIR_LINKAGE_NONE
+            && call->host != SOL_MIR_LINKAGE_NONE
+            && call->table == SOL_MIR_LINKAGE_NONE
+            && call->signature < owner.signature_count
+            && owner.signatures[call->signature].origin
+                == SOL_MIR_RUNTIME_SIGNATURE_HOST);
+    }
+    CHECK(sol_mir_runtime_conventions_validate(&owner, NULL));
+    sol_mir_runtime_conventions_free(&owner);
+    sol_mir_concrete_program_free(&program); text_compilation_free(&c);
+}
+
 static void test_unit_entry_exit(void) {
     static const char source[] =
         "module runtime_unit_entry\n"
@@ -1665,6 +1884,7 @@ int main(void) {
     test_supported_call_vocabulary();
     test_predicate_calls_and_callback_boundary();
     test_indirect_predicate_and_bound_environment();
+    test_bodyful_bound_capability_predicate_conventions();
     test_unit_entry_exit();
     test_stable_rendering();
     test_never_callable_boundary();
