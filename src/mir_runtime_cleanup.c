@@ -411,6 +411,23 @@ static bool allocation_instruction(const SolMirRuntimeValues *v,
 static bool emit_implicit(Sink*s,const SolMirRuntimeCleanup *owner,const Replay*r,size_t block,size_t instruction,SolSpan span,bool allocation,Storage *stt,unsigned char*holes,size_t*tmp,size_t*tmpo,size_t td,size_t*snap,size_t sd,size_t*scope,size_t cd,size_t*region,size_t rd,size_t*handler,size_t hd) { SolMirRuntimeSource src;if(!source_for(owner->conventions->concrete->program.ir,span,&src))return false;SolMirRuntimeCleanupEvent e={SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION,SOL_MIR_RUNTIME_CLEANUP_ORIGIN_IMPLICIT,r->image_id,block,instruction,src,inherited(owner->conventions,r->image_id,block,instruction),SOL_MIR_RUNTIME_NONE,{action_pos(s),0},{s->count.transitions,0},SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL,false,SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE};e.captures_failure_detail=true;size_t id=event_pos(s);if(allocation&&e.inherited_failure_site==SOL_MIR_RUNTIME_NONE){e.supplemental_site=s->count.supplemental_sites;if(!sink_supplemental(s,&(SolMirRuntimeCleanupSupplementalSite){id,src,failbit(SOL_MIR_RUNTIME_FAILURE_ALLOCATION_LIMIT)|failbit(SOL_MIR_RUNTIME_FAILURE_ALLOCATION_FAILED)}))return false;}
  if(!sink_event(s,&e))return false;size_t at=action_pos(s);if(!sink_transition(s,id,SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,SOL_MIR_RUNTIME_NONE,at))return false;at=action_pos(s);if(!emit_implicit_cleanup(s,owner,r,stt,holes,tmp,tmpo,td,snap,sd,scope,cd,region,rd,handler,hd)||!sink_action(s,SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE,SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY,e.inherited_failure_site!=SOL_MIR_RUNTIME_NONE?e.inherited_failure_site:e.supplemental_site,SOL_MIR_RECIPE_NONE)||!sink_transition(s,id,SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE,SOL_MIR_RUNTIME_NONE,at))return false;if(s->writing){SolMirRuntimeCleanupEvent *x=&s->out->events[id];x->actions.count=s->out->action_count-x->actions.offset;x->transitions.count=s->out->transition_count-x->transitions.offset;}return true; }
 static bool terminal_failure(SolMirTerminatorKind k){return k==SOL_MIR_TERM_PANIC||k==SOL_MIR_TERM_MATCH_FAILURE||k==SOL_MIR_TERM_UNREACHABLE||k==SOL_MIR_TERM_RESUME_FAILURE||k==SOL_MIR_TERM_CONTRACT_VIOLATION;}
+static bool local_or_pending_call(const SolMirRuntimeCleanup *cleanup,
+    const SolMirRuntimeCleanupEvent *event, const SolMirRuntimeCleanupTransition *transition) {
+    const SolMirMaterialization *m = &cleanup->conventions->concrete->materialization;
+    if (event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+        || event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_INVOKE
+        || event->block >= m->block_count || event->inherited_failure_site >= cleanup->conventions->call_count
+        || transition->outcome != SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE) return false;
+    const SolMirMaterializedTerminator *term = &m->blocks[event->block].terminator;
+    const SolMirRuntimeCall *call = &cleanup->conventions->calls[event->inherited_failure_site];
+    return term->kind == SOL_MIR_TERM_INVOKE && call->failure_site == event->inherited_failure_site
+        && call->owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_IMAGE && call->image == event->owner
+        && call->block == event->block && call->call_kind == SOL_IR_CALL_FUNCTION
+        && term->call_kind == SOL_IR_CALL_FUNCTION
+        && call->target_kind == SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL
+        && call->normal_edge == term->normal_edge && call->failure_edge == term->failure_edge
+        && transition->continuation == term->failure_edge;
+}
  static bool emit_term(Sink*s,const SolMirRuntimeCleanup*owner,const Replay*r,size_t block,const SolMirMaterializedTerminator*t,Storage *stt,unsigned char *holes,size_t *tmp,size_t *tmpo,size_t td,size_t *snap,size_t sd,size_t *scope,size_t cd,size_t *region,size_t rd,size_t *handler,size_t hd){SolMirRuntimeSource src;if(!source_for(owner->conventions->concrete->program.ir,t->span,&src))return false;SolMirRuntimeCleanupEvent e={SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR,SOL_MIR_RUNTIME_CLEANUP_ORIGIN_EXPLICIT,r->image_id,block,SOL_MIR_RUNTIME_NONE,src,inherited(owner->conventions,r->image_id,block,SOL_MIR_RUNTIME_NONE),SOL_MIR_RUNTIME_NONE,{action_pos(s),0},{s->count.transitions,0},SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL,false,SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE};e.captures_failure_detail=terminal_failure(t->kind)||t->kind==SOL_MIR_TERM_INVOKE||t->kind==SOL_MIR_TERM_CHECK_REFINED||t->kind==SOL_MIR_TERM_CHECK_CONTRACT;e.capture_detail_kind=t->kind==SOL_MIR_TERM_PANIC?SOL_MIR_RUNTIME_FAILURE_DETAIL_PANIC_TEXT:SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE;size_t id=event_pos(s);if(!sink_event(s,&e))return false;size_t normal[3],n=edges(t,normal);bool is_failure=terminal_failure(t->kind);for(size_t i=0;i<n;i++){bool evaluation_failure=(t->kind==SOL_MIR_TERM_INVOKE&&normal[i]==t->failure_edge)||(t->kind==SOL_MIR_TERM_CHECK_REFINED&&normal[i]==t->failure_edge)||(t->kind==SOL_MIR_TERM_CHECK_CONTRACT&&normal[i]==t->failure_edge);bool violation=(t->kind==SOL_MIR_TERM_CHECK_CONTRACT&&normal[i]==t->violation_edge);size_t at=action_pos(s);if(!evaluation_failure&&!violation&&t->kind==SOL_MIR_TERM_INVOKE&&normal[i]==t->normal_edge)for(size_t q=0;q<t->writebacks.count;q++){const SolMirMaterializedWriteback*w=&r->m->writebacks[t->writebacks.offset+q];if(!sink_action(s,SOL_MIR_RUNTIME_CLEANUP_ACTION_WRITEBACK,SOL_MIR_RUNTIME_CLEANUP_ACTION_NORMAL_ONLY,w->place,w->type))return false;}if(!evaluation_failure&&(t->kind==SOL_MIR_TERM_CHECK_REFINED||t->kind==SOL_MIR_TERM_CHECK_CONTRACT)&&!sink_action(s,SOL_MIR_RUNTIME_CLEANUP_ACTION_CHECK_CONTRACT,normal[i]==t->satisfied_edge?SOL_MIR_RUNTIME_CLEANUP_ACTION_NORMAL_ONLY:0,t->source_obligation,SOL_MIR_RECIPE_NONE))return false;if(!sink_transition(s,id,(evaluation_failure||violation)?SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE:SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,normal[i],at))return false;}
  if(t->kind==SOL_MIR_TERM_RETURN||is_failure){size_t at=action_pos(s);if(is_failure&&!emit_implicit_cleanup(s,owner,r,stt,holes,tmp,tmpo,td,snap,sd,scope,cd,region,rd,handler,hd))return false;if(is_failure&&!sink_action(s,SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE,SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY,e.inherited_failure_site,SOL_MIR_RECIPE_NONE))return false;if(!sink_transition(s,id,is_failure?SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE:SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT,SOL_MIR_RUNTIME_NONE,at))return false;}
  if(s->writing){SolMirRuntimeCleanupEvent*x=&s->out->events[id];x->actions.count=s->out->action_count-x->actions.offset;x->transitions.count=s->out->transition_count-x->transitions.offset;}return true; }
@@ -779,6 +796,8 @@ static void cleanup_finalize_metadata(SolMirRuntimeCleanup *cleanup) {
                 t->failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31;
                 t->failure_site = event->inherited_failure_site;
                 t->failure_mask = cleanup->conventions->failure_sites[event->inherited_failure_site].allowed_codes;
+                if (local_or_pending_call(cleanup, event, t))
+                    t->failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING;
             } else if (t->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE
                 && event->supplemental_site != SOL_MIR_RUNTIME_NONE) {
                 t->failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_SUPPLEMENTAL_P33;
@@ -902,7 +921,8 @@ bool sol_mir_runtime_cleanup_capture_detail(const SolMirRuntimeCleanup *cleanup,
         || !cleanup_detail_shape(record->detail_kind, record->code, record->length)
         || (transition->failure_mask & failbit(record->code)) == 0) return false;
     SolMirRuntimeSource source;
-    if (transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31) {
+    if (transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31
+        || transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING) {
         if (transition->failure_site >= cleanup->conventions->failure_site_count) return false;
         source = cleanup->conventions->failure_sites[transition->failure_site].source;
     } else {
@@ -945,7 +965,7 @@ static bool cleanup_action_digest(const SolMirRuntimeCleanup *c,
 }
 static const char *action_name(SolMirRuntimeCleanupActionKind x) { static const char *n[] = {"writeback","check-contract","drop-temporary","drop-place","exit-scope","exit-region","exit-handler","drop-snapshot","drop-parameter","propagate-failure"}; return x <= SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE ? n[x] : "invalid"; }
 static const char *role_name(SolMirRuntimeCleanupEdgeRole x) { static const char *n[] = {"goto","branch-true","branch-false","call-normal","call-failure","refined-satisfied","refined-violation","refined-failure","propagate-value","propagate-residual","contract-satisfied","contract-violation","contract-failure","return","terminal-failure"}; return x <= SOL_MIR_RUNTIME_CLEANUP_EDGE_TERMINAL_FAILURE ? n[x] : "invalid"; }
-static const char *failure_source_name(SolMirRuntimeCleanupFailureSource x) { static const char *n[] = {"none","inherited-p31","supplemental-p33","pending"}; return x <= SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING ? n[x] : "invalid"; }
+static const char *failure_source_name(SolMirRuntimeCleanupFailureSource x) { static const char *n[] = {"none","inherited-p31","supplemental-p33","pending","local-or-pending"}; return x <= SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING ? n[x] : "invalid"; }
 static const char *producer_name(SolMirRuntimeCleanupProducerKind x) { static const char *n[] = {"control","image-arithmetic","image-invoke","image-panic","image-no-match","image-unreachable","predicate-arithmetic","predicate-invoke","predicate-no-match","predicate-result","supplemental-allocation"}; return x <= SOL_MIR_RUNTIME_CLEANUP_PRODUCER_SUPPLEMENTAL_ALLOCATION ? n[x] : "invalid"; }
 static const char *target_class(SolMirRuntimeCleanupActionKind x) { switch (x) { case SOL_MIR_RUNTIME_CLEANUP_ACTION_WRITEBACK: return "place"; case SOL_MIR_RUNTIME_CLEANUP_ACTION_CHECK_CONTRACT: return "obligation"; case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_TEMPORARY: return "temporary"; case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE: return "place"; case SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_SCOPE: return "scope"; case SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_REGION: return "region"; case SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_HANDLER: return "handler"; case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT: return "snapshot"; case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PARAMETER: return "parameter"; case SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE: return "failure-site"; } return "invalid"; }
 static bool keyed_u64(const char *domain, uint64_t value, SolMirLinkageDigest *out) { SolMirLinkageSha256 s; sol_mir_linkage_internal_sha256_init(&s); sol_mir_linkage_internal_sha256_write(&s, domain, strlen(domain)); digest_u64(&s, value); return sol_mir_linkage_internal_sha256_finish(&s, out); }
@@ -1037,6 +1057,18 @@ bool sol_mir_runtime_cleanup_test_select(const SolMirRuntimeCleanup*c,
     if (selected->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING) {
         if (request->produced || !request->pending || !authenticate_occurrence(c, request->pending)) return false;
         primary = request->pending;
+    } else if (selected->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING) {
+        if ((request->produced == NULL) == (request->pending == NULL)) return false;
+        if (request->produced) {
+            if (!occurrence_for_event_transition(c, event, &(SolMirRuntimeCleanupTransition){
+                    .failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31,
+                    .failure_site = selected->failure_site, .failure_mask = selected->failure_mask},
+                    request->produced)) return false;
+            primary = request->produced;
+        } else {
+            if (!authenticate_occurrence(c, request->pending)) return false;
+            primary = request->pending;
+        }
     } else if (selected->failure_source != SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE) {
         if (request->pending || !request->produced
             || !occurrence_for_event_transition(c, event, selected, request->produced)) return false;

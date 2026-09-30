@@ -1445,6 +1445,49 @@ static void test_callable_trace_model(const SolMirRuntimeValues *values);
 static void test_copy_transaction_model(const SolMirRuntimeValues *values);
 static void test_equality_model(const SolMirRuntimeValues *values);
 
+static void test_no_import_recipe_accounting(void) {
+    static const char source[] =
+        "module runtime_values_no_import\n"
+        "function root(value: Int64) -> Int64 effects { pure } { return value }\n";
+    TextCompilation compilation;
+    SolMirConcreteProgram program;
+    SolMirRuntimeConventions conventions;
+    SolMirRuntimeValues values, exact, below;
+    sol_mir_concrete_program_init(&program);
+    sol_mir_runtime_conventions_init(&conventions);
+    sol_mir_runtime_values_init(&values);
+    sol_mir_runtime_values_init(&exact);
+    sol_mir_runtime_values_init(&below);
+    CHECK(compile_text(&compilation, "/checkout/runtime_values_no_import.sol", source));
+    SolIrCallableId root = callable(&compilation.ir, "root", SOL_IR_CALLABLE_FUNCTION);
+    SolMirProgramRoot request_root = {root, SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    SolMirTargetDescriptor target = sol_mir_target_wasm32();
+    CHECK(root != SOL_IR_NONE && sol_mir_concrete_program_build(
+        &(SolMirConcreteBuildRequest){&compilation.ir, &request_root, 1, NULL, 0, &target, NULL},
+        &program, &compilation.diagnostics) == SOL_MIR_CONCRETE_BUILD_SUCCEEDED);
+    CHECK(build_values(&program, &compilation.diagnostics, &conventions, &values));
+    CHECK(conventions.import_count == 0 && values.recipe_operation_count != 0);
+    CHECK(values.usage.build_work == 23);
+    SolMirRuntimeValuesUsage reconstructed;
+    CHECK(sol_mir_runtime_values_test_reconstruct_usage(&conventions, &values.limits,
+        &reconstructed) && reconstructed.build_work == 23
+        && memcmp(&reconstructed, &values.usage, sizeof reconstructed) == 0);
+    SolMirRuntimeValuesLimits limits = sol_mir_runtime_values_default_limits();
+    limits.max_build_work = 23;
+    SolMirRuntimeValuesBuildOutcome exact_outcome = sol_mir_runtime_values_build(
+        &(SolMirRuntimeValuesBuildRequest){&conventions, &limits}, &exact, NULL);
+    CHECK(exact_outcome == SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED);
+    limits.max_build_work = 22;
+    SolMirRuntimeValuesBuildOutcome below_outcome = sol_mir_runtime_values_build(
+        &(SolMirRuntimeValuesBuildRequest){&conventions, &limits}, &below, NULL);
+    CHECK(below_outcome == SOL_MIR_RUNTIME_VALUES_BUILD_RESOURCE_EXHAUSTED
+        && below.conventions == NULL && below.recipe_operations == NULL
+        && below.recipe_operation_count == 0);
+    sol_mir_runtime_values_free(&below); sol_mir_runtime_values_free(&exact);
+    sol_mir_runtime_values_free(&values); sol_mir_runtime_conventions_free(&conventions);
+    sol_mir_concrete_program_free(&program); text_compilation_free(&compilation);
+}
+
 static void test_bound_environment_exclusion(void) {
     static const char source[] =
         "module runtime_values_bound_environment\n"
@@ -3885,6 +3928,7 @@ int main(void) {
         sol_mir_concrete_program_free(&programs[i]);
     }
     compilation_free(&compilation);
+    test_no_import_recipe_accounting();
     test_bound_environment_exclusion();
     test_host_result_result_fixture();
     test_forbidden_host_result_requirement();

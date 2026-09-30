@@ -58,6 +58,9 @@ typedef enum {
     SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31,
     SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_SUPPLEMENTAL_P33,
     SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING,
+    /* A direct internal image call either produces its own P3.1 call-depth
+     * failure or transports an already authenticated pending packet. */
+    SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING,
 } SolMirRuntimeCleanupFailureSource;
 
 typedef enum {

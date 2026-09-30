@@ -7,10 +7,10 @@ This relocates the detailed baseline README documentation, reconciled with the
 approved ledger. It is not a second checklist, a new test report, or a stable ABI
 specification. [TODO.md](../TODO.md) alone owns live work status and order.
 
-**Current-worktree addendum, September 29, 2026:** P2.7, P2.8, P3.1-P3.6, and P4.1 are
+**Current-worktree addendum, September 29, 2026:** P2.7, P2.8, P3.1-P3.6, P4.1, and P4.2 are
 independently approved and complete in the current worktree. P4.1 pins Binaryen 129
-and Wasmtime 49.0.1 for an opt-in, root-contained Wasm probe; P4 remains open and
-P4.2 is next. The baseline hash above remains the historical September 9 snapshot;
+and Wasmtime 49.0.1; P4.2 adds internal scalar CFG/direct-call emission. P4 remains
+open and P4.3 is next. The baseline hash above remains the historical September 9 snapshot;
 no post-baseline commit hash is asserted here. M1 completed as infeasible and M2-M5
 remain gated unless it is reopened feasibly.
 
@@ -26,9 +26,9 @@ every target-language form is executable or that a fresh full suite was rerun.
 
 The implemented CLI provides `check`, `test`, `run`, `effects`, `inspect`, and
 `fmt`. Reference execution uses owning typed IR, not the separate experimental
-MIR/P2/P3 owners. There is no backend, physical ABI,
+MIR/P2/P3 owners. There is no complete backend, physical ABI,
 `sol build`, full public IR, or SMT discharge. P3.1 supplies target-independent
-call/result/failure conventions, P3.2a adds a recipe operation-demand inventory, P3.2b adds independently validated allocation plans and pure quota checking, P3.2c adds static ownership plans, P3.2d adds static copy plans, and P3.2e adds static equality plans with allocation-free bounded test modeling, P3.2f adds static E3 host-result transfer plans, P3.3 adds static cleanup/panic/failure policy, P3.4 adds static capability/trusted-host ABI policy, P3.5 adds static exact-handler ABI policy, and P3.6 joins the complete authenticated runtime-lowered graph: there is no executor, physical ABI, allocation implementation, production host adapter, Sol execution, CLI/build artifact, or tokens. P4.1 adds only the opt-in Binaryen 129/Wasmtime 49.0.1 core-Wasm probe: it emits, validates, explicitly optimizes, independently validates, instantiates, and invokes a fixed `[] -> [i32]` module returning 4. OFF + Werror passed 54/54; ON + Werror and ON + ASan/UBSan each passed 56/56. It is not CFG lowering, an adapter, production optimizer policy, or a stable public ABI. Wasm is the first production target; native output is deferred and Component Model integration is not implemented. See [Wasm toolchain](wasm-toolchain.md).
+call/result/failure conventions, P3.2a adds a recipe operation-demand inventory, P3.2b adds independently validated allocation plans and pure quota checking, P3.2c adds static ownership plans, P3.2d adds static copy plans, and P3.2e adds static equality plans with allocation-free bounded test modeling, P3.2f adds static E3 host-result transfer plans, P3.3 adds static cleanup/panic/failure policy, P3.4 adds static capability/trusted-host ABI policy, P3.5 adds static exact-handler ABI policy, and P3.6 joins the complete authenticated runtime-lowered graph: there is no executor, physical ABI, allocation implementation, production host adapter, Sol execution, CLI/build artifact, or tokens. P4.1 adds the opt-in Binaryen 129/Wasmtime 49.0.1 core-Wasm probe. P4.2 then emits and validates authenticated P3.6 whole-scalar direct-call closures using a private provisional scalar convention, not a stable/public physical ABI or adapter. It covers scalar CFG/SSA/lifetime, checked scalar arithmetic, ordinary internal owned-scalar calls, normal/failure dispatch, and returns; P4.3 remains the next represented-values/places/indirect-calls checkpoint. Final validation was OFF Debug Werror 54/54, ON Debug Werror 57/57, and ON RelWithDebInfo ASan/UBSan Werror 57/57. It is not full E6 Wasm execution, an adapter, production optimizer policy, or a stable public ABI. Wasm is the first production target; native output is deferred and Component Model integration is not implemented. See [Wasm toolchain](wasm-toolchain.md).
 
 Compilation sessions use configurable deterministic ceilings for per-file and package source bytes, source files, directory depth and entries, tokens, persistent arena entries, diagnostics, cumulative allocation bytes, and allocation requests. Disk packages are discovered relative to verified open directory descriptors; source reads reject symbolic links, non-regular or duplicate identities, growth, truncation, replacement, and metadata changes. Raw interpreter host failures are copied through interpreter-owned length-delimited storage rather than borrowed C strings.
 
@@ -1105,6 +1105,16 @@ uses 253227 validation work because authenticated borrowed path text is exact-wo
 input; canonical rendered bytes remain path-independent. Conformance includes generic,
 copy, and indirect fixtures. Final Debug and ASan/UBSan validation each passed 54/54.
 
+## Scalar Wasm Emission (P4.2 Current-Worktree Addendum)
+
+P4.2 is an internal opt-in Binaryen 129/Wasmtime 49.0.1 emitter over authenticated P3.6 whole scalar direct-call closures. It emits `Int64`, `Bool`, and Unit constants and parameters; SSA values and block parameters including parallel edges; whole-local and temporary lifetime; arbitrary CFG dispatch and loops; infallible and checked unary, binary, and compound scalar operations without Wasm traps; direct ordinary internal owned-scalar calls; VALUE/Unit normal and failure dispatch; and returns. It consumes only the authenticated scalar subset, rather than interpreting source IR or inventing a general runtime representation.
+
+The linker mapping retains exact P2 `sol.i1` internal definitions. Only exact P2 `sol.e1` functions are externally callable exports; no `sol.i1` function exports exist. The module additionally exports exactly two explicitly unstable mutable diagnostic globals for private packet observation, not as a stable/public ABI. A private entry wrapper resets those globals once. The convention is private and provisional: it is neither a stable/public physical ABI nor a host adapter. Provenance is canonical package-relative `sol.p42.provenance.v1`; nested leaf failure packet code and site survive callers. Static construction rejects direct-call cycles and call chains longer than 64. P4.2 does not emit runtime depth code 7; P4.4 owns runtime checks. P3.3's `LOCAL_OR_PENDING` prerequisite authenticates a future caller-local code-7 packet or an unchanged pending callee packet only for ordinary image direct-function `INVOKE`, excluding host, indirect, capability, and predicate calls.
+
+The representative nested-overflow fixture uses `(functions, blocks, edges, values, locals, generated nodes, provenance records, work bytes, scratch bytes, owned bytes, output bytes)` = `(4, 7, 4, 7, 13, 146, 7, 4115, 1703, 1703, 1504)` and SHA-256 `6a75a3627de544741885fcd12aad0ef27237e9d7d9f3c616f8ceb181f115ddb4`. Limits are exact backend limits: every field has exact, one-below, and partial-zero coverage; backend-owned allocation sweeps and rollback are covered. Binaryen/Wasmtime private allocations are outside quotas, while serialized output bytes are metered. The narrow P3.2 prerequisite adds only the no-import/nonzero-record scratch-allocation event: exact work 23 succeeds and one-below work 22 exhausts; import-bearing E6 frozen build work remains 357. This is not a broader P3.2 semantic change.
+
+Final verification on Darwin arm64 was OFF Debug Werror 54/54, ON Debug Werror 57/57, and ON RelWithDebInfo ASan/UBSan Werror 57/57, plus `git diff --check` and independent final review. Linux execution was not run. P4.2 excludes represented values, places/projections, indirect calls/callbacks/receivers/writeback, patterns/propagation; P4.4 owns contracts/refinements/snapshots/general cleanup/handlers/runtime checks/unwind; P4.5 owns the host adapter and E6 execution; P5 owns artifacts and `sol build`.
+
 ## Remaining Boundary
 
 P2 and P3 are complete for the frozen E6 profile. They select no physical ABI,
@@ -1113,6 +1123,6 @@ runtime executor or allocator implementation, build artifact, or public format. 
 artifacts, and interpreter/Wasm differential execution remain later tracks. No
 internal census is an empirical maintenance advantage, user-facing performance
 guarantee, or proof of application behavior. The proposed M experiment is not
-implemented by these compiler owners. P4.1 is complete; P4.2 is the next production checkpoint.
+implemented by these compiler owners. P4.1 and P4.2 are complete; P4 remains open and P4.3 is the next production checkpoint.
 Consult [TODO.md](../TODO.md#execution-cursor) for the single active cursor and
 [the analysis](project-analysis.md) for the experiment rationale.

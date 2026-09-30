@@ -1359,7 +1359,8 @@ static bool owner_header_valid(const SolMirRuntimeValues *values) {
             concrete->linkage.runtime_requirement_count)
         || !add_size(&build_work, conventions->import_count)
         || !add_size(&build_work, conventions->import_count)
-        || (conventions->import_count != 0 && !add_size(&build_work, 1))
+        || ((conventions->import_count != 0 || values->recipe_operation_count != 0)
+            && !add_size(&build_work, 1))
         || (values->recipe_operation_count != 0
             && (!add_size(&build_work, 1) || !add_size(&build_work, 1)
                 || !add_size(&build_work, 1)))

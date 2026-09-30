@@ -984,6 +984,23 @@ static SolMirRuntimeFailureSiteId validation_predicate_result_site(
             && conventions->failure_sites[i].owner == body) return i;
     return SOL_MIR_RUNTIME_NONE;
 }
+static bool validation_local_or_pending_call(const SolMirRuntimeCleanup *cleanup,
+    const SolMirRuntimeCleanupEvent *event, const SolMirRuntimeCleanupTransition *transition) {
+    const SolMirMaterialization *m = &cleanup->conventions->concrete->materialization;
+    if (event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+        || event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_INVOKE
+        || event->block >= m->block_count || event->inherited_failure_site >= cleanup->conventions->call_count
+        || transition->outcome != SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE) return false;
+    const SolMirMaterializedTerminator *term = &m->blocks[event->block].terminator;
+    const SolMirRuntimeCall *call = &cleanup->conventions->calls[event->inherited_failure_site];
+    return term->kind == SOL_MIR_TERM_INVOKE && call->failure_site == event->inherited_failure_site
+        && call->owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_IMAGE && call->image == event->owner
+        && call->block == event->block && call->call_kind == SOL_IR_CALL_FUNCTION
+        && term->call_kind == SOL_IR_CALL_FUNCTION
+        && call->target_kind == SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL
+        && call->normal_edge == term->normal_edge && call->failure_edge == term->failure_edge
+        && transition->continuation == term->failure_edge;
+}
 static bool validation_metadata(const SolMirRuntimeCleanup *cleanup) {
     const SolMirMaterialization *m = &cleanup->conventions->concrete->materialization;
     const SolMirOperations *ops = &cleanup->conventions->concrete->operations;
@@ -1048,6 +1065,8 @@ static bool validation_metadata(const SolMirRuntimeCleanup *cleanup) {
                 failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31;
                 failure_site = event->inherited_failure_site;
                 mask = cleanup->conventions->failure_sites[failure_site].allowed_codes;
+                if (validation_local_or_pending_call(cleanup, event, t))
+                    failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING;
             } else if (t->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE
                 && event->supplemental_site != SOL_MIR_RUNTIME_NONE) {
                 failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_SUPPLEMENTAL_P33;

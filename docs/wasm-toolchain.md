@@ -1,9 +1,9 @@
-# P4.1 WebAssembly Toolchain
+# P4.1-P4.2 WebAssembly Toolchain
 
-**Status:** P4.1 is complete in the current worktree (September 29, 2026).
-This document is the technical authority for its selected tools, configuration
-boundary, and probe contract. [TODO.md](../TODO.md) remains the sole live
-execution-order ledger; P4 remains open and P4.2 is next.
+**Status:** P4.1 and P4.2 are complete in the current worktree (September 29, 2026).
+This document is the technical authority for the selected tools, configuration
+boundary, probe, and scalar-emitter contracts. [TODO.md](../TODO.md) remains the
+sole live execution-order ledger; P4 remains open and P4.3 is next.
 
 ## Selected tools and boundary
 
@@ -65,8 +65,8 @@ cmake --build build-wasm
 ctest --test-dir build-wasm --output-on-failure
 ```
 
-Checkpoint evidence on Darwin arm64: OFF + Werror passed **54/54**; ON +
-Werror passed the current full suite **56/56**; ON + ASan/UBSan passed
+Historical P4.1 checkpoint evidence on Darwin arm64: OFF + Werror passed **54/54**; ON +
+Werror passed the then-current full suite **56/56**; ON + ASan/UBSan passed
 **56/56**. The full ON Werror suite was rerun after later corrections limited
 to the CMake rejection fixture/root gate. Configure-negative coverage rejects
 missing Binaryen/Wasmtime roots, wrong Binaryen/Wasmtime versions, a symlink
@@ -91,10 +91,8 @@ are independently built twice and byte-for-byte deterministic; the frozen
 probe SHA-256 is
 `193548fb234d599b22cdc269e908d30ba54fc2fa98ea5215851eb6f68b97c674`.
 
-This is not P3.6 or CFG lowering; it selects no physical ABI, adapter, Sol
+This P4.1 probe is not P3.6 or CFG lowering; it selects no physical ABI, adapter, Sol
 execution, production optimizer policy, artifact format, or `sol build`.
-P4.2 must lower scalar CFG and ordinary calls; later P4 checkpoints own values,
-checks/cleanup/handlers, and the trusted adapter/E6 execution.
 
 ## Provenance and release limits
 
@@ -104,3 +102,18 @@ release artifact, or cross-host compatibility guarantee. P5 must define owned
 build artifacts and target/profile identity, deterministic writes and metadata,
 artifact execution, interpreter/Wasm differential conformance, and byte-identical
 release acceptance across supported hosts with pinned-dependency provenance.
+
+
+## P4.2 scalar-emitter contract
+
+P4.2 uses the P4.1 opt-in Binaryen 129/Wasmtime 49.0.1 toolchain to emit and validate authenticated P3.6 **whole scalar direct-call closures**. It supports `Int64`, `Bool`, and Unit constants and parameters; SSA values/block parameters and parallel edges; whole-local and temporary lifetime; arbitrary dispatcher CFG and loops; infallible plus checked unary/binary/compound operations with no Wasm traps; direct ordinary internal owned-scalar calls; VALUE/Unit normal/failure dispatch; and returns.
+
+The module keeps exact P2 `sol.i1` definitions internally. Only exact P2 `sol.e1` functions are externally callable exports; no `sol.i1` function exports exist. The module additionally exports exactly two explicitly unstable mutable diagnostic globals for private packet observation, not as a stable/public ABI. A private entry wrapper resets those globals once. This is a **private provisional scalar convention**, not a stable/public physical ABI or a host adapter. Provenance is canonical package-relative `sol.p42.provenance.v1`; a nested leaf failure packet's code/site survives callers. Cycles and call chains over 64 are rejected statically. There is no runtime depth-code-7 emission: P4.4 owns runtime checks. The P3.3 `LOCAL_OR_PENDING` prerequisite permits only authenticated future caller-local code 7 or an unchanged pending callee packet, and only on ordinary image direct-function `INVOKE`; host, indirect, capability, and predicate calls remain excluded.
+
+P4.2 intentionally excludes represented values, places/projections, indirect calls/callbacks/receivers/writeback, patterns/propagation, contracts/refinements/snapshots, general cleanup/handlers/runtime checks/unwind, the host adapter, and E6 Wasm execution. P4.3 is next for represented values, places, projections, and indirect calls; P4.4 owns checks/cleanup/handlers; P4.5 owns the adapter/E6; P5 owns artifacts and `sol build`.
+
+### Limits and validation
+
+Backend limits are exact and have exact, one-below, and partial-zero tests; backend-owned allocation sweeps and rollback are covered. Binaryen and Wasmtime private allocations are outside Sol quotas, while serialized output bytes are metered. The narrow P3.2 prerequisite adds only the no-import/nonzero-record scratch-allocation event: exact work 23 succeeds and one-below work 22 exhausts; import-bearing E6 frozen build work remains 357. This is not a broader P3.2 semantic change. The representative nested-overflow fixture uses `(functions, blocks, edges, values, locals, generated nodes, provenance records, work bytes, scratch bytes, owned bytes, output bytes)` = `(4, 7, 4, 7, 13, 146, 7, 4115, 1703, 1703, 1504)` with SHA-256 `6a75a3627de544741885fcd12aad0ef27237e9d7d9f3c616f8ceb181f115ddb4`.
+
+Final verification on Darwin arm64: OFF Debug Werror **54/54**; ON Debug Werror **57/57**; ON RelWithDebInfo ASan/UBSan Werror **57/57**. `git diff --check` passed and independent final review approved. No Linux execution is claimed.

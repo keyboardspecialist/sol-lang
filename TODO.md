@@ -12,7 +12,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 
 ## Execution Cursor
 
-- **Next overall and next production checkpoint: P4.2.**
+- **Next overall and next production checkpoint: P4.3.**
 - M1 is resolved through its infeasibility path: the
   [September 25 report](experiments/m1/README.md) records the missing independent
   governance and protected evaluation boundary.
@@ -128,7 +128,7 @@ deferred until a concrete core API requires their smallest coherent subset.
 
 ## End-to-End and Production Track
 
-E1-E6, P1, P2, and P3 are complete for the frozen E6 profile. P4.1 is complete; P4.2 is the next overall and next production checkpoint.
+E1-E6, P1, P2, and P3 are complete for the frozen E6 profile. P4.1 and P4.2 are complete; P4 remains open and P4.3 is the next overall and next production checkpoint.
 Deferred language breadth is not a prerequisite for P2-P5 unless a
 milestone explicitly activates a bounded numbered-task slice. Existing numbered
 capability IDs remain stable; named slices such as `48A` account for completed portions
@@ -153,7 +153,7 @@ access for malformed IR/MIR mutation, phase-corruption assertions, differential
 evaluation, and trusted host-callback coverage.
 
 The production track is underway. P1, P2, and P3 are complete for the frozen E6
-profile; P4.1 is complete and P4.2 is the next overall item and next production checkpoint:
+profile; P4.1 and P4.2 are complete; P4 remains open and P4.3 is the next overall item and next production checkpoint:
 
 | Done | Order | Milestone | Dependency and numbered-backlog scope |
 | --- | ---: | --- | --- |
@@ -235,7 +235,7 @@ external dependencies, public IR, concurrency, or broader handlers.
 | Done | Order | Checkpoint | Exit criteria |
 | --- | ---: | --- | --- |
 | [x] | P3.1 | Freeze call, result, and failure conventions | A separate bounded `SolMirRuntimeConventions` owner borrows the immutable completed P2 concrete program; freezes receiver-first internal, host, and indirect-table signatures and calls with owned/shared/exclusive access, VALUE/UNIT/NEVER outcomes, failure edges, and normal-only exclusive writeback; maps entry results to E2 exits; derives collision-checked SHA-256 `sol.h1` host and `sol.r1` recipe-operation identities/symbols from exact P2 requirements; owns canonical source-aware failure sites and code masks; independently validates exact resources and aliases; and renders one canonical buffered form without choosing a physical ABI or Wasm index. |
-| [ ] | P3.W1 | Bounded Wasm ABI Integration Experiment | Unperformed historical/optional proposed work. If separately activated after P3.1, it would record candidate tool versions, validate and execute a minimal scalar call/result/failure module, and report ABI/tool mismatches. It does not own or replace the P4.2 cursor and did not inform or complete P4.1, 47W, 48C, component support, E6 Wasm execution, backend integration, or build tooling. |
+| [ ] | P3.W1 | Bounded Wasm ABI Integration Experiment | Unperformed historical/optional proposed work. If separately activated after P3.1, it would record candidate tool versions, validate and execute a minimal scalar call/result/failure module, and report ABI/tool mismatches. It does not own or replace the P4.3 cursor and did not inform or complete P4.1, 47W, 48C, component support, E6 Wasm execution, backend integration, or build tooling. |
 | [x] | P3.2 | Define bounded allocation and owned-value operations | P3.2a-P3.2f collectively define and test-model static allocation, ownership, move/drop, copy, equality, and E3 host-result transfer for the frozen profile, without production execution or the user allocator/resource model from tasks 36-38. |
 | [x] | P3.2a | Inventory recipe operation demands | A separate bounded `SolMirRuntimeValues` owner borrows authenticated immutable P3.1 conventions and owns one same-ID record per concrete recipe. It strips bound-environment from linkage requirements and pairs every demanded create/copy/drop/equal bit with exactly one existing P3.1 import, while absent bits remain `NONE`; independent validation reconstructs masks, IDs, exact resources, complete arena consumption, and transitive anti-aliasing. This inventory defines no executable operations or allocation plans. |
 | [x] | P3.2b | Define checked allocation and quota plans | One same-ID target-parameterized plan per recipe classifies NONE, fixed aggregate outer objects, and Text headers; checked preflight covers zero-length Text, target/object bounds, cumulative request/byte quotas, and allocation-limit/failure outcomes. Independent validation and canonical rendering retain no physical allocation execution. |
@@ -347,14 +347,14 @@ target logic, access classes, result classes, failure masks, provenance, and exi
 P3 completes static runtime lowering but defines no executor, physical ABI, Wasm,
 adapter, allocator implementation, CLI/build artifact, or tokens. The P3.3 policy
 retains exact inherited P3.1 sites and adds supplemental sites only for uncovered
-allocation/resource producers. P3.W1 remains unperformed historical/optional proposed work and non-cursor; it does not replace the P4.2 cursor.
+allocation/resource producers. P3.W1 remains unperformed historical/optional proposed work and non-cursor; it does not replace the P4.3 cursor.
 
 ### P4 - WebAssembly Backend and Host Adapter
 
 | Done | Order | Checkpoint | Exit criteria |
 | --- | ---: | --- | --- |
 | [x] | P4.1 | Select and pin the WebAssembly toolchain | Binaryen 129 C API emits, validates, serializes, and explicitly runs the fixed probe optimizer pass; Wasmtime 49.0.1 C API independently validates, instantiates, and runs it. Opt-in root-only fail-closed configuration, exact versions, no cross compilation, configure-time probe, frozen namespaces, deterministic probe bytes, and rejection fixtures are complete; see `docs/wasm-toolchain.md`. |
-| [ ] | P4.2 | Emit scalar CFG and ordinary calls | Generate validated Wasm for constants, SSA/block parameters, storage lifetime, unary/checked binary operations, branches, loops, direct calls, returns, and normal/failure result dispatch with deterministic P2 symbols and package-relative provenance |
+| [x] | P4.2 | Emit scalar CFG and ordinary calls | Internal opt-in Binaryen 129/Wasmtime 49.0.1 emission consumes authenticated P3.6 whole-scalar direct-call closures: scalar CFG/SSA/block parameters, lifetime, checked arithmetic, ordinary owned-scalar calls, VALUE/Unit dispatch, returns, exact internal `sol.i1` definitions, only exact P2 `sol.e1` externally callable function exports (no `sol.i1` function exports), two explicitly unstable mutable diagnostic globals for private packet observation, and package-relative provenance. This is a private provisional scalar convention, not a stable/public physical ABI or adapter. |
 | [ ] | P4.3 | Emit represented values, places, and indirect calls | Implement Text, aggregates, sums, nominal wrappers, constructors, projections, partial moves/reinitialization, copy/drop, propagation, pattern plans, function tables, callbacks, receivers, and normal-edge writeback using P2 layouts and P3 runtime operations |
 | [ ] | P4.4 | Emit runtime checks, cleanup, and handlers | Realize panic, arithmetic/allocation errors, no-match, require/unreachable, contracts, snapshots, refinements, complete unwind, handler scopes, and provider dispatch; validate modules and compare instrumented cleanup/failure identity with the P3 contract |
 | [ ] | P4.5 | Integrate the trusted host adapter and E6 execution | Map only the E3 profiles to approved imports, preserve distinct roots and authority preflight, marshal bounded data-only values, retain exact console/host failures, and execute E6 success and panic paths from emitted Wasm; every P1 vocabulary category executes or has an explicit unreachable-by-profile rule; complete tasks 47W and 48C |
@@ -489,7 +489,7 @@ or renumber stable capability IDs.
 | [ ] | 44 | Define lexical unsafe blocks, assumptions/establishments, raw pointer primitives, audit records, and unsafe effects | 5 | 5 | Places, lifetimes, resources, and obligations |
 | [x] | 45 | Introduce target-neutral ownership-explicit callable-scoped CFG MIR for the frozen E6 core, including blocks/SSA, moves, call-scoped borrows/writeback, abstract cleanup/storage lifetimes, regions, panic/failure control flow, generic/effect/evidence metadata, independent validation, canonical rendering, and bounded evaluator/trace semantics without selecting representation or ABI | 5 | 5 | E6 and completed executable-core semantics |
 | [ ] | 46 | Define C ABI layouts and FFI declarations with ownership, nullability, threading, blocking, error, and effect metadata | 5 | 5 | Unsafe boundaries (44), package policy (40), and P2 representation/target layout |
-| [~] | 47 | 47A selects WebAssembly as the first production target; P4.1 pins the probe toolchain only; 47W remains open to integrate the established WebAssembly backend for the frozen executable core; native/additional backends remain deferred | 5 | 5 | 47A and P4.1 complete; P2 representation/layout and P3 runtime ABI for 47W |
+| [~] | 47 | 47A selects WebAssembly as the first production target; P4.1 pins the probe toolchain and P4.2 completes the scalar direct-call subset; 47W remains open for the remaining frozen executable-core backend integration; native/additional backends remain deferred | 5 | 5 | 47A, P4.1, and the P4.2 scalar slice complete; P2 representation/layout and P3 runtime ABI for 47W |
 | [~] | 48 | Complete compiled-runtime support after 48A/E3: 48B is complete with target-independent executable-core allocation, cleanup, panic, capability, handler ABI policy, and the complete runtime-lowered program; 48C supplies the WebAssembly adapter; user resource/allocation and FFI extensions remain deferred with tasks 36-37 and 46 | 5 | 5 | E3, P2, and P3 complete for 48B; P4 and task 47W for 48C |
 | [~] | 49 | Complete application tooling after 49A/E2 and 49B/E4: 49C adds WebAssembly `sol build`, artifact execution, target/profile selection, linkage metadata, reproducibility, and interpreter/Wasm differential tests over the bounded existing package model | 5 | 4 | P4 and existing package resolution; task 40 only if separately activated |
 | [~] | 50 | Complete verification beyond 50A/E5 and P1 runtime-preserving lowering: normalized obligations and call-site substitution; refinement projection, destructuring, and exhaustiveness; cost/resource obligations only when tasks 36-37 activate them | 5 | 5 | E5 and P1; tasks 36-37 only for cost/resource checks |
