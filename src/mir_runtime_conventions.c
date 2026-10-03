@@ -326,7 +326,10 @@ static bool build_call_failure_mask(const SolMirRuntimeCall *call,
             && target != SOL_MIR_LINKAGE_TARGET_HOST) return false;
         targets_host = target == SOL_MIR_LINKAGE_TARGET_HOST;
     } else return false;
-    *mask = failure_code_bit(SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT);
+    *mask = call->target_kind == SOL_MIR_RUNTIME_TARGET_INDIRECT_TABLE
+            && !targets_host
+        ? failure_code_bit(SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT)
+        : failure_code_bit(SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT);
     if (targets_host) {
         *mask |= failure_code_bit(SOL_MIR_RUNTIME_FAILURE_HOST_CALL_LIMIT);
         *mask |= failure_code_bit(SOL_MIR_RUNTIME_FAILURE_HOST_ERROR);

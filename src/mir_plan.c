@@ -1475,30 +1475,79 @@ static const SolMirProgramReference *find_program_reference(
 /* Retain the initializer as the authenticated producer.  A local place alone
    has no receiver capture, so accepting anything other than one exact let-bound
    function or bound operation would manufacture an unproven callable handle. */
-static SolIrExpressionId local_callable_initializer(const SolIr *ir,
-    SolIrExpressionId expression_id) {
-    if (expression_id >= ir->expression_count) return SOL_IR_NONE;
-    const SolIrExpression *expression = &ir->expressions[expression_id];
+/* P4.3 accepts one exact, immutable record-field producer route only. This
+ * mirrors program construction so planning cannot manufacture a callback
+ * target that the source-backed producer census did not retain. */
+static SolIrExpressionId finite_callable_producer(Builder *builder,
+    SolIrExpressionId id, size_t depth) {
+    const SolIr *ir = builder->ir;
+    if (!charge(builder, 1) || id >= ir->expression_count
+        || depth > ir->expression_count) return SOL_IR_NONE;
+    const SolIrExpression *expression = &ir->expressions[id];
+    if (expression->kind == SOL_IR_EXPR_DEFINITION
+        || expression->kind == SOL_IR_EXPR_BOUND_OPERATION) return id;
     if (expression->kind != SOL_IR_EXPR_PLACE
         || expression->as.place >= ir->place_count) return SOL_IR_NONE;
     const SolIrPlace *place = &ir->places[expression->as.place];
-    if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
-        || place->projections.count != 0 || place->local >= ir->local_count)
-        return SOL_IR_NONE;
+    if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL || place->local >= ir->local_count
+        || ir->locals[place->local].kind != SOL_IR_LOCAL_BINDING
+        || ir->locals[place->local].mutable) return SOL_IR_NONE;
+    if (place->projections.count == 0) {
+        /* Keep P2's authenticated whole-local route.  The source marks this
+         * producer lookup as NONE; projection is the only new MOVE-only path. */
+        if (expression->local_use != SOL_IR_LOCAL_USE_NONE
+            && expression->local_use != SOL_IR_LOCAL_USE_MOVE) return SOL_IR_NONE;
+        SolIrExpressionId initializer = SOL_IR_NONE;
+        for (size_t index = 0; index < ir->statement_count; ++index) {
+            if (!charge(builder, 1)) return SOL_IR_NONE;
+            const SolIrStatement *statement = &ir->statements[index];
+            if (statement->kind != SOL_IR_STATEMENT_LET || statement->local != place->local)
+                continue;
+            if (initializer != SOL_IR_NONE || statement->expression >= ir->expression_count)
+                return SOL_IR_NONE;
+            initializer = statement->expression;
+        }
+        return initializer == SOL_IR_NONE ? SOL_IR_NONE
+            : finite_callable_producer(builder, initializer, depth + 1);
+    }
+    if (place->projections.count != 1
+        || expression->local_use != SOL_IR_LOCAL_USE_MOVE
+        || place->projections.offset >= ir->projection_count) return SOL_IR_NONE;
+    const SolIrProjection *projection = &ir->projections[place->projections.offset];
+    if (projection->kind != SOL_IR_PROJECTION_FIELD) return SOL_IR_NONE;
     SolIrExpressionId initializer = SOL_IR_NONE;
     for (size_t index = 0; index < ir->statement_count; ++index) {
+        if (!charge(builder, 1)) return SOL_IR_NONE;
         const SolIrStatement *statement = &ir->statements[index];
-        if (statement->kind != SOL_IR_STATEMENT_LET
-            || statement->local != place->local) continue;
+        if (statement->kind != SOL_IR_STATEMENT_LET || statement->local != place->local)
+            continue;
         if (initializer != SOL_IR_NONE || statement->expression >= ir->expression_count)
             return SOL_IR_NONE;
         initializer = statement->expression;
     }
-    if (initializer == SOL_IR_NONE || ir->expressions[initializer].type != expression->type)
-        return SOL_IR_NONE;
-    SolIrExpressionKind kind = ir->expressions[initializer].kind;
-    return kind == SOL_IR_EXPR_DEFINITION || kind == SOL_IR_EXPR_BOUND_OPERATION
-        ? initializer : SOL_IR_NONE;
+    if (initializer == SOL_IR_NONE
+        || ir->expressions[initializer].kind != SOL_IR_EXPR_RECORD) return SOL_IR_NONE;
+    const SolIrExpression *record = &ir->expressions[initializer];
+    SolIrExpressionId field_value = SOL_IR_NONE;
+    for (size_t index = 0; index < record->as.record.fields.count; ++index) {
+        if (!charge(builder, 1)) return SOL_IR_NONE;
+        size_t operand_id = record->as.record.fields.offset + index;
+        if (operand_id >= ir->operand_count) return SOL_IR_NONE;
+        const SolIrOperand *operand = &ir->operands[operand_id];
+        if (operand->formal != projection->field || operand->access != SOL_ACCESS_OWNED)
+            continue;
+        if (field_value != SOL_IR_NONE) return SOL_IR_NONE;
+        field_value = operand->value;
+    }
+    SolIrExpressionId producer = field_value == SOL_IR_NONE ? SOL_IR_NONE
+        : finite_callable_producer(builder, field_value, depth + 1);
+    if (producer == SOL_IR_NONE || ir->expressions[producer].kind != SOL_IR_EXPR_DEFINITION
+        || ir->expressions[producer].as.definition >= ir->definition_count) return SOL_IR_NONE;
+    SolIrCallableId callable = ir->definitions[ir->expressions[producer].as.definition].callable;
+    return callable < ir->callable_count && ir->callables[callable].kind == SOL_IR_CALLABLE_FUNCTION
+        && ir->callables[callable].generic_parameters.count == 0
+        && ir->callables[callable].effect_parameters.count == 0
+        && ir->callables[callable].effect_parameter == SOL_IR_NONE ? producer : SOL_IR_NONE;
 }
 
 static bool plan_callable_value(Environment *environment,
@@ -1588,7 +1637,7 @@ static bool plan_call(Environment *environment, SolMirPlanDemandKind kind,
         SolIrExpressionId producer = expression->as.call.callee;
         if (producer < builder->ir->expression_count
             && builder->ir->expressions[producer].kind == SOL_IR_EXPR_PLACE)
-            producer = local_callable_initializer(builder->ir, producer);
+            producer = finite_callable_producer(builder, producer, 0);
         if (producer >= builder->ir->expression_count) return fail(builder,
                 SOL_MIR_PLAN_BUILD_UNSUPPORTED_OR_UNRESOLVED,
                 "callback has no exact static callable producer");
@@ -1612,7 +1661,7 @@ static bool plan_call(Environment *environment, SolMirPlanDemandKind kind,
         SolIrExpressionId producer = expression->as.call.callee;
         const SolIrExpression *operation = &builder->ir->expressions[producer];
         if (operation->kind == SOL_IR_EXPR_PLACE) {
-            producer = local_callable_initializer(builder->ir, producer);
+            producer = finite_callable_producer(builder, producer, 0);
             if (producer == SOL_IR_NONE) return fail(builder,
                     SOL_MIR_PLAN_BUILD_UNSUPPORTED_OR_UNRESOLVED,
                     "capability call has no exact static bound-operation producer");
@@ -1760,7 +1809,7 @@ static bool scan_expression(Environment *environment, SolIrExpressionId id,
                         = &ir->expressions[expression->as.call.callee];
                     SolIrExpressionId producer = expression->as.call.callee;
                     if (callee->kind == SOL_IR_EXPR_PLACE) {
-                        producer = local_callable_initializer(ir, producer);
+                        producer = finite_callable_producer(builder, producer, 0);
                         if (producer == SOL_IR_NONE) return fail(builder,
                                 SOL_MIR_PLAN_BUILD_UNSUPPORTED_OR_UNRESOLVED,
                                 "predicate callback has no exact static producer");
@@ -1889,7 +1938,7 @@ static bool scan_expression(Environment *environment, SolIrExpressionId id,
                 SolIrArmId arm_id
                     = ir->arm_ids[expression->as.match_expr.arms.offset + index];
                 const SolIrArm *arm = &ir->arms[arm_id];
-                if (!scan_pattern(environment, arm->pattern, depth + 1)) return false;
+                if (!scan_pattern(environment, arm->pattern, 0)) return false;
                 for (size_t local = 0; local < arm->bindings.count; ++local) {
                     if (!add_local_use(environment,
                             ir->roots[arm->bindings.offset + local])) return false;
@@ -1959,7 +2008,8 @@ static bool invoke_authentic(const Builder *builder, SolIrCallableId parent,
     const SolIrExpression *source
         = &builder->ir->expressions[term->as.invoke.source_expression];
     if (source->kind != SOL_IR_EXPR_CALL || source->as.call.kind != term->as.invoke.kind
-        || source->as.call.callable != term->as.invoke.callable
+        || (source->as.call.kind != SOL_IR_CALL_METHOD
+            && source->as.call.callable != term->as.invoke.callable)
         || source->as.call.type_arguments.offset != term->as.invoke.type_arguments.offset
         || source->as.call.type_arguments.count != term->as.invoke.type_arguments.count
         || source->as.call.effects.offset != term->as.invoke.effects.offset
@@ -1967,8 +2017,49 @@ static bool invoke_authentic(const Builder *builder, SolIrCallableId parent,
         || source->as.call.effect_parameter != term->as.invoke.effect_parameter
         || source->as.call.evidence.offset != term->as.invoke.evidence.offset
         || source->as.call.evidence.count != term->as.invoke.evidence.count) return false;
-    return program_has_invoke_reference(builder, parent,
-        term->as.invoke.source_expression, term->as.invoke.callable);
+    if (!program_has_invoke_reference(builder, parent,
+            term->as.invoke.source_expression, term->as.invoke.callable)) {
+        return false;
+    }
+    if (term->as.invoke.kind != SOL_IR_CALL_METHOD) return true;
+
+    /* Immediate method dispatch is a direct implementation call, but its
+       source names the trait requirement.  Keep those two identities joined
+       here rather than letting planning manufacture a concrete target from a
+       merely well-formed source call. */
+    if (source->as.call.evidence.count != 1
+        || source->as.call.evidence.offset >= builder->ir->evidence_count
+        || source->as.call.receiver >= builder->ir->expression_count) return false;
+    const SolIrDispatchEvidence *evidence
+        = &builder->ir->evidence[source->as.call.evidence.offset];
+    /* Forwarded and generic dispatch retain the established P2.2 dictionary
+       path.  This direct-method prerequisite intentionally proves only the
+       immediate, closed implementation path. */
+    if (evidence->forwarded || source->as.call.type_arguments.count != 0)
+        return true;
+    const SolIrExpression *receiver
+        = &builder->ir->expressions[source->as.call.receiver];
+    if (evidence->binding != SOL_IR_NONE || evidence->parameter != SOL_IR_NONE
+        || evidence->requirement != source->as.call.callable
+        || evidence->method != term->as.invoke.callable
+        || evidence->type != receiver->type
+        || evidence->implementation >= builder->ir->definition_count
+        || evidence->method >= builder->ir->callable_count) return false;
+    const SolIrDefinition *implementation
+        = &builder->ir->definitions[evidence->implementation];
+    const SolIrCallable *method = &builder->ir->callables[evidence->method];
+    return implementation->kind == SOL_IR_DEFINITION_IMPLEMENTATION
+        && implementation->implementation_trait == evidence->trait
+        && implementation->implementation_target == evidence->type
+        && method->kind == SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION
+        && method->owner == evidence->implementation
+        && method->body != SOL_IR_NONE
+        && method->generic_parameters.count == 0
+        && method->effect_parameters.count == 0
+        && method->receiver != SOL_IR_NONE
+        && method->receiver < builder->ir->local_count
+        && builder->ir->locals[method->receiver].type == evidence->type
+        && method->receiver_access == source->as.call.receiver_access;
 }
 
 static bool scan_predicate_obligation(Environment *environment,
@@ -2117,7 +2208,7 @@ static bool scan_instance(Builder *builder, SolMirPlanInstanceId instance_id) {
             if (producer >= builder->ir->expression_count) return false;
             const SolIrExpression *source = &builder->ir->expressions[producer];
             if (source->kind == SOL_IR_EXPR_PLACE) {
-                producer = local_callable_initializer(builder->ir, producer);
+                producer = finite_callable_producer(builder, producer, 0);
                 if (producer == SOL_IR_NONE) return fail(builder,
                         SOL_MIR_PLAN_BUILD_UNSUPPORTED_OR_UNRESOLVED,
                         "callback invoke has no exact static producer");

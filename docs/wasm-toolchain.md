@@ -1,9 +1,9 @@
-# P4.1-P4.2 WebAssembly Toolchain
+# P4.1-P4.3 WebAssembly Toolchain
 
-**Status:** P4.1 and P4.2 are complete in the current worktree (September 29, 2026).
+**Status:** P4.1 through P4.3 are complete in the current worktree (October 3, 2026).
 This document is the technical authority for the selected tools, configuration
 boundary, probe, and scalar-emitter contracts. [TODO.md](../TODO.md) remains the
-sole live execution-order ledger; P4 remains open and P4.3 is next.
+sole live execution-order ledger; P4 remains open and P4.4 is next.
 
 ## Selected tools and boundary
 
@@ -110,10 +110,18 @@ P4.2 uses the P4.1 opt-in Binaryen 129/Wasmtime 49.0.1 toolchain to emit and val
 
 The module keeps exact P2 `sol.i1` definitions internally. Only exact P2 `sol.e1` functions are externally callable exports; no `sol.i1` function exports exist. The module additionally exports exactly two explicitly unstable mutable diagnostic globals for private packet observation, not as a stable/public ABI. A private entry wrapper resets those globals once. This is a **private provisional scalar convention**, not a stable/public physical ABI or a host adapter. Provenance is canonical package-relative `sol.p42.provenance.v1`; a nested leaf failure packet's code/site survives callers. Cycles and call chains over 64 are rejected statically. There is no runtime depth-code-7 emission: P4.4 owns runtime checks. The P3.3 `LOCAL_OR_PENDING` prerequisite permits only authenticated future caller-local code 7 or an unchanged pending callee packet, and only on ordinary image direct-function `INVOKE`; host, indirect, capability, and predicate calls remain excluded.
 
-P4.2 intentionally excludes represented values, places/projections, indirect calls/callbacks/receivers/writeback, patterns/propagation, contracts/refinements/snapshots, general cleanup/handlers/runtime checks/unwind, the host adapter, and E6 Wasm execution. P4.3 is next for represented values, places, projections, and indirect calls; P4.4 owns checks/cleanup/handlers; P4.5 owns the adapter/E6; P5 owns artifacts and `sol build`.
+P4.2 historically excluded represented values, places/projections, indirect calls/callbacks/receivers/writeback, and patterns/propagation. P4.3 completes its bounded represented-emitter scope below. P4.4 owns general runtime checks, non-total/guarded-match failure, contracts/refinements/snapshots, complete cleanup/unwind/handlers/provider dispatch, and runtime depth/step codes 6/7; P4.5 owns the host adapter/E6; P5 owns artifacts and `sol build`.
 
 ### Limits and validation
 
 Backend limits are exact and have exact, one-below, and partial-zero tests; backend-owned allocation sweeps and rollback are covered. Binaryen and Wasmtime private allocations are outside Sol quotas, while serialized output bytes are metered. The narrow P3.2 prerequisite adds only the no-import/nonzero-record scratch-allocation event: exact work 23 succeeds and one-below work 22 exhausts; import-bearing E6 frozen build work remains 357. This is not a broader P3.2 semantic change. The representative nested-overflow fixture uses `(functions, blocks, edges, values, locals, generated nodes, provenance records, work bytes, scratch bytes, owned bytes, output bytes)` = `(4, 7, 4, 7, 13, 146, 7, 4115, 1703, 1703, 1504)` with SHA-256 `6a75a3627de544741885fcd12aad0ef27237e9d7d9f3c616f8ceb181f115ddb4`.
 
 Final verification on Darwin arm64: OFF Debug Werror **54/54**; ON Debug Werror **57/57**; ON RelWithDebInfo ASan/UBSan Werror **57/57**. `git diff --check` passed and independent final review approved. No Linux execution is claimed.
+
+## P4.3 represented-emitter contract
+
+P4.3 is a private opt-in Binaryen 129/Wasmtime 49.0.1 Wasm32 represented emitter over authenticated P3.6, with canonical package-relative provenance `sol.p43.provenance.v1`. It emits bounded Text; finite fixed products/tuples, sums, distinct wrappers, and Unit fields; constructors/projections; deep copy, equality, and logical cleanup; guard-free total patterns and Copy extraction; Option/Result propagation; a private sentinel `funcref` table with exact unbound internal callbacks; whole-local scalar `inout` callback normal-only writeback; immediate shared/exclusive `Int64` methods; and exact callable-plus-Text product projected moves, conditional holes, repair/reopen, intact whole-root moves, and hole-aware cleanup.
+
+It preserves deterministic bump memory, exact runtime request/byte quotas, code 5 resource failure before code 4 physical allocation failure with canonical supplemental sites, exact resource/fault rollback, deterministic module validation, bounded/capped raw parsing, and source-backed mutations. Bound stored trait-method values remain intentionally unsupported under the language immediate-method rule; broader represented shapes and callable signatures fail closed. It adds no host/capability adapter or E6 execution and remains a private provisional convention, not a stable public ABI.
+
+Validation on Darwin arm64: OFF Debug Werror **54/54**; ON Debug Werror **58/58**; the current ON ASan/UBSan Werror represented-emitter test and focused MIR tests passed. This does not claim a current full ASan suite or Linux execution.

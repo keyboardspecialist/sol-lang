@@ -133,6 +133,43 @@ static bool charge_work(Builder *builder, size_t count) {
     return true;
 }
 
+/* The independent source/reference proof has no owner allocation to publish,
+ * but it must still be bounded by the same P2.1 work budget.  Keep its meter
+ * separate from the builder's persistent census: the canonical rebuild below
+ * independently reconstructs that census, while this meter rejects a hostile
+ * owner before an unbounded validation walk. */
+typedef struct {
+    size_t work;
+    size_t limit;
+    bool exhausted;
+} ValidationWork;
+
+typedef bool (*ProofTick)(void *context);
+
+typedef struct {
+    ProofTick tick;
+    void *context;
+} ProofWork;
+
+static bool builder_proof_tick(void *context) {
+    return charge_work(context, 1);
+}
+
+static bool validation_proof_tick(void *context) {
+    ValidationWork *work = context;
+    if (work->work > work->limit || work->work == SIZE_MAX
+        || 1 > work->limit - work->work) {
+        work->exhausted = true;
+        return false;
+    }
+    ++work->work;
+    return true;
+}
+
+static bool proof_tick(ProofWork *work) {
+    return work != NULL && work->tick != NULL && work->tick(work->context);
+}
+
 static bool charge_classification(Builder *builder) {
     SolMirProgramUsage *usage = &builder->program->usage;
     if (usage->callable_classifications
@@ -523,34 +560,84 @@ static bool scan_evidence(Builder *builder, SolIrCallableId source_callable,
 
 static bool scan_expression(Builder *builder, SolIrCallableId source_callable,
     SolIrExpressionId id, bool predicate, size_t depth);
+static bool meter_invoke_producer_work(Builder *builder);
 
 /* A callable local is statically finite only when its sole immutable binding
    retains one exact callable expression.  Do not infer through arbitrary
    callable-valued expressions: the P2 producer must retain its capture site. */
-static SolIrExpressionId local_callable_initializer(const SolIr *ir,
-    SolIrExpressionId expression_id) {
-    if (expression_id >= ir->expression_count) return SOL_IR_NONE;
-    const SolIrExpression *expression = &ir->expressions[expression_id];
+/* This is provenance recognition, not general value-flow analysis. P4.3
+ * permits only one immutable record-field route back to its exact function
+ * producer; every other callable-valued route stays unsupported. */
+static SolIrExpressionId finite_callable_producer(Builder *builder,
+    SolIrExpressionId id, size_t depth) {
+    const SolIr *ir = builder->program->ir;
+    if (!charge_work(builder, 1) || id >= ir->expression_count
+        || depth > ir->expression_count) return SOL_IR_NONE;
+    const SolIrExpression *expression = &ir->expressions[id];
+    if (expression->kind == SOL_IR_EXPR_DEFINITION
+        || expression->kind == SOL_IR_EXPR_BOUND_OPERATION) return id;
     if (expression->kind != SOL_IR_EXPR_PLACE
         || expression->as.place >= ir->place_count) return SOL_IR_NONE;
     const SolIrPlace *place = &ir->places[expression->as.place];
-    if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL
-        || place->projections.count != 0 || place->local >= ir->local_count)
-        return SOL_IR_NONE;
+    if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL || place->local >= ir->local_count
+        || ir->locals[place->local].kind != SOL_IR_LOCAL_BINDING
+        || ir->locals[place->local].mutable) return SOL_IR_NONE;
+    if (place->projections.count == 0) {
+        /* Preserve the pre-P4.3 whole-local producer lookup.  Only the new
+         * record-field route is a move and must stay projection-specific. */
+        if (expression->local_use != SOL_IR_LOCAL_USE_NONE
+            && expression->local_use != SOL_IR_LOCAL_USE_MOVE) return SOL_IR_NONE;
+        SolIrExpressionId initializer = SOL_IR_NONE;
+        for (size_t index = 0; index < ir->statement_count; ++index) {
+            if (!charge_work(builder, 1)) return SOL_IR_NONE;
+            const SolIrStatement *statement = &ir->statements[index];
+            if (statement->kind != SOL_IR_STATEMENT_LET || statement->local != place->local)
+                continue;
+            if (initializer != SOL_IR_NONE || statement->expression >= ir->expression_count)
+                return SOL_IR_NONE;
+            initializer = statement->expression;
+        }
+        return initializer == SOL_IR_NONE ? SOL_IR_NONE
+            : finite_callable_producer(builder, initializer, depth + 1);
+    }
+    if (place->projections.count != 1
+        || expression->local_use != SOL_IR_LOCAL_USE_MOVE
+        || place->projections.offset >= ir->projection_count) return SOL_IR_NONE;
+    const SolIrProjection *projection = &ir->projections[place->projections.offset];
+    if (projection->kind != SOL_IR_PROJECTION_FIELD) return SOL_IR_NONE;
     SolIrExpressionId initializer = SOL_IR_NONE;
     for (size_t index = 0; index < ir->statement_count; ++index) {
+        if (!charge_work(builder, 1)) return SOL_IR_NONE;
         const SolIrStatement *statement = &ir->statements[index];
-        if (statement->kind != SOL_IR_STATEMENT_LET
-            || statement->local != place->local) continue;
+        if (statement->kind != SOL_IR_STATEMENT_LET || statement->local != place->local)
+            continue;
         if (initializer != SOL_IR_NONE || statement->expression >= ir->expression_count)
             return SOL_IR_NONE;
         initializer = statement->expression;
     }
-    if (initializer == SOL_IR_NONE || ir->expressions[initializer].type != expression->type)
-        return SOL_IR_NONE;
-    SolIrExpressionKind kind = ir->expressions[initializer].kind;
-    return kind == SOL_IR_EXPR_DEFINITION || kind == SOL_IR_EXPR_BOUND_OPERATION
-        ? initializer : SOL_IR_NONE;
+    if (initializer == SOL_IR_NONE
+        || ir->expressions[initializer].kind != SOL_IR_EXPR_RECORD) return SOL_IR_NONE;
+    const SolIrExpression *record = &ir->expressions[initializer];
+    SolIrExpressionId field_value = SOL_IR_NONE;
+    for (size_t index = 0; index < record->as.record.fields.count; ++index) {
+        if (!charge_work(builder, 1)) return SOL_IR_NONE;
+        size_t operand_id = record->as.record.fields.offset + index;
+        if (operand_id >= ir->operand_count) return SOL_IR_NONE;
+        const SolIrOperand *operand = &ir->operands[operand_id];
+        if (operand->formal != projection->field || operand->access != SOL_ACCESS_OWNED)
+            continue;
+        if (field_value != SOL_IR_NONE) return SOL_IR_NONE;
+        field_value = operand->value;
+    }
+    SolIrExpressionId producer = field_value == SOL_IR_NONE ? SOL_IR_NONE
+        : finite_callable_producer(builder, field_value, depth + 1);
+    if (producer == SOL_IR_NONE || ir->expressions[producer].kind != SOL_IR_EXPR_DEFINITION
+        || ir->expressions[producer].as.definition >= ir->definition_count) return SOL_IR_NONE;
+    SolIrCallableId callable = ir->definitions[ir->expressions[producer].as.definition].callable;
+    return callable < ir->callable_count && ir->callables[callable].kind == SOL_IR_CALLABLE_FUNCTION
+        && ir->callables[callable].generic_parameters.count == 0
+        && ir->callables[callable].effect_parameters.count == 0
+        && ir->callables[callable].effect_parameter == SOL_IR_NONE ? producer : SOL_IR_NONE;
 }
 
 static bool scan_refinement_predicates(Builder *builder,
@@ -599,9 +686,10 @@ static bool scan_static_callable(Builder *builder,
     if (!charge_work(builder, 1)) return false;
     const SolIrExpression *expression = &ir->expressions[id];
     if (expression->kind == SOL_IR_EXPR_PLACE) {
-        SolIrExpressionId initializer = local_callable_initializer(ir, id);
-        if (initializer == SOL_IR_NONE) return true;
-        return scan_static_callable(builder, source_callable, initializer,
+        SolIrExpressionId producer = finite_callable_producer(builder, id, depth + 1);
+        if (builder->outcome == SOL_MIR_PROGRAM_BUILD_RESOURCE_EXHAUSTED) return false;
+        if (producer == SOL_IR_NONE) return true;
+        return scan_static_callable(builder, source_callable, producer,
             predicate, depth + 1, finite);
     }
     if (expression->kind == SOL_IR_EXPR_DEFINITION) {
@@ -832,6 +920,27 @@ static bool scan_mir(Builder *builder, const SolMir *mir) {
         if (!add_reference(builder, SOL_MIR_PROGRAM_REFERENCE_INVOKE,
                 mir->callable, term->as.invoke.source_expression, term->span,
                 term->as.invoke.callable)) return false;
+        if (term->as.invoke.kind == SOL_IR_CALL_CAPABILITY) {
+            SolIrExpressionId source = term->as.invoke.source_expression;
+            if (source < ir->expression_count) {
+                const SolIrExpression *call = &ir->expressions[source];
+                if (call->kind == SOL_IR_EXPR_CALL && call->as.call.kind == SOL_IR_CALL_CAPABILITY
+                    && call->as.call.callable == term->as.invoke.callable
+                    && call->as.call.callee < ir->expression_count) {
+                    const SolIrExpression *callee = &ir->expressions[call->as.call.callee];
+                    if (callee->kind == SOL_IR_EXPR_BOUND_OPERATION
+                        && callee->as.operation.callable == term->as.invoke.callable
+                        && callee->as.operation.receiver != SOL_IR_NONE
+                        && callee->as.operation.receiver < ir->expression_count
+                        && term->as.invoke.receiver.source_expression
+                            == callee->as.operation.receiver
+                        && !add_reference(builder,
+                            SOL_MIR_PROGRAM_REFERENCE_BOUND_OPERATION,
+                            mir->callable, call->as.call.callee, callee->span,
+                            term->as.invoke.callable)) return false;
+                }
+            }
+        }
         if (term->as.invoke.kind == SOL_IR_CALL_CALLBACK) {
             bool finite = false;
             SolMirTemporaryId temporary = term->as.invoke.callee;
@@ -1172,6 +1281,9 @@ static SolMirProgramBuildOutcome build_scratch(
     if (scratch->specialization_count > 1) qsort(scratch->specializations,
         scratch->specialization_count, sizeof(*scratch->specializations),
         compare_specialization);
+    /* Keep the independent invoke proof last: a one-below complete P2.1
+       discovery budget fails in this causal proof rather than after publish. */
+    if (!meter_invoke_producer_work(&builder)) goto done;
     builder.outcome = SOL_MIR_PROGRAM_BUILD_SUCCEEDED;
 done:
     free(builder.classes);
@@ -1417,6 +1529,141 @@ invalid:
     return false;
 }
 
+/* This deliberately does not use the canonical rebuild below: it authenticates
+ * the one capability-invoke discovery edge directly against source IR. */
+static bool reference_source_matches(const SolIr *ir, const SolMirProgramSource *source,
+    SolIrCallableId callable, SolIrExpressionId expression, SolSpan span,
+    ProofWork *work) {
+    for (size_t file = 0; file < ir->file_count; ++file) {
+        if (work != NULL && !proof_tick(work)) return false;
+        const SolIrSourceFile *item = &ir->files[file];
+        if (span.start < item->aggregate_start || span.end > item->aggregate_end) continue;
+        return source->callable == callable && source->expression == expression
+            && source->file == file && source->start == span.start - item->aggregate_start
+            && source->end == span.end - item->aggregate_start;
+    }
+    return false;
+}
+static bool capability_invoke_references_valid(const SolMirProgram *program,
+    ProofWork *work) {
+    const SolIr *ir = program->ir;
+    for (size_t template_id = 0; template_id < program->template_count; ++template_id) {
+        const SolMir *mir = &program->templates[template_id].mir;
+        for (size_t block = 0; block < mir->block_count; ++block) {
+            const SolMirTerminator *term = &mir->blocks[block].terminator;
+            if (term->kind != SOL_MIR_TERM_INVOKE
+                || term->as.invoke.kind != SOL_IR_CALL_CAPABILITY) continue;
+            if (!proof_tick(work)) return false;
+            SolIrExpressionId source = term->as.invoke.source_expression;
+            if (source >= ir->expression_count) return false;
+            const SolIrExpression *call = &ir->expressions[source];
+            if (call->kind != SOL_IR_EXPR_CALL || call->as.call.kind != SOL_IR_CALL_CAPABILITY
+                || call->as.call.callable != term->as.invoke.callable
+                || call->as.call.callee >= ir->expression_count) return false;
+            const SolIrExpression *callee = &ir->expressions[call->as.call.callee];
+            if (callee->kind != SOL_IR_EXPR_BOUND_OPERATION
+                || callee->as.operation.callable != term->as.invoke.callable
+                || callee->as.operation.receiver == SOL_IR_NONE
+                || callee->as.operation.receiver >= ir->expression_count
+                || term->as.invoke.receiver.source_expression
+                    != callee->as.operation.receiver) return false;
+            size_t invokes = 0, bound = 0;
+            for (size_t i = 0; i < program->reference_count; ++i) {
+                if (!proof_tick(work)) return false;
+                const SolMirProgramReference *reference = &program->references[i];
+                if (reference->kind == SOL_MIR_PROGRAM_REFERENCE_INVOKE
+                    && reference_source_matches(ir, &reference->source, mir->callable,
+                        source, term->span, work)
+                    && reference->target == term->as.invoke.callable) ++invokes;
+                if (reference->kind == SOL_MIR_PROGRAM_REFERENCE_BOUND_OPERATION
+                    && reference_source_matches(ir, &reference->source, mir->callable,
+                        call->as.call.callee, callee->span, work)
+                    && reference->target == term->as.invoke.callable) ++bound;
+            }
+            if (invokes != 1 || bound != 1) return false;
+        }
+    }
+    return true;
+}
+
+/* Like capability invokes, immediate method invokes carry two source-level
+ * identities: the trait requirement at the call site and the concrete
+ * implementation selected by one evidence row.  Canonical rebuilding proves
+ * the complete owner; this smaller proof keeps that P2.1 edge independently
+ * hostile to a forged method target or reference. */
+static bool method_invoke_references_valid(const SolMirProgram *program,
+    ProofWork *work) {
+    const SolIr *ir = program->ir;
+    for (size_t template_id = 0; template_id < program->template_count; ++template_id) {
+        const SolMir *mir = &program->templates[template_id].mir;
+        for (size_t block = 0; block < mir->block_count; ++block) {
+            const SolMirTerminator *term = &mir->blocks[block].terminator;
+            if (term->kind != SOL_MIR_TERM_INVOKE
+                || term->as.invoke.kind != SOL_IR_CALL_METHOD) continue;
+            if (!proof_tick(work)) return false;
+            SolIrExpressionId source = term->as.invoke.source_expression;
+            if (source >= ir->expression_count) return false;
+            const SolIrExpression *call = &ir->expressions[source];
+            if (call->kind != SOL_IR_EXPR_CALL
+                || call->as.call.kind != SOL_IR_CALL_METHOD
+                || call->as.call.evidence.count != 1
+                || call->as.call.evidence.offset >= ir->evidence_count
+                || call->as.call.receiver >= ir->expression_count) return false;
+            const SolIrDispatchEvidence *evidence
+                = &ir->evidence[call->as.call.evidence.offset];
+            if (evidence->forwarded || call->as.call.type_arguments.count != 0)
+                continue;
+            const SolIrExpression *receiver = &ir->expressions[call->as.call.receiver];
+            if (evidence->binding != SOL_IR_NONE || evidence->parameter != SOL_IR_NONE
+                || evidence->requirement != call->as.call.callable
+                || evidence->method != term->as.invoke.callable
+                || evidence->type != receiver->type
+                || evidence->implementation >= ir->definition_count
+                || evidence->method >= ir->callable_count) return false;
+            const SolIrDefinition *implementation
+                = &ir->definitions[evidence->implementation];
+            const SolIrCallable *method = &ir->callables[evidence->method];
+            if (implementation->kind != SOL_IR_DEFINITION_IMPLEMENTATION
+                || implementation->implementation_trait != evidence->trait
+                || implementation->implementation_target != evidence->type
+                || method->kind != SOL_IR_CALLABLE_TRAIT_IMPLEMENTATION
+                || method->owner != evidence->implementation
+                || method->body == SOL_IR_NONE
+                || method->generic_parameters.count != 0
+                || method->effect_parameters.count != 0
+                || method->receiver == SOL_IR_NONE
+                || method->receiver >= ir->local_count
+                || ir->locals[method->receiver].type != evidence->type
+                || method->receiver_access != call->as.call.receiver_access) return false;
+            size_t invokes = 0;
+            for (size_t i = 0; i < program->reference_count; ++i) {
+                if (!proof_tick(work)) return false;
+                const SolMirProgramReference *reference = &program->references[i];
+                if (reference->kind == SOL_MIR_PROGRAM_REFERENCE_INVOKE
+                    && reference_source_matches(ir, &reference->source, mir->callable,
+                        source, term->span, work)
+                    && reference->target == evidence->method) ++invokes;
+            }
+            if (invokes != 1) return false;
+        }
+    }
+    return true;
+}
+
+/* The builder already paid to produce each source/reference row.  It also pays
+ * each direct-invoke proof's exact comparison/range walk, so a one-below P2.1
+ * discovery budget cannot evade either hostile validation path. */
+static bool meter_invoke_producer_work(Builder *builder) {
+    ProofWork work = {builder_proof_tick, builder};
+    if (capability_invoke_references_valid(builder->program, &work)
+        && method_invoke_references_valid(builder->program, &work)) return true;
+    if (builder->outcome != SOL_MIR_PROGRAM_BUILD_RESOURCE_EXHAUSTED) {
+        builder->outcome = SOL_MIR_PROGRAM_BUILD_INTERNAL_FAILED;
+        report(builder, "direct invoke reference proof disagrees with produced P2.1 owner");
+    }
+    return false;
+}
+
 bool sol_mir_program_validate(const SolMirProgram *program,
     SolDiagnostics *diagnostics) {
     SolDiagnostics local_diagnostics;
@@ -1450,6 +1697,18 @@ bool sol_mir_program_validate(const SolMirProgram *program,
             if (owns_diagnostics) sol_diagnostics_free(&local_diagnostics);
             return false;
         }
+    }
+    ValidationWork invoke_validation = {0, program->limits.max_discovery_work, false};
+    ProofWork invoke_work = {validation_proof_tick, &invoke_validation};
+    if (!capability_invoke_references_valid(program, &invoke_work)
+        || !method_invoke_references_valid(program, &invoke_work)
+        || invoke_validation.exhausted
+        || invoke_validation.work > program->usage.discovery_work) {
+        owner_error(diagnostics, invoke_validation.exhausted
+            ? "symbolic MIR program direct-invoke proof exceeded its P2.1 work budget"
+            : "symbolic MIR program direct-invoke reference proof is malformed");
+        if (owns_diagnostics) sol_diagnostics_free(&local_diagnostics);
+        return false;
     }
     SolMirProgramBuildRequest request = {
         program->ir, program->roots, program->root_count,

@@ -412,13 +412,34 @@ static void test_independent_render_determinism(const SolMirRuntimeHostAbi *firs
     sol_mir_runtime_values_free(&v); sol_mir_runtime_conventions_free(&c);
     sol_mir_concrete_program_free(&p); finish(&f);
 }
+static void test_host_call_cleanup_links(const SolMirRuntimeHostAbi *abi,
+    const SolMirRuntimeCleanup *cleanup) {
+    for (size_t i = 0; i < abi->requirement_count; ++i) {
+        const SolMirRuntimeHostRequirement *requirement = &abi->requirements[i];
+        CHECK(requirement->event < cleanup->event_count
+            && requirement->failure_transition < cleanup->transition_count);
+        if (requirement->event >= cleanup->event_count
+            || requirement->failure_transition >= cleanup->transition_count) continue;
+        const SolMirRuntimeCleanupEvent *event = &cleanup->events[requirement->event];
+        const SolMirRuntimeCleanupTransition *transition =
+            &cleanup->transitions[requirement->failure_transition];
+        CHECK(event->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+            && event->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+            && event->producer == SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_INVOKE
+            && event->semantic_site == SOL_MIR_RUNTIME_NONE
+            && transition->event == requirement->event
+            && transition->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_FAILURE
+            && transition->failure_source
+                == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31);
+    }
+}
 int main(void){Fixture f;CHECK(setup(&f));SolMirConcreteProgram p;sol_mir_concrete_program_init(&p);SolMirProgramRoot root={find(&f.ir,"launch",SOL_IR_CALLABLE_FUNCTION),SOL_MIR_PROGRAM_ROOT_ENTRY};const char*names[]={"write","get","count","read"};SolIrCallableId imports[4];for(size_t i=0;i<4;i++)imports[i]=find(&f.ir,names[i],SOL_IR_CALLABLE_CAPABILITY);SolMirTargetDescriptor target=sol_mir_target_wasm32();SolMirConcreteBuildRequest request={&f.ir,&root,1,imports,4,&target,NULL};CHECK(sol_mir_concrete_program_build(&request,&p,&f.d)==SOL_MIR_CONCRETE_BUILD_SUCCEEDED);SolMirRuntimeConventions c;SolMirRuntimeValues v;SolMirRuntimeCleanup cl;SolMirRuntimeHostAbi a;sol_mir_runtime_conventions_init(&c);sol_mir_runtime_values_init(&v);sol_mir_runtime_cleanup_init(&cl);sol_mir_runtime_host_abi_init(&a);CHECK(sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){&p,NULL},&c,&f.d)==SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED);CHECK(sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){&c,NULL},&v,&f.d)==SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED);CHECK(sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){&c,&v,NULL},&cl,&f.d)==SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED);size_t forbidden=0,unreachable=0;for(size_t i=0;i<v.host_result_plan_count;i++){forbidden+=v.host_result_plans[i].classification==SOL_MIR_RUNTIME_HOST_RESULT_FORBIDDEN;unreachable+=v.host_result_plans[i].classification==SOL_MIR_RUNTIME_HOST_RESULT_UNREACHABLE;}CHECK(forbidden!=0&&unreachable!=0);size_t host_result=c.concrete->linkage.host_requirements[0].result;SolMirRuntimeHostResultClass saved_class=v.host_result_plans[host_result].classification;SolMirRuntimeHostAbi rejected_owner;sol_mir_runtime_host_abi_init(&rejected_owner);v.host_result_plans[host_result].classification=SOL_MIR_RUNTIME_HOST_RESULT_FORBIDDEN;CHECK(sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){&c,&v,&cl,NULL},&rejected_owner,&f.d)==SOL_MIR_RUNTIME_HOST_ABI_BUILD_INVALID_PREDECESSOR);v.host_result_plans[host_result].classification=SOL_MIR_RUNTIME_HOST_RESULT_UNREACHABLE;CHECK(sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){&c,&v,&cl,NULL},&rejected_owner,&f.d)==SOL_MIR_RUNTIME_HOST_ABI_BUILD_INVALID_PREDECESSOR);v.host_result_plans[host_result].classification=saved_class;sol_mir_runtime_host_abi_free(&rejected_owner);CHECK(sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){&c,&v,&cl,NULL},&a,&f.d)==SOL_MIR_RUNTIME_HOST_ABI_BUILD_SUCCEEDED);CHECK(sol_mir_runtime_host_abi_validate(&a,NULL));CHECK(a.operation_count==4&&a.requirement_count==5&&a.entry_root_count==3);
     CHECK(a.usage.capabilities==3&&a.usage.entry_roots==3&&a.usage.operations==4
         &&a.usage.arguments==3&&a.usage.formals==3&&a.usage.shapes==3
         &&a.usage.shape_cases==0&&a.usage.requirements==5&&a.usage.grants==4
         &&a.usage.owned_bytes==1816&&a.usage.build_scratch_bytes==185
-           &&a.usage.build_work==27868&&a.usage.validation_scratch_bytes==77
-            &&a.usage.validation_work==15916);SolMirRuntimeHostAbiWorkCensus meter=sol_mir_runtime_host_abi_test_work_census();CHECK(meter.dry_work==meter.actual_work&&meter.census_work+meter.dry_work+meter.actual_work==a.usage.build_work&&meter.validation_audit_work+meter.validation_replay_work==meter.validation_work&&meter.validation_work==a.usage.validation_work);
+           &&a.usage.build_work==27963&&a.usage.validation_scratch_bytes==77
+             &&a.usage.validation_work==16074);SolMirRuntimeHostAbiWorkCensus meter=sol_mir_runtime_host_abi_test_work_census();CHECK(meter.dry_work==meter.actual_work&&meter.census_work+meter.dry_work+meter.actual_work==a.usage.build_work&&meter.validation_audit_work+meter.validation_replay_work==meter.validation_work&&meter.validation_work==a.usage.validation_work);
     /* A one-below total reaches the final persistent replay tick.  It has made
      * persistent allocation attempts, but cannot publish any partial owner. */
     SolMirRuntimeHostAbi final_write;sol_mir_runtime_host_abi_init(&final_write);
@@ -498,7 +519,7 @@ int main(void){Fixture f;CHECK(setup(&f));SolMirConcreteProgram p;sol_mir_concre
     CHECK(!sol_mir_runtime_host_abi_validate(&a,NULL));check_render_rejects_mutation(&a);
     p.program.templates[0].mir.instructions=saved_template_instructions;
     CHECK(sol_mir_runtime_host_abi_validate(&a,NULL));
-    test_exact_host_abi_limits(&c,&v,&cl,&a,&f.d);
+    test_exact_host_abi_limits(&c,&v,&cl,&a,&f.d);test_host_call_cleanup_links(&a,&cl);
 /* Preflight is O(1) and allocation-free after successful construction.  Its
  * immutable-owner prerequisite covers semantic arena bytes; header changes are
  * nevertheless rejected before configuration or callback handling. */

@@ -98,6 +98,8 @@ typedef enum {
     SOL_MIR_INST_CAPTURE_SNAPSHOT,
     SOL_MIR_INST_SCOPE_ENTER,
     SOL_MIR_INST_SCOPE_EXIT,
+    /* An exact, closed function definition made into an owned callable value. */
+    SOL_MIR_INST_FUNCTION_VALUE,
 } SolMirInstructionKind;
 
 typedef enum {
@@ -174,6 +176,7 @@ typedef struct {
             SolIrSlice capability_roots;
             SolIrSlice operation_roots;
         } construct;
+        SolIrCallableId function_callable;
         SolIrSnapshotId snapshot;
         SolMirScope scope;
     } as;

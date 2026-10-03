@@ -113,7 +113,8 @@ static SolMirProgramBuildOutcome build(const SolIr *ir,
     if (outcome != SOL_MIR_PROGRAM_BUILD_SUCCEEDED
         && outcome != SOL_MIR_PROGRAM_BUILD_RESOURCE_EXHAUSTED
         && outcome != SOL_MIR_PROGRAM_BUILD_UNSUPPORTED_CLOSURE
-        && outcome != SOL_MIR_PROGRAM_BUILD_INVALID_ARGUMENT) {
+        && outcome != SOL_MIR_PROGRAM_BUILD_INVALID_ARGUMENT
+        && outcome != SOL_MIR_PROGRAM_BUILD_INVALID_IR) {
         for (size_t index = 0; index < diagnostics.count; ++index) {
             fprintf(stderr, "program diagnostic: %s\n",
                 diagnostics.items[index].message);
@@ -146,6 +147,81 @@ static bool program_fields_equal(const SolMirProgram *a,
 #undef ARRAY_EQUAL
 }
 
+/* Independently reconstruct the bounded hostile proof's work census: one tick
+ * per method invoke, every candidate reference comparison, and every source
+ * file range considered by matching invoke references. */
+static size_t direct_method_validation_work(const SolMirProgram *program) {
+    const SolIr *ir = program->ir;
+    size_t work = 0;
+    for (size_t template_id = 0; template_id < program->template_count; ++template_id) {
+        const SolMir *mir = &program->templates[template_id].mir;
+        for (size_t block = 0; block < mir->block_count; ++block) {
+            const SolMirTerminator *term = &mir->blocks[block].terminator;
+            if (term->kind != SOL_MIR_TERM_INVOKE
+                || term->as.invoke.kind != SOL_IR_CALL_METHOD) continue;
+            ++work;
+            const SolIrExpression *call = term->as.invoke.source_expression
+                    < ir->expression_count
+                ? &ir->expressions[term->as.invoke.source_expression] : NULL;
+            if (call == NULL || call->kind != SOL_IR_EXPR_CALL
+                || call->as.call.evidence.count != 1
+                || call->as.call.evidence.offset >= ir->evidence_count
+                || ir->evidence[call->as.call.evidence.offset].forwarded
+                || call->as.call.type_arguments.count != 0) continue;
+            for (size_t reference = 0; reference < program->reference_count;
+                ++reference) {
+                ++work;
+                if (program->references[reference].kind
+                    != SOL_MIR_PROGRAM_REFERENCE_INVOKE) continue;
+                for (size_t file = 0; file < ir->file_count; ++file) {
+                    ++work;
+                    const SolIrSourceFile *item = &ir->files[file];
+                    if (term->span.start >= item->aggregate_start
+                        && term->span.end <= item->aggregate_end) break;
+                }
+            }
+        }
+    }
+    return work;
+}
+
+static size_t capability_validation_work(const SolMirProgram *program) {
+    const SolIr *ir = program->ir;
+    size_t work = 0;
+    for (size_t template_id = 0; template_id < program->template_count; ++template_id) {
+        const SolMir *mir = &program->templates[template_id].mir;
+        for (size_t block = 0; block < mir->block_count; ++block) {
+            const SolMirTerminator *term = &mir->blocks[block].terminator;
+            if (term->kind != SOL_MIR_TERM_INVOKE
+                || term->as.invoke.kind != SOL_IR_CALL_CAPABILITY) continue;
+            ++work;
+            const SolIrExpression *call = term->as.invoke.source_expression
+                    < ir->expression_count
+                ? &ir->expressions[term->as.invoke.source_expression] : NULL;
+            if (call == NULL || call->kind != SOL_IR_EXPR_CALL
+                || call->as.call.callee >= ir->expression_count) continue;
+            const SolIrExpression *callee = &ir->expressions[call->as.call.callee];
+            for (size_t reference = 0; reference < program->reference_count;
+                ++reference) {
+                ++work;
+                SolSpan span;
+                if (program->references[reference].kind
+                    == SOL_MIR_PROGRAM_REFERENCE_INVOKE) span = term->span;
+                else if (program->references[reference].kind
+                    == SOL_MIR_PROGRAM_REFERENCE_BOUND_OPERATION) span = callee->span;
+                else continue;
+                for (size_t file = 0; file < ir->file_count; ++file) {
+                    ++work;
+                    const SolIrSourceFile *item = &ir->files[file];
+                    if (span.start >= item->aggregate_start
+                        && span.end <= item->aggregate_end) break;
+                }
+            }
+        }
+    }
+    return work;
+}
+
 static void check_invalid_owner(SolMirProgram *program,
     SolDiagnostics *diagnostics) {
     size_t before = diagnostics->count;
@@ -153,7 +229,8 @@ static void check_invalid_owner(SolMirProgram *program,
     CHECK(diagnostics->allocation_failed || diagnostics->count > before);
 }
 
-static bool compile_e6(Compilation *compilation, SolPackage *package) {
+static bool compile_package_at(Compilation *compilation, SolPackage *package,
+    const char *directory) {
     memset(compilation, 0, sizeof(*compilation));
     sol_package_init(package);
     sol_diagnostics_init(&compilation->diagnostics);
@@ -163,8 +240,7 @@ static bool compile_e6(Compilation *compilation, SolPackage *package) {
     sol_contract_table_init(&compilation->contracts);
     sol_ir_init(&compilation->ir);
     char error[256];
-    if (!sol_package_load_directory(package,
-            SOL_TEST_SOURCE_DIR "/tests/conformance/e6",
+    if (!sol_package_load_directory(package, directory,
             &compilation->diagnostics, error, sizeof(error))) return false;
     SolHirFileScope *scopes = malloc(package->file_count * sizeof(*scopes));
     if (scopes == NULL) return false;
@@ -194,6 +270,11 @@ static bool compile_e6(Compilation *compilation, SolPackage *package) {
             &compilation->ir, &compilation->diagnostics);
     free(scopes);
     return valid;
+}
+
+static bool compile_e6(Compilation *compilation, SolPackage *package) {
+    return compile_package_at(compilation, package,
+        SOL_TEST_SOURCE_DIR "/tests/conformance/e6");
 }
 
 static void free_e6(Compilation *compilation, SolPackage *package) {
@@ -234,12 +315,15 @@ static void test_e6_closures_and_determinism(void) {
     sol_mir_program_init(&entry);
     CHECK(build(ir, roots, 1, approvals, 4, NULL, &entry)
         == SOL_MIR_PROGRAM_BUILD_SUCCEEDED);
+    CHECK(entry.usage.discovery_work == 1166
+        && capability_validation_work(&entry) == 345);
     CHECK(entry.template_count == 8);
     CHECK(entry.import_count == 4);
     CHECK(entry.specialization_count == 1);
     size_t invokes = 0;
     size_t static_function_invokes = 0;
     size_t bound_operation_invokes = 0;
+    size_t authenticated_bound_references = 0;
     for (size_t index = 0; index < entry.reference_count; ++index) {
         const SolMirProgramReference *reference = &entry.references[index];
         if (reference->kind != SOL_MIR_PROGRAM_REFERENCE_INVOKE) continue;
@@ -253,12 +337,24 @@ static void test_e6_closures_and_determinism(void) {
             static_function_invokes += callee_kind == SOL_IR_EXPR_DEFINITION;
             bound_operation_invokes += callee_kind
                 == SOL_IR_EXPR_BOUND_OPERATION;
+            if (call->as.call.kind == SOL_IR_CALL_CAPABILITY
+                && callee_kind == SOL_IR_EXPR_BOUND_OPERATION) {
+                size_t matches = 0;
+                for (size_t other = 0; other < entry.reference_count; ++other) {
+                    const SolMirProgramReference *bound = &entry.references[other];
+                    matches += bound->kind == SOL_MIR_PROGRAM_REFERENCE_BOUND_OPERATION
+                        && bound->source.callable == reference->source.callable
+                        && bound->source.expression == call->as.call.callee
+                        && bound->target == call->as.call.callable;
+                }
+                CHECK(matches == 1); authenticated_bound_references += matches;
+            }
         }
     }
     CHECK(invokes == 12);
     CHECK(static_function_invokes != 0);
     CHECK(bound_operation_invokes == 5);
-    CHECK(entry.reference_count == 12);
+    CHECK(authenticated_bound_references == 5 && entry.reference_count == 17);
     CHECK(entry.specializations[0].source_count != 0);
     CHECK(has_template(&entry, launch));
     for (size_t index = 0; index < 4; ++index) {
@@ -267,6 +363,32 @@ static void test_e6_closures_and_determinism(void) {
     SolDiagnostics validation;
     sol_diagnostics_init(&validation);
     CHECK(sol_mir_program_validate(&entry, &validation));
+    size_t bound_reference = SIZE_MAX;
+    for (size_t i = 0; i < entry.reference_count; ++i)
+        if (entry.references[i].kind == SOL_MIR_PROGRAM_REFERENCE_BOUND_OPERATION) {
+            bound_reference = i; break;
+        }
+    CHECK(bound_reference != SIZE_MAX);
+    if (bound_reference != SIZE_MAX) {
+        SolMirProgramReference saved = entry.references[bound_reference];
+        entry.references[bound_reference].target = SOL_IR_NONE;
+        CHECK(!sol_mir_program_validate(&entry, NULL));
+        entry.references[bound_reference] = saved;
+        entry.references[bound_reference].source.expression = SOL_IR_NONE;
+        CHECK(!sol_mir_program_validate(&entry, NULL));
+        entry.references[bound_reference] = saved;
+        entry.references[bound_reference].source.file = SIZE_MAX;
+        CHECK(!sol_mir_program_validate(&entry, NULL));
+        entry.references[bound_reference] = saved;
+        ++entry.references[bound_reference].source.start;
+        CHECK(!sol_mir_program_validate(&entry, NULL));
+        entry.references[bound_reference] = saved;
+        SolMirProgramReference displaced = entry.references[0];
+        entry.references[0] = saved;
+        CHECK(!sol_mir_program_validate(&entry, NULL));
+        entry.references[0] = displaced;
+        CHECK(sol_mir_program_validate(&entry, NULL));
+    }
     SolMirProgramRootKind root_kind = entry.roots[0].kind;
     entry.roots[0].kind = SOL_MIR_PROGRAM_ROOT_TEST;
     CHECK(!sol_mir_program_validate(&entry, &validation));
@@ -328,7 +450,7 @@ static void test_e6_closures_and_determinism(void) {
             == SOL_MIR_PROGRAM_REFERENCE_INVOKE;
     }
     CHECK(invokes == 18);
-    CHECK(all.reference_count == 18);
+    CHECK(all.reference_count == 23);
     CHECK(program_fields_equal(&all, &permuted));
     for (SolIrCallableId id = 0; id < ir->callable_count; ++id) {
         if (ir->callables[id].body != SOL_IR_NONE) CHECK(has_template(&all, id));
@@ -534,6 +656,17 @@ static void test_evidence_and_callbacks(void) {
         == SOL_MIR_PROGRAM_BUILD_UNSUPPORTED_CLOSURE);
     sol_mir_program_free(&program);
     free_compilation(&compilation);
+
+    /* Method evidence is an immediate-call proof, never a callable value. */
+    Compilation method_value;
+    CHECK(!compile_text(&method_value,
+        "module method_value\n"
+        "trait Value { function value(self: borrow Self) -> Int64 effects { pure } }\n"
+        "implementation Value for Int64 { function value(self: borrow Self) -> Int64 "
+        "effects { pure } { return self } }\n"
+        "function rejected() -> Int64 effects { pure } { let value = 1 "
+        "let method = value.value return method() }\n"));
+    free_compilation(&method_value);
 }
 
 static void test_callback_source_limitations(void) {
@@ -546,12 +679,105 @@ static void test_callback_source_limitations(void) {
         "let selected = if flag { plain } else { callback } "
         "return selected(1) }\n"));
     free_compilation(&compilation);
-    CHECK(!compile_text(&compilation,
+    CHECK(compile_text(&compilation,
         "module mixed_callbacks\n"
         "function plain(value: Int64) -> Int64 effects { pure } { return value }\n"
         "function rejected(callback: function(Int64) -> Int64 effects { pure }) "
         "-> Int64 effects { pure } { let known = plain "
         "let first = known(1) return callback(first) }\n"));
+    SolMirProgramRoot root = {callable(&compilation.ir, "rejected",
+        SOL_IR_CALLABLE_FUNCTION), SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    SolMirProgram program; sol_mir_program_init(&program);
+    CHECK(root.callable != SOL_IR_NONE && build(&compilation.ir, &root, 1,
+        NULL, 0, NULL, &program) == SOL_MIR_PROGRAM_BUILD_UNSUPPORTED_CLOSURE);
+    sol_mir_program_free(&program);
+    free_compilation(&compilation);
+    CHECK(!compile_text(&compilation,
+        "module callback_parameter_mismatch\n"
+        "function plain(value: Int64) -> Int64 effects { pure } { return value }\n"
+        "function bad() -> function(Text) -> Int64 effects { pure } effects { pure } { "
+        "return plain }\n"));
+    free_compilation(&compilation);
+    CHECK(!compile_text(&compilation,
+        "module callback_access_mismatch\n"
+        "function plain(value: Int64) -> Int64 effects { pure } { return value }\n"
+        "function bad() -> function(borrow Int64) -> Int64 effects { pure } effects { pure } { "
+        "return plain }\n"));
+    free_compilation(&compilation);
+    CHECK(!compile_text(&compilation,
+        "module callback_result_mismatch\n"
+        "function plain(value: Int64) -> Int64 effects { pure } { return value }\n"
+        "function bad() -> function(Int64) -> Bool effects { pure } effects { pure } { "
+        "return plain }\n"));
+    free_compilation(&compilation);
+}
+
+static void test_callback_producer_discovery_limits(void) {
+    static const char source[] =
+        "module callback_producer_limits\n"
+        "record Wide { left: function() -> Int64 effects { pure }, a: Text, b: Text, "
+        "c: Text, d: Text, e: Text }\n"
+        "function answer() -> Int64 effects { pure } { return 42 }\n"
+        "function root() -> Int64 effects { pure } { let f0 = answer let f1 = f0 "
+        "let f2 = f1 let f3 = f2 let f4 = f3 let f5 = f4 let f6 = f5 let f7 = f6 "
+        "let f8 = f7 let f9 = f8 let wide = Wide { left = f9, a = \"a\", b = \"b\", "
+        "c = \"c\", d = \"d\", e = \"e\" } let moved = wide.left return moved() }\n";
+    Compilation compilation; CHECK(compile_text(&compilation, source));
+    SolMirProgramRoot root = {callable(&compilation.ir, "root",
+        SOL_IR_CALLABLE_FUNCTION), SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    SolMirProgram program, exact, limited;
+    sol_mir_program_init(&program); sol_mir_program_init(&exact); sol_mir_program_init(&limited);
+    CHECK(build(&compilation.ir, &root, 1, NULL, 0, NULL, &program)
+        == SOL_MIR_PROGRAM_BUILD_SUCCEEDED);
+    if (program.ir != NULL) {
+        SolMirProgramLimits limits = sol_mir_program_default_limits();
+        limits.max_discovery_work = program.usage.discovery_work;
+        CHECK(build(&compilation.ir, &root, 1, NULL, 0, &limits, &exact)
+            == SOL_MIR_PROGRAM_BUILD_SUCCEEDED
+            && exact.usage.discovery_work == limits.max_discovery_work);
+        CHECK(limits.max_discovery_work != 0);
+        --limits.max_discovery_work;
+        CHECK(build(&compilation.ir, &root, 1, NULL, 0, &limits, &limited)
+            == SOL_MIR_PROGRAM_BUILD_RESOURCE_EXHAUSTED && limited.ir == NULL);
+
+        SolIrLocalId f0 = SOL_IR_NONE, f9 = SOL_IR_NONE, wide = SOL_IR_NONE;
+        for (size_t i = 0; i < compilation.ir.local_count; ++i) {
+            if (strcmp(compilation.ir.locals[i].name, "f0") == 0) f0 = i;
+            if (strcmp(compilation.ir.locals[i].name, "f9") == 0) f9 = i;
+            if (strcmp(compilation.ir.locals[i].name, "wide") == 0) wide = i;
+        }
+        size_t f0_statement = SOL_IR_NONE, f9_place = SOL_IR_NONE;
+        for (size_t i = 0; i < compilation.ir.statement_count; ++i)
+            if (compilation.ir.statements[i].kind == SOL_IR_STATEMENT_LET
+                && compilation.ir.statements[i].local == f0) f0_statement = i;
+        for (size_t i = 0; i < compilation.ir.expression_count; ++i) {
+            const SolIrExpression *expression = &compilation.ir.expressions[i];
+            if (expression->kind != SOL_IR_EXPR_PLACE
+                || expression->as.place >= compilation.ir.place_count) continue;
+            const SolIrPlace *place = &compilation.ir.places[expression->as.place];
+            if (place->root_kind == SOL_IR_PLACE_ROOT_LOCAL && place->local == f9
+                && place->projections.count == 0) f9_place = i;
+        }
+        CHECK(f0 != SOL_IR_NONE && f9 != SOL_IR_NONE && wide != SOL_IR_NONE
+            && f0_statement != SOL_IR_NONE && f9_place != SOL_IR_NONE);
+        if (f0_statement != SOL_IR_NONE && f9_place != SOL_IR_NONE) {
+            SolMirProgram rejected; sol_mir_program_init(&rejected);
+            SolIrExpressionId saved = compilation.ir.statements[f0_statement].expression;
+            compilation.ir.statements[f0_statement].expression = f9_place;
+            CHECK(build(&compilation.ir, &root, 1, NULL, 0, NULL, &rejected)
+                != SOL_MIR_PROGRAM_BUILD_SUCCEEDED && rejected.ir == NULL);
+            compilation.ir.statements[f0_statement].expression = saved;
+            sol_mir_program_free(&rejected);
+            sol_mir_program_init(&rejected);
+            SolIrLocalId saved_local = compilation.ir.statements[f0_statement].local;
+            compilation.ir.statements[f0_statement].local = wide;
+            CHECK(build(&compilation.ir, &root, 1, NULL, 0, NULL, &rejected)
+                != SOL_MIR_PROGRAM_BUILD_SUCCEEDED && rejected.ir == NULL);
+            compilation.ir.statements[f0_statement].local = saved_local;
+            sol_mir_program_free(&rejected);
+        }
+    }
+    sol_mir_program_free(&limited); sol_mir_program_free(&exact); sol_mir_program_free(&program);
     free_compilation(&compilation);
 }
 
@@ -805,6 +1031,99 @@ static void test_derived_bodyful_capability_is_transactionally_unsupported(void)
     free_compilation(&compilation);
 }
 
+static void test_source_backed_method_meter(void) {
+    Compilation compilation;
+    SolPackage package;
+    CHECK(compile_package_at(&compilation, &package,
+        SOL_TEST_SOURCE_DIR "/tests/conformance/p43_method_meter"));
+    SolMirProgramRoot root = {callable(&compilation.ir, "launch",
+        SOL_IR_CALLABLE_FUNCTION), SOL_MIR_PROGRAM_ROOT_ENTRY};
+    SolMirProgram program;
+    sol_mir_program_init(&program);
+    CHECK(root.callable != SOL_IR_NONE && build(&compilation.ir, &root, 1,
+        NULL, 0, NULL, &program) == SOL_MIR_PROGRAM_BUILD_SUCCEEDED);
+    size_t direct_methods = 0;
+    for (size_t index = 0; index < program.reference_count; ++index) {
+        const SolMirProgramReference *reference = &program.references[index];
+        if (reference->kind != SOL_MIR_PROGRAM_REFERENCE_INVOKE
+            || reference->source.expression >= compilation.ir.expression_count) continue;
+        const SolIrExpression *source
+            = &compilation.ir.expressions[reference->source.expression];
+        if (source->kind == SOL_IR_EXPR_CALL
+            && source->as.call.kind == SOL_IR_CALL_METHOD) {
+            ++direct_methods;
+            CHECK(reference->source.file < compilation.ir.file_count
+                && reference->source.start < reference->source.end);
+        }
+    }
+    CHECK(direct_methods == 4 && direct_method_validation_work(&program) == 76
+        && program.usage.discovery_work == 203
+        && sol_mir_program_validate(&program, NULL));
+    SolMirProgramLimits exact = {program.usage.callable_classifications,
+        program.usage.references, program.usage.discovery_work};
+    SolMirProgram repeated;
+    sol_mir_program_init(&repeated);
+    CHECK(build(&compilation.ir, &root, 1, NULL, 0, &exact, &repeated)
+        == SOL_MIR_PROGRAM_BUILD_SUCCEEDED
+        && repeated.usage.discovery_work == exact.max_discovery_work
+        && sol_mir_program_validate(&repeated, NULL));
+    sol_mir_program_free(&repeated);
+    SolMirProgramLimits less = exact;
+    --less.max_discovery_work;
+    CHECK(build(&compilation.ir, &root, 1, NULL, 0, &less, &repeated)
+        == SOL_MIR_PROGRAM_BUILD_RESOURCE_EXHAUSTED
+        && repeated.ir == NULL && repeated.references == NULL
+        && repeated.usage.discovery_work == 0);
+    sol_mir_program_free(&repeated);
+    sol_mir_program_free(&program);
+    free_e6(&compilation, &package);
+}
+
+static void test_source_backed_capability_meter(void) {
+    Compilation compilation;
+    SolPackage package;
+    CHECK(compile_package_at(&compilation, &package,
+        SOL_TEST_SOURCE_DIR "/tests/conformance/p43_capability_meter"));
+    SolIrCallableId launch = callable(&compilation.ir, "launch",
+        SOL_IR_CALLABLE_FUNCTION);
+    SolIrCallableId tick = callable(&compilation.ir, "tick",
+        SOL_IR_CALLABLE_CAPABILITY);
+    SolMirProgramRoot root = {launch, SOL_MIR_PROGRAM_ROOT_ENTRY};
+    SolMirProgram program;
+    sol_mir_program_init(&program);
+    CHECK(launch != SOL_IR_NONE && tick != SOL_IR_NONE
+        && build(&compilation.ir, &root, 1, &tick, 1, NULL, &program)
+            == SOL_MIR_PROGRAM_BUILD_SUCCEEDED);
+    size_t invokes = 0, bound = 0;
+    for (size_t index = 0; index < program.reference_count; ++index) {
+        invokes += program.references[index].kind == SOL_MIR_PROGRAM_REFERENCE_INVOKE;
+        bound += program.references[index].kind
+            == SOL_MIR_PROGRAM_REFERENCE_BOUND_OPERATION;
+    }
+    CHECK(invokes == 3 && bound == 3 && program.import_count == 1
+        && capability_validation_work(&program) == 57
+        && program.usage.discovery_work == 133
+        && sol_mir_program_validate(&program, NULL));
+    SolMirProgramLimits exact = {program.usage.callable_classifications,
+        program.usage.references, program.usage.discovery_work};
+    SolMirProgram repeated;
+    sol_mir_program_init(&repeated);
+    CHECK(build(&compilation.ir, &root, 1, &tick, 1, &exact, &repeated)
+        == SOL_MIR_PROGRAM_BUILD_SUCCEEDED
+        && repeated.usage.discovery_work == exact.max_discovery_work
+        && sol_mir_program_validate(&repeated, NULL));
+    sol_mir_program_free(&repeated);
+    SolMirProgramLimits less = exact;
+    --less.max_discovery_work;
+    CHECK(build(&compilation.ir, &root, 1, &tick, 1, &less, &repeated)
+        == SOL_MIR_PROGRAM_BUILD_RESOURCE_EXHAUSTED
+        && repeated.ir == NULL && repeated.references == NULL
+        && repeated.usage.discovery_work == 0);
+    sol_mir_program_free(&repeated);
+    sol_mir_program_free(&program);
+    free_e6(&compilation, &package);
+}
+
 static void test_malformed_owner(void) {
     Compilation compilation;
     CHECK(compile_text(&compilation,
@@ -946,9 +1265,12 @@ int main(void) {
     test_recursion_references_and_unreachable();
     test_evidence_and_callbacks();
     test_callback_source_limitations();
+    test_callback_producer_discovery_limits();
     test_import_policy_and_lifecycle();
     test_predicate_proof_and_handler_relations();
     test_derived_bodyful_capability_is_transactionally_unsupported();
+    test_source_backed_method_meter();
+    test_source_backed_capability_meter();
     test_malformed_owner();
     if (failures != 0) {
         fprintf(stderr, "%d MIR program test(s) failed\n", failures);

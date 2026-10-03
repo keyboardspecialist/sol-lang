@@ -442,6 +442,9 @@ static SolMirInstructionId mir_append_instruction(MirLowerer *lowerer,
             stored->as.construct.operation_roots
                 = instruction.as.construct.operation_roots;
             break;
+        case SOL_MIR_INST_FUNCTION_VALUE:
+            stored->as.function_callable = instruction.as.function_callable;
+            break;
         case SOL_MIR_INST_CAPTURE_SNAPSHOT:
             stored->as.snapshot = instruction.as.snapshot; break;
         case SOL_MIR_INST_SCOPE_ENTER:
@@ -2095,6 +2098,20 @@ static LoweredValue mir_lower_block(MirLowerer *lowerer,
                 LoweredValue value = mir_lower_expression(lowerer,
                     statement->expression, &scope);
                 if (!value.reachable) return value;
+                if (value.value < lowerer->mir->value_count) {
+                    SolMirValue *produced = &lowerer->mir->values[value.value];
+                    if (produced->kind == SOL_MIR_VALUE_INSTRUCTION
+                        && produced->definition < lowerer->mir->instruction_count
+                        && lowerer->mir->instructions[produced->definition].kind
+                            == SOL_MIR_INST_FUNCTION_VALUE
+                        && lowerer->ir->locals[statement->local].type < lowerer->ir->type_count
+                        && lowerer->ir->types[lowerer->ir->locals[statement->local].type].kind
+                            == SOL_IR_TYPE_FUNCTION) {
+                        lowerer->mir->instructions[produced->definition].type
+                            = lowerer->ir->locals[statement->local].type;
+                        produced->type = lowerer->ir->locals[statement->local].type;
+                    }
+                }
                 if (!mir_emit_local(lowerer, SOL_MIR_INST_STORAGE_LIVE,
                         statement->local, statement->span)
                     || mir_append_instruction(lowerer, (SolMirInstruction){
@@ -2387,6 +2404,27 @@ static LoweredValue mir_lower_expression(MirLowerer *lowerer,
         case SOL_IR_EXPR_UNIT:
             instruction.kind = SOL_MIR_INST_CONST_UNIT;
             break;
+        case SOL_IR_EXPR_DEFINITION: {
+            SolIrDefinitionId definition = expression->as.definition;
+            if (definition >= lowerer->ir->definition_count) return mir_failure(lowerer);
+            SolIrCallableId callable = lowerer->ir->definitions[definition].callable;
+            if (callable >= lowerer->ir->callable_count
+                || lowerer->ir->types[expression->type].kind != SOL_IR_TYPE_FUNCTION) {
+                return mir_failure(lowerer);
+            }
+            const SolIrCallable *target = &lowerer->ir->callables[callable];
+            if (target->kind != SOL_IR_CALLABLE_FUNCTION
+                || target->generic_parameters.count != 0
+                || target->effect_parameters.count != 0
+                || target->effect_parameter != SOL_IR_NONE) {
+                mir_unsupported(lowerer, expression->span,
+                    "MIR function values require one exact nongeneric function");
+                return mir_unreachable();
+            }
+            instruction.kind = SOL_MIR_INST_FUNCTION_VALUE;
+            instruction.as.function_callable = callable;
+            break;
+        }
         case SOL_IR_EXPR_PLACE: {
             if (expression->as.place >= lowerer->ir->place_count) {
                 return mir_failure(lowerer);
@@ -7180,7 +7218,7 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || id - mir->blocks[instruction->block].instructions.offset
                 >= mir->blocks[instruction->block].instructions.count
             || (int)instruction->kind < 0
-            || instruction->kind > SOL_MIR_INST_SCOPE_EXIT
+            || instruction->kind > SOL_MIR_INST_FUNCTION_VALUE
             || !mir_span_valid(ir, instruction->span)) {
             return mir_error(diagnostics, instruction->span,
                 "malformed MIR instruction");
@@ -7195,12 +7233,14 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || instruction->kind == SOL_MIR_INST_EXPRESSION_RESULT
             || instruction->kind == SOL_MIR_INST_PATTERN_TEST
             || instruction->kind == SOL_MIR_INST_PATTERN_VALUE
-            || instruction->kind == SOL_MIR_INST_CONSTRUCT;
+            || instruction->kind == SOL_MIR_INST_CONSTRUCT
+            || instruction->kind == SOL_MIR_INST_FUNCTION_VALUE;
         if (result_kind && (instruction->type >= ir->type_count
             || (instruction->source_expression != SOL_IR_NONE
                 && (instruction->source_expression >= ir->expression_count
                     || ir->expressions[instruction->source_expression].type
-                        != instruction->type)))) {
+                        != instruction->type)
+                && instruction->kind != SOL_MIR_INST_FUNCTION_VALUE))) {
             return mir_error(diagnostics, instruction->span,
                 "MIR instruction result type is inconsistent with source IR");
         }
@@ -7687,6 +7727,25 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
                 return mir_error(diagnostics, instruction->span,
                     "malformed MIR semantic construction");
             }
+        } else if (instruction->kind == SOL_MIR_INST_FUNCTION_VALUE) {
+            SolIrDefinitionId definition = source != NULL
+                && source->kind == SOL_IR_EXPR_DEFINITION
+                ? source->as.definition : SOL_IR_NONE;
+            SolIrCallableId target = definition < ir->definition_count
+                ? ir->definitions[definition].callable : SOL_IR_NONE;
+            if (source == NULL || definition >= ir->definition_count
+                || target >= ir->callable_count
+                || instruction->as.function_callable != target
+                || !mir_type_is(ir, instruction->type, SOL_IR_TYPE_FUNCTION)
+                || ir->callables[target].kind != SOL_IR_CALLABLE_FUNCTION
+                || ir->callables[target].generic_parameters.count != 0
+                || ir->callables[target].effect_parameters.count != 0
+                || ir->callables[target].effect_parameter != SOL_IR_NONE
+                || instruction->span.start != source->span.start
+                || instruction->span.end != source->span.end) {
+                return mir_error(diagnostics, instruction->span,
+                    "malformed MIR function value");
+            }
         } else if (instruction->kind == SOL_MIR_INST_CAPTURE_SNAPSHOT) {
             SolIrSnapshotId snapshot_id = instruction->as.snapshot;
             const SolIrSnapshot *snapshot = snapshot_id < ir->snapshot_count
@@ -7892,7 +7951,12 @@ bool sol_mir_validate(const SolIr *ir, const SolMir *mir,
             || (value->source_expression != SOL_IR_NONE
                 && (value->source_expression >= ir->expression_count
                     || ir->expressions[value->source_expression].type
-                        != value->type) && !propagation_residual)
+                        != value->type)
+                && !propagation_residual
+                && !(value->kind == SOL_MIR_VALUE_INSTRUCTION
+                    && value->definition < mir->instruction_count
+                    && mir->instructions[value->definition].kind
+                        == SOL_MIR_INST_FUNCTION_VALUE))
             || !mir_span_valid(ir, value->span)) {
             return mir_error(diagnostics, value->span,
                 "malformed MIR value metadata");

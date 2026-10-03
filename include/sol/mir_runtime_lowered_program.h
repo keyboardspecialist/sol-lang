@@ -83,7 +83,7 @@ typedef struct { SolMirRuntimeLoweredState state; SolMirRuntimeLoweredExecution 
 typedef struct { SolMirRuntimeLoweredState state; SolMirPlanInstanceId image; SolMirMaterializedBlockId block; SolMirRuntimeSlice incoming_edges; SolMirRuntimeSlice outgoing_edges; } SolMirRuntimeLoweredImageBlock;
 typedef struct { SolMirRuntimeLoweredState state; SolMirPlanInstanceId image; SolMirMaterializedEdgeId edge; SolMirMaterializedBlockId target; SolMirMaterializedBlockId source; size_t ordinal; } SolMirRuntimeLoweredImageEdge;
 typedef struct { SolMirRuntimeLoweredState state; SolMirPlanInstanceId image; SolMirMaterializedBlockId block; SolMirMaterializedEdgeId edge; size_t ordinal; } SolMirRuntimeLoweredImageBlockEdge;
-typedef struct { SolMirRuntimeLoweredState state; SolMirRuntimeLoweredExecution execution; SolMirPlanInstanceId image; SolMirMaterializedBlockId block; SolMirTerminatorKind kind; SolMirRuntimeLoweredRuntimeClass runtime_class; SolMirRuntimeLoweredPlanFamily plan_family; uint32_t facilities; size_t plan; SolMirRuntimeSlice demanded_recipes; SolMirRuntimeCallId call; SolMirRuntimeCleanupEventId cleanup_event; SolMirRuntimeFailureSiteId failure_site; } SolMirRuntimeLoweredImageTerminator;
+typedef struct { SolMirRuntimeLoweredState state; SolMirRuntimeLoweredExecution execution; SolMirPlanInstanceId image; SolMirMaterializedBlockId block; SolMirTerminatorKind kind; SolMirRuntimeLoweredRuntimeClass runtime_class; SolMirRuntimeLoweredPlanFamily plan_family; uint32_t facilities; size_t plan; SolMirRuntimeSlice demanded_recipes; SolMirRuntimeCallId call; SolMirRuntimeCleanupEventId cleanup_event; SolMirRuntimeFailureSiteId failure_site; SolMirRuntimeCleanupEventId pre_operation_cleanup_event; SolMirRuntimeCleanupSupplementalSiteId pre_operation_supplemental_site; } SolMirRuntimeLoweredImageTerminator;
 typedef struct { SolMirRuntimeLoweredState state; SolMirPredicateBodyId body; SolMirPredicateOwnerKind owner_kind; SolMirPlanInstanceId image; SolMirMaterializedImportId import_id; SolMirPlanContextId context; SolContractClauseKind phase; SolContractOutcomeKind outcome; SolMirRuntimeSlice blocks; SolMirPredicateBlockId entry; SolMirRecipeId output_recipe; SolMirRecipeId refinement_self_recipe; } SolMirRuntimeLoweredPredicateBody;
 typedef struct { SolMirRuntimeLoweredState state; SolMirPredicateBodyId body; SolMirPredicateInstructionId instruction; SolMirPredicateBlockId block; SolMirPredicateInstructionKind kind; SolMirRuntimeLoweredRuntimeClass runtime_class; SolMirRuntimeLoweredPlanFamily plan_family; uint32_t facilities; size_t plan; SolMirRuntimeSlice demanded_recipes; SolMirRuntimeCleanupEventId cleanup_event; SolMirRuntimeFailureSiteId failure_site; } SolMirRuntimeLoweredPredicateInstruction;
 typedef struct { SolMirRuntimeLoweredState state; SolMirPredicateBodyId body; SolMirPredicateBlockId block; SolMirRuntimeSlice incoming_edges; SolMirRuntimeSlice outgoing_edges; } SolMirRuntimeLoweredPredicateBlock;
@@ -102,7 +102,8 @@ typedef struct { SolMirRuntimeLoweredState state; SolMirRecipeId recipe; size_t 
 typedef struct {
     SolMirRuntimeLoweredState state; SolMirRuntimeLoweredCleanupKind kind; size_t record;
     SolMirRuntimeCleanupEventId event; SolMirRuntimeCleanupEventKind event_kind;
-    SolMirRuntimeCleanupOrigin origin; size_t owner, block, operation;
+    SolMirRuntimeCleanupOrigin origin; SolMirRuntimeCleanupPhase phase;
+    size_t owner, block, operation, semantic_site;
     SolMirRuntimeCleanupProducerKind producer; SolMirRuntimeFailureSiteId inherited_failure_site;
     SolMirRuntimeCleanupSupplementalSiteId supplemental_site;
     SolMirRuntimeSlice actions, transitions;

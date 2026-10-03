@@ -2842,6 +2842,9 @@ static bool sol_ir_type_matches_instantiation(
     if (formal->kind == SOL_IR_TYPE_SELF && self_type != SOL_IR_NONE) {
         return actual_id == self_type;
     }
+    /* Named closed function values deliberately have no expanded signature. */
+    if (actual_id == formal_id && actual->kind == SOL_IR_TYPE_FUNCTION
+        && actual->definition != SOL_IR_NONE && actual->result == SOL_IR_NONE) return true;
     if (formal->kind == SOL_IR_TYPE_FUNCTION && formal->definition == SOL_IR_NONE
         && actual->kind == SOL_IR_TYPE_FUNCTION && actual->definition != SOL_IR_NONE) {
         if (actual->definition >= ir->definition_count

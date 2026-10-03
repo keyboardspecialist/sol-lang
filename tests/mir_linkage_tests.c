@@ -393,7 +393,7 @@ static void test_entry_and_host_requirement(void) {
         CHECK(pipeline.linkage.callable_count == 1);
         CHECK(pipeline.linkage.entry_export_count == 1);
         CHECK(pipeline.linkage.host_requirement_count == 1);
-        CHECK(pipeline.linkage.binding_count == 2);
+        CHECK(pipeline.linkage.binding_count == 3);
         CHECK(strcmp(pipeline.linkage.callables[0].symbol.bytes, "") != 0);
         CHECK(memcmp(pipeline.linkage.callables[0].symbol.bytes, "sol.i1.", 7) == 0);
         CHECK(memcmp(pipeline.linkage.entry_exports[0].symbol.bytes,
@@ -616,7 +616,7 @@ static void test_callable_target_deduplication(void) {
         &pipeline, NULL);
     CHECK(built);
     if (built) {
-        CHECK(pipeline.linkage.callable_value_count == 3
+        CHECK(pipeline.linkage.callable_value_count == 4
             && pipeline.linkage.table_entry_count == 2
             && pipeline.linkage.host_requirement_count == 1);
         size_t host_values = 0, internal_values = 0;
@@ -646,7 +646,7 @@ static void test_callable_target_deduplication(void) {
                 CHECK(entry->internal == callback_link);
             }
         }
-        CHECK(host_values == 2 && internal_values == 1
+        CHECK(host_values == 3 && internal_values == 1
             && callback_link != SOL_MIR_LINKAGE_NONE
             && sol_mir_linkage_validate(&pipeline.linkage, NULL));
         uint32_t runtime_present, runtime_absent;
@@ -1020,11 +1020,11 @@ static void test_e6_all_roots_census(void) {
     CHECK(built);
     if (built) {
         CHECK(pipeline.linkage.callable_count == 14);
-        CHECK(pipeline.linkage.binding_count == 23);
+        CHECK(pipeline.linkage.binding_count == 28);
         CHECK(pipeline.linkage.entry_export_count == 1);
         CHECK(pipeline.linkage.host_requirement_count == 4);
-        CHECK(pipeline.linkage.callable_value_count == 0);
-        CHECK(pipeline.linkage.table_entry_count == 0);
+        CHECK(pipeline.linkage.callable_value_count == 5);
+        CHECK(pipeline.linkage.table_entry_count == 4);
         CHECK(pipeline.linkage.runtime_requirement_count == 17);
         CHECK(sol_mir_linkage_validate(&pipeline.linkage, NULL));
         uint32_t runtime_present, runtime_absent;

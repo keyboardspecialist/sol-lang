@@ -3563,6 +3563,9 @@ static bool sol_type_signature_shape_matches_parameters(
         );
 }
 
+static SolType sol_type_closed_function_signature(SolTypeChecker *checker,
+    SolType value);
+
 static bool sol_type_record_coercion(
     SolTypeChecker *checker,
     SolExprId expression,
@@ -3633,11 +3636,8 @@ static bool sol_type_assignable(
         }
         return expected_function->effect_parameter != SOL_AST_NONE
             || (actual_function->effect_parameter == SOL_AST_NONE
-                && sol_type_effect_subset(
-                checker,
-                &actual_function->effects,
-                &expected_function->effects
-            ));
+                && sol_type_effect_subset(checker, &actual_function->effects,
+                    &expected_function->effects));
     }
     SolParameterId first_parameter = SOL_AST_NONE;
     SolType result = {.kind = SOL_TYPE_ERROR};
@@ -5099,6 +5099,70 @@ static bool sol_type_callable_projection_restore(SolTypeChecker *checker,
         && sol_type_closed_authority_free_callable(checker, checker->types->expressions[value], 0);
 }
 
+static SolType sol_type_closed_function_signature(SolTypeChecker *checker,
+    SolType value) {
+    if (value.kind != SOL_TYPE_FUNCTION || value.definition >= checker->syntax->item_count)
+        return value;
+    const SolSyntaxItem *item = &checker->syntax->items[value.definition];
+    if (item->kind != SOL_ITEM_FUNCTION || sol_type_parameter_count(checker, value.definition)
+            != 0 || item->first_effect_parameter != SOL_AST_NONE) return value;
+    for (SolEffectId effect = item->first_effect; effect != SOL_AST_NONE;
+            effect = checker->syntax->effects[effect].next) {
+        if (effect >= checker->syntax->effect_count
+            || !checker->syntax->effects[effect].is_pure) return value;
+    }
+    size_t count = 0; SolParameterId parameter = item->first_parameter;
+    while (parameter != SOL_AST_NONE) {
+        if (parameter >= checker->syntax->parameter_count || count == SIZE_MAX) {
+            sol_type_malformed(checker); return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+        ++count; parameter = checker->syntax->parameters[parameter].next;
+    }
+    SolFunctionType candidate = {.parameter_count = count, .effect_parameter = SOL_AST_NONE,
+        .result = checker->types->definitions[value.definition]};
+    if (count) {
+        candidate.parameters = malloc(count * sizeof(*candidate.parameters));
+        candidate.accesses = malloc(count * sizeof(*candidate.accesses));
+        if (!candidate.parameters || !candidate.accesses) {
+            free(candidate.parameters); free(candidate.accesses); checker->allocation_failed = true;
+            return (SolType){.kind = SOL_TYPE_ERROR};
+        }
+    }
+    parameter = item->first_parameter;
+    for (size_t i = 0; i < count; ++i) {
+        candidate.parameters[i] = sol_type_from_id(checker,
+            checker->syntax->parameters[parameter].type_id);
+        candidate.accesses[i] = checker->syntax->parameters[parameter].access;
+        parameter = checker->syntax->parameters[parameter].next;
+    }
+    return sol_type_intern_function(checker, candidate);
+}
+
+/* A local exact function remains a direct function unless every call through
+ * that binding has callback syntax.  This preserves named-argument direct
+ * calls while giving the bounded local callback producer its signature type. */
+static bool sol_type_local_needs_callback_signature(const SolTypeChecker *checker,
+    SolLocalId local) {
+    bool callback_use = false;
+    for (size_t expression = 0; expression < checker->syntax->expression_count;
+            ++expression) {
+        const SolExpr *call = &checker->syntax->expressions[expression];
+        if (call->kind != SOL_EXPR_CALL || call->as.call.callee
+                >= checker->hir->resolution_count) continue;
+        const SolResolution *resolution
+            = &checker->hir->resolutions[call->as.call.callee];
+        if (resolution->kind != SOL_RESOLUTION_LOCAL || resolution->target != local) continue;
+        for (SolArgumentId argument = call->as.call.first_argument;
+                argument != SOL_AST_NONE;) {
+            if (argument >= checker->syntax->argument_count
+                || checker->syntax->arguments[argument].is_named) return false;
+            argument = checker->syntax->arguments[argument].next;
+        }
+        callback_use = true;
+    }
+    return callback_use;
+}
+
 static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
     SolType result = {.kind = SOL_TYPE_UNIT};
     bool terminated = false;
@@ -5298,6 +5362,10 @@ static SolType sol_type_block(SolTypeChecker *checker, const SolExpr *block) {
                 SOL_LOCAL_BINDING,
                 statement_id
             );
+            if (statement->kind == SOL_STATEMENT_LET && initializer != SOL_AST_NONE
+                && local != SOL_AST_NONE
+                && sol_type_local_needs_callback_signature(checker, local))
+                value = sol_type_closed_function_signature(checker, value);
             if (local != SOL_AST_NONE) {
                 checker->types->locals[local] = value;
                 checker->types->local_capability_origins[local] = initializer == SOL_AST_NONE

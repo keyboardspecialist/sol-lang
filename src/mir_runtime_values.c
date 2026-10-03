@@ -1482,9 +1482,19 @@ SolMirRuntimeAllocationOutcome sol_mir_runtime_values_check_allocation(
     }
     const SolMirRuntimeAllocationPlan *plan
         = &values->allocation_plans[request->recipe];
+    if (request->mode != SOL_MIR_RUNTIME_ALLOCATION_REQUEST_ORDINARY
+        && request->mode != SOL_MIR_RUNTIME_ALLOCATION_REQUEST_CALLABLE) {
+        return SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT;
+    }
     if (!plan_is_valid(values, plan, request->recipe)
         || (plan->kind != SOL_MIR_RUNTIME_ALLOCATION_PLAN_TEXT
-            && request->text_length != 0))
+            && request->text_length != 0)
+        || (request->mode == SOL_MIR_RUNTIME_ALLOCATION_REQUEST_ORDINARY
+            && request->callable_plan != SOL_MIR_RUNTIME_NONE
+            && request->callable_plan != 0)
+        || (request->mode == SOL_MIR_RUNTIME_ALLOCATION_REQUEST_CALLABLE
+            && (request->callable_plan == SOL_MIR_RUNTIME_NONE
+                || plan->kind != SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE)))
         return SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT;
     uint64_t pointer_max = values->conventions->concrete->layout.target.pointer_size
         == 4 ? UINT32_MAX : UINT64_MAX;
@@ -1501,6 +1511,33 @@ SolMirRuntimeAllocationOutcome sol_mir_runtime_values_check_allocation(
             && (!add_u64(requests, 1, &requests)
                 || !add_u64(bytes, request->text_length, &bytes)))
             return SOL_MIR_RUNTIME_ALLOCATION_LIMIT;
+    }
+    if (request->mode == SOL_MIR_RUNTIME_ALLOCATION_REQUEST_CALLABLE) {
+        const SolMirOperations *operations = &values->conventions->concrete->operations;
+        if (request->callable_plan >= operations->callable_count) {
+            return SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT;
+        }
+        const SolMirOperationCallablePlan *callable
+            = &operations->callables[request->callable_plan];
+        if (callable->function_recipe != request->recipe
+            || values->conventions->concrete->layout.types[request->recipe].object_kind
+                != SOL_MIR_LAYOUT_OBJECT_CALLABLE
+            || callable->kind > SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION) {
+            return SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT;
+        }
+        requests = 1;
+        bytes = values->conventions->concrete->layout.target.pointer_size;
+        if (callable->kind == SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION) {
+            if (callable->capture_recipe >= values->allocation_plan_count) {
+                return SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT;
+            }
+            uint64_t environment = values->conventions->concrete->layout.types[
+                callable->capture_recipe].object_size;
+            if (environment != 0 && (!add_u64(requests, 1, &requests)
+                    || !add_u64(bytes, environment, &bytes))) {
+                return SOL_MIR_RUNTIME_ALLOCATION_LIMIT;
+            }
+        }
     }
     uint64_t total_requests, total_bytes;
     if (!add_u64(usage->requests, requests, &total_requests)
@@ -1614,7 +1651,8 @@ static SolMirRuntimeHostTransferOutcome host_transfer_demand(HostTransfer *trans
     const SolMirRuntimeAllocationQuota *quota, SolMirRuntimeAllocationUsage *tentative) {
     if (!host_transfer_tick(transfer, 1)) return SOL_MIR_RUNTIME_HOST_TRANSFER_LIMIT;
     SolMirRuntimeAllocationRequest request = {recipe,
-        source->kind == SOL_MIR_RUNTIME_HOST_VALUE_TEXT ? source->as.text.length : 0};
+        source->kind == SOL_MIR_RUNTIME_HOST_VALUE_TEXT ? source->as.text.length : 0,
+        SOL_MIR_RUNTIME_NONE, SOL_MIR_RUNTIME_ALLOCATION_REQUEST_ORDINARY};
     SolMirRuntimeAllocationDemand demand;
     SolMirRuntimeAllocationOutcome outcome = sol_mir_runtime_values_check_allocation(
         transfer->values, &request, quota, tentative, &demand);

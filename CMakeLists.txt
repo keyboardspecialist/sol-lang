@@ -113,6 +113,7 @@ add_library(sol_compiler STATIC
     src/typecheck.c
     $<$<BOOL:${SOL_ENABLE_WASM_BACKEND}>:src/wasm_backend.c>
     $<$<BOOL:${SOL_ENABLE_WASM_BACKEND}>:src/wasm_scalar.c>
+    $<$<BOOL:${SOL_ENABLE_WASM_BACKEND}>:src/wasm_represented.c>
 )
 
 target_include_directories(sol_compiler PUBLIC include)
@@ -294,6 +295,13 @@ if(BUILD_TESTING)
             SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
             SOL_TEST_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}/p42_scalar_test_artifacts"
             SOL_MIR_PLAN_TEST_HOOKS)
+        add_executable(sol_wasm_represented_tests tests/wasm_represented_tests.c)
+        target_link_libraries(sol_wasm_represented_tests PRIVATE sol_compiler sol_binaryen_dependency sol_wasmtime_dependency)
+        target_include_directories(sol_wasm_represented_tests PRIVATE src)
+        target_compile_definitions(sol_wasm_represented_tests PRIVATE
+            SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+            SOL_TEST_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}/p43_represented_test_artifacts"
+            SOL_MIR_PLAN_TEST_HOOKS)
     endif()
     if(UNIX)
         add_executable(sol_cli_io_helper tests/cli_io_helper.c)
@@ -339,6 +347,7 @@ if(BUILD_TESTING)
         if(SOL_ENABLE_WASM_BACKEND)
             target_compile_options(sol_wasm_backend_tests PRIVATE /std:c17 /W4)
             target_compile_options(sol_wasm_scalar_tests PRIVATE /std:c17 /W4)
+            target_compile_options(sol_wasm_represented_tests PRIVATE /std:c17 /W4)
         endif()
         if(UNIX)
             target_compile_options(sol_cli_io_helper PRIVATE /std:c17 /W4)
@@ -375,6 +384,7 @@ if(BUILD_TESTING)
         if(SOL_ENABLE_WASM_BACKEND)
             target_compile_options(sol_wasm_backend_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
             target_compile_options(sol_wasm_scalar_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wconversion)
+            target_compile_options(sol_wasm_represented_tests PRIVATE -std=c17 -Wall -Wextra -Wpedantic -Wshadow -Wconversion)
         endif()
         if(UNIX)
             target_compile_options(sol_cli_io_helper PRIVATE -std=c17 -Wall -Wextra -Wpedantic)
@@ -387,6 +397,8 @@ if(BUILD_TESTING)
         )
         if(SOL_ENABLE_WASM_BACKEND)
             set_target_properties(sol_wasm_backend_tests sol_wasm_scalar_tests PROPERTIES
+                C_STANDARD 17 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+            set_target_properties(sol_wasm_represented_tests PROPERTIES
                 C_STANDARD 17 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
         endif()
     endif()
@@ -453,6 +465,8 @@ if(BUILD_TESTING)
             target_link_options(sol_wasm_backend_tests PRIVATE -fsanitize=address,undefined)
             target_compile_options(sol_wasm_scalar_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
             target_link_options(sol_wasm_scalar_tests PRIVATE -fsanitize=address,undefined)
+            target_compile_options(sol_wasm_represented_tests PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+            target_link_options(sol_wasm_represented_tests PRIVATE -fsanitize=address,undefined)
         endif()
     endif()
 
@@ -487,6 +501,7 @@ if(BUILD_TESTING)
     if(SOL_ENABLE_WASM_BACKEND)
         add_test(NAME wasm_backend COMMAND sol_wasm_backend_tests)
         add_test(NAME wasm_scalar COMMAND sol_wasm_scalar_tests)
+        add_test(NAME wasm_represented COMMAND sol_wasm_represented_tests)
         if(UNIX)
             add_test(NAME wasm_backend_config_rejections
                 COMMAND ${CMAKE_COMMAND}

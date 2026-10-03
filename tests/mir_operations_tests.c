@@ -597,6 +597,113 @@ static void test_dynamic_predicate_callback_rejection(void) {
     sol_mir_program_free(&program); free_text(&c);
 }
 
+static void test_image_callback_operations(void) {
+    static const char source[] =
+        "module image_callback\n"
+        "function answer() -> Int64 effects { pure } { return 43 }\n"
+        "function root() -> Int64 effects { pure } { "
+        "let callback = answer return callback() }\n";
+    Compilation c; bool compiled = compile_text(&c, source); CHECK(compiled);
+    if (!compiled) { free_text(&c); return; }
+    SolMirProgramRoot root = {callable(&c.ir, "root", SOL_IR_CALLABLE_FUNCTION),
+        SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    Pipeline p; pipeline_init(&p);
+    bool built = build_pipeline(&c.ir, &root, 1, NULL, 0, &p, NULL);
+    CHECK(built);
+    if (built) {
+        size_t image_values = 0, image_callbacks = 0, predicate_callbacks = 0;
+        size_t exact_callables = 0;
+        for (size_t i = 0; i < p.materialization.instruction_count; ++i)
+            image_values += p.materialization.instructions[i].kind
+                == SOL_MIR_INST_FUNCTION_VALUE;
+        for (size_t i = 0; i < p.materialization.block_count; ++i) {
+            const SolMirMaterializedTerminator *term
+                = &p.materialization.blocks[i].terminator;
+            image_callbacks += term->kind == SOL_MIR_TERM_INVOKE
+                && term->call_kind == SOL_IR_CALL_CALLBACK;
+        }
+        for (size_t i = 0; i < p.operations.predicate_block_count; ++i) {
+            const SolMirPredicateTerminator *term
+                = &p.operations.predicate_blocks[i].terminator;
+            predicate_callbacks += term->kind == SOL_MIR_PREDICATE_TERM_INVOKE
+                && term->call_kind == SOL_IR_CALL_CALLBACK;
+        }
+        for (size_t i = 0; i < p.operations.callable_count; ++i)
+            exact_callables += p.operations.callables[i].kind
+                == SOL_MIR_CALLABLE_PRODUCER_EXACT_FUNCTION;
+        CHECK(image_values == 1 && image_callbacks == 1 && exact_callables == 1
+            && p.operations.callable_count == 1 && predicate_callbacks == 0
+            && sol_mir_operations_validate(&p.operations, NULL));
+    }
+    pipeline_free(&p); free_text(&c);
+}
+
+static void test_callable_hole_field_operations(void) {
+    static const char source[] =
+        "module callable_hole_operations\n"
+        "record Pair { left: function() -> Int64 effects { pure }, right: Text }\n"
+        "function answer() -> Int64 effects { pure } { return 42 }\n"
+        "function root() -> Int64 effects { pure } { let exact = answer "
+        "let pair = Pair { left = exact, right = \"ignored\" } "
+        "let moved = pair.left return moved() }\n";
+    Compilation c; CHECK(compile_text(&c, source));
+    if (!sol_diagnostics_has_errors(&c.diagnostics)) {
+        SolMirProgramRoot root = {callable(&c.ir, "root", SOL_IR_CALLABLE_FUNCTION),
+            SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+        Pipeline p; pipeline_init(&p);
+        CHECK(build_pipeline(&c.ir, &root, 1, NULL, 0, &p, NULL));
+        if (p.operations.constructor_count != 0) {
+            SolMirOperationConstructPlan *construct = &p.operations.constructors[0];
+            CHECK(construct->operands.count == 2);
+            size_t operand_id = SOL_MIR_OPERATION_NONE;
+            for (size_t i = 0; i < construct->operands.count; ++i) {
+                size_t id = construct->operands.offset + i;
+                if (p.operations.construct_operands[id].recipe
+                    < p.representation.recipe_count
+                    && p.representation.recipes[p.operations.construct_operands[id].recipe].kind
+                        == SOL_MIR_RECIPE_FUNCTION) operand_id = id;
+            }
+            CHECK(operand_id != SOL_MIR_OPERATION_NONE);
+            if (operand_id != SOL_MIR_OPERATION_NONE) {
+                SolMirOperationConstructOperand *operand
+                    = &p.operations.construct_operands[operand_id];
+                SolMirRecipeId recipe = operand->recipe;
+                operand->recipe = p.representation.recipe_count;
+                CHECK(!sol_mir_operations_validate(&p.operations, NULL)); operand->recipe = recipe;
+                size_t field = operand->recipe_field;
+                operand->recipe_field = SOL_MIR_OPERATION_NONE;
+                CHECK(!sol_mir_operations_validate(&p.operations, NULL)); operand->recipe_field = field;
+                uint64_t offset = operand->absolute_offset;
+                ++operand->absolute_offset;
+                CHECK(!sol_mir_operations_validate(&p.operations, NULL)); operand->absolute_offset = offset;
+                SolMirRecipe *function = &p.representation.recipes[recipe];
+                SolMirPlanSlice parameters = function->parameters;
+                function->parameters.count = 1;
+                CHECK(!sol_mir_operations_validate(&p.operations, NULL)); function->parameters = parameters;
+                SolMirPlanSlice accesses = function->parameter_accesses;
+                function->parameter_accesses.count = 1;
+                CHECK(!sol_mir_operations_validate(&p.operations, NULL)); function->parameter_accesses = accesses;
+                SolMirRecipeId result = function->result;
+                function->result = p.representation.recipe_count;
+                CHECK(!sol_mir_operations_validate(&p.operations, NULL)); function->result = result;
+                SolMirMaterializedEffectRowId effects = function->effects;
+                function->effects = p.materialization.effect_row_count;
+                CHECK(!sol_mir_operations_validate(&p.operations, NULL)); function->effects = effects;
+                SolMirCopyKind copy = function->copy_kind;
+                function->copy_kind = SOL_MIR_COPY_TRIVIAL;
+                CHECK(!sol_mir_operations_validate(&p.operations, NULL)); function->copy_kind = copy;
+                SolMirTypeLayout *layout = &p.layout.types[recipe];
+                uint64_t size = layout->value_size;
+                layout->value_size = 8;
+                CHECK(!sol_mir_operations_validate(&p.operations, NULL)); layout->value_size = size;
+                CHECK(sol_mir_operations_validate(&p.operations, NULL));
+            }
+        }
+        pipeline_free(&p);
+    }
+    free_text(&c);
+}
+
 static void test_predicate_local_bound_capability_producer(void) {
     static const char source[] =
         "module predicate_local_bound_capability\n"
@@ -883,7 +990,7 @@ static void test_e6_operations(void) {
         && o->pattern_test_count == 3 && o->pattern_extraction_count == 3
         && o->propagation_count == 2 && o->snapshot_count == 1
         && o->predicate_count == 4 && o->handler_count == 0
-        && o->callable_count == 0);
+        && o->callable_count == 5);
     size_t checked = 0, comparison = 0, equality = 0, compound = 0;
     for (size_t i = 0; i < o->arithmetic_count; ++i) {
         checked += o->arithmetic[i].failures != SOL_MIR_OPERATION_FAILURE_NONE;
@@ -1427,7 +1534,7 @@ static void test_handlers_and_unresolved_callable_rejection(void) {
     SolIrCallableId choose = callable(&c.ir, "choose", SOL_IR_CALLABLE_CAPABILITY);
     built = build_pipeline(&c.ir, &root, 1, &choose, 1, &p, NULL);
     CHECK(built && p.operations.layout != NULL
-        && p.representation.callable_producer_count == 2);
+        && p.representation.callable_producer_count == 3);
     if (built) {
         size_t exact = SOL_MIR_OPERATION_NONE, bound = SOL_MIR_OPERATION_NONE;
         for (size_t i = 0; i < p.operations.callable_count; ++i) {
@@ -1594,9 +1701,10 @@ static void test_p2_6b2_rich_predicates(void) {
         "module direct_call\nfunction helper(value: Int64) -> Bool effects { pure } "
             "{ return true }\nfunction root(value: Int64) -> Bool effects { pure } "
             "requires { helper(value) } { return true }\n",
-        "module function_value\nfunction helper(value: Int64) -> Bool effects { pure } "
-            "{ return true }\nfunction root() -> Bool effects { pure } "
-            "requires { { let callback = helper callback(1) } } { return true }\n",
+        "module predicate_function_value\n"
+            "function helper(value: Int64) -> Bool effects { pure } { return true }\n"
+            "function root() -> Bool effects { pure } "
+            "requires { { let callback = helper true } } { return true }\n",
         "module aggregate\nrecord Box { value: Int64 }\n"
             "function root() -> Bool effects { pure } "
             "requires { Box { value = 1 } == Box { value = 1 } } { return true }\n",
@@ -1634,7 +1742,7 @@ static void test_p2_6b2_rich_predicates(void) {
             "function helper(value: Int64) -> Bool effects { pure } "
             "{ return true }\n"
             "function root(box: Box) -> Bool effects { pure } requires { { "
-            "let callback = helper callback(box.value) } match "
+            "let callback = helper let checked = helper(box.value) checked } match "
             "Choice.yes(box.value) { yes(item) => item > 0 _ => false } "
             "} { return true }\n",
         "module scalar_variants\n"
@@ -2228,6 +2336,8 @@ int main(void) {
     test_predicate_body_count_wrap_rejection();
     test_contract_propagation_rejection();
     test_dynamic_predicate_callback_rejection();
+    test_image_callback_operations();
+    test_callable_hole_field_operations();
     test_predicate_local_bound_capability_producer();
     test_match_binding_dfs_authentication();
     test_p2_6b2_rich_predicates();

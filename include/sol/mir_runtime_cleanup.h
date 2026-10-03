@@ -29,6 +29,8 @@ typedef enum {
     SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_FAILURE,
     SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN,
     SOL_MIR_RUNTIME_CLEANUP_EDGE_TERMINAL_FAILURE,
+    /* A successful non-CFG prerequisite; continuation is always NONE. */
+    SOL_MIR_RUNTIME_CLEANUP_EDGE_PRE_OPERATION_READY,
 } SolMirRuntimeCleanupEdgeRole;
 
 typedef enum {
@@ -43,7 +45,16 @@ typedef enum {
     SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PREDICATE_NO_MATCH,
     SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PREDICATE_RESULT,
     SOL_MIR_RUNTIME_CLEANUP_PRODUCER_SUPPLEMENTAL_ALLOCATION,
+    SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CALLABLE_CONSTRUCTION,
+    SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PROPAGATION_RESIDUAL,
 } SolMirRuntimeCleanupProducerKind;
+
+/* Prerequisite allocations are distinct from an operation's ordinary event. */
+typedef enum {
+    SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION,
+    SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_INVOKE_CALLABLE,
+    SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_PROPAGATE_RESIDUAL,
+} SolMirRuntimeCleanupPhase;
 
 typedef enum {
     SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE,
@@ -103,8 +114,9 @@ enum {
 
 typedef struct {
     SolMirRuntimeCleanupEventKind kind;
+    SolMirRuntimeCleanupPhase phase;
     SolMirRuntimeCleanupOrigin origin;
-    size_t owner, block, operation;
+    size_t owner, block, operation, semantic_site;
     SolMirRuntimeSource source;
     SolMirRuntimeFailureSiteId inherited_failure_site;
     SolMirRuntimeCleanupSupplementalSiteId supplemental_site;

@@ -35,9 +35,65 @@ static bool fail(Builder *b, SolMirOperationsBuildOutcome outcome,
     return error(b->diagnostics, message);
 }
 
+static bool charge(Builder *b, size_t amount);
+
 static bool add_size(size_t *value, size_t amount) {
     if (amount > SIZE_MAX - *value) return false;
     *value += amount; return true;
+}
+
+/* A record write may carry a callable through a field whose recipe was
+ * materialized independently of the operand.  Equality of arena IDs is not a
+ * proof of ABI compatibility: replay the exact unbound function shape and its
+ * Wasm32 callable representation before recording the field write. */
+static bool exact_unbound_function_field_compatible(Builder *builder,
+    const SolMirLayout *layout,
+    SolMirRecipeId operand_recipe, SolMirRecipeId field_recipe, size_t field) {
+    const SolMirRepresentation *r = layout->representation;
+    if (operand_recipe >= r->recipe_count || field_recipe >= r->recipe_count
+        || field >= r->field_count || operand_recipe >= layout->type_count
+        || field_recipe >= layout->type_count || field >= layout->field_count) return false;
+    const SolMirRecipe *operand = &r->recipes[operand_recipe];
+    const SolMirRecipe *destination = &r->recipes[field_recipe];
+    const SolMirTypeLayout *operand_layout = &layout->types[operand_recipe];
+    const SolMirTypeLayout *destination_layout = &layout->types[field_recipe];
+    const SolMirFieldLayout *field_layout = &layout->fields[field];
+    if (operand->kind != SOL_MIR_RECIPE_FUNCTION
+        || destination->kind != SOL_MIR_RECIPE_FUNCTION
+        || operand->parameters.count != destination->parameters.count
+        || operand->parameter_accesses.count != destination->parameter_accesses.count
+        || operand->result != destination->result || operand->effects != destination->effects
+        || operand->storage != SOL_MIR_STORAGE_CALLABLE_HANDLE
+        || destination->storage != SOL_MIR_STORAGE_CALLABLE_HANDLE
+        || operand->is_copy || destination->is_copy
+        || operand->copy_kind != SOL_MIR_COPY_FORBIDDEN
+        || destination->copy_kind != SOL_MIR_COPY_FORBIDDEN
+        || operand->drop_kind != SOL_MIR_DROP_CALLABLE
+        || destination->drop_kind != SOL_MIR_DROP_CALLABLE
+        || layout->target.pointer_size != 4 || layout->target.pointer_alignment != 4
+        || operand_layout->value_size != 4 || destination_layout->value_size != 4
+        || operand_layout->value_alignment != 4 || destination_layout->value_alignment != 4
+        || operand_layout->object_kind != SOL_MIR_LAYOUT_OBJECT_CALLABLE
+        || destination_layout->object_kind != SOL_MIR_LAYOUT_OBJECT_CALLABLE
+        || operand_layout->object_size != 4 || destination_layout->object_size != 4
+        || operand_layout->target_token_offset != 0
+        || destination_layout->target_token_offset != 0
+        || operand_layout->environment_handle_offset != SOL_MIR_LAYOUT_OFFSET_NONE
+        || destination_layout->environment_handle_offset != SOL_MIR_LAYOUT_OFFSET_NONE
+        || field_layout->owner_recipe == SOL_MIR_RECIPE_NONE
+        || field_layout->size != 4 || field_layout->alignment != 4) return false;
+    for (size_t i = 0; i < operand->parameters.count; ++i) {
+        if (!charge(builder, SOL_MIR_OPERATIONS_WORK_SCAN)) return false;
+        size_t left = operand->parameters.offset + i;
+        size_t right = destination->parameters.offset + i;
+        size_t left_access = operand->parameter_accesses.offset + i;
+        size_t right_access = destination->parameter_accesses.offset + i;
+        if (left >= r->recipe_id_count || right >= r->recipe_id_count
+            || left_access >= r->access_count || right_access >= r->access_count
+            || r->recipe_ids[left] != r->recipe_ids[right]
+            || r->accesses[left_access] != r->accesses[right_access]) return false;
+    }
+    return r->fields[field].type == field_recipe;
 }
 
 static bool charge(Builder *b, size_t amount) {
@@ -2034,6 +2090,28 @@ static bool populate(Builder *b) {
                 if (field != SOL_MIR_OPERATION_NONE) offset = o->layout->fields[field].offset;
                 else if (kind == SOL_MIR_OPERATION_CONSTRUCT_CAPABILITY)
                     offset = o->layout->types[recipe].private_source_handle_offset;
+                if ((operand->type < r->recipe_count
+                        && r->recipes[operand->type].kind == SOL_MIR_RECIPE_FUNCTION)
+                    || (field != SOL_MIR_OPERATION_NONE && field < r->field_count
+                        && r->recipes[r->fields[field].type].kind
+                            == SOL_MIR_RECIPE_FUNCTION)) {
+                    if (field == SOL_MIR_OPERATION_NONE) return false;
+                    SolMirRecipeId field_recipe = r->fields[field].type;
+                    const SolMirTypeLayout *operand_layout = operand->type < o->layout->type_count
+                        ? &o->layout->types[operand->type] : NULL;
+                    const SolMirTypeLayout *field_type_layout = field_recipe < o->layout->type_count
+                        ? &o->layout->types[field_recipe] : NULL;
+                    /* Bound-operation envelopes are independently retained by
+                     * the general operation path.  This proof owns only the
+                     * one-word, unbound exact-function field route. */
+                    if (operand_layout != NULL && field_type_layout != NULL
+                        && operand_layout->environment_handle_offset
+                            == SOL_MIR_LAYOUT_OFFSET_NONE
+                        && field_type_layout->environment_handle_offset
+                            == SOL_MIR_LAYOUT_OFFSET_NONE
+                        && !exact_unbound_function_field_compatible(b, o->layout,
+                            operand->type, field_recipe, field)) return false;
+                }
                 size_t formal_ordinal = field == SOL_MIR_OPERATION_NONE
                     ? operand->formal : r->fields[field].ordinal;
                 o->construct_operands[o->construct_operand_count++]

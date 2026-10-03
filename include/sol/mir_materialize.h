@@ -145,6 +145,7 @@ typedef struct {
     SolIrDefinitionId construct_definition;
     SolIrVariantId construct_variant;
     SolMirPlanSlice construct_operands;
+    SolIrCallableId function_callable;
     SolIrSlice source_capability_roots;
     SolIrSlice source_operation_roots;
 } SolMirMaterializedInstruction;

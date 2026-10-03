@@ -21,11 +21,21 @@ typedef struct {
     size_t place_count;
 } View;
 
+typedef struct {
+    size_t *total;
+    size_t limit;
+    bool exhausted;
+} TraceMeter;
+
 static const SolMirMaterializedTerminator *cleanup_terminal(const View *v,
     size_t block);
 static bool signatures_equal(const SolMirMaterialization *o,
     const SolMirMaterializedBinding *left,
     const SolMirMaterializedBinding *right);
+static bool callback_function_value_trace(const View *view, size_t block_id,
+    const SolMirMaterializedTerminator *term,
+    const SolMirMaterializedSemanticSite *site, TraceMeter *work);
+static bool callback_trace_work(const SolMirMaterialization *owner, TraceMeter *work);
 
 static bool contract_owned_by_image(const View *v,
     const SolMirMaterializedTerminator *term) {
@@ -92,6 +102,15 @@ static bool work_add(size_t *total, size_t value) {
     return true;
 }
 
+static bool trace_tick(TraceMeter *work) {
+    if (work == NULL) return true;
+    if (!work_add(work->total, 1) || *work->total > work->limit) {
+        work->exhausted = true;
+        return false;
+    }
+    return true;
+}
+
 static bool work_mul(size_t left, size_t right, size_t *result) {
     if (left != 0 && right > SIZE_MAX / left) return false;
     *result = left * right;
@@ -154,6 +173,9 @@ bool sol_mir_materialization_validation_work(
         if (!work_mul(storage_passes, storage_scan, &storage_work)
             || !work_add(&total, storage_work)) return false;
     }
+    TraceMeter trace = {&total, owner->limits.max_validation_work, false};
+    if (total > trace.limit || !callback_trace_work(owner, &trace)
+        || trace.exhausted) return false;
     size_t closure;
     if (owner->image_count == SIZE_MAX || owner->binding_count == SIZE_MAX
         || !work_mul(owner->image_count + 1, owner->binding_count + 1, &closure)
@@ -877,6 +899,24 @@ static bool instruction_semantics(const View *view,
                     || operand->type != o->temporaries[operand->temporary].type) return false;
             }
             return ins->type < o->type_count;
+        case SOL_MIR_INST_FUNCTION_VALUE: {
+            const SolIr *ir = o->plan->program->ir;
+            if (ins->function_callable >= ir->callable_count
+                || ins->source_expression >= ir->expression_count
+                || ir->expressions[ins->source_expression].kind
+                    != SOL_IR_EXPR_DEFINITION
+                || ir->expressions[ins->source_expression].as.definition
+                    >= ir->definition_count
+                || ir->definitions[ir->expressions[ins->source_expression]
+                        .as.definition].callable != ins->function_callable
+                || ins->type >= o->type_count
+                || o->types[ins->type].kind != SOL_IR_TYPE_FUNCTION) return false;
+            const SolIrCallable *callable = &ir->callables[ins->function_callable];
+            return callable->kind == SOL_IR_CALLABLE_FUNCTION
+                && callable->generic_parameters.count == 0
+                && callable->effect_parameters.count == 0
+                && callable->effect_parameter == SOL_IR_NONE;
+        }
         case SOL_MIR_INST_CAPTURE_SNAPSHOT:
             for (size_t i = 0; i < view->image->overlays.count; ++i) {
                 const SolMirMaterializedTypeOverlay *overlay
@@ -925,6 +965,272 @@ static bool instruction_semantics(const View *view,
             return false;
     }
     return false;
+}
+
+/* Independently reconstruct the four callable type positions in the field
+ * route.  A matching arena number is deliberately insufficient evidence. */
+static bool exact_unbound_function_types(const SolMirMaterialization *o,
+    SolMirMaterializedTypeId producer, SolMirMaterializedTypeId field,
+    SolMirMaterializedTypeId load, SolMirMaterializedTypeId callee,
+    TraceMeter *work) {
+    const SolMirMaterializedTypeId all[] = {producer, field, load, callee};
+    if (producer >= o->type_count) return false;
+    const SolMirMaterializedType *exact = &o->types[producer];
+    if (exact->kind != SOL_IR_TYPE_FUNCTION || exact->is_copy
+        || exact->parameters.count != exact->parameter_accesses.count
+        || exact->result >= o->type_count || exact->effects >= o->effect_row_count) return false;
+    for (size_t i = 1; i < sizeof(all) / sizeof(*all); ++i) {
+        if (all[i] >= o->type_count) return false;
+        const SolMirMaterializedType *candidate = &o->types[all[i]];
+        if (candidate->kind != SOL_IR_TYPE_FUNCTION || candidate->is_copy
+            || candidate->parameters.count != exact->parameters.count
+            || candidate->parameter_accesses.count != exact->parameter_accesses.count) return false;
+        if (!trace_tick(work) || candidate->result != exact->result
+            || !trace_tick(work) || candidate->effects != exact->effects) return false;
+        for (size_t p = 0; p < exact->parameters.count; ++p) {
+            if (!trace_tick(work)) return false;
+            size_t left = exact->parameters.offset + p;
+            size_t right = candidate->parameters.offset + p;
+            size_t left_access = exact->parameter_accesses.offset + p;
+            size_t right_access = candidate->parameter_accesses.offset + p;
+            if (left >= o->type_id_count || right >= o->type_id_count
+                || left_access >= o->access_count || right_access >= o->access_count
+                || o->type_ids[left] != o->type_ids[right]) return false;
+            if (!trace_tick(work) || o->accesses[left_access] != o->accesses[right_access])
+                return false;
+        }
+    }
+    return true;
+}
+
+/* Independently replay the only accepted local callback coercion.  The site
+ * belongs to the FUNCTION_VALUE producer, not to the callback terminator. */
+static bool callback_function_value_trace(const View *view, size_t block_id,
+    const SolMirMaterializedTerminator *term,
+    const SolMirMaterializedSemanticSite *site, TraceMeter *work) {
+    const SolMirMaterialization *o = view->owner;
+    if (term->kind != SOL_MIR_TERM_INVOKE
+        || term->call_kind != SOL_IR_CALL_CALLBACK
+        || !in(view->image->temporaries, term->callee)
+        || term->binding >= o->binding_count || site->kind != SOL_MIR_PLAN_DEMAND_FUNCTION_VALUE
+        || site->binding >= o->binding_count || site->parent != view->image_id
+        || site->producer_kind != SOL_MIR_MATERIALIZED_PRODUCER_INSTRUCTION
+        || !in(view->image->instructions, site->instruction)
+        || site->block != o->instructions[site->instruction].block) return false;
+    const SolMirMaterializedBinding *function = &o->bindings[site->binding];
+    const SolMirMaterializedBinding *invoke = &o->bindings[term->binding];
+    const SolMirMaterializedInstruction *producer = &o->instructions[site->instruction];
+    if (producer->kind != SOL_MIR_INST_FUNCTION_VALUE
+        || producer->result == SOL_MIR_MATERIALIZED_NONE
+        || producer->source_expression != function->source.expression
+        || producer->function_callable != function->symbolic_callable
+        || !targets_equal(function, invoke)
+        || producer->type != site->produced_function_type
+        || function->target_kind != SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+        || function->instance >= o->plan->instance_count
+        || o->plan->instances[function->instance].callable
+            != producer->function_callable) return false;
+    size_t initializer = SOL_MIR_MATERIALIZED_NONE;
+    for (size_t i = 0; i < view->image->instructions.count; ++i) {
+        if (!trace_tick(work)) return false;
+        size_t id = view->image->instructions.offset + i;
+        const SolMirMaterializedInstruction *instruction = &o->instructions[id];
+        if (instruction->kind == SOL_MIR_INST_TEMPORARY_INIT
+            && instruction->temporary == term->callee) {
+            if (initializer != SOL_MIR_MATERIALIZED_NONE) return false;
+            initializer = id;
+        }
+    }
+    if (initializer == SOL_MIR_MATERIALIZED_NONE) return false;
+    const SolMirMaterializedInstruction *init = &o->instructions[initializer];
+    if (!in(view->image->values, init->left)
+        || o->values[init->left].kind != SOL_MIR_VALUE_INSTRUCTION
+        || !in(view->image->instructions, o->values[init->left].instruction)) return false;
+    size_t load_id = o->values[init->left].instruction;
+    const SolMirMaterializedInstruction *load = &o->instructions[load_id];
+    if ((load->kind != SOL_MIR_INST_LOAD_COPY && load->kind != SOL_MIR_INST_LOAD_MOVE)
+        || load->result != init->left || !in(view->image->places, load->place)) return false;
+    if (!trace_tick(work)) return false;
+    size_t callback_load_id = load_id;
+    size_t callback_store = SOL_MIR_MATERIALIZED_NONE;
+    if (o->places[load->place].projections.count == 0) {
+        size_t store = SOL_MIR_MATERIALIZED_NONE;
+        for (size_t i = 0; i < view->image->instructions.count; ++i) {
+            if (!trace_tick(work)) return false;
+            size_t id = view->image->instructions.offset + i;
+            const SolMirMaterializedInstruction *instruction = &o->instructions[id];
+            if (instruction->kind != SOL_MIR_INST_STORE || !in(view->image->places,
+                    instruction->place) || o->places[instruction->place].local
+                        != o->places[load->place].local) continue;
+            if (store != SOL_MIR_MATERIALIZED_NONE) return false;
+            store = id;
+        }
+        if (store == SOL_MIR_MATERIALIZED_NONE) return false;
+        if (o->instructions[store].left == producer->result) {
+            size_t callback_block = view->image->blocks.offset + block_id;
+            return producer->type == o->temporaries[term->callee].type
+                && load->type == producer->type
+                && producer->block == callback_block
+                && o->instructions[store].block == callback_block
+                && load->block == callback_block && init->block == callback_block
+                && site->instruction < store && store < load_id && load_id < initializer;
+        }
+        if (!in(view->image->values, o->instructions[store].left)
+            || o->values[o->instructions[store].left].kind
+                != SOL_MIR_VALUE_INSTRUCTION
+            || !in(view->image->instructions,
+                o->values[o->instructions[store].left].instruction)) return false;
+        load_id = o->values[o->instructions[store].left].instruction;
+        load = &o->instructions[load_id]; callback_store = store;
+        if (load->result != o->instructions[store].left)
+            return false;
+    }
+    if (load->kind != SOL_MIR_INST_LOAD_MOVE
+        || o->places[load->place].projections.count != 1) return false;
+    const SolIr *ir = o->plan->program->ir;
+    if (producer->function_callable >= ir->callable_count
+        || ir->callables[producer->function_callable].kind != SOL_IR_CALLABLE_FUNCTION
+        || ir->callables[producer->function_callable].generic_parameters.count != 0
+        || ir->callables[producer->function_callable].effect_parameters.count != 0
+        || ir->callables[producer->function_callable].effect_parameter != SOL_IR_NONE
+        || o->plan->instances[function->instance].receiver != SOL_MIR_PLAN_NONE
+        || site->captured_receiver_kind != SOL_MIR_MATERIALIZED_RECEIVER_NONE
+        || site->captured_receiver_type != SOL_MIR_MATERIALIZED_NONE
+        || site->captured_receiver_roots.count != 0) return false;
+    size_t projection_id = o->places[load->place].projections.offset;
+    if (projection_id >= o->projection_count
+        || o->projections[projection_id].kind != SOL_IR_PROJECTION_FIELD) return false;
+    SolIrFieldId field = o->projections[projection_id].source_field;
+    SolMirMaterializedLocalId pair_local = o->places[load->place].local;
+    if (!trace_tick(work)) return false;
+    if (pair_local >= o->local_count || o->locals[pair_local].source_local >= ir->local_count
+        || ir->locals[o->locals[pair_local].source_local].kind != SOL_IR_LOCAL_BINDING
+        || ir->locals[o->locals[pair_local].source_local].mutable) return false;
+    size_t pair_store = SOL_MIR_MATERIALIZED_NONE;
+    for (size_t i = 0; i < view->image->instructions.count; ++i) {
+        if (!trace_tick(work)) return false;
+        size_t id = view->image->instructions.offset + i;
+        const SolMirMaterializedInstruction *instruction = &o->instructions[id];
+        if (instruction->kind != SOL_MIR_INST_STORE || !in(view->image->places,
+                instruction->place) || o->places[instruction->place].local != pair_local)
+            continue;
+        if (pair_store != SOL_MIR_MATERIALIZED_NONE) return false;
+        pair_store = id;
+    }
+    if (pair_store == SOL_MIR_MATERIALIZED_NONE) return false;
+    const SolMirMaterializedInstruction *write_pair = &o->instructions[pair_store];
+    size_t construct_id = SOL_MIR_MATERIALIZED_NONE;
+    for (size_t i = 0; i < view->image->instructions.count; ++i) {
+        if (!trace_tick(work)) return false;
+        size_t id = view->image->instructions.offset + i;
+        const SolMirMaterializedInstruction *instruction = &o->instructions[id];
+        if (instruction->kind != SOL_MIR_INST_CONSTRUCT || instruction->result != write_pair->left)
+            continue;
+        if (construct_id != SOL_MIR_MATERIALIZED_NONE) return false;
+        construct_id = id;
+    }
+    if (construct_id == SOL_MIR_MATERIALIZED_NONE) return false;
+    const SolMirMaterializedInstruction *construct = &o->instructions[construct_id];
+    if (construct->construct_kind != SOL_MIR_CONSTRUCT_RECORD
+        || construct->type != o->places[load->place].root_type) return false;
+    size_t operand_id = SOL_MIR_MATERIALIZED_NONE;
+    for (size_t i = 0; i < construct->construct_operands.count; ++i) {
+        if (!trace_tick(work)) return false;
+        size_t id = construct->construct_operands.offset + i;
+        if (id >= o->construct_operand_count) return false;
+        const SolMirMaterializedConstructOperand *operand = &o->construct_operands[id];
+        if (operand->formal != field) continue;
+        if (operand_id != SOL_MIR_MATERIALIZED_NONE) return false;
+        operand_id = id;
+    }
+    if (operand_id == SOL_MIR_MATERIALIZED_NONE) return false;
+    const SolMirMaterializedConstructOperand *operand = &o->construct_operands[operand_id];
+    size_t operand_init = SOL_MIR_MATERIALIZED_NONE;
+    for (size_t i = 0; i < view->image->instructions.count; ++i) {
+        if (!trace_tick(work)) return false;
+        size_t id = view->image->instructions.offset + i;
+        const SolMirMaterializedInstruction *instruction = &o->instructions[id];
+        if (instruction->kind != SOL_MIR_INST_TEMPORARY_INIT
+            || instruction->temporary != operand->temporary) continue;
+        if (operand_init != SOL_MIR_MATERIALIZED_NONE) return false;
+        operand_init = id;
+    }
+    if (operand_init == SOL_MIR_MATERIALIZED_NONE) return false;
+    const SolMirMaterializedInstruction *init_operand = &o->instructions[operand_init];
+    if (!in(view->image->values, init_operand->left)
+        || o->values[init_operand->left].kind != SOL_MIR_VALUE_INSTRUCTION
+        || !in(view->image->instructions, o->values[init_operand->left].instruction)) return false;
+    size_t exact_load_id = o->values[init_operand->left].instruction;
+    const SolMirMaterializedInstruction *exact_load = &o->instructions[exact_load_id];
+    if (exact_load->kind != SOL_MIR_INST_LOAD_MOVE || exact_load->result != init_operand->left
+        || !in(view->image->places, exact_load->place)
+        || o->places[exact_load->place].projections.count != 0) return false;
+    SolMirMaterializedLocalId exact_local = o->places[exact_load->place].local;
+    if (!trace_tick(work)) return false;
+    if (exact_local >= o->local_count || o->locals[exact_local].source_local >= ir->local_count
+        || ir->locals[o->locals[exact_local].source_local].kind != SOL_IR_LOCAL_BINDING
+        || ir->locals[o->locals[exact_local].source_local].mutable) return false;
+    size_t store = SOL_MIR_MATERIALIZED_NONE;
+    for (size_t i = 0; i < view->image->instructions.count; ++i) {
+        if (!trace_tick(work)) return false;
+        size_t id = view->image->instructions.offset + i;
+        const SolMirMaterializedInstruction *instruction = &o->instructions[id];
+        if (instruction->kind != SOL_MIR_INST_STORE || !in(view->image->places,
+                instruction->place) || o->places[instruction->place].local
+                    != exact_local) continue;
+        if (store != SOL_MIR_MATERIALIZED_NONE || instruction->left != producer->result)
+            return false;
+        store = id;
+    }
+    size_t callback_block = view->image->blocks.offset + block_id;
+    return store != SOL_MIR_MATERIALIZED_NONE
+        && exact_unbound_function_types(o, producer->type, operand->type,
+            load->type, o->temporaries[term->callee].type, work)
+        && producer->block == callback_block && o->instructions[store].block == callback_block
+        && exact_load->block == callback_block && init_operand->block == callback_block
+        && construct->block == callback_block && write_pair->block == callback_block
+        && load->block == callback_block && init->block == callback_block
+        && site->instruction < store && store < exact_load_id && exact_load_id < operand_init
+        && operand_init < construct_id && construct_id < pair_store && pair_store < load_id
+        && (callback_store == SOL_MIR_MATERIALIZED_NONE
+            || (load_id < callback_store && callback_store < callback_load_id))
+        && callback_load_id < initializer;
+}
+
+/* Replay each logical callback proof exactly once.  The selected site is
+ * authenticated here and later terminator validation reuses that result;
+ * TraceMeter stops this replay at max_validation_work rather than first
+ * deriving an unbounded total from hostile owner contents. */
+static bool callback_trace_work(const SolMirMaterialization *owner, TraceMeter *work) {
+    if (owner->semantic_site_count < owner->binding_count) return false;
+    for (size_t image_id = 0; image_id < owner->image_count; ++image_id) {
+        const SolMirMaterializedImage *image = &owner->images[image_id];
+        if (image->blocks.offset > owner->block_count
+            || image->blocks.count > owner->block_count - image->blocks.offset)
+            return false;
+        View view = {owner, image, image_id, image->blocks.count,
+            image->values.count, image->locals.count, image->places.count};
+        for (size_t block_id = 0; block_id < image->blocks.count; ++block_id) {
+            const SolMirMaterializedTerminator *term
+                = &owner->blocks[image->blocks.offset + block_id].terminator;
+            if (term->kind != SOL_MIR_TERM_INVOKE
+                || term->call_kind != SOL_IR_CALL_CALLBACK) continue;
+            for (size_t probe = 0; probe <= image_id; ++probe)
+                if (!trace_tick(work)) return false;
+            size_t match = SOL_MIR_MATERIALIZED_NONE;
+            for (size_t site_id = 0; site_id < owner->binding_count; ++site_id) {
+                if (!trace_tick(work)) return false;
+                bool authentic = callback_function_value_trace(&view, block_id, term,
+                    &owner->semantic_sites[site_id], work);
+                if (work->exhausted) return false;
+                if (!authentic) continue;
+                if (match != SOL_MIR_MATERIALIZED_NONE) return false;
+                match = site_id;
+            }
+            if (match != term->callable_site) return false;
+        }
+    }
+    return true;
 }
 
 static bool terminator_semantics(const View *view, size_t block_id) {
@@ -983,12 +1289,17 @@ static bool terminator_semantics(const View *view, size_t block_id) {
             if (term->callable_site >= o->semantic_site_count) return false;
             const SolMirMaterializedSemanticSite *site
                 = &o->semantic_sites[term->callable_site];
-            if (site->producer_kind != SOL_MIR_MATERIALIZED_PRODUCER_TERMINATOR
-                || site->block != block->id || site->parent != view->image_id
+            if (site->parent != view->image_id
                 || (term->call_kind == SOL_IR_CALL_CALLBACK
                     ? site->kind != SOL_MIR_PLAN_DEMAND_FUNCTION_VALUE
-                        && site->kind != SOL_MIR_PLAN_DEMAND_BOUND_OPERATION
-                    : site->kind != SOL_MIR_PLAN_DEMAND_BOUND_OPERATION)
+                        || site->producer_kind
+                            != SOL_MIR_MATERIALIZED_PRODUCER_INSTRUCTION
+                        || !in(view->image->instructions, site->instruction)
+                        || site->block != o->instructions[site->instruction].block
+                    : site->producer_kind
+                            != SOL_MIR_MATERIALIZED_PRODUCER_TERMINATOR
+                        || site->block != block->id
+                        || site->kind != SOL_MIR_PLAN_DEMAND_BOUND_OPERATION)
                 || !targets_equal(&o->bindings[site->binding], invoke_binding)) return false;
             if (site->kind == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION
                 && !operation_key_matches(&site->operation, invoke_binding,

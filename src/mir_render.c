@@ -182,6 +182,7 @@ static const char *instruction_kind_name(SolMirInstructionKind kind) {
         case SOL_MIR_INST_CAPTURE_SNAPSHOT: return "capture_snapshot";
         case SOL_MIR_INST_SCOPE_ENTER: return "scope_enter";
         case SOL_MIR_INST_SCOPE_EXIT: return "scope_exit";
+        case SOL_MIR_INST_FUNCTION_VALUE: return "function_value";
     }
     return NULL;
 }
@@ -1841,6 +1842,11 @@ static void render_instruction(MirRenderer *renderer, size_t id) {
         case SOL_MIR_INST_CAPTURE_SNAPSHOT:
             render_text(output, " snapshot=");
             render_id(output, "snapshot", instruction->as.snapshot, SOL_IR_NONE);
+            break;
+        case SOL_MIR_INST_FUNCTION_VALUE:
+            render_text(output, " callable=");
+            render_id(output, "callable", instruction->as.function_callable,
+                SOL_IR_NONE);
             break;
         case SOL_MIR_INST_SCOPE_ENTER:
         case SOL_MIR_INST_SCOPE_EXIT:

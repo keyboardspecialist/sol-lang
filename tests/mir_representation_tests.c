@@ -456,9 +456,9 @@ static void test_complete_graph(void) {
                 CHECK(producer->function_recipe == shared);
         }
     }
-    CHECK(exact_producers == 1 && bound_producers == 2
-        && representation.callable_producer_count == 3
-        && representation.receiver_root_count == 2);
+    CHECK(exact_producers == 1 && bound_producers == 3
+        && representation.callable_producer_count == 4
+        && representation.receiver_root_count == 3);
 
     bool saw_copy_chain = false, saw_noncopy_chain = false;
     for (size_t i = 0; i < representation.recipe_count; ++i) {
@@ -900,8 +900,8 @@ static void test_e6_all_roots_census(void) {
         && representation.variant_count == 9
         && representation.recipe_id_count == 3
         && representation.access_count == 3
-        && representation.callable_producer_count == 0
-        && representation.receiver_root_count == 0);
+        && representation.callable_producer_count == 5
+        && representation.receiver_root_count == 5);
     CHECK(memcmp(kinds, expected_kinds, sizeof(expected_kinds)) == 0);
     CHECK(inhabited == 20 && zero == 1 && copy == 14);
     CHECK(memcmp(storage, expected_storage, sizeof(expected_storage)) == 0);

@@ -900,7 +900,7 @@ static void test_e6_census(void) {
         0, 0, 3, 0, 0, 1, 1, 2, 2, 0, 5, 5, 5, 2, 2, 2, 1, 4, 4, 4, 4,
     };
     static const uint64_t object_sizes[21] = {
-        0, 0, 8, 0, 0, 16, 8, 8, 4, 0, 8, 8, 8, 16, 8, 16, 16, 4, 4, 4, 4,
+        0, 0, 8, 0, 0, 16, 8, 8, 4, 0, 8, 8, 8, 16, 8, 16, 16, 8, 8, 8, 8,
     };
     static const uint64_t object_alignments[21] = {
         1, 1, 4, 1, 1, 8, 4, 4, 4, 1, 4, 4, 4, 8, 4, 8, 8, 4, 4, 4, 4,
@@ -937,7 +937,7 @@ static void test_e6_census(void) {
         if (i == 13) { tag_offset = 0; tag_size = 4; payload_offset = 8; payload_size = 8; }
         if (i == 14) { tag_offset = 0; tag_size = 4; payload_offset = 4; payload_size = 4; }
         if (i == 15) { tag_offset = 0; tag_size = 4; payload_offset = 8; payload_size = 8; }
-        if (i >= 17) target = 0;
+        if (i >= 17) { target = 0; environment = 4; }
         if (i >= 10 && i <= 12) { root = 0; private_source = 4; }
         CHECK(type->tag_offset == tag_offset && type->tag_size == tag_size
             && type->payload_offset == payload_offset

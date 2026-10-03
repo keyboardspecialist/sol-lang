@@ -514,7 +514,8 @@ static void test_allocation_plans(SolMirRuntimeValues *values) {
     size_t ownership_scans = sol_mir_runtime_values_test_ownership_count_scans();
     SolMirRuntimeAllocationUsage usage = {0};
     SolMirRuntimeAllocationQuota none_quota = {0, 0};
-    SolMirRuntimeAllocationRequest request = {none_recipe, 0};
+    SolMirRuntimeAllocationRequest request = {none_recipe, 0,
+        SOL_MIR_RUNTIME_NONE, SOL_MIR_RUNTIME_ALLOCATION_REQUEST_ORDINARY};
     CHECK(sol_mir_runtime_values_check_allocation(values, &request, &none_quota,
             &usage, &demand) == SOL_MIR_RUNTIME_ALLOCATION_SUCCEEDED
         && demand.requests == 0 && demand.bytes == 0);
@@ -770,18 +771,38 @@ static void test_host_result_transfer_model(const SolMirRuntimeValues *values) {
 static void test_inventory(SolMirConcreteProgram *program,
     SolDiagnostics *diagnostics, SolMirRuntimeConventions *conventions,
     SolMirRuntimeValues *values) {
+    size_t edge_kinds[4] = {0}, captures = 0;
+    bool capture_producers[5] = {false};
+    for (size_t i = 0; i < values->owned_edge_count; ++i) {
+        const SolMirRuntimeOwnedEdge *edge = &values->owned_edges[i];
+        ++edge_kinds[edge->kind];
+        if (edge->kind == SOL_MIR_RUNTIME_OWNED_EDGE_CAPTURED_RECEIVER) {
+            ++captures;
+            CHECK(edge->producer < sizeof(capture_producers) / sizeof(*capture_producers)
+                && !capture_producers[edge->producer]);
+            if (edge->producer < sizeof(capture_producers) / sizeof(*capture_producers))
+                capture_producers[edge->producer] = true;
+        }
+    }
+    const size_t expected_edge_kinds[] = {11, 1, 0, 5};
+    CHECK(memcmp(edge_kinds, expected_edge_kinds, sizeof(edge_kinds)) == 0
+        && captures == 5);
+    for (size_t i = 0; i < sizeof(capture_producers) / sizeof(*capture_producers); ++i)
+        CHECK(capture_producers[i]);
     CHECK(values->recipe_operation_count == 21);
     CHECK(values->usage.records == 21 && values->usage.allocation_plans == 21
         && values->usage.copy_plans == 21 && values->usage.equality_plans == 21
         && values->usage.host_result_plans == 21
         && values->usage.host_result_requirements == 4
         && values->usage.ownership_plans == 21
-        && values->usage.ownership_variants == 9 && values->usage.owned_edges == 12
-        && values->usage.owned_bytes == 4432
-        && values->usage.build_scratch_bytes == 94
-        && values->usage.build_work == 357
-        && values->usage.validation_scratch_bytes == 762459500
-        && values->usage.validation_work == 95870865);
+        && values->usage.ownership_variants == 9 && values->usage.owned_edges == 17
+        && values->usage.owned_bytes == 4592
+        && values->usage.build_scratch_bytes == 98
+        && values->usage.build_work == 410
+        /* The values validator borrows the concrete/conventions scratch peak;
+         * callback provenance grows that authenticated predecessor peak. */
+        && values->usage.validation_scratch_bytes == 763171604
+        && values->usage.validation_work == 96028179);
     test_allocation_plans(values);
     test_host_result_transfer_model(values);
     check_ownership_plans(values);
@@ -842,6 +863,41 @@ static void test_inventory(SolMirConcreteProgram *program,
     }
     CHECK(values->recipe_operation_count
         == program->representation.recipe_count);
+    size_t bound_callable_plans = 0;
+    for (size_t i = 0; i < program->operations.callable_count; ++i) {
+        const SolMirOperationCallablePlan *plan = &program->operations.callables[i];
+        if (plan->kind != SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION) continue;
+        ++bound_callable_plans;
+        CHECK(plan->function_recipe < program->layout.type_count
+            && plan->capture_recipe < program->layout.type_count
+            && program->layout.target.pointer_size == 4
+            && program->layout.types[plan->function_recipe].object_kind
+                == SOL_MIR_LAYOUT_OBJECT_CALLABLE
+            && program->layout.types[plan->capture_recipe].object_kind
+                == SOL_MIR_LAYOUT_OBJECT_CAPABILITY
+            && program->layout.types[plan->capture_recipe].object_size == 8);
+        SolMirRuntimeAllocationRequest request = {plan->function_recipe, 0, i,
+            SOL_MIR_RUNTIME_ALLOCATION_REQUEST_CALLABLE};
+        SolMirRuntimeAllocationQuota exact = {2, 12};
+        SolMirRuntimeAllocationDemand demand = {0};
+        CHECK(sol_mir_runtime_values_check_allocation(values, &request, &exact,
+                &(SolMirRuntimeAllocationUsage){0}, &demand)
+                == SOL_MIR_RUNTIME_ALLOCATION_SUCCEEDED
+            && demand.requests == 2 && demand.bytes == 12);
+        SolMirRuntimeAllocationDemand unchanged = {23, 29};
+        --exact.max_requests;
+        CHECK(sol_mir_runtime_values_check_allocation(values, &request, &exact,
+                &(SolMirRuntimeAllocationUsage){0}, &unchanged)
+                == SOL_MIR_RUNTIME_ALLOCATION_LIMIT
+            && unchanged.requests == 23 && unchanged.bytes == 29);
+        ++exact.max_requests;
+        --exact.max_bytes;
+        CHECK(sol_mir_runtime_values_check_allocation(values, &request, &exact,
+                &(SolMirRuntimeAllocationUsage){0}, &unchanged)
+                == SOL_MIR_RUNTIME_ALLOCATION_LIMIT
+            && unchanged.requests == 23 && unchanged.bytes == 29);
+    }
+    CHECK(bound_callable_plans == 5);
     size_t demanding = 0, create = 0, copy = 0, drop = 0, equal = 0;
     for (size_t i = 0; i < values->recipe_operation_count; ++i) {
         const SolMirRuntimeRecipeOperations *record
@@ -924,6 +980,7 @@ static void test_inventory(SolMirConcreteProgram *program,
     SolMirRuntimeValuesBuildRequest request = {conventions, &exact};
     CHECK(sol_mir_runtime_values_build(&request, &limited, diagnostics)
         == SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED);
+    CHECK(sol_mir_runtime_values_validate(&limited, NULL));
     char *second = render_values(&limited);
     CHECK(first != NULL && second != NULL && strcmp(first, second) == 0);
     SolMirRuntimeValues before = limited;
@@ -1269,6 +1326,16 @@ static void test_inventory(SolMirConcreteProgram *program,
         CHECK(!sol_mir_runtime_values_validate(values, NULL));
         ++values->owned_edge_capacity;
     }
+    for (size_t i = 0; i < values->owned_edge_count; ++i) {
+        if (values->owned_edges[i].kind
+                != SOL_MIR_RUNTIME_OWNED_EDGE_CAPTURED_RECEIVER) continue;
+        SolMirRuntimeOwnedEdge saved_edge = values->owned_edges[i];
+        values->owned_edges[i].producer = values->conventions->concrete->representation
+            .callable_producer_count;
+        CHECK(!sol_mir_runtime_values_validate(values, NULL));
+        values->owned_edges[i] = saved_edge;
+        break;
+    }
     SolMirRuntimeValuesUsage saved_usage = values->usage;
     --values->usage.ownership_plans;
     CHECK(!sol_mir_runtime_values_validate(values, NULL)); values->usage = saved_usage;
@@ -1532,6 +1599,52 @@ static void test_bound_environment_exclusion(void) {
             bound |= (programs[side].linkage.runtime_requirements[i].operations
                 & SOL_MIR_LINKAGE_RUNTIME_BOUND_ENVIRONMENT) != 0;
         CHECK(bound);
+        /* Callable construction is a P2-plan request: every callable pays its
+           target-token header, while a bound callable additionally pays its
+           positive-size captured environment.  The rejected preflight is
+           transactional and leaves its output untouched. */
+        size_t unbound_plan = SOL_MIR_RUNTIME_NONE, bound_plan = SOL_MIR_RUNTIME_NONE;
+        for (size_t plan = 0; plan < programs[side].operations.callable_count; ++plan) {
+            const SolMirOperationCallablePlan *callable_plan
+                = &programs[side].operations.callables[plan];
+            if (callable_plan->kind == SOL_MIR_CALLABLE_PRODUCER_EXACT_FUNCTION)
+                unbound_plan = plan;
+            else if (callable_plan->kind == SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION)
+                bound_plan = plan;
+        }
+        CHECK(unbound_plan != SOL_MIR_RUNTIME_NONE && bound_plan != SOL_MIR_RUNTIME_NONE);
+        for (size_t pass = 0; pass < 2; ++pass) {
+            size_t plan = pass == 0 ? unbound_plan : bound_plan;
+            if (plan == SOL_MIR_RUNTIME_NONE) continue;
+            const SolMirOperationCallablePlan *callable_plan
+                = &programs[side].operations.callables[plan];
+            uint64_t environment = callable_plan->kind
+                    == SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION
+                ? programs[side].layout.types[callable_plan->capture_recipe].object_size : 0;
+            SolMirRuntimeAllocationDemand callable_demand = {UINT64_MAX, UINT64_MAX};
+            SolMirRuntimeAllocationRequest callable_request = {callable_plan->function_recipe,
+                0, plan, SOL_MIR_RUNTIME_ALLOCATION_REQUEST_CALLABLE};
+            SolMirRuntimeAllocationQuota exact = {1 + (environment != 0),
+                programs[side].layout.target.pointer_size + environment};
+            CHECK(sol_mir_runtime_values_check_allocation(&values[side], &callable_request,
+                    &exact, &(SolMirRuntimeAllocationUsage){0}, &callable_demand)
+                    == SOL_MIR_RUNTIME_ALLOCATION_SUCCEEDED
+                && callable_demand.requests == exact.max_requests
+                && callable_demand.bytes == exact.max_bytes);
+            SolMirRuntimeAllocationDemand unchanged = {91, 92};
+            SolMirRuntimeAllocationQuota below = exact;
+            --below.max_requests;
+            CHECK(sol_mir_runtime_values_check_allocation(&values[side], &callable_request,
+                    &below, &(SolMirRuntimeAllocationUsage){0}, &unchanged)
+                    == SOL_MIR_RUNTIME_ALLOCATION_LIMIT
+                && unchanged.requests == 91 && unchanged.bytes == 92);
+            below = exact;
+            --below.max_bytes;
+            CHECK(sol_mir_runtime_values_check_allocation(&values[side], &callable_request,
+                    &below, &(SolMirRuntimeAllocationUsage){0}, &unchanged)
+                    == SOL_MIR_RUNTIME_ALLOCATION_LIMIT
+                && unchanged.requests == 91 && unchanged.bytes == 92);
+        }
         size_t none_recipe = SOL_MIR_RECIPE_NONE;
         for (size_t i = 0; i < values[side].allocation_plan_count; ++i)
             if (values[side].allocation_plans[i].kind
@@ -1542,12 +1655,88 @@ static void test_bound_environment_exclusion(void) {
         SolMirRuntimeAllocationQuota allocation_quota = {0, 0};
         SolMirRuntimeAllocationUsage allocation_usage = {0, 0};
         size_t scans = sol_mir_runtime_values_test_ownership_count_scans();
-        SolMirRuntimeAllocationRequest allocation_request = {none_recipe, 0};
+        SolMirRuntimeAllocationRequest allocation_request = {none_recipe, 0,
+            SOL_MIR_RUNTIME_NONE, SOL_MIR_RUNTIME_ALLOCATION_REQUEST_ORDINARY};
         CHECK(none_recipe != SOL_MIR_RECIPE_NONE
             && sol_mir_runtime_values_check_allocation(&values[side],
                 &allocation_request, &allocation_quota, &allocation_usage,
                 &allocation_demand) == SOL_MIR_RUNTIME_ALLOCATION_SUCCEEDED
             && sol_mir_runtime_values_test_ownership_count_scans() == scans);
+        /* Mode is explicit for new callers, while zero-initialized legacy
+         * requests remain ordinary and may carry the inactive plan-zero. */
+        SolMirRuntimeAllocationDemand unchanged = {71, 73};
+        SolMirRuntimeAllocationRequest legacy = {.recipe = none_recipe,
+            .text_length = 0, .callable_plan = 0};
+        CHECK(sol_mir_runtime_values_check_allocation(&values[side], &legacy,
+                &allocation_quota, &allocation_usage, &allocation_demand)
+                == SOL_MIR_RUNTIME_ALLOCATION_SUCCEEDED);
+        SolMirRuntimeAllocationRequest invalid = {none_recipe, 0,
+            SOL_MIR_RUNTIME_NONE, SOL_MIR_RUNTIME_ALLOCATION_REQUEST_CALLABLE};
+        CHECK(sol_mir_runtime_values_check_allocation(&values[side], &invalid,
+                &allocation_quota, &allocation_usage, &unchanged)
+                == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT
+            && unchanged.requests == 71 && unchanged.bytes == 73);
+        invalid.callable_plan = programs[side].operations.callable_count;
+        CHECK(sol_mir_runtime_values_check_allocation(&values[side], &invalid,
+                &allocation_quota, &allocation_usage, &unchanged)
+                == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT
+            && unchanged.requests == 71 && unchanged.bytes == 73);
+        invalid = (SolMirRuntimeAllocationRequest){none_recipe, 0,
+            programs[side].operations.callable_count,
+            SOL_MIR_RUNTIME_ALLOCATION_REQUEST_ORDINARY};
+        CHECK(sol_mir_runtime_values_check_allocation(&values[side], &invalid,
+                &allocation_quota, &allocation_usage, &unchanged)
+                == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT
+            && unchanged.requests == 71 && unchanged.bytes == 73);
+        invalid.mode = (SolMirRuntimeAllocationRequestMode)2;
+        invalid.callable_plan = SOL_MIR_RUNTIME_NONE;
+        CHECK(sol_mir_runtime_values_check_allocation(&values[side], &invalid,
+                &allocation_quota, &allocation_usage, &unchanged)
+                == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT
+            && unchanged.requests == 71 && unchanged.bytes == 73);
+        if (unbound_plan != SOL_MIR_RUNTIME_NONE && bound_plan != SOL_MIR_RUNTIME_NONE) {
+            const SolMirOperationCallablePlan *unbound
+                = &programs[side].operations.callables[unbound_plan];
+            invalid = (SolMirRuntimeAllocationRequest){unbound->function_recipe, 0,
+                bound_plan, SOL_MIR_RUNTIME_ALLOCATION_REQUEST_CALLABLE};
+            CHECK(sol_mir_runtime_values_check_allocation(&values[side], &invalid,
+                    &allocation_quota, &allocation_usage, &unchanged)
+                    == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT
+                && unchanged.requests == 71 && unchanged.bytes == 73);
+        }
+        if (programs[side].operations.callable_count != 0) {
+            const SolMirOperationCallablePlan *zero_plan
+                = &programs[side].operations.callables[0];
+            uint64_t environment = zero_plan->kind
+                    == SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION
+                ? programs[side].layout.types[zero_plan->capture_recipe].object_size : 0;
+            SolMirRuntimeAllocationRequest plan_zero = {zero_plan->function_recipe,
+                0, 0, SOL_MIR_RUNTIME_ALLOCATION_REQUEST_CALLABLE};
+            SolMirRuntimeAllocationQuota quota = {1 + (environment != 0),
+                programs[side].layout.target.pointer_size + environment};
+            CHECK(sol_mir_runtime_values_check_allocation(&values[side], &plan_zero,
+                    &quota, &allocation_usage, &allocation_demand)
+                    == SOL_MIR_RUNTIME_ALLOCATION_SUCCEEDED);
+            if (none_recipe != zero_plan->function_recipe) {
+                invalid = (SolMirRuntimeAllocationRequest){none_recipe, 0, 0,
+                    SOL_MIR_RUNTIME_ALLOCATION_REQUEST_CALLABLE};
+                CHECK(sol_mir_runtime_values_check_allocation(&values[side], &invalid,
+                        &allocation_quota, &allocation_usage, &unchanged)
+                        == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT
+                    && unchanged.requests == 71 && unchanged.bytes == 73);
+            }
+        }
+        for (size_t recipe = 0; recipe < values[side].allocation_plan_count; ++recipe) {
+            if (values[side].allocation_plans[recipe].kind
+                    != SOL_MIR_RUNTIME_ALLOCATION_PLAN_TEXT) continue;
+            invalid = (SolMirRuntimeAllocationRequest){recipe, 0, 0,
+                SOL_MIR_RUNTIME_ALLOCATION_REQUEST_CALLABLE};
+            CHECK(sol_mir_runtime_values_check_allocation(&values[side], &invalid,
+                    &allocation_quota, &allocation_usage, &unchanged)
+                    == SOL_MIR_RUNTIME_ALLOCATION_INVALID_ARGUMENT
+                && unchanged.requests == 71 && unchanged.bytes == 73);
+            break;
+        }
         for (size_t i = 0; i < values[side].recipe_operation_count; ++i)
             CHECK((values[side].recipe_operations[i].demanded_operations
                 & SOL_MIR_LINKAGE_RUNTIME_BOUND_ENVIRONMENT) == 0);
@@ -2639,7 +2828,8 @@ static bool copy_model_children(CopyModel *model, const CopyModelNode *node,
 
 static bool copy_model_account(CopyModel *model, const CopyModelNode *node,
     SolMirRuntimeAllocationUsage *aggregate) {
-    SolMirRuntimeAllocationRequest request = {node->recipe, node->text_length};
+    SolMirRuntimeAllocationRequest request = {node->recipe, node->text_length,
+        SOL_MIR_RUNTIME_NONE, SOL_MIR_RUNTIME_ALLOCATION_REQUEST_ORDINARY};
     SolMirRuntimeAllocationQuota unlimited = {UINT64_MAX, UINT64_MAX};
     SolMirRuntimeAllocationDemand demand;
     if (sol_mir_runtime_values_check_allocation(model->values, &request,

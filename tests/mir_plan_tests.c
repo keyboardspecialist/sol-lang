@@ -132,6 +132,37 @@ static bool compile_e6(Compilation *compilation, SolPackage *package) {
     return valid;
 }
 
+static bool compile_package_at(Compilation *compilation, SolPackage *package,
+    const char *directory) {
+    memset(compilation, 0, sizeof(*compilation)); sol_package_init(package);
+    sol_diagnostics_init(&compilation->diagnostics); sol_hir_module_init(&compilation->hir);
+    sol_type_table_init(&compilation->types); sol_effect_table_init(&compilation->effects);
+    sol_contract_table_init(&compilation->contracts); sol_ir_init(&compilation->ir);
+    char error[256];
+    if (!sol_package_load_directory(package, directory, &compilation->diagnostics,
+            error, sizeof(error))) return false;
+    SolHirFileScope *scopes = malloc(package->file_count * sizeof(*scopes));
+    if (package->file_count && !scopes) return false;
+    for (size_t i = 0; i < package->file_count; ++i) scopes[i] = (SolHirFileScope){
+        package->files[i].module_name, package->files[i].import_start,
+        package->files[i].import_count, package->files[i].item_start,
+        package->files[i].item_count};
+    bool valid = sol_hir_lower_scoped(&package->source, &package->syntax, scopes,
+            package->file_count, &compilation->hir, &compilation->diagnostics)
+        && sol_type_check(&package->source, &package->syntax, &compilation->hir,
+            &compilation->types, &compilation->diagnostics)
+        && sol_effect_check(&package->source, &package->syntax, &compilation->hir,
+            &compilation->types, &compilation->effects, &compilation->diagnostics)
+        && sol_contract_lower(&package->source, &package->syntax, &compilation->hir,
+            &compilation->types, &compilation->effects, &compilation->contracts,
+            &compilation->diagnostics)
+        && sol_ir_lower_scoped(&package->source, &package->syntax, &compilation->hir,
+            &compilation->types, &compilation->effects, &compilation->contracts,
+            package->files, package->file_count, &compilation->ir,
+            &compilation->diagnostics);
+    free(scopes); return valid;
+}
+
 static void free_e6(Compilation *compilation, SolPackage *package) {
     sol_ir_free(&compilation->ir);
     sol_contract_table_free(&compilation->contracts);
@@ -331,6 +362,39 @@ static void test_instances_types_cycles_and_limits(void) {
     free_compilation(&compilation);
 }
 
+static void test_callback_producer_planning_limits(void) {
+    static const char source[] =
+        "module callback_producer_plan_limits\n"
+        "record Pair { left: function() -> Int64 effects { pure }, right: Text }\n"
+        "function answer() -> Int64 effects { pure } { return 42 }\n"
+        "function root() -> Int64 effects { pure } { let f0 = answer let f1 = f0 "
+        "let f2 = f1 let f3 = f2 let f4 = f3 let f5 = f4 let f6 = f5 let f7 = f6 "
+        "let pair = Pair { left = f7, right = \"long operand route\" } "
+        "let moved = pair.left return moved() }\n";
+    Compilation compilation; CHECK(compile_text(&compilation, source));
+    SolDiagnostics diagnostics; SolMirProgram program; SolMirPlan plan, exact, limited;
+    sol_diagnostics_init(&diagnostics); sol_mir_program_init(&program); sol_mir_plan_init(&plan);
+    sol_mir_plan_init(&exact); sol_mir_plan_init(&limited);
+    CHECK(build_program(&compilation.ir, callable(&compilation.ir, "root"),
+        &program, &diagnostics) == SOL_MIR_PROGRAM_BUILD_SUCCEEDED);
+    if (program.ir != NULL) {
+        CHECK(build_plan(&program, NULL, &plan, &diagnostics)
+            == SOL_MIR_PLAN_BUILD_SUCCEEDED);
+        SolMirPlanLimits limits = sol_mir_plan_default_limits();
+        limits.max_planning_work = plan.usage.planning_work;
+        CHECK(build_plan(&program, &limits, &exact, &diagnostics)
+            == SOL_MIR_PLAN_BUILD_SUCCEEDED
+            && exact.usage.planning_work == limits.max_planning_work);
+        CHECK(limits.max_planning_work != 0);
+        --limits.max_planning_work;
+        CHECK(build_plan(&program, &limits, &limited, &diagnostics)
+            == SOL_MIR_PLAN_BUILD_RESOURCE_EXHAUSTED && limited.program == NULL);
+    }
+    sol_mir_plan_free(&limited); sol_mir_plan_free(&exact); sol_mir_plan_free(&plan);
+    sol_mir_program_free(&program); sol_diagnostics_free(&diagnostics);
+    free_compilation(&compilation);
+}
+
 static void test_evidence_self_and_generic_root_policy(void) {
     Compilation compilation;
     CHECK(compile_text(&compilation,
@@ -430,7 +494,7 @@ static void test_e6_entry_census(void) {
     CHECK(outcome == SOL_MIR_PLAN_BUILD_SUCCEEDED);
     CHECK(plan.instance_count == 8);
     CHECK(plan.import_count == 4);
-    CHECK(plan.demand_count == 13);
+    CHECK(plan.demand_count == 18);
     CHECK(plan.dictionary_entry_count == 1);
     SolIrCallableId expected_callables[] = {
         callable_kind(ir, "launch", SOL_IR_CALLABLE_FUNCTION),
@@ -553,7 +617,7 @@ static void test_e6_entry_census(void) {
         == SOL_MIR_PLAN_BUILD_SUCCEEDED);
     CHECK(plan.instance_count == 14);
     CHECK(plan.import_count == 4);
-    CHECK(plan.demand_count == 23);
+    CHECK(plan.demand_count == 28);
     CHECK(plan.dictionary_entry_count == 1);
     SolIrCallableId expected_all[14] = {
         callable_kind(ir, "launch", SOL_IR_CALLABLE_FUNCTION),
@@ -930,14 +994,62 @@ static void test_recursion_classification(void) {
     CHECK(sol_mir_plan_test_effect_normalization());
 }
 
+static void test_pattern_text_root_depth(void) {
+    Compilation compilation; SolPackage package; SolDiagnostics diagnostics;
+    SolMirProgram program; SolMirPlan plan, exact_plan, limited;
+    sol_mir_program_init(&program); sol_mir_plan_init(&plan);
+    sol_mir_plan_init(&exact_plan); sol_mir_plan_init(&limited);
+    sol_diagnostics_init(&diagnostics);
+    CHECK(compile_package_at(&compilation, &package,
+        SOL_TEST_SOURCE_DIR "/tests/conformance/p43_pattern_copy"));
+    SolIrCallableId root = callable_kind(&compilation.ir, "launch",
+        SOL_IR_CALLABLE_FUNCTION);
+    CHECK(root != SOL_IR_NONE && compilation.ir.type_count >= 4);
+    CHECK(build_program(&compilation.ir, root, &program, &diagnostics)
+        == SOL_MIR_PROGRAM_BUILD_SUCCEEDED);
+    CHECK(sol_mir_program_validate(&program, NULL));
+    SolMirPlanBuildOutcome outcome = build_plan(&program, NULL, &plan, &diagnostics);
+    CHECK(outcome == SOL_MIR_PLAN_BUILD_SUCCEEDED && !diagnostics.allocation_failed
+        && sol_mir_plan_validate(&plan, NULL));
+    size_t text_pattern = SOL_MIR_PLAN_NONE;
+    for (size_t i = 0; i < plan.typed_use_count; ++i) {
+        const SolMirPlanTypedUse *use = &plan.typed_uses[i];
+        if (use->kind == SOL_MIR_PLAN_USE_PATTERN && use->type < plan.type_count
+            && plan.types[use->type].kind == SOL_IR_TYPE_TEXT) {
+            CHECK(text_pattern == SOL_MIR_PLAN_NONE); text_pattern = i;
+        }
+    }
+    CHECK(text_pattern != SOL_MIR_PLAN_NONE);
+    SolMirPlanLimits exact = {plan.usage.instances, plan.usage.concrete_types,
+        plan.usage.demands, plan.usage.typed_uses, plan.usage.contexts,
+        plan.usage.planning_work, plan.usage.substitution_depth};
+    CHECK(build_plan(&program, &exact, &exact_plan, &diagnostics)
+        == SOL_MIR_PLAN_BUILD_SUCCEEDED && sol_mir_plan_validate(&exact_plan, NULL));
+    SolMirPlanLimits one_below = exact; --one_below.max_typed_uses;
+    CHECK(build_plan(&program, &one_below, &limited, &diagnostics)
+        == SOL_MIR_PLAN_BUILD_RESOURCE_EXHAUSTED && limited.program == NULL);
+    if (text_pattern != SOL_MIR_PLAN_NONE) {
+        SolMirPlanTypeId saved = plan.typed_uses[text_pattern].type;
+        plan.typed_uses[text_pattern].type = SOL_MIR_PLAN_NONE;
+        CHECK(!sol_mir_plan_validate(&plan, NULL));
+        plan.typed_uses[text_pattern].type = saved;
+        CHECK(sol_mir_plan_validate(&plan, NULL));
+    }
+    sol_mir_plan_free(&limited); sol_mir_plan_free(&exact_plan); sol_mir_plan_free(&plan);
+    sol_mir_program_free(&program); sol_diagnostics_free(&diagnostics);
+    free_e6(&compilation, &package);
+}
+
 int main(void) {
     test_instances_types_cycles_and_limits();
+    test_callback_producer_planning_limits();
     test_evidence_self_and_generic_root_policy();
     test_e6_entry_census();
     test_nested_types_effect_closure_and_root_policy();
     test_callee_effect_coordinates();
     test_predicate_function_value_demand();
     test_recursion_classification();
+    test_pattern_text_root_depth();
     if (failures != 0) {
         fprintf(stderr, "%d MIR plan test(s) failed\n", failures);
         return 1;

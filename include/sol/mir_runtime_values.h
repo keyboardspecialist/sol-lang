@@ -140,10 +140,19 @@ typedef struct {
     uint64_t bytes;
 } SolMirRuntimeAllocationUsage;
 
+typedef enum {
+    /* Zero preserves legacy aggregate initializers as ordinary requests. */
+    SOL_MIR_RUNTIME_ALLOCATION_REQUEST_ORDINARY = 0,
+    SOL_MIR_RUNTIME_ALLOCATION_REQUEST_CALLABLE,
+} SolMirRuntimeAllocationRequestMode;
+
 /* Text length is meaningful only for a TEXT allocation plan. */
 typedef struct {
     SolMirRecipeId recipe;
     uint64_t text_length;
+    /* P2 callable-plan ID.  Ordinary requests accept NONE or legacy zero. */
+    size_t callable_plan;
+    SolMirRuntimeAllocationRequestMode mode;
 } SolMirRuntimeAllocationRequest;
 
 typedef struct {

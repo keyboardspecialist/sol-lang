@@ -34,6 +34,58 @@ static bool mul_size(size_t a, size_t b, size_t *r) {
     *r = a * b; return true;
 }
 
+/* Do not trust the builder's construct-write record: reconstruct the complete
+ * exact unbound callable shape and the one-word Wasm32 layout from the owners
+ * it borrows. */
+static bool exact_unbound_function_field_compatible(const SolMirLayout *layout,
+    SolMirRecipeId operand_recipe, SolMirRecipeId field_recipe, size_t field) {
+    const SolMirRepresentation *r = layout->representation;
+    if (operand_recipe >= r->recipe_count || field_recipe >= r->recipe_count
+        || field >= r->field_count || operand_recipe >= layout->type_count
+        || field_recipe >= layout->type_count || field >= layout->field_count) return false;
+    const SolMirRecipe *operand = &r->recipes[operand_recipe];
+    const SolMirRecipe *destination = &r->recipes[field_recipe];
+    const SolMirTypeLayout *operand_layout = &layout->types[operand_recipe];
+    const SolMirTypeLayout *destination_layout = &layout->types[field_recipe];
+    const SolMirFieldLayout *field_layout = &layout->fields[field];
+    if (operand->kind != SOL_MIR_RECIPE_FUNCTION
+        || destination->kind != SOL_MIR_RECIPE_FUNCTION
+        || operand->parameters.count != destination->parameters.count
+        || operand->parameter_accesses.count != destination->parameter_accesses.count
+        || operand->result != destination->result || operand->effects != destination->effects
+        || operand->storage != SOL_MIR_STORAGE_CALLABLE_HANDLE
+        || destination->storage != SOL_MIR_STORAGE_CALLABLE_HANDLE
+        || operand->is_copy || destination->is_copy
+        || operand->copy_kind != SOL_MIR_COPY_FORBIDDEN
+        || destination->copy_kind != SOL_MIR_COPY_FORBIDDEN
+        || operand->drop_kind != SOL_MIR_DROP_CALLABLE
+        || destination->drop_kind != SOL_MIR_DROP_CALLABLE
+        || layout->target.pointer_size != 4 || layout->target.pointer_alignment != 4
+        || operand_layout->value_size != 4 || destination_layout->value_size != 4
+        || operand_layout->value_alignment != 4 || destination_layout->value_alignment != 4
+        || operand_layout->object_kind != SOL_MIR_LAYOUT_OBJECT_CALLABLE
+        || destination_layout->object_kind != SOL_MIR_LAYOUT_OBJECT_CALLABLE
+        || operand_layout->object_size != 4 || destination_layout->object_size != 4
+        || operand_layout->target_token_offset != 0
+        || destination_layout->target_token_offset != 0
+        || operand_layout->environment_handle_offset != SOL_MIR_LAYOUT_OFFSET_NONE
+        || destination_layout->environment_handle_offset != SOL_MIR_LAYOUT_OFFSET_NONE
+        || field_layout->owner_recipe == SOL_MIR_RECIPE_NONE
+        || field_layout->size != 4 || field_layout->alignment != 4) return false;
+    for (size_t i = 0; i < operand->parameters.count; ++i) {
+        if (!tick(1)) return false;
+        size_t left = operand->parameters.offset + i;
+        size_t right = destination->parameters.offset + i;
+        size_t left_access = operand->parameter_accesses.offset + i;
+        size_t right_access = destination->parameter_accesses.offset + i;
+        if (left >= r->recipe_id_count || right >= r->recipe_id_count
+            || left_access >= r->access_count || right_access >= r->access_count
+            || r->recipe_ids[left] != r->recipe_ids[right]
+            || r->accesses[left_access] != r->accesses[right_access]) return false;
+    }
+    return r->fields[field].type == field_recipe;
+}
+
 static bool canonical(size_t count, size_t capacity, const void *p) {
     return count == capacity && ((count == 0) == (p == NULL));
 }
@@ -1904,12 +1956,41 @@ static bool validate_constructors(const SolMirOperations *o, size_t *prov) {
                 || actual->recipe != source->type
                 || actual->recipe_field != expected_field
                 || actual->layout_field != expected_field) return false;
+            if ((source->type < r->recipe_count
+                    && r->recipes[source->type].kind == SOL_MIR_RECIPE_FUNCTION)
+                || (expected_field != SOL_MIR_OPERATION_NONE
+                    && expected_field < r->field_count
+                    && r->recipes[r->fields[expected_field].type].kind
+                        == SOL_MIR_RECIPE_FUNCTION)) {
+                if (expected_field == SOL_MIR_OPERATION_NONE) return false;
+                SolMirRecipeId field_recipe = r->fields[expected_field].type;
+                const SolMirTypeLayout *operand_layout = source->type < o->layout->type_count
+                    ? &o->layout->types[source->type] : NULL;
+                const SolMirTypeLayout *field_type_layout = field_recipe < o->layout->type_count
+                    ? &o->layout->types[field_recipe] : NULL;
+                if (operand_layout != NULL && field_type_layout != NULL
+                    && operand_layout->environment_handle_offset
+                        == SOL_MIR_LAYOUT_OFFSET_NONE
+                    && field_type_layout->environment_handle_offset
+                        == SOL_MIR_LAYOUT_OFFSET_NONE
+                    && !exact_unbound_function_field_compatible(o->layout,
+                        source->type, field_recipe, expected_field)) return false;
+            }
             size_t expected_formal = expected_field == SOL_MIR_OPERATION_NONE
                 ? source->formal : r->fields[expected_field].ordinal;
             if (actual->formal_ordinal != expected_formal) return false;
             if (actual->layout_field != SOL_MIR_OPERATION_NONE) {
                 if (actual->layout_field >= o->layout->field_count
-                    || r->fields[actual->layout_field].type != source->type
+                    || (r->fields[actual->layout_field].type != source->type
+                        && !(source->type < r->recipe_count
+                            && r->fields[actual->layout_field].type < r->recipe_count
+                            && r->recipes[source->type].kind == SOL_MIR_RECIPE_FUNCTION
+                            && r->recipes[r->fields[actual->layout_field].type].kind
+                                == SOL_MIR_RECIPE_FUNCTION
+                            && exact_unbound_function_field_compatible(o->layout,
+                                source->type,
+                                r->fields[actual->layout_field].type,
+                                actual->layout_field)))
                     || o->layout->fields[actual->layout_field].owner_recipe != x->type
                     || o->layout->fields[actual->layout_field].variant
                         != (kind == SOL_MIR_OPERATION_CONSTRUCT_SUM

@@ -7,10 +7,9 @@ This relocates the detailed baseline README documentation, reconciled with the
 approved ledger. It is not a second checklist, a new test report, or a stable ABI
 specification. [TODO.md](../TODO.md) alone owns live work status and order.
 
-**Current-worktree addendum, September 29, 2026:** P2.7, P2.8, P3.1-P3.6, P4.1, and P4.2 are
-independently approved and complete in the current worktree. P4.1 pins Binaryen 129
-and Wasmtime 49.0.1; P4.2 adds internal scalar CFG/direct-call emission. P4 remains
-open and P4.3 is next. The baseline hash above remains the historical September 9 snapshot;
+**Current-worktree addendum, October 3, 2026:** P2.7, P2.8, P3.1-P3.6, and P4.1-P4.3 are
+independently approved and complete in the current worktree. P4.3 completes bounded private represented-value/place/indirect-call emission. P4 remains
+open and P4.4 is next. The baseline hash above remains the historical September 9 snapshot;
 no post-baseline commit hash is asserted here. M1 completed as infeasible and M2-M5
 remain gated unless it is reopened feasibly.
 
@@ -28,7 +27,7 @@ The implemented CLI provides `check`, `test`, `run`, `effects`, `inspect`, and
 `fmt`. Reference execution uses owning typed IR, not the separate experimental
 MIR/P2/P3 owners. There is no complete backend, physical ABI,
 `sol build`, full public IR, or SMT discharge. P3.1 supplies target-independent
-call/result/failure conventions, P3.2a adds a recipe operation-demand inventory, P3.2b adds independently validated allocation plans and pure quota checking, P3.2c adds static ownership plans, P3.2d adds static copy plans, and P3.2e adds static equality plans with allocation-free bounded test modeling, P3.2f adds static E3 host-result transfer plans, P3.3 adds static cleanup/panic/failure policy, P3.4 adds static capability/trusted-host ABI policy, P3.5 adds static exact-handler ABI policy, and P3.6 joins the complete authenticated runtime-lowered graph: there is no executor, physical ABI, allocation implementation, production host adapter, Sol execution, CLI/build artifact, or tokens. P4.1 adds the opt-in Binaryen 129/Wasmtime 49.0.1 core-Wasm probe. P4.2 then emits and validates authenticated P3.6 whole-scalar direct-call closures using a private provisional scalar convention, not a stable/public physical ABI or adapter. It covers scalar CFG/SSA/lifetime, checked scalar arithmetic, ordinary internal owned-scalar calls, normal/failure dispatch, and returns; P4.3 remains the next represented-values/places/indirect-calls checkpoint. Final validation was OFF Debug Werror 54/54, ON Debug Werror 57/57, and ON RelWithDebInfo ASan/UBSan Werror 57/57. It is not full E6 Wasm execution, an adapter, production optimizer policy, or a stable public ABI. Wasm is the first production target; native output is deferred and Component Model integration is not implemented. See [Wasm toolchain](wasm-toolchain.md).
+call/result/failure conventions, P3.2a adds a recipe operation-demand inventory, P3.2b adds independently validated allocation plans and pure quota checking, P3.2c adds static ownership plans, P3.2d adds static copy plans, and P3.2e adds static equality plans with allocation-free bounded test modeling, P3.2f adds static E3 host-result transfer plans, P3.3 adds static cleanup/panic/failure policy, P3.4 adds static capability/trusted-host ABI policy, P3.5 adds static exact-handler ABI policy, and P3.6 joins the complete authenticated runtime-lowered graph: there is no executor, physical ABI, allocation implementation, production host adapter, Sol execution, CLI/build artifact, or tokens. P4.1 adds the opt-in Binaryen 129/Wasmtime 49.0.1 core-Wasm probe. P4.2 then emits and validates authenticated P3.6 whole-scalar direct-call closures using a private provisional scalar convention, not a stable/public physical ABI or adapter. P4.3 completes the bounded represented-value/place/indirect-call checkpoint with `sol.p43.provenance.v1`, but remains private provisional Wasm32 lowering, not full E6 Wasm execution, an adapter, production optimizer policy, or a stable public ABI. Validation was OFF Debug Werror 54/54, ON Debug Werror 58/58, with the current ON ASan/UBSan Werror represented-emitter and focused MIR tests passing; no current full ASan suite or Linux run is claimed. Wasm is the first production target; native output is deferred and Component Model integration is not implemented. See [Wasm toolchain](wasm-toolchain.md).
 
 Compilation sessions use configurable deterministic ceilings for per-file and package source bytes, source files, directory depth and entries, tokens, persistent arena entries, diagnostics, cumulative allocation bytes, and allocation requests. Disk packages are discovered relative to verified open directory descriptors; source reads reject symbolic links, non-regular or duplicate identities, growth, truncation, replacement, and metadata changes. Raw interpreter host failures are copied through interpreter-owned length-delimited storage rather than borrowed C strings.
 
@@ -1115,6 +1114,14 @@ The representative nested-overflow fixture uses `(functions, blocks, edges, valu
 
 Final verification on Darwin arm64 was OFF Debug Werror 54/54, ON Debug Werror 57/57, and ON RelWithDebInfo ASan/UBSan Werror 57/57, plus `git diff --check` and independent final review. Linux execution was not run. P4.2 excludes represented values, places/projections, indirect calls/callbacks/receivers/writeback, patterns/propagation; P4.4 owns contracts/refinements/snapshots/general cleanup/handlers/runtime checks/unwind; P4.5 owns the host adapter and E6 execution; P5 owns artifacts and `sol build`.
 
+## Represented Wasm Emission (P4.3 Current-Worktree Addendum)
+
+P4.3 is the private opt-in Binaryen 129/Wasmtime 49.0.1 Wasm32 represented emitter over authenticated P3.6. Canonical package-relative provenance is `sol.p43.provenance.v1`. It covers bounded Text; finite fixed products/tuples, sums, distinct wrappers, and Unit fields; constructors/projections; deep copy, equality, and logical cleanup; guard-free total patterns and Copy extraction; Option/Result propagation; private sentinel `funcref` table callbacks with exact unbound internal callbacks; whole-local scalar `inout` callback normal-only writeback; immediate shared/exclusive `Int64` methods; and exact callable-plus-Text product projected moves, conditional holes, repair/reopen, intact whole-root moves, and hole-aware cleanup.
+
+Deterministic bump memory, exact runtime request/byte quotas, code 5 resource failure before code 4 physical allocation failure with canonical supplemental sites, exact resource/fault rollback, deterministic module validation, bounded/capped raw parsing, and source-backed mutations are covered. Bound stored trait-method values remain intentionally unsupported by the language immediate-method rule; broader represented shapes and callable signatures fail closed. P4.3 adds no host/capability adapter or E6 execution and remains a private provisional convention, not a stable public ABI.
+
+Final validation on Darwin arm64 was OFF Debug Werror **54/54** and ON Debug Werror **58/58**; the current ON ASan/UBSan Werror represented-emitter test and focused MIR tests passed. No current full ASan suite or Linux execution is claimed. P4.4 owns general runtime checks, non-total/guarded-match failure, contracts/refinements/snapshots, complete cleanup/unwind/handlers/provider dispatch, and runtime depth/step codes 6/7; P4.5 owns host adapter/E6 execution; P5 owns artifacts and `sol build`.
+
 ## Remaining Boundary
 
 P2 and P3 are complete for the frozen E6 profile. They select no physical ABI,
@@ -1123,6 +1130,6 @@ runtime executor or allocator implementation, build artifact, or public format. 
 artifacts, and interpreter/Wasm differential execution remain later tracks. No
 internal census is an empirical maintenance advantage, user-facing performance
 guarantee, or proof of application behavior. The proposed M experiment is not
-implemented by these compiler owners. P4.1 and P4.2 are complete; P4 remains open and P4.3 is the next production checkpoint.
+implemented by these compiler owners. P4.1 through P4.3 are complete; P4 remains open and P4.4 is the next production checkpoint.
 Consult [TODO.md](../TODO.md#execution-cursor) for the single active cursor and
 [the analysis](project-analysis.md) for the experiment rationale.

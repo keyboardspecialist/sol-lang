@@ -2043,6 +2043,14 @@ static bool execute_instruction(MirEval *eval, MirFrame *frame,
             ok = new_node(eval, instruction->span)
                 && sol_interpreter_value_unit(&output);
             break;
+        case SOL_MIR_INST_FUNCTION_VALUE:
+            ok = instruction->as.function_callable < ir->callable_count
+                && new_node(eval, instruction->span);
+            if (ok) {
+                output.kind = SOL_INTERPRETER_VALUE_FUNCTION;
+                output.as.callable.callable = instruction->as.function_callable;
+            }
+            break;
         case SOL_MIR_INST_PARAMETER_LIVE:
             ok = instruction->as.local < ir->local_count
                 && (frame->registered[instruction->as.local]

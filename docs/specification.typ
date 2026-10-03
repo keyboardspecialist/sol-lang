@@ -11,8 +11,8 @@
 #set document(
   title: "Sol Programming Language - Language and Toolchain Design Specification v0.2",
   author: "The Sol Project",
-  date: datetime(year: 2026, month: 9, day: 29, hour: 12, minute: 0, second: 0),
-  keywords: ("Sol", "programming language", "design specification", "effects", "contracts", "6ec4ba9", "P2.6", "September 29, 2026 documentation revision"),
+  date: datetime(year: 2026, month: 10, day: 3, hour: 12, minute: 0, second: 0),
+  keywords: ("Sol", "programming language", "design specification", "effects", "contracts", "6ec4ba9", "P2.6", "October 3, 2026 documentation revision"),
 )
 #set page(
   paper: "us-letter",
@@ -124,7 +124,7 @@
     #text(size: 14pt, weight: "bold", fill: navy)[Concept Design v0.2]
   ]
   #v(0.25in)
-  #text(size: 12pt)[Documentation revision: September 29, 2026]
+  #text(size: 12pt)[Documentation revision: October 3, 2026]
   #linebreak()
   #text(size: 9pt, fill: blue)[Implementation baseline: September 9, 2026 / 6ec4ba9 / through P2.6]
   #v(0.6in)
@@ -147,8 +147,8 @@
   ([Field], [Value]),
   (
     ([Document], [Sol Programming Language - Language and Toolchain Design Specification]),
-    ([Version], [0.2 Concept Draft; September 29, 2026 documentation revision]),
-    ([Date], [Documentation revision: September 29, 2026]),
+    ([Version], [0.2 Concept Draft; October 3, 2026 documentation revision]),
+    ([Date], [Documentation revision: October 3, 2026]),
     ([Status], [Concept Draft with Executable-Core Decisions]),
     ([Baseline], [September 9, 2026 implementation baseline `6ec4ba9`; E1-E6, P1, P2.1-P2.6 complete; P2 remains open.]),
     ([Primary objective], [Define a language whose semantics, tooling, and source representation optimize safe maintenance by humans and AI systems.]),
@@ -157,7 +157,7 @@
   ),
 )
 
-#callout([SCOPE], [This document records the target design and bounded implemented decisions. Unless explicitly marked *IMPLEMENTED* or described as current bootstrap behavior, passages and examples are proposals, not delivered guarantees. Open alternatives remain open. The September 9 implementation baseline remains `6ec4ba9` through P2.6; current-worktree addenda explicitly identify the independently approved P2.7-P4.2 implementations and M1's completed-as-infeasible outcome. No M-track feature is implemented.])
+#callout([SCOPE], [This document records the target design and bounded implemented decisions. Unless explicitly marked *IMPLEMENTED* or described as current bootstrap behavior, passages and examples are proposals, not delivered guarantees. Open alternatives remain open. The September 9 implementation baseline remains `6ec4ba9` through P2.6; current-worktree addenda explicitly identify the independently approved P2.7-P4.3 implementations and M1's completed-as-infeasible outcome. No M-track feature is implemented.])
 
 Current references, linked relative to the root PDF:
 
@@ -181,7 +181,7 @@ The compiler is intended to expose a canonical typed semantic graph, stable decl
 
 #status("IMPLEMENTED", [At `6ec4ba9`, the C17 edition-2027 bootstrap has bounded reference execution over owning typed IR, explicit trusted hosting, `sol run` and authored Boolean `sol test`, runtime callable CHECK policy, direct checked refined construction, deterministic cleanup, package-local stable top-level IDs, structured diagnostics, and selected versioned inspection projections. E1-E6 and P1 are complete. Separate experimental owners provide frozen-E6 callable CFG MIR, monomorphic planning and concrete materialization, representation recipes, target layout, and source-independent semantic operations/predicate bodies through P2.6. These owners are not the CLI execution pipeline and impose finite callable-closure restrictions beyond interpreter support.])
 
-The current worktree additionally completes symbols and whole-program linkage (P2.7), the complete concrete-program freeze (P2.8), and P3's target-independent runtime-lowered closure for the frozen E6 profile. `SolMirRuntimeLoweredProgram` is a separate address-stable backend-independent owner borrowing authenticated P3.1-P3.5/P2 owners. It joins complete typed same-ID image/predicate CFG and semantic operations; calls/signatures/imports/failures; recipe/value demands; cleanup/failure; requirements/distinct root grants/incidence; and handler frames/exits. An independent hostile validator proves complete transitive anti-aliasing. Draft-first build, validation, and rendering use exact limits; canonical rendering is typed, semantic, buffered, and one-write. It adds no executor, physical ABI, Wasm, adapter, allocator implementation, CLI/build artifact, or tokens. M1 completed as infeasible because independent governance and protected evaluation inputs are unavailable; M2-M5 remain gated unless M1 is reopened feasibly. P4.1 pins Binaryen 129 and Wasmtime 49.0.1 behind an opt-in root-only CMake boundary. P4.2 adds internal scalar CFG/direct-call emission over authenticated P3.6 whole-scalar closures, with canonical package-relative provenance and no stable/public physical ABI or adapter. Final validation was OFF Debug Werror 54/54 and ON Debug Werror plus ON RelWithDebInfo ASan/UBSan Werror 57/57. P4 remains open; P4.3 is next overall and the next production checkpoint. This is not represented-value lowering, a physical ABI, adapter, full E6 Wasm execution, production optimizer policy, artifact, or `sol build`; [the Wasm toolchain authority](docs/wasm-toolchain.md) records the exact contract and validation. Full backend emission, `sol build`, full public IR, SMT discharge, and semantic patch tooling remain absent. Loop/decreases templates are runtime-erased and unresolved; unreachable obligations are not proved. No M feature is implemented by this refresh.
+The current worktree additionally completes symbols and whole-program linkage (P2.7), the complete concrete-program freeze (P2.8), and P3's target-independent runtime-lowered closure for the frozen E6 profile. `SolMirRuntimeLoweredProgram` is a separate address-stable backend-independent owner borrowing authenticated P3.1-P3.5/P2 owners. It joins complete typed same-ID image/predicate CFG and semantic operations; calls/signatures/imports/failures; recipe/value demands; cleanup/failure; requirements/distinct root grants/incidence; and handler frames/exits. An independent hostile validator proves complete transitive anti-aliasing. Draft-first build, validation, and rendering use exact limits; canonical rendering is typed, semantic, buffered, and one-write. It adds no executor, physical ABI, Wasm, adapter, allocator implementation, CLI/build artifact, or tokens. M1 completed as infeasible because independent governance and protected evaluation inputs are unavailable; M2-M5 remain gated unless M1 is reopened feasibly. P4.1 pins Binaryen 129 and Wasmtime 49.0.1 behind an opt-in root-only CMake boundary. P4.2 adds internal scalar CFG/direct-call emission; P4.3 extends the private Wasm32 emitter over authenticated P3.6 to bounded represented values, places, and indirect calls with `sol.p43.provenance.v1`, not a stable/public physical ABI or adapter. Validation was OFF Debug Werror 54/54 and ON Debug Werror 58/58; the current ON ASan/UBSan Werror represented-emitter and focused MIR tests passed, without claiming a current full ASan suite or Linux run. P4 remains open; P4.4 is next overall and the next production checkpoint. This is not a host/capability adapter, full E6 Wasm execution, production optimizer policy, artifact, or `sol build`; [the Wasm toolchain authority](docs/wasm-toolchain.md) records the exact contract and validation. Full backend emission, `sol build`, full public IR, SMT discharge, and semantic patch tooling remain absent. Loop/decreases templates are runtime-erased and unresolved; unreachable obligations are not proved. No M feature is implemented by this refresh.
 
 M1 evaluated an unvalidated capability-restricted hosted expense-policy candidate but could not establish an actual user, policy owner, protected held-out material, externally controlled verifier, or independent adjudicator. Existing projections and interpreter checks could support a feasibly reopened maintenance experiment without full IR or SMT. Safer or cheaper human/AI maintenance remains an unmeasured hypothesis, not a delivered benefit.
 
@@ -1718,12 +1718,12 @@ Runtime reflection is opt-in package metadata and cannot bypass invariants. Dese
 
 Begin with a deliberately small core proving interactions among canonical syntax, algebraic types, ownership, effects, contracts, semantic identities, and diagnostics. Simultaneously building full proof automation, workflows, native targets, and an ecosystem would obscure core coherence.
 
-E1-E6 established the bounded frontend/interpreter application core, and P1 through P2.6 are complete at the September 9 baseline `6ec4ba9`. The current worktree additionally completes P2.7, P2.8, P3.1-P3.6, P4.1, and P4.2, completing P2 and P3, pinning the opt-in Wasm probe, and adding internal scalar emission for the frozen E6 profile. Language breadth remains frozen. The live #link("TODO.md")[execution cursor] is:
+E1-E6 established the bounded frontend/interpreter application core, and P1 through P2.6 are complete at the September 9 baseline `6ec4ba9`. The current worktree additionally completes P2.7, P2.8, P3.1-P3.6, and P4.1-P4.3, completing P2 and P3, pinning the opt-in Wasm probe, and adding bounded private represented emission for the frozen E6 profile. Language breadth remains frozen. The live #link("TODO.md")[execution cursor] is:
 
 ```text
-P4.1-P4.2 complete: pinned Binaryen 129 / Wasmtime 49.0.1 plus internal scalar CFG/direct-call emission
--> P4.3 represented values, places, projections, and indirect calls (next overall and production checkpoint)
--> P4.4 checks/cleanup/handlers -> P4.5 adapter/E6 -> P5 build artifacts
+P4.1-P4.3 complete: pinned Binaryen 129 / Wasmtime 49.0.1 plus private scalar and represented emission
+-> P4.4 runtime checks, match failure, contracts/refinements/snapshots, cleanup/unwind/handlers, depth/step codes 6/7 (next overall and production checkpoint)
+-> P4.5 adapter/E6 -> P5 build artifacts
 ```
 
 P2 is complete. M1 recorded its infeasibility blocker, and M2-M5 remain gated unless M1 is reopened and completed feasibly. One coordinator maintains the sole next-overall cursor. Closures, collections, user resources/allocators, unsafe, C FFI, manifests/dependencies, full public IR, concurrency, and broader handlers are not implicit P3-P5 requirements.
@@ -1793,7 +1793,13 @@ The September 9, 2026 snapshot of `6ec4ba9` provides the following. This is a do
 
 #status("IMPLEMENTED", [P4.2 is an internal opt-in Binaryen 129/Wasmtime 49.0.1 emitter that consumes authenticated P3.6 whole scalar direct-call closures. It covers `Int64`, `Bool`, and Unit constants/parameters, SSA/block parameters and parallel edges, whole-local/temporary lifetime, arbitrary CFG dispatch and loops, infallible and checked unary/binary/compound operations without Wasm traps, direct ordinary internal owned-scalar calls, VALUE/Unit normal/failure dispatch, and returns. Exact P2 `sol.i1` definitions remain internal. Only exact P2 `sol.e1` functions are externally callable exports; no `sol.i1` function exports exist. The module additionally exports exactly two explicitly unstable mutable diagnostic globals for private packet observation, not as a stable/public ABI. A private entry wrapper resets those globals once. Canonical provenance is package-relative `sol.p42.provenance.v1`; nested leaf packet code/site survives callers. Cycles and chains over 64 reject statically; no runtime depth code-7 emission occurs (P4.4 owns runtime checks). The P3.3 `LOCAL_OR_PENDING` prerequisite applies only to ordinary image direct-function `INVOKE`, excluding host, indirect, capability, and predicate calls. This is private provisional scalar lowering, not a stable/public physical ABI, adapter, or E6 Wasm execution.])
 
-The representative nested-overflow usage, ordered as `(functions, blocks, edges, values, locals, generated nodes, provenance records, work bytes, scratch bytes, owned bytes, output bytes)`, is `(4, 7, 4, 7, 13, 146, 7, 4115, 1703, 1703, 1504)`, with SHA-256 `6a75a3627de544741885fcd12aad0ef27237e9d7d9f3c616f8ceb181f115ddb4`. Exact backend limits have exact, one-below, and partial-zero coverage, including backend-owned allocation sweeps/rollback. Binaryen/Wasmtime private allocations are outside quotas; serialized bytes are metered. Darwin arm64 verification was OFF Debug Werror 54/54, ON Debug Werror 57/57, and ON RelWithDebInfo ASan/UBSan Werror 57/57; no Linux run is claimed. P4.3 remains next for represented values, places/projections, and indirect calls/callbacks/receivers/writeback. P4.4 retains contracts/refinements/snapshots/general cleanup/handlers/runtime checks/unwind; P4.5 retains the host adapter and E6 execution; P5 retains artifacts and `sol build`.
+The representative nested-overflow usage, ordered as `(functions, blocks, edges, values, locals, generated nodes, provenance records, work bytes, scratch bytes, owned bytes, output bytes)`, is `(4, 7, 4, 7, 13, 146, 7, 4115, 1703, 1703, 1504)`, with SHA-256 `6a75a3627de544741885fcd12aad0ef27237e9d7d9f3c616f8ceb181f115ddb4`. Exact backend limits have exact, one-below, and partial-zero coverage, including backend-owned allocation sweeps/rollback. Binaryen/Wasmtime private allocations are outside quotas; serialized bytes are metered. Darwin arm64 verification was OFF Debug Werror 54/54, ON Debug Werror 57/57, and ON RelWithDebInfo ASan/UBSan Werror 57/57; no Linux run is claimed. P4.2 historically preceded the completed P4.3 represented-emitter checkpoint. P4.4 retains general runtime checks, non-total/guarded-match failure, contracts/refinements/snapshots, complete cleanup/unwind/handlers/provider dispatch, and runtime depth/step codes 6/7; P4.5 retains the host adapter and E6 execution; P5 retains artifacts and `sol build`.
+
+=== P4.3 Internal Represented Wasm Emission
+
+#status("IMPLEMENTED", [P4.3 is a private opt-in Binaryen 129/Wasmtime 49.0.1 Wasm32 represented emitter over authenticated P3.6 with canonical package-relative provenance `sol.p43.provenance.v1`. It covers bounded Text; finite fixed products/tuples, sums, distinct wrappers, and Unit fields; constructors/projections; deep copy, equality, and logical cleanup; guard-free total patterns and Copy extraction; Option/Result propagation; a private sentinel `funcref` table with exact unbound internal callbacks; whole-local scalar `inout` callback normal-only writeback; immediate shared/exclusive `Int64` methods; and exact callable-plus-Text product projected moves, conditional holes, repair/reopen, intact whole-root moves, and hole-aware cleanup. Deterministic bump memory, exact runtime request/byte quotas, code 5 resource failure before code 4 physical allocation failure with canonical supplemental sites, exact resource/fault rollback, deterministic module validation, bounded/capped raw parsing, and source-backed mutations are included. Bound stored trait-method values remain intentionally unsupported by the language immediate-method rule; broader represented shapes and callable signatures fail closed. This remains a private provisional convention, not a stable public ABI, host/capability adapter, or E6 Wasm execution.])
+
+Darwin arm64 validation was OFF Debug Werror 54/54 and ON Debug Werror 58/58. The current ON ASan/UBSan Werror represented-emitter test and focused MIR tests passed; this does not claim a current full ASan suite or Linux execution. P4.4 owns general runtime checks, non-total/guarded-match failure, contracts/refinements/snapshots, complete cleanup/unwind/handlers/provider dispatch, and runtime depth/step codes 6/7; P4.5 owns host adapter/E6; P5 owns artifacts and `sol build`.
 
 === Predicate Bodies and Finite Closure
 
@@ -1823,7 +1829,7 @@ P3.1 chooses no physical ABI, concrete target indices, wrappers/adapters, alloca
 
 == Phased Roadmap
 
-This orientation mirrors #link("TODO.md")[the live ledger], not a second queue. P2 and P3 are complete for the frozen E6 profile; P4.1 and P4.2 are complete; P4 remains open and P4.3 is next.
+This orientation mirrors #link("TODO.md")[the live ledger], not a second queue. P2 and P3 are complete for the frozen E6 profile; P4.1 through P4.3 are complete; P4 remains open and P4.4 is next.
 
 #spec-table(
   (1fr, 2fr),
@@ -1832,8 +1838,8 @@ This orientation mirrors #link("TODO.md")[the live ledger], not a second queue. 
     ([E1-E6 / complete], [Bounded shared compilation, hardened input/host boundaries, explicit entrypoint, trusted interpreter profiles, `sol run`, runtime contracts/refinements, and E6 conformance.]),
     ([P1 / complete], [Frozen-E6 callable CFG MIR, dominance/affine validation, rendering, and bounded reference differential evaluation.]),
     ([P2 / complete], [P2.1-P2.8 complete for frozen E6, including the address-stable complete concrete owner, independent validation, canonical rendering, and census. P2 selects no runtime ABI, concrete target indices, adapters, Wasm output, artifact, or public format.]),
-    ([P3 / complete], [P3.1-P3.5 freeze conventions and static value, cleanup/failure, host, and handler policy; P3.6 `SolMirRuntimeLoweredProgram` joins the complete authenticated runtime-lowered closure. P3.W1 remains unperformed historical/optional proposed work and does not replace the P4.3 cursor.]),
-    ([P4 / open], [P4.1-P4.2 are complete: the opt-in Binaryen 129/Wasmtime 49.0.1 toolchain now emits authenticated P3.6 whole-scalar direct-call closures with `sol.i1` internals, only exact P2 `sol.e1` externally callable function exports (no `sol.i1` function exports), exactly two explicitly unstable mutable diagnostic globals for private packet observation, and `sol.p42.provenance.v1`. It is a private provisional scalar convention, not a stable/public ABI or adapter. P4.3 next owns represented values, places/projections, and indirect calls; P4.4 owns checks/cleanup/handlers; P4.5 owns the adapter and E6 Wasm execution. No implicit Component Model scope.]),
+    ([P3 / complete], [P3.1-P3.5 freeze conventions and static value, cleanup/failure, host, and handler policy; P3.6 `SolMirRuntimeLoweredProgram` joins the complete authenticated runtime-lowered closure. P3.W1 remains unperformed historical/optional proposed work and does not replace the P4.4 cursor.]),
+    ([P4 / open], [P4.1-P4.2 are complete: the opt-in Binaryen 129/Wasmtime 49.0.1 toolchain now emits authenticated P3.6 whole-scalar direct-call closures with `sol.i1` internals, only exact P2 `sol.e1` externally callable function exports (no `sol.i1` function exports), exactly two explicitly unstable mutable diagnostic globals for private packet observation, and `sol.p42.provenance.v1`. It is a private provisional scalar convention, not a stable/public ABI or adapter. P4.3 completes bounded represented values, places/projections, and indirect calls; P4.4 owns general runtime checks, match failure, contracts/refinements/snapshots, cleanup/unwind/handlers, and depth/step codes 6/7; P4.5 owns the adapter and E6 Wasm execution. No implicit Component Model scope.]),
     ([P5 / open], [Immutable build API/artifacts, deterministic `sol build` writes, artifact execution, interpreter/Wasm differential tests, and byte-identical release/reproducibility acceptance.]),
     ([M1 / infeasible; M2-M5 / gated], [M1 stopped because no independent participant, protected evaluation material, externally controlled verifier, or adjudicator exists. M2-M5 require a feasibly reopened M1. Optional M4E remains only a basic editor slice. No M feature is implemented.]),
     ([Deferred breadth], [Proof/SMT, schemas, full public IR and patch language, richer libraries/numerics, resources, concurrency/workflows, general handlers, reflection, real-time profiles, native/VM targets, and ecosystem/stabilization work require explicit workload gates.]),
@@ -1871,7 +1877,7 @@ sampling, and budget policy. Full semantic patch syntax, an architecture DSL,
 generalized risk scoring, signed/deployment attestations, fine-grained persistent IDs,
 production telemetry, and proof are outside the bounded experiment.
 
-P3.W1 remains unperformed historical/optional proposed timeboxed ABI work. If separately activated, it would record candidate versions and validate/execute a minimal scalar module to expose ABI/tool mismatches. It neither owns nor replaces the P4.3 cursor and did not inform or complete P4.1, 47W, 48C, component support, E6 Wasm execution, backend integration, or build tooling.
+P3.W1 remains unperformed historical/optional proposed timeboxed ABI work. If separately activated, it would record candidate versions and validate/execute a minimal scalar module to expose ABI/tool mismatches. It neither owns nor replaces the then-current P4.3 cursor and did not inform or complete P4.1, 47W, 48C, component support, E6 Wasm execution, backend integration, or build tooling.
 
 The fuller target still includes stable semantic graph interfaces, intent metadata, semantic patches/change reports, progressive proof, and mature deployment tooling. Larger workflows/transactions should first gain library/host-provider experience; broad numerics/units, general resumptive handlers, reflection, and real-time certification remain proposed. None is required merely to test whether bounded semantic context helps maintenance.
 
@@ -2306,7 +2312,7 @@ Sol is a proposal for a new interface between intent, implementation, verificati
 
 The most important experiment is not whether Sol compiles a benchmark. It is whether a human or model can modify a nontrivial system with less hidden context, receive bounded meaningful obligations, and demonstrate mechanically or operationally that requested behavior changed while unrelated behavior did not.
 
-#callout([NEXT WORK], [Follow #link("TODO.md")[the sole live queue]: P2 and P3 are complete for the frozen E6 profile; P4.1 and P4.2 are complete, P4 remains open, and P4.3 is next overall and the next production checkpoint. M1 remains completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. Consult #link("docs/compiler-status.md")[the implementation snapshot and current-worktree addenda] for compatibility boundaries and #link("docs/project-analysis.md")[the dated analysis] for historical findings and evaluation rationale. Future RFCs should separate target semantics, implemented behavior, and unresolved decisions without creating competing priorities.])
+#callout([NEXT WORK], [Follow #link("TODO.md")[the sole live queue]: P2 and P3 are complete for the frozen E6 profile; P4.1 through P4.3 are complete, P4 remains open, and P4.4 is next overall and the next production checkpoint. M1 remains completed as infeasible and M2-M5 remain gated unless it is reopened feasibly. Consult #link("docs/compiler-status.md")[the implementation snapshot and current-worktree addenda] for compatibility boundaries and #link("docs/project-analysis.md")[the dated analysis] for historical findings and evaluation rationale. Future RFCs should separate target semantics, implemented behavior, and unresolved decisions without creating competing priorities.])
 
 #v(1em)
 #align(center)[#text(size: 8pt, fill: blue)[End of Design Specification v0.2]]

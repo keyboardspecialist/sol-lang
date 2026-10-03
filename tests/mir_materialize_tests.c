@@ -1388,6 +1388,91 @@ static void test_non_cfg_predicate_function_site(void) {
     free_compilation(&compilation);
 }
 
+static void test_callable_hole_field_trace(void) {
+    static const char source[] =
+        "module callable_hole\n"
+        "record Pair { left: function(Int64) -> Int64 effects { pure }, right: Text }\n"
+        "function answer(value: Int64) -> Int64 effects { pure } { return value }\n"
+        "function launch() -> Int64 effects { pure } { let exact = answer let ignored = answer "
+        "let pad0 = 0 let pad1 = 1 let pad2 = 2 let pad3 = 3 let pad4 = 4 "
+        "let pad5 = 5 let pad6 = 6 let pad7 = 7 let pad8 = 8 let pad9 = 9 "
+        "let pair = Pair { left = exact, right = \"ignored\" } "
+        "let moved = pair.left return moved(42) }\n";
+    Compilation compilation; CHECK(compile_text(&compilation, source));
+    SolDiagnostics diagnostics; SolMirProgram program; SolMirPlan plan;
+    SolMirMaterialization materialization; SolMirMaterializeBuildOutcome outcome;
+    sol_diagnostics_init(&diagnostics); sol_mir_program_init(&program); sol_mir_plan_init(&plan);
+    sol_mir_materialization_init(&materialization);
+    bool built = build_all(&compilation.ir,
+        callable(&compilation.ir, "launch", SOL_IR_CALLABLE_FUNCTION), NULL, 0,
+        &program, &plan, &materialization, NULL, &diagnostics, &outcome);
+    CHECK(built && outcome == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED
+        && sol_mir_materialization_validate_concrete(&materialization, NULL));
+    if (built && outcome == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED) {
+        SolIrCallableId answer = callable(&compilation.ir, "answer", SOL_IR_CALLABLE_FUNCTION);
+        size_t producer = SOL_MIR_MATERIALIZED_NONE, projected = SOL_MIR_MATERIALIZED_NONE;
+        size_t callback = SOL_MIR_MATERIALIZED_NONE;
+        for (size_t i = 0; i < materialization.instruction_count; ++i) {
+            const SolMirMaterializedInstruction *instruction = &materialization.instructions[i];
+            if (instruction->kind == SOL_MIR_INST_FUNCTION_VALUE
+                && instruction->function_callable == answer) producer = i;
+            if (instruction->kind == SOL_MIR_INST_LOAD_MOVE
+                && instruction->place < materialization.place_count
+                && materialization.places[instruction->place].projections.count == 1) projected = i;
+        }
+        for (size_t i = 0; i < materialization.block_count; ++i)
+            if (materialization.blocks[i].terminator.kind == SOL_MIR_TERM_INVOKE
+                && materialization.blocks[i].terminator.call_kind == SOL_IR_CALL_CALLBACK)
+                callback = i;
+        CHECK(producer != SOL_MIR_MATERIALIZED_NONE && projected != SOL_MIR_MATERIALIZED_NONE
+            && callback != SOL_MIR_MATERIALIZED_NONE);
+        if (callback != SOL_MIR_MATERIALIZED_NONE) {
+            const SolMirMaterializedTerminator *term = &materialization.blocks[callback].terminator;
+            CHECK(term->callable_site < materialization.semantic_site_count
+                && materialization.semantic_sites[term->callable_site].instruction
+                    < materialization.instruction_count
+                && materialization.instructions[materialization.semantic_sites[
+                    term->callable_site].instruction].function_callable == answer
+                && materialization.bindings[term->binding].symbolic_callable == answer);
+        }
+        SolMirMaterializeLimits exact = sol_mir_materialize_default_limits();
+        exact.max_materialization_work = materialization.usage.materialization_work;
+        SolMirMaterialization replay, limited, trace_limited;
+        sol_mir_materialization_init(&replay); sol_mir_materialization_init(&limited);
+        sol_mir_materialization_init(&trace_limited);
+        SolMirMaterializeBuildRequest request = {&plan, &exact};
+        CHECK(sol_mir_materialize_build(&request, &replay, &diagnostics)
+            == SOL_MIR_MATERIALIZE_BUILD_SUCCEEDED
+            && replay.usage.materialization_work == exact.max_materialization_work);
+        size_t closure = (replay.image_count + 1) * (replay.binding_count + 1);
+        size_t validation_limit = replay.limits.max_validation_work;
+        replay.limits.max_validation_work = replay.usage.validation_work - closure - 1;
+        size_t recomputed_work = 0;
+        CHECK(!sol_mir_materialization_validation_work(&replay, &recomputed_work)
+            && !sol_mir_materialization_validate_concrete(&replay, NULL));
+        replay.limits.max_validation_work = validation_limit;
+        CHECK(sol_mir_materialization_validate_concrete(&replay, NULL));
+        CHECK(exact.max_materialization_work != 0);
+        --exact.max_materialization_work;
+        request.limits = &exact;
+        CHECK(sol_mir_materialize_build(&request, &limited, &diagnostics)
+            == SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED
+            && limited.image_count == 0 && limited.usage.materialization_work == 0);
+        size_t trace_limit = materialization.usage.materialization_work
+            - materialization.usage.concrete_records - 1;
+        exact.max_materialization_work = trace_limit;
+        request.limits = &exact;
+        CHECK(sol_mir_materialize_build(&request, &trace_limited, &diagnostics)
+            == SOL_MIR_MATERIALIZE_BUILD_RESOURCE_EXHAUSTED
+            && trace_limited.image_count == 0 && trace_limited.usage.materialization_work == 0);
+        sol_mir_materialization_free(&trace_limited); sol_mir_materialization_free(&limited);
+        sol_mir_materialization_free(&replay);
+    }
+    sol_mir_materialization_free(&materialization); sol_mir_plan_free(&plan);
+    sol_mir_program_free(&program); sol_diagnostics_free(&diagnostics);
+    free_compilation(&compilation);
+}
+
 static void test_multiple_predicate_dependencies(void) {
     Compilation compilation;
     CHECK(compile_text(&compilation,
@@ -1822,9 +1907,9 @@ static void test_e6_concrete_closure_and_determinism(void) {
         37, 101};
     const size_t expected_terminators[] = {0, 11, 12, 17, 1, 18, 22, 0, 0,
         0, 1, 1, 2, 3, 3};
-    const size_t expected_demands[] = {5, 18, 0, 0, 0, 0, 0, 0, 0};
+    const size_t expected_demands[] = {5, 18, 0, 0, 0, 0, 0, 5, 0};
     CHECK(all.instruction_count == 583 && all.block_count == 91
-        && all.binding_count == 23);
+        && all.binding_count == 28);
     CHECK(memcmp(instruction_kinds, expected_instructions,
         sizeof(expected_instructions)) == 0);
     CHECK(memcmp(terminator_kinds, expected_terminators,
@@ -1999,6 +2084,7 @@ int main(void) {
     test_partial_path_restore_and_loop_metadata();
     test_refinement_predicate_site_and_temp_suffix();
     test_non_cfg_predicate_function_site();
+    test_callable_hole_field_trace();
     test_multiple_predicate_dependencies();
     test_terminator_scope_topology_provenance();
     test_e6_concrete_closure_and_determinism();

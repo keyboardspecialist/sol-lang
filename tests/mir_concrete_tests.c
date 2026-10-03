@@ -290,42 +290,46 @@ static void check_counts(const char *stage, const size_t *actual,
 }
 
 static const size_t expected_program_counts[] = {
-    5, 4, 14, 4, 1, 18,
+    5, 4, 14, 4, 1, 23,
 };
-static const SolMirProgramUsage expected_program_usage = {19, 18, 1055};
+/* The independently metered direct-invoke proof contributes 466 P2.1 ticks
+   after the closure census has otherwise completed.  It neither discovers
+   new callables nor publishes references. */
+static const SolMirProgramUsage expected_program_usage = {19, 23, 1681};
 
 /* types, components, type accesses, effect atoms/rows/row atoms, instances,
    instance types/accesses, dictionaries, imports, uses, contexts, demands. */
 static const size_t expected_plan_counts[] = {
-    21, 23, 3, 9, 7, 10, 14, 16, 14, 1, 4, 738, 18, 23,
+    21, 23, 3, 9, 7, 10, 14, 16, 14, 1, 4, 738, 18, 28,
 };
 static const SolMirPlanUsage expected_plan_usage = {
-    14, 21, 23, 738, 18, 11022, 3,
+    14, 21, 28, 738, 18, 11307, 3,
 };
 
 /* Follows the declaration order in SolMirMaterialization. */
 static const size_t expected_materialization_counts[] = {
     14, 21, 5, 3, 39, 17, 738, 18, 27, 48, 5, 173, 583, 50, 27,
-    18, 91, 86, 40, 32, 0, 23, 23, 0, 4, 0, 1, 7, 9, 10, 164, 60,
+    18, 91, 86, 40, 32, 0, 28, 28, 5, 4, 0, 1, 7, 9, 10, 164, 60,
 };
 static const SolMirMaterializeUsage expected_materialization_usage = {
-    14, 1263, 761, 2042, 411948, 3295, 185, 95255944,
+    /* FUNCTION_VALUE adds one callable word to every concrete instruction. */
+    14, 1263, 766, 2057, 418692, 3310, 185, 95344114,
 };
 
-static const size_t expected_representation_counts[] = {21, 11, 9, 3, 3, 0, 0};
+static const size_t expected_representation_counts[] = {21, 11, 9, 3, 3, 5, 5};
 static const SolMirRepresentationUsage expected_representation_usage = {
-    21, 11, 9, 3, 0, 0, 3348, 63, 385, 95318662, 762459500,
+    21, 11, 9, 3, 5, 5, 4068, 63, 400, 95407052, 763171604,
 };
 
 static const size_t expected_layout_counts[] = {21, 11, 9, 5};
 static const SolMirLayoutUsage expected_layout_usage = {
-    21, 11, 9, 5, 4232, 21, 87, 762459500, 95318796,
+    21, 11, 9, 5, 4232, 21, 107, 763171604, 95407206,
 };
 
 /* Follows SOL_MIR_OPERATIONS_ARENAS order. */
 static const size_t expected_operations_counts[] = {
-    48, 5, 28, 27, 3, 3, 12, 28, 2, 17, 26, 15, 1, 0, 0, 4, 4,
-    4, 4, 10, 6, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 0, 62,
+    48, 5, 28, 27, 3, 3, 12, 28, 2, 17, 26, 15, 1, 5, 0, 4, 4,
+    4, 4, 10, 6, 0, 0, 0, 0, 0, 4, 0, 0, 0, 0, 5, 67,
 };
 static const SolMirOperationsUsage expected_operations_usage = {
     .access_plans = 48, .access_steps = 5,
@@ -334,23 +338,129 @@ static const SolMirOperationsUsage expected_operations_usage = {
     .pattern_nodes = 12, .path_steps = 28,
     .propagations = 2, .arithmetic = 17,
     .equality_nodes = 26, .equality_children = 15,
-    .snapshots = 1, .callables = 0, .handlers = 0, .predicates = 4,
-    .recipe_ids = 0, .roots = 0, .provenance = 62,
+    .snapshots = 1, .callables = 5, .handlers = 0, .predicates = 4,
+    .recipe_ids = 0, .roots = 5, .provenance = 67,
     .predicate_bodies = 4, .predicate_blocks = 4, .predicate_inputs = 4,
     .predicate_values = 10, .predicate_instructions = 6,
     .predicate_edges = 0, .predicate_edge_values = 0,
     .predicate_operands = 0, .predicate_path_steps = 0,
     .predicate_pattern_nodes = 0, .import_envelopes = 4,
     .import_contract_references = 0, .literal_bytes = 0,
-    .import_snapshots = 0, .owned_bytes = 20960,
-    .build_scratch_bytes = 2679, .build_work = 10525,
-    .validation_scratch_bytes = 762459500, .validation_work = 95357416,
+    .import_snapshots = 0, .owned_bytes = 21960,
+    .build_scratch_bytes = 2679, .build_work = 10547,
+    .validation_scratch_bytes = 763171604, .validation_work = 95448051,
 };
 
-static const size_t expected_linkage_counts[] = {14, 23, 1, 0, 0, 4, 17};
+static const size_t expected_linkage_counts[] = {14, 28, 1, 4, 5, 4, 17};
 static const SolMirLinkageUsage expected_linkage_usage = {
-    14, 23, 1, 0, 0, 4, 17, 4648, 0, 77697, 762459500, 95443081,
+    14, 28, 1, 4, 5, 4, 17, 5112, 280, 83898, 763171604, 95540247,
 };
+
+static void check_capability_bound_closure(const SolMirConcreteProgram *p) {
+    size_t invokes = 0, bound_references = 0, bound_demands = 0;
+    size_t bound_bindings = 0, bound_sites = 0, site_receiver_roots = 0;
+    size_t bound_producers = 0, producer_receiver_roots = 0;
+    size_t bound_callables = 0, callable_provenance = 0;
+    size_t values_per_table[4] = {0};
+    bool callable_values[5] = {false};
+
+    for (size_t i = 0; i < p->program.reference_count; ++i) {
+        invokes += p->program.references[i].kind
+            == SOL_MIR_PROGRAM_REFERENCE_INVOKE;
+        bound_references += p->program.references[i].kind
+            == SOL_MIR_PROGRAM_REFERENCE_BOUND_OPERATION;
+    }
+    for (size_t i = 0; i < p->plan.demand_count; ++i)
+        bound_demands += p->plan.demands[i].kind
+            == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION;
+    for (size_t i = 0; i < p->materialization.binding_count; ++i) {
+        const SolMirMaterializedBinding *binding = &p->materialization.bindings[i];
+        if (binding->kind != SOL_MIR_PLAN_DEMAND_BOUND_OPERATION) continue;
+        ++bound_bindings;
+        CHECK(binding->source_demand < p->plan.demand_count
+            && p->plan.demands[binding->source_demand].kind
+                == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION);
+    }
+    for (size_t i = 0; i < p->materialization.semantic_site_count; ++i) {
+        const SolMirMaterializedSemanticSite *site
+            = &p->materialization.semantic_sites[i];
+        if (site->kind != SOL_MIR_PLAN_DEMAND_BOUND_OPERATION) continue;
+        ++bound_sites;
+        site_receiver_roots += site->captured_receiver_roots.count;
+        CHECK(site->binding < p->materialization.binding_count
+            && p->materialization.bindings[site->binding].kind
+                == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION
+            && site->captured_receiver_roots.count == 1);
+    }
+    for (size_t i = 0; i < p->representation.callable_producer_count; ++i) {
+        const SolMirCallableProducer *producer
+            = &p->representation.callable_producers[i];
+        if (producer->kind != SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION) continue;
+        ++bound_producers;
+        producer_receiver_roots += producer->captured_receiver_roots.count;
+        CHECK(producer->semantic_site < p->materialization.semantic_site_count
+            && producer->binding < p->materialization.binding_count
+            && p->materialization.semantic_sites[producer->semantic_site].binding
+                == producer->binding
+            && producer->captured_receiver_roots.count == 1);
+    }
+    for (size_t i = 0; i < p->operations.callable_count; ++i) {
+        const SolMirOperationCallablePlan *call = &p->operations.callables[i];
+        if (call->kind != SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION) continue;
+        ++bound_callables;
+        CHECK(call->semantic_site < p->materialization.semantic_site_count
+            && p->materialization.semantic_sites[call->semantic_site].kind
+                == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION
+            && call->roots.count == 1);
+    }
+    for (size_t i = 0; i < p->operations.provenance_count; ++i) {
+        const SolMirOperationProvenance *provenance = &p->operations.provenance[i];
+        if (provenance->kind != SOL_MIR_OPERATION_PROVENANCE_CALLABLE) continue;
+        CHECK(provenance->executable < p->operations.callable_count);
+        if (provenance->executable < p->operations.callable_count)
+            callable_provenance += p->operations.callables[provenance->executable].kind
+                == SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION;
+    }
+    for (size_t i = 0; i < p->linkage.callable_value_count; ++i) {
+        const SolMirLinkageCallableValue *value = &p->linkage.callable_values[i];
+        CHECK(value->callable_plan < p->operations.callable_count
+            && value->table < p->linkage.table_entry_count);
+        if (value->callable_plan >= p->operations.callable_count
+            || value->table >= p->linkage.table_entry_count) continue;
+        const SolMirOperationCallablePlan *call
+            = &p->operations.callables[value->callable_plan];
+        const SolMirMaterializedSemanticSite *site
+            = &p->materialization.semantic_sites[call->semantic_site];
+        const SolMirLinkageBinding *binding = &p->linkage.bindings[site->binding];
+        const SolMirLinkageTableEntry *table
+            = &p->linkage.table_entries[value->table];
+        CHECK(call->kind == SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION
+            && !callable_values[value->callable_plan]
+            && ((binding->target_kind == SOL_MIR_LINKAGE_TARGET_INTERNAL
+                    && table->target_kind == SOL_MIR_LINKAGE_TARGET_INTERNAL
+                    && table->internal == binding->internal)
+                || (binding->target_kind == SOL_MIR_LINKAGE_TARGET_HOST
+                    && table->target_kind == SOL_MIR_LINKAGE_TARGET_HOST
+                    && table->host == binding->host)));
+        if (call->kind == SOL_MIR_CALLABLE_PRODUCER_BOUND_OPERATION
+            && value->callable_plan < sizeof(callable_values))
+            callable_values[value->callable_plan] = true;
+        ++values_per_table[value->table];
+    }
+    size_t singleton_tables = 0, duplicate_tables = 0;
+    for (size_t i = 0; i < p->linkage.table_entry_count; ++i) {
+        singleton_tables += values_per_table[i] == 1;
+        duplicate_tables += values_per_table[i] == 2;
+    }
+    CHECK(invokes == 18 && bound_references == 5 && bound_demands == 5
+        && bound_bindings == 5 && bound_sites == 5 && site_receiver_roots == 5
+        && p->materialization.receiver_root_count == 5 && bound_producers == 5
+        && producer_receiver_roots == 5 && p->representation.receiver_root_count == 5
+        && bound_callables == 5 && callable_provenance == 5
+        && p->operations.root_count == 5 && p->linkage.binding_count == 28
+        && p->linkage.callable_value_count == 5 && p->linkage.table_entry_count == 4
+        && singleton_tables == 3 && duplicate_tables == 1);
+}
 
 static void check_e6_census_and_closure(const Compilation *c,
     const SolMirConcreteProgram *p) {
@@ -409,6 +519,7 @@ static void check_e6_census_and_closure(const Compilation *c,
     CHECK_TABLE(representation); CHECK_TABLE(layout); CHECK_TABLE(operations);
     CHECK_TABLE(linkage);
 #undef CHECK_TABLE
+    check_capability_bound_closure(p);
 
 #define EQ(left, right, member) (left).member == (right).member
     CHECK(EQ(p->program.usage, expected_program_usage,
@@ -590,7 +701,7 @@ static void check_e6_census_and_closure(const Compilation *c,
         ++runtime_drop[requirement->drop_kind];
     }
     const size_t expected_runtime_operations[32] = {
-        [5] = 7, [6] = 1, [7] = 4, [15] = 5,
+        [5] = 3, [6] = 1, [7] = 4, [15] = 5, [21] = 4,
     };
     const size_t expected_runtime_storage[] = {0, 1, 1, 8, 4, 3};
     const size_t expected_runtime_copy[] = {0, 1, 8, 1, 7, 0};
@@ -659,6 +770,79 @@ static void test_validation_mutations(SolMirConcreteProgram *p) {
     MUTATE(p->operations.constructors[0], kind,
         (SolMirOperationConstructKind)99);
     MUTATE(p->linkage.bindings[0], binding, SOL_MIR_LINKAGE_NONE);
+    size_t bound_binding_index = SIZE_MAX;
+    for (size_t i = 0; i < p->materialization.binding_count; ++i) {
+        if (p->materialization.bindings[i].kind
+                == SOL_MIR_PLAN_DEMAND_BOUND_OPERATION) {
+            bound_binding_index = i;
+            break;
+        }
+    }
+    CHECK(bound_binding_index != SIZE_MAX);
+    if (bound_binding_index != SIZE_MAX) {
+        SolMirMaterializedBinding *binding
+            = &p->materialization.bindings[bound_binding_index];
+        MUTATE(*binding, source_demand, p->plan.demand_count);
+        MUTATE(*binding, target_kind,
+            binding->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+                ? SOL_MIR_MATERIALIZED_TARGET_IMPORT
+                : SOL_MIR_MATERIALIZED_TARGET_INSTANCE);
+        size_t site_index = binding->site;
+        CHECK(site_index < p->materialization.semantic_site_count);
+        if (site_index < p->materialization.semantic_site_count) {
+            SolMirMaterializedSemanticSite *site
+                = &p->materialization.semantic_sites[site_index];
+            MUTATE(*site, captured_receiver_kind,
+                SOL_MIR_MATERIALIZED_RECEIVER_NONE);
+            size_t producer_index = SIZE_MAX;
+            for (size_t i = 0; i < p->representation.callable_producer_count;
+                    ++i) {
+                if (p->representation.callable_producers[i].semantic_site
+                    == site_index) {
+                    producer_index = i;
+                    break;
+                }
+            }
+            CHECK(producer_index != SIZE_MAX);
+            if (producer_index != SIZE_MAX) {
+                SolMirCallableProducer *producer
+                    = &p->representation.callable_producers[producer_index];
+                MUTATE(*producer, semantic_site,
+                    p->materialization.semantic_site_count);
+                MUTATE(*producer, target_kind,
+                    producer->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+                        ? SOL_MIR_MATERIALIZED_TARGET_IMPORT
+                        : SOL_MIR_MATERIALIZED_TARGET_INSTANCE);
+            }
+            size_t callable_index = SIZE_MAX;
+            for (size_t i = 0; i < p->operations.callable_count; ++i) {
+                if (p->operations.callables[i].semantic_site == site_index) {
+                    callable_index = i;
+                    break;
+                }
+            }
+            CHECK(callable_index != SIZE_MAX);
+            if (callable_index != SIZE_MAX) {
+                SolMirOperationCallablePlan *call
+                    = &p->operations.callables[callable_index];
+                MUTATE(*call, semantic_site,
+                    p->materialization.semantic_site_count);
+                MUTATE(*call, target_kind,
+                    call->target_kind == SOL_MIR_MATERIALIZED_TARGET_INSTANCE
+                        ? SOL_MIR_MATERIALIZED_TARGET_IMPORT
+                        : SOL_MIR_MATERIALIZED_TARGET_INSTANCE);
+                MUTATE(*call, capture_kind, SOL_MIR_OPERATION_CAPTURE_NONE);
+                for (size_t i = 0; i < p->linkage.callable_value_count; ++i) {
+                    SolMirLinkageCallableValue *value
+                        = &p->linkage.callable_values[i];
+                    if (value->callable_plan != callable_index) continue;
+                    MUTATE(*value, callable_plan, p->operations.callable_count);
+                    MUTATE(*value, table, p->linkage.table_entry_count);
+                    break;
+                }
+            }
+        }
+    }
 #undef MUTATE
 #define HEADER(field) do { \
     size_t saved_header = (field); ++(field); \
@@ -785,12 +969,13 @@ static void test_validation_mutations(SolMirConcreteProgram *p) {
 
 static void test_e6_complete_and_deterministic(Compilation *c,
     const E6Request *e6) {
-    SolMirConcreteProgram first, repeat, reversed, relocated, limited;
+    SolMirConcreteProgram first, repeat, reversed, relocated, limited, discovery_limited;
     sol_mir_concrete_program_init(&first);
     sol_mir_concrete_program_init(&repeat);
     sol_mir_concrete_program_init(&reversed);
     sol_mir_concrete_program_init(&relocated);
     sol_mir_concrete_program_init(&limited);
+    sol_mir_concrete_program_init(&discovery_limited);
     SolMirConcreteBuildOutcome outcome = build(&c->ir, e6, NULL, &first,
         &c->diagnostics);
     if (outcome != SOL_MIR_CONCRETE_BUILD_SUCCEEDED)
@@ -799,14 +984,28 @@ static void test_e6_complete_and_deterministic(Compilation *c,
     if (outcome != SOL_MIR_CONCRETE_BUILD_SUCCEEDED) return;
     CHECK(sol_mir_concrete_program_validate(&first, NULL));
     check_e6_census_and_closure(c, &first);
+    /* The 466-tick direct-invoke proof is last in P2.1: exact succeeds and a
+       one-below discovery budget fails before any concrete owner is published. */
+    SolMirConcreteLimits discovery_limits = sol_mir_concrete_default_limits();
+    discovery_limits.program.max_discovery_work = 1681;
+    CHECK(build(&c->ir, e6, &discovery_limits, &discovery_limited, &c->diagnostics)
+        == SOL_MIR_CONCRETE_BUILD_SUCCEEDED
+        && sol_mir_concrete_program_validate(&discovery_limited, NULL));
+    sol_mir_concrete_program_free(&discovery_limited);
+    discovery_limits.program.max_discovery_work = 1680;
+    CHECK(build(&c->ir, e6, &discovery_limits, &discovery_limited, &c->diagnostics)
+        == SOL_MIR_CONCRETE_BUILD_RESOURCE_EXHAUSTED);
+    check_zero(&discovery_limited);
     CHECK(build(&c->ir, e6, NULL, &repeat, &c->diagnostics)
         == SOL_MIR_CONCRETE_BUILD_SUCCEEDED);
+    CHECK(sol_mir_concrete_program_validate(&repeat, NULL));
     E6Request reverse = *e6;
     for (size_t i = 0; i < e6->root_count; ++i)
         reverse.roots[i] = e6->roots[e6->root_count - i - 1];
     for (size_t i = 0; i < 4; ++i) reverse.imports[i] = e6->imports[3 - i];
     CHECK(build(&c->ir, &reverse, NULL, &reversed, &c->diagnostics)
         == SOL_MIR_CONCRETE_BUILD_SUCCEEDED);
+    CHECK(sol_mir_concrete_program_validate(&reversed, NULL));
     SolMirConcreteLimits alternate = sol_mir_concrete_default_limits();
     ++alternate.program.max_references;
     ++alternate.plan.max_instances;
@@ -817,6 +1016,7 @@ static void test_e6_complete_and_deterministic(Compilation *c,
     ++alternate.linkage.max_callables;
     CHECK(build(&c->ir, e6, &alternate, &limited, &c->diagnostics)
         == SOL_MIR_CONCRETE_BUILD_SUCCEEDED);
+    CHECK(sol_mir_concrete_program_validate(&limited, NULL));
     char *a = render(&first), *b = render(&repeat), *d = render(&reversed);
     char *l = render(&limited);
     char *saved_path = c->ir.source_path;
@@ -840,6 +1040,7 @@ static void test_e6_complete_and_deterministic(Compilation *c,
     }
     CHECK(build(&c->ir, e6, NULL, &relocated, &c->diagnostics)
         == SOL_MIR_CONCRETE_BUILD_SUCCEEDED);
+    CHECK(sol_mir_concrete_program_validate(&relocated, NULL));
     char *r = render(&relocated);
     c->ir.source_path = saved_path;
     for (size_t i = 0; i < c->ir.file_count; ++i) {
@@ -875,6 +1076,7 @@ static void test_e6_complete_and_deterministic(Compilation *c,
     free(a); free(b); free(d); free(l); free(r);
     test_validation_mutations(&first);
     sol_mir_concrete_program_free(&relocated);
+    sol_mir_concrete_program_free(&discovery_limited);
     sol_mir_concrete_program_free(&limited);
     sol_mir_concrete_program_free(&reversed);
     sol_mir_concrete_program_free(&repeat);
