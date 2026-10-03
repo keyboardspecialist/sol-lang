@@ -2313,24 +2313,7 @@ static LoweredValue mir_lower_block(MirLowerer *lowerer,
                 if (!mir_start_block(lowerer, required)) {
                     return mir_failure(lowerer);
                 }
-                SolIrTypeId unit = SOL_IR_NONE;
-                for (size_t type = 0; type < lowerer->ir->type_count; ++type) {
-                    if (lowerer->ir->types[type].kind == SOL_IR_TYPE_UNIT) {
-                        unit = type;
-                        break;
-                    }
-                }
-                if (unit == SOL_IR_NONE) return mir_failure(lowerer);
-                last = (LoweredValue){
-                    .reachable = true,
-                    .value = mir_instruction_result(lowerer, (SolMirInstruction){
-                        .kind = SOL_MIR_INST_CONST_UNIT,
-                        .type = unit,
-                        .source_expression = SOL_IR_NONE,
-                        .span = statement->span,
-                    }),
-                };
-                if (last.value == SOL_MIR_NONE) return mir_failure(lowerer);
+                last.value = SOL_MIR_NONE;
                 break;
             }
             case SOL_IR_STATEMENT_UNREACHABLE:

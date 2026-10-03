@@ -1,5 +1,8 @@
 #define SOL_MIR_PLAN_TEST_HOOKS 1
 #include "sol/mir_runtime_lowered_program.h"
+#include "sol/effects.h"
+#include "sol/lexer.h"
+#include "sol/ownership.h"
 #include "sol/package.h"
 
 #include <stdio.h>
@@ -13,10 +16,13 @@ static int failures;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); ++failures; } } while (0)
 typedef struct { SolDiagnostics d; SolHirModule h; SolTypeTable t; SolEffectTable e; SolContractTable k; SolIr ir; SolPackage p; } Fixture;
 typedef struct { SolMirConcreteProgram concrete; SolMirRuntimeConventions conventions; SolMirRuntimeValues values; SolMirRuntimeCleanup cleanup; SolMirRuntimeHostAbi host; SolMirRuntimeHandlerAbi handlers; SolMirRuntimeLoweredProgram lowered; } Pipeline;
+typedef struct { SolSource source; SolTokens tokens; SolSyntaxTree syntax; SolDiagnostics d; SolHirModule h; SolTypeTable t; SolEffectTable e; SolContractTable k; SolIr ir; } TextFixture;
 static SolIrCallableId find(const SolIr *ir,const char*n,SolIrCallableKind k) { for(size_t i=0;i<ir->callable_count;i++)if(ir->callables[i].kind==k&&!strcmp(ir->callables[i].name,n))return i;return SOL_IR_NONE; }
 static bool setup_at(Fixture*f,const char*directory) { memset(f,0,sizeof *f);sol_package_init(&f->p);sol_diagnostics_init(&f->d);sol_hir_module_init(&f->h);sol_type_table_init(&f->t);sol_effect_table_init(&f->e);sol_contract_table_init(&f->k);sol_ir_init(&f->ir);char message[256];if(!sol_package_load_directory(&f->p,directory,&f->d,message,sizeof message))return false;SolHirFileScope scopes[8];if(f->p.file_count>8)return false;for(size_t i=0;i<f->p.file_count;i++)scopes[i]=(SolHirFileScope){f->p.files[i].module_name,f->p.files[i].import_start,f->p.files[i].import_count,f->p.files[i].item_start,f->p.files[i].item_count};return sol_hir_lower_scoped(&f->p.source,&f->p.syntax,scopes,f->p.file_count,&f->h,&f->d)&&sol_type_check(&f->p.source,&f->p.syntax,&f->h,&f->t,&f->d)&&sol_effect_check(&f->p.source,&f->p.syntax,&f->h,&f->t,&f->e,&f->d)&&sol_contract_lower(&f->p.source,&f->p.syntax,&f->h,&f->t,&f->e,&f->k,&f->d)&&sol_ir_lower_scoped(&f->p.source,&f->p.syntax,&f->h,&f->t,&f->e,&f->k,f->p.files,f->p.file_count,&f->ir,&f->d); }
 static bool setup(Fixture*f) { return setup_at(f,SOL_TEST_SOURCE_DIR "/tests/conformance/e6"); }
 static void finish(Fixture*f) { sol_ir_free(&f->ir);sol_contract_table_free(&f->k);sol_effect_table_free(&f->e);sol_type_table_free(&f->t);sol_hir_module_free(&f->h);sol_diagnostics_free(&f->d);sol_package_free(&f->p); }
+static bool setup_text(TextFixture*f,const char*text) { memset(f,0,sizeof *f);sol_tokens_init(&f->tokens);sol_diagnostics_init(&f->d);sol_syntax_tree_init(&f->syntax);sol_hir_module_init(&f->h);sol_type_table_init(&f->t);sol_effect_table_init(&f->e);sol_contract_table_init(&f->k);sol_ir_init(&f->ir);return sol_source_from_text(&f->source,"mir_runtime_require.sol",text)&&sol_lex(&f->source,&f->tokens,&f->d)&&sol_parse(&f->source,&f->tokens,&f->syntax,&f->d)&&sol_hir_lower(&f->source,&f->syntax,&f->h,&f->d)&&sol_type_check(&f->source,&f->syntax,&f->h,&f->t,&f->d)&&sol_effect_check(&f->source,&f->syntax,&f->h,&f->t,&f->e,&f->d)&&sol_contract_lower(&f->source,&f->syntax,&f->h,&f->t,&f->e,&f->k,&f->d)&&sol_ir_lower(&f->source,&f->syntax,&f->h,&f->t,&f->e,&f->k,&f->ir,&f->d); }
+static void finish_text(TextFixture*f) { sol_ir_free(&f->ir);sol_contract_table_free(&f->k);sol_effect_table_free(&f->e);sol_type_table_free(&f->t);sol_hir_module_free(&f->h);sol_syntax_tree_free(&f->syntax);sol_tokens_free(&f->tokens);sol_source_free(&f->source);sol_diagnostics_free(&f->d); }
 static void init(Pipeline*p) { memset(p,0,sizeof *p);sol_mir_concrete_program_init(&p->concrete);sol_mir_runtime_conventions_init(&p->conventions);sol_mir_runtime_values_init(&p->values);sol_mir_runtime_cleanup_init(&p->cleanup);sol_mir_runtime_host_abi_init(&p->host);sol_mir_runtime_handler_abi_init(&p->handlers);sol_mir_runtime_lowered_program_init(&p->lowered); }
 static void done(Pipeline*p) { sol_mir_runtime_lowered_program_free(&p->lowered);sol_mir_runtime_handler_abi_free(&p->handlers);sol_mir_runtime_host_abi_free(&p->host);sol_mir_runtime_cleanup_free(&p->cleanup);sol_mir_runtime_values_free(&p->values);sol_mir_runtime_conventions_free(&p->conventions);sol_mir_concrete_program_free(&p->concrete); }
 static char *rendered(const SolMirRuntimeLoweredProgram *lowered, size_t *length) {
@@ -209,6 +215,7 @@ static bool build_pre_operations(Fixture*f,Pipeline*p, bool reverse_tests) {
 }
 static bool build_graph(Fixture*f,Pipeline*p) { SolMirProgramRoot root={find(&f->ir,"launch",SOL_IR_CALLABLE_FUNCTION),SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};SolMirTargetDescriptor target=sol_mir_target_wasm32();return root.callable!=SOL_IR_NONE&&sol_mir_concrete_program_build(&(SolMirConcreteBuildRequest){&f->ir,&root,1,NULL,0,&target,NULL},&p->concrete,&f->d)==SOL_MIR_CONCRETE_BUILD_SUCCEEDED&&sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){&p->concrete,NULL},&p->conventions,&f->d)==SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED&&sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){&p->conventions,NULL},&p->values,&f->d)==SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED&&sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){&p->conventions,&p->values,NULL},&p->cleanup,&f->d)==SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED&&sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){&p->conventions,&p->values,&p->cleanup,NULL},&p->host,&f->d)==SOL_MIR_RUNTIME_HOST_ABI_BUILD_SUCCEEDED&&sol_mir_runtime_handler_abi_build(&(SolMirRuntimeHandlerAbiBuildRequest){&p->conventions,&p->values,&p->cleanup,&p->host,NULL},&p->handlers,&f->d)==SOL_MIR_RUNTIME_HANDLER_ABI_BUILD_SUCCEEDED&&sol_mir_runtime_lowered_program_build(&(SolMirRuntimeLoweredProgramBuildRequest){&p->conventions,&p->values,&p->cleanup,&p->host,&p->handlers,NULL},&p->lowered,&f->d)==SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_SUCCEEDED; }
 static bool build_named(Fixture*f,Pipeline*p,const char*name) { SolMirProgramRoot root={find(&f->ir,name,SOL_IR_CALLABLE_FUNCTION),SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};SolMirTargetDescriptor target=sol_mir_target_wasm32();return root.callable!=SOL_IR_NONE&&sol_mir_concrete_program_build(&(SolMirConcreteBuildRequest){&f->ir,&root,1,NULL,0,&target,NULL},&p->concrete,&f->d)==SOL_MIR_CONCRETE_BUILD_SUCCEEDED&&sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){&p->concrete,NULL},&p->conventions,&f->d)==SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED&&sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){&p->conventions,NULL},&p->values,&f->d)==SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED&&sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){&p->conventions,&p->values,NULL},&p->cleanup,&f->d)==SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED&&sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){&p->conventions,&p->values,&p->cleanup,NULL},&p->host,&f->d)==SOL_MIR_RUNTIME_HOST_ABI_BUILD_SUCCEEDED&&sol_mir_runtime_handler_abi_build(&(SolMirRuntimeHandlerAbiBuildRequest){&p->conventions,&p->values,&p->cleanup,&p->host,NULL},&p->handlers,&f->d)==SOL_MIR_RUNTIME_HANDLER_ABI_BUILD_SUCCEEDED&&sol_mir_runtime_lowered_program_build(&(SolMirRuntimeLoweredProgramBuildRequest){&p->conventions,&p->values,&p->cleanup,&p->host,&p->handlers,NULL},&p->lowered,&f->d)==SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_SUCCEEDED; }
+static bool build_text_named(TextFixture*f,Pipeline*p,const char*name) { SolMirProgramRoot root={find(&f->ir,name,SOL_IR_CALLABLE_FUNCTION),SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};SolMirTargetDescriptor target=sol_mir_target_wasm32();return root.callable!=SOL_IR_NONE&&sol_mir_concrete_program_build(&(SolMirConcreteBuildRequest){&f->ir,&root,1,NULL,0,&target,NULL},&p->concrete,&f->d)==SOL_MIR_CONCRETE_BUILD_SUCCEEDED&&sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){&p->concrete,NULL},&p->conventions,&f->d)==SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED&&sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){&p->conventions,NULL},&p->values,&f->d)==SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED&&sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){&p->conventions,&p->values,NULL},&p->cleanup,&f->d)==SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED&&sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){&p->conventions,&p->values,&p->cleanup,NULL},&p->host,&f->d)==SOL_MIR_RUNTIME_HOST_ABI_BUILD_SUCCEEDED&&sol_mir_runtime_handler_abi_build(&(SolMirRuntimeHandlerAbiBuildRequest){&p->conventions,&p->values,&p->cleanup,&p->host,NULL},&p->handlers,&f->d)==SOL_MIR_RUNTIME_HANDLER_ABI_BUILD_SUCCEEDED&&sol_mir_runtime_lowered_program_build(&(SolMirRuntimeLoweredProgramBuildRequest){&p->conventions,&p->values,&p->cleanup,&p->host,&p->handlers,NULL},&p->lowered,&f->d)==SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_SUCCEEDED; }
 static bool build_handlers(Fixture*f,Pipeline*p) { const char*names[]={"newest","distinct_roots","one_handler","cleanup_return","cleanup_failure"};SolMirProgramRoot roots[5];for(size_t i=0;i<5;i++)roots[i]=(SolMirProgramRoot){find(&f->ir,names[i],SOL_IR_CALLABLE_FUNCTION),SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};SolIrCallableId imports[]={find(&f->ir,"write",SOL_IR_CALLABLE_CAPABILITY)};SolMirTargetDescriptor target=sol_mir_target_wasm32();for(size_t i=0;i<5;i++)if(roots[i].callable==SOL_IR_NONE)return false;return imports[0]!=SOL_IR_NONE&&sol_mir_concrete_program_build(&(SolMirConcreteBuildRequest){&f->ir,roots,5,imports,1,&target,NULL},&p->concrete,&f->d)==SOL_MIR_CONCRETE_BUILD_SUCCEEDED&&sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){&p->concrete,NULL},&p->conventions,&f->d)==SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED&&sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){&p->conventions,NULL},&p->values,&f->d)==SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED&&sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){&p->conventions,&p->values,NULL},&p->cleanup,&f->d)==SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED&&sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){&p->conventions,&p->values,&p->cleanup,NULL},&p->host,&f->d)==SOL_MIR_RUNTIME_HOST_ABI_BUILD_SUCCEEDED&&sol_mir_runtime_handler_abi_build(&(SolMirRuntimeHandlerAbiBuildRequest){&p->conventions,&p->values,&p->cleanup,&p->host,NULL},&p->handlers,&f->d)==SOL_MIR_RUNTIME_HANDLER_ABI_BUILD_SUCCEEDED&&sol_mir_runtime_lowered_program_build(&(SolMirRuntimeLoweredProgramBuildRequest){&p->conventions,&p->values,&p->cleanup,&p->host,&p->handlers,NULL},&p->lowered,&f->d)==SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_SUCCEEDED; }
 static void expect_descriptor(bool ok, SolMirRuntimeLoweredDemandDescriptor actual,
     SolMirRuntimeLoweredRuntimeClass runtime_class, SolMirRuntimeLoweredPlanFamily family, uint32_t facilities) {
@@ -2411,4 +2418,54 @@ static void test_immediate_method_prerequisite(void) {
     done(&p); finish(&f);
 }
 
-int main(void) { test_vocabulary();Fixture f;Pipeline p;init(&p);CHECK(setup(&f));bool built=!failures&&build(&f,&p,NULL);if(!built)sol_diagnostics_render_human(stderr,&f.p.source,&f.d);CHECK(built);if(built)check_build_work(&p);CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));test_e6_census_and_missing(&p);test_slice_b_graph_joins(&p);test_executable_plan_event_value_joins(&p);test_slice_c_cleanup_and_host(&p);test_slice_d_raw_owner_preflight(&p);test_slice_d_e6_usage(&p);test_slice_e_render(&p);test_slice_d_resource_limits(&p);test_slice_d_allocation_faults(&p);{ Fixture pre_fixture; CHECK(setup(&pre_fixture)); if(!failures) check_pre_operation_render_stability(&pre_fixture); finish(&pre_fixture); }test_erased_loop_census();test_propagation_value_demand();test_pattern_copy_pipeline();test_nontrivial_copy_demand();test_callback_prerequisite();test_callable_hole_prerequisite();test_callable_hole_exact();test_immediate_method_prerequisite();test_bound_environment_indirect_graph();test_source_backed_p36_graph_keys();test_generic_type_place_keys();test_slice_c_handlers();test_long_virtual_path_validation_work();FILE*s=tmpfile();CHECK(s&&sol_mir_runtime_lowered_program_render(s,&p.lowered));if(s)fclose(s);uint64_t seal=p.lowered.authentication;p.lowered.authentication^=1;CHECK(!sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));p.lowered.authentication=seal;CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));SolMirRuntimeLoweredProgramLimits exact=p.lowered.limits;exact.max_owned_bytes=p.lowered.usage.owned_bytes? p.lowered.usage.owned_bytes-1:1;Pipeline bad;init(&bad);CHECK(!build(&f,&bad,&exact)&&!bad.lowered.image_instructions);done(&bad);done(&p);finish(&f);return failures?1:0; }
+static void test_require_never_fallback_pipeline(void) {
+    static const char source[] =
+        "module runtime_require_never\n"
+        "function true_continue(flag: Bool) -> Int64 effects { panic } { require flag else { panic \"fallback\" } return 7 }\n"
+        "function false_panic() -> Int64 effects { panic } { require false else { panic \"fallback\" } return 7 }\n"
+        "function false_unreachable() -> Int64 { require false else { unreachable because { true } } return 7 }\n"
+        "function final_unit(flag: Bool) -> () effects { panic } { require flag else { panic \"fallback\" } }\n";
+    static const struct { const char *name; SolMirTerminatorKind terminal; } cases[] = {
+        {"true_continue", SOL_MIR_TERM_PANIC}, {"false_panic", SOL_MIR_TERM_PANIC},
+        {"false_unreachable", SOL_MIR_TERM_UNREACHABLE}, {"final_unit", SOL_MIR_TERM_PANIC},
+    };
+    TextFixture f;
+    CHECK(setup_text(&f, source));
+    for (size_t c = 0; c < sizeof cases / sizeof *cases; ++c) {
+        Pipeline p; init(&p);
+        bool built = build_text_named(&f, &p, cases[c].name);
+        CHECK(built);
+        if (built) {
+            CHECK(sol_mir_concrete_program_validate(&p.concrete, NULL)
+                && sol_mir_runtime_lowered_program_validate(&p.lowered, NULL));
+            size_t branches = 0, terminals = 0;
+            SolMirRuntimeLoweredImageTerminator *terminal = NULL;
+            for (size_t i = 0; i < p.lowered.image_terminator_count; ++i) {
+                SolMirRuntimeLoweredImageTerminator *row = &p.lowered.image_terminators[i];
+                branches += row->kind == SOL_MIR_TERM_BRANCH;
+                if (row->kind == cases[c].terminal) {
+                    ++terminals;
+                    terminal = row;
+                }
+            }
+            CHECK(branches == 1 && terminals == 1 && terminal != NULL);
+            if (terminal != NULL) {
+                SolMirRuntimeCleanupEventId event = terminal->cleanup_event;
+                CHECK(event < p.cleanup.event_count
+                    && p.cleanup.events[event].block == terminal->block
+                    && p.cleanup.events[event].kind
+                        == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR);
+                terminal->cleanup_event = SOL_MIR_RUNTIME_LOWERED_NONE;
+                reseal(&p.lowered);
+                CHECK(!sol_mir_runtime_lowered_program_validate(&p.lowered, NULL));
+                terminal->cleanup_event = event;
+                reseal(&p.lowered);
+                CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered, NULL));
+            }
+        }
+        done(&p);
+    }
+    finish_text(&f);
+}
+
+int main(void) { test_vocabulary();Fixture f;Pipeline p;init(&p);CHECK(setup(&f));bool built=!failures&&build(&f,&p,NULL);if(!built)sol_diagnostics_render_human(stderr,&f.p.source,&f.d);CHECK(built);if(built)check_build_work(&p);CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));test_e6_census_and_missing(&p);test_slice_b_graph_joins(&p);test_executable_plan_event_value_joins(&p);test_slice_c_cleanup_and_host(&p);test_slice_d_raw_owner_preflight(&p);test_slice_d_e6_usage(&p);test_slice_e_render(&p);test_slice_d_resource_limits(&p);test_slice_d_allocation_faults(&p);{ Fixture pre_fixture; CHECK(setup(&pre_fixture)); if(!failures) check_pre_operation_render_stability(&pre_fixture); finish(&pre_fixture); }test_erased_loop_census();test_propagation_value_demand();test_pattern_copy_pipeline();test_nontrivial_copy_demand();test_callback_prerequisite();test_callable_hole_prerequisite();test_callable_hole_exact();test_immediate_method_prerequisite();test_require_never_fallback_pipeline();test_bound_environment_indirect_graph();test_source_backed_p36_graph_keys();test_generic_type_place_keys();test_slice_c_handlers();test_long_virtual_path_validation_work();FILE*s=tmpfile();CHECK(s&&sol_mir_runtime_lowered_program_render(s,&p.lowered));if(s)fclose(s);uint64_t seal=p.lowered.authentication;p.lowered.authentication^=1;CHECK(!sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));p.lowered.authentication=seal;CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));SolMirRuntimeLoweredProgramLimits exact=p.lowered.limits;exact.max_owned_bytes=p.lowered.usage.owned_bytes? p.lowered.usage.owned_bytes-1:1;Pipeline bad;init(&bad);CHECK(!build(&f,&bad,&exact)&&!bad.lowered.image_instructions);done(&bad);done(&p);finish(&f);return failures?1:0; }

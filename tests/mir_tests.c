@@ -538,6 +538,92 @@ static void test_initial_lowering_and_determinism(void) {
     free_compilation(&compilation);
 }
 
+static void test_require_never_fallback_lowering(void) {
+    Compilation compilation;
+    CHECK(compile(&compilation,
+        "module mir_require_never\n"
+        "function true_continue(flag: Bool) -> Int64 effects { panic } { "
+        "require flag else { panic \"fallback\" } return 7 }\n"
+        "function false_panic() -> Int64 effects { panic } { "
+        "require false else { panic \"fallback\" } return 7 }\n"
+        "function false_unreachable() -> Int64 { "
+        "require false else { unreachable because { true } } return 7 }\n"
+        "function final_unit(flag: Bool) -> () effects { panic } { "
+        "require flag else { panic \"fallback\" } }\n"));
+    CHECK(!sol_diagnostics_has_errors(&compilation.diagnostics));
+
+    const struct {
+        const char *name;
+        SolMirTerminatorKind fallback_terminal;
+        size_t unit_constants;
+    } cases[] = {
+        {"true_continue", SOL_MIR_TERM_PANIC, 0},
+        {"false_panic", SOL_MIR_TERM_PANIC, 0},
+        {"false_unreachable", SOL_MIR_TERM_UNREACHABLE, 0},
+        {"final_unit", SOL_MIR_TERM_PANIC, 1},
+    };
+    for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+        SolMir mir;
+        sol_mir_init(&mir);
+        CHECK(sol_mir_lower_callable(&compilation.ir,
+            callable(&compilation.ir, cases[index].name), &mir,
+            &compilation.diagnostics) == SOL_MIR_LOWER_SUCCEEDED);
+        CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+        SolMirBlockId branch = SOL_MIR_NONE;
+        for (size_t block = 0; block < mir.block_count; ++block) {
+            if (mir.blocks[block].terminator.kind == SOL_MIR_TERM_BRANCH) {
+                CHECK(branch == SOL_MIR_NONE);
+                branch = block;
+            }
+        }
+        CHECK(branch != SOL_MIR_NONE);
+        if (branch != SOL_MIR_NONE) {
+            const SolMirTerminator *term = &mir.blocks[branch].terminator;
+            SolMirBlockId required = term->as.branch.true_edge.block;
+            SolMirBlockId fallback = term->as.branch.false_edge.block;
+            CHECK(required < mir.block_count && fallback < mir.block_count
+                && required != fallback);
+            if (required < mir.block_count && fallback < mir.block_count) {
+                CHECK(mir.blocks[required].terminator.kind == SOL_MIR_TERM_RETURN);
+                CHECK(mir.blocks[fallback].terminator.kind
+                    == cases[index].fallback_terminal);
+                SolMirSlice cleanup = mir.blocks[fallback].instructions;
+                CHECK(cleanup.count != 0);
+                size_t scope_exits = 0;
+                for (size_t instruction = 0; instruction < cleanup.count;
+                    ++instruction) {
+                    scope_exits += mir.instructions[cleanup.offset + instruction].kind
+                        == SOL_MIR_INST_SCOPE_EXIT;
+                }
+                CHECK(scope_exits >= 2 && mir.instructions[cleanup.offset
+                    + cleanup.count - 1].kind == SOL_MIR_INST_SCOPE_EXIT);
+                SolMirBlockId saved_destination = term->as.branch.true_edge.block;
+                mir.blocks[branch].terminator.as.branch.true_edge.block
+                    = mir.block_count;
+                CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+                mir.blocks[branch].terminator.as.branch.true_edge.block
+                    = saved_destination;
+                CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+                SolMirTerminatorKind saved_terminal
+                    = mir.blocks[fallback].terminator.kind;
+                mir.blocks[fallback].terminator.kind = SOL_MIR_TERM_RETURN;
+                CHECK(!sol_mir_validate(&compilation.ir, &mir, NULL));
+                mir.blocks[fallback].terminator.kind = saved_terminal;
+                CHECK(sol_mir_validate(&compilation.ir, &mir, NULL));
+            }
+        }
+        size_t unit_constants = 0;
+        for (size_t instruction = 0; instruction < mir.instruction_count;
+            ++instruction) {
+            unit_constants += mir.instructions[instruction].kind
+                == SOL_MIR_INST_CONST_UNIT;
+        }
+        CHECK(unit_constants == cases[index].unit_constants);
+        sol_mir_free(&mir);
+    }
+    free_compilation(&compilation);
+}
+
 static void test_transactional_unsupported(void) {
     Compilation compilation;
     CHECK(compile(&compilation,
@@ -3908,6 +3994,7 @@ static void test_scope_terminator_provenance(void) {
 int main(void) {
     test_canonical_rendering();
     test_initial_lowering_and_determinism();
+    test_require_never_fallback_lowering();
     test_lexical_scope_markers();
     test_scope_terminator_provenance();
     test_transactional_unsupported();
