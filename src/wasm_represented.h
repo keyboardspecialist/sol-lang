@@ -126,6 +126,12 @@ typedef struct {
     size_t chain_depth;
 } SolWasmRepresentedTestCallCatalogEntry;
 
+typedef enum {
+    SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_INVALID,
+    SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_EVENTLESS,
+    SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_ACTION,
+} SolWasmRepresentedTestCleanupMarkerRoute;
+
 /* Test-only authenticated catalog view.  It never emits a module and exposes
  * only IDs already named by the P3.6 owner.  `entries == NULL, cap == 0` is a
  * summary-only query; otherwise `cap` must cover every reported call. */
@@ -168,6 +174,10 @@ void sol_wasm_represented_test_p44_packet_reset_probe(bool enabled);
 bool sol_wasm_represented_test_control_transition(const SolWasmRepresentedBuildRequest *,
     size_t block, SolMirRuntimeCleanupEdgeRole role, size_t *transition,
     SolMirRuntimeSlice *actions);
+/* Runs the explicit cleanup-marker selector alone.  A successful action is an
+ * index into the authenticated cleanup action arena; eventless has no action. */
+SolWasmRepresentedTestCleanupMarkerRoute sol_wasm_represented_test_cleanup_marker(
+    const SolWasmRepresentedBuildRequest *, size_t instruction, size_t *action);
 #endif
 
 #endif

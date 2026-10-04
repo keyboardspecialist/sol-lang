@@ -1370,6 +1370,13 @@ static bool callable_hole_owner_mutations(const char *directory, size_t holes) {
     }
     if (action == NULL || path == NULL || event == NULL || transition == NULL || row == NULL
         || action_id == SOL_MIR_RUNTIME_LOWERED_NONE) ok = false;
+    if (ok) {
+        size_t selected = SOL_MIR_RUNTIME_LOWERED_NONE;
+        ok = sol_wasm_represented_test_cleanup_marker(
+            &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL},
+            (size_t)(row - pipeline.lowered.image_instructions), &selected)
+                == SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_ACTION && selected == action_id;
+    }
     if (ok && holes == 1) {
         if (path->holes.offset >= pipeline.cleanup.drop_path_count) ok = false;
         else moved = &pipeline.cleanup.drop_paths[path->holes.offset];
@@ -1445,6 +1452,57 @@ static bool callable_hole_owner_mutations(const char *directory, size_t holes) {
         }
     }
 #undef CHECK_CALLABLE_HOLE_REJECT
+    /* A present event whose owned action no longer joins exactly must be
+     * invalid, not the eventless route.  Exercise the selector before the
+     * whole-owner build check, then prove restoration re-enables both. */
+#define CHECK_CALLABLE_HOLE_SELECTOR_REJECT(edit, restore) do { \
+    SolWasmRepresentedOutput rejected, restored; \
+    sol_wasm_represented_output_init(&rejected); sol_wasm_represented_output_init(&restored); \
+    edit; pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+    size_t selected = SOL_MIR_RUNTIME_LOWERED_NONE; \
+    ok = ok && sol_wasm_represented_test_cleanup_marker( \
+        &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, \
+        (size_t)(row - pipeline.lowered.image_instructions), &selected) \
+            == SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_INVALID \
+        && !sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL) \
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, \
+            &rejected, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE \
+        && rejected.bytes.bytes == NULL && rejected.bytes.count == 0 && usage_zero(&rejected.usage); \
+    sol_wasm_represented_output_free(&rejected); restore; \
+    pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+    selected = SOL_MIR_RUNTIME_LOWERED_NONE; \
+    ok = ok && sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL) \
+        && sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL) \
+        && sol_wasm_represented_test_cleanup_marker( \
+            &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, \
+            (size_t)(row - pipeline.lowered.image_instructions), &selected) \
+                == SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_ACTION && selected == action_id \
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, \
+            &restored, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK; \
+    sol_wasm_represented_output_free(&restored); \
+} while (0)
+    if (ok) {
+        SolMirRuntimeCleanupEventKind event_kind = event->kind;
+        CHECK_CALLABLE_HOLE_SELECTOR_REJECT(event->kind = SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION,
+            event->kind = event_kind);
+        SolMirRuntimeSlice event_actions = event->actions;
+        CHECK_CALLABLE_HOLE_SELECTOR_REJECT(event->actions.count = 0,
+            event->actions = event_actions);
+        if (event_actions.offset + 1 < pipeline.cleanup.action_count)
+            CHECK_CALLABLE_HOLE_SELECTOR_REJECT(event->actions.count = 2,
+                event->actions = event_actions);
+        CHECK_CALLABLE_HOLE_SELECTOR_REJECT(event->actions.count = pipeline.cleanup.action_count + 1,
+            event->actions = event_actions);
+        SolMirRuntimeCleanupAction saved_action = *action;
+        CHECK_CALLABLE_HOLE_SELECTOR_REJECT(action->kind = SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_TEMPORARY,
+            *action = saved_action);
+        CHECK_CALLABLE_HOLE_SELECTOR_REJECT(action->target = m->place_count, *action = saved_action);
+        CHECK_CALLABLE_HOLE_SELECTOR_REJECT(action->recipe = SOL_MIR_RECIPE_NONE, *action = saved_action);
+        size_t row_block = row->block;
+        CHECK_CALLABLE_HOLE_SELECTOR_REJECT(row->block = SOL_MIR_RUNTIME_LOWERED_NONE,
+            row->block = row_block);
+    }
+#undef CHECK_CALLABLE_HOLE_SELECTOR_REJECT
     propagation_pipeline_free(&pipeline);
     return ok;
 }
@@ -1995,6 +2053,25 @@ static bool callable_hole_c32_owner_mutations(const char *directory, unsigned sh
             && action != NULL && path != NULL;
         if (ok) {
             SolMirRuntimeLoweredImageInstruction *old_row = &pipeline.lowered.image_instructions[old_marker];
+            size_t selected = SOL_MIR_RUNTIME_LOWERED_NONE;
+            ok = ok && sol_wasm_represented_test_cleanup_marker(
+                &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, old_marker,
+                &selected) == SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_EVENTLESS
+                && selected == SOL_MIR_RUNTIME_NONE;
+            SolMirRuntimeLoweredRuntimeClass runtime_class = old_row->runtime_class;
+            old_row->runtime_class = SOL_MIR_RUNTIME_LOWERED_CLASS_EXECUTABLE;
+            selected = SOL_MIR_RUNTIME_LOWERED_NONE;
+            ok = ok && sol_wasm_represented_test_cleanup_marker(
+                &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, old_marker,
+                &selected) == SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_INVALID
+                && c32_owner_rejected(&pipeline, directory, false);
+            old_row->runtime_class = runtime_class;
+            selected = SOL_MIR_RUNTIME_LOWERED_NONE;
+            ok = ok && c32_owner_restored(&pipeline, directory)
+                && sol_wasm_represented_test_cleanup_marker(
+                    &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, old_marker,
+                    &selected) == SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_EVENTLESS
+                && selected == SOL_MIR_RUNTIME_NONE;
             size_t old_event = old_row->cleanup_event;
             CHECK_C32_OWNER_MUTATION(false, old_row->cleanup_event = 0, old_row->cleanup_event = old_event);
             SolMirMaterializedInstruction *move = &m->instructions[move_id];

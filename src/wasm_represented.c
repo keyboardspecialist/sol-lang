@@ -1514,11 +1514,16 @@ static bool represented_callable_product_whole_transfer(const SolWasmRepresented
 static bool represented_projected_pre_store_cleanup_action(const SolWasmRepresentedBuildRequest *,
     const SolMirRuntimeCleanupAction *);
 
-/* A cleanup marker may only emit the action named by its own P3.6 row.  In
- * particular, multiple scope exits can contain superficially equivalent root
- * drops; searching the arena would let one instruction borrow another exit's
- * drop path. */
-static const SolMirRuntimeCleanupAction *represented_cleanup_instruction_drop_action(
+typedef enum {
+    REPRESENTED_CLEANUP_MARKER_INVALID,
+    REPRESENTED_CLEANUP_MARKER_EVENTLESS,
+    REPRESENTED_CLEANUP_MARKER_ACTION,
+} RepresentedCleanupMarkerRoute;
+
+/* Select the sole action owned by an executable cleanup marker.  This is a
+ * deliberately local join through that marker's P3.6 row: neither an equal
+ * action elsewhere in the cleanup arena nor a CFG successor is evidence. */
+static const SolMirRuntimeCleanupAction *represented_cleanup_instruction_action(
     const RepresentedFunction *function, size_t instruction) {
     const SolMirRuntimeLoweredProgram *owner = function->request->program;
     const SolMirMaterialization *m = &owner->conventions->concrete->materialization;
@@ -1529,24 +1534,47 @@ static const SolMirRuntimeCleanupAction *represented_cleanup_instruction_drop_ac
     const SolMirRuntimeLoweredImageInstruction *row = &owner->image_instructions[instruction];
     size_t target = SOL_MIR_RUNTIME_NONE;
     SolMirRecipeId recipe = SOL_MIR_RECIPE_NONE;
-    if (item->kind == SOL_MIR_INST_DROP_IF_INITIALIZED) {
+    SolMirRuntimeCleanupActionKind kind;
+    bool needs_drop_path = false;
+    if (item->kind == SOL_MIR_INST_TEMPORARY_DROP) {
+        if (item->temporary >= m->temporary_count) return NULL;
+        kind = SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_TEMPORARY;
+        target = item->temporary; recipe = m->temporaries[target].type;
+    } else if (item->kind == SOL_MIR_INST_DROP_IF_INITIALIZED) {
         if (item->local >= m->local_count)
             return NULL;
-        for (size_t i = 0; i < m->place_count; ++i) {
+        kind = (m->locals[item->local].kind == SOL_MIR_MATERIALIZED_LOCAL_PARAMETER
+                || m->locals[item->local].kind == SOL_MIR_MATERIALIZED_LOCAL_RECEIVER)
+            ? SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PARAMETER
+            : SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE;
+        for (size_t i = function->image->places.offset;
+             i < function->image->places.offset + function->image->places.count; ++i) {
+            if (i >= m->place_count) return NULL;
             const SolMirMaterializedPlace *place = &m->places[i];
             if (place->local != item->local || place->projections.count != 0) continue;
-            if (target != SOL_MIR_RUNTIME_NONE) return NULL;
-            target = i;
+            if (target == SOL_MIR_RUNTIME_NONE) target = i;
         }
+        if (kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PARAMETER) target = item->local;
         recipe = m->locals[item->local].type;
+        needs_drop_path = true;
     } else if (item->kind == SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED) {
         if (item->place >= m->place_count) return NULL;
+        kind = SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE;
         target = item->place;
         recipe = m->places[target].final_type;
+        needs_drop_path = true;
+    } else if (item->kind == SOL_MIR_INST_SCOPE_EXIT) {
+        kind = SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_SCOPE;
+        target = instruction; recipe = SOL_MIR_RECIPE_NONE;
+    } else if (item->kind == SOL_MIR_INST_REGION_EXIT) {
+        kind = SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_REGION;
+        target = item->source_statement; recipe = SOL_MIR_RECIPE_NONE;
     } else return NULL;
     if (target == SOL_MIR_RUNTIME_NONE || row->state != SOL_MIR_RUNTIME_LOWERED_PRESENT
         || row->instruction != instruction || row->image != function->image_id
         || row->block != m->instructions[instruction].block || row->kind != item->kind
+        || row->runtime_class != SOL_MIR_RUNTIME_LOWERED_CLASS_CONTROL
+        || row->plan_family != SOL_MIR_RUNTIME_LOWERED_PLAN_CLEANUP
         || row->cleanup_event >= cleanup->event_count) return NULL;
     const SolMirRuntimeCleanupEvent *event = &cleanup->events[row->cleanup_event];
     if (event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION
@@ -1562,6 +1590,7 @@ static const SolMirRuntimeCleanupAction *represented_cleanup_instruction_drop_ac
         || event->transitions.count != 1
         || event->transitions.offset > cleanup->transition_count
         || event->actions.offset > cleanup->action_count
+        || event->actions.count != 1
         || event->actions.count > cleanup->action_count - event->actions.offset
         || event->transitions.count > cleanup->transition_count - event->transitions.offset)
         return NULL;
@@ -1578,11 +1607,14 @@ static const SolMirRuntimeCleanupAction *represented_cleanup_instruction_drop_ac
         || transition->actions.count > cleanup->action_count - transition->actions.offset)
         return NULL;
     const SolMirRuntimeCleanupAction *action = &cleanup->actions[transition->actions.offset];
-    if (action->kind != SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE
-        || action->target != target || action->target >= m->place_count
-        || m->places[action->target].local != m->places[target].local
-        || action->recipe != recipe || action->drop_path >= cleanup->drop_path_count)
+    if (action->kind != kind || action->target != target || action->recipe != recipe
+        || (action->flags & ~(unsigned)SOL_MIR_RUNTIME_CLEANUP_ACTION_GUARDED) != 0)
         return NULL;
+    if (!needs_drop_path) {
+        if (action->flags != 0 || action->drop_path != SOL_MIR_RUNTIME_NONE) return NULL;
+    } else {
+        if (action->drop_path >= cleanup->drop_path_count) return NULL;
+    }
     return action;
 }
 
@@ -2353,9 +2385,16 @@ static bool represented_eventless_old_root_marker(const RepresentedFunction *fun
     const SolMirRuntimeLoweredProgram *owner = function->request->program;
     const SolMirMaterialization *m = &owner->conventions->concrete->materialization;
     if (instruction >= m->instruction_count || instruction >= owner->image_instruction_count
-        || m->instructions[instruction].kind != SOL_MIR_INST_DROP_IF_INITIALIZED
-        || owner->image_instructions[instruction].cleanup_event != SOL_MIR_RUNTIME_LOWERED_NONE)
+        || m->instructions[instruction].kind != SOL_MIR_INST_DROP_IF_INITIALIZED)
         return false;
+    const SolMirRuntimeLoweredImageInstruction *row = &owner->image_instructions[instruction];
+    if (row->state != SOL_MIR_RUNTIME_LOWERED_PRESENT || row->image != function->image_id
+        || row->instruction != instruction || row->block != m->instructions[instruction].block
+        || row->kind != m->instructions[instruction].kind
+        || row->runtime_class != SOL_MIR_RUNTIME_LOWERED_CLASS_CONTROL
+        || row->plan_family != SOL_MIR_RUNTIME_LOWERED_PLAN_CLEANUP
+        || row->cleanup_event != SOL_MIR_RUNTIME_LOWERED_NONE
+        || row->failure_site != SOL_MIR_RUNTIME_NONE) return false;
     size_t moves = 0;
     for (size_t i = 0; i < function->image->instructions.count; ++i) {
         size_t candidate = function->image->instructions.offset + i;
@@ -2370,6 +2409,46 @@ static bool represented_eventless_old_root_marker(const RepresentedFunction *fun
         }
     }
     return moves == 1;
+}
+
+/* P3.6 intentionally omits a marker event when replay proves that there is no
+ * owned value left to consume.  Do not turn that absence into an arena search:
+ * accept it only when the current, present lowered row itself names this exact
+ * control marker and carries no failure identity. */
+static bool represented_eventless_cleanup_marker(const RepresentedFunction *function,
+    size_t instruction) {
+    const SolMirRuntimeLoweredProgram *owner = function->request->program;
+    const SolMirMaterialization *m = &owner->conventions->concrete->materialization;
+    if (instruction >= m->instruction_count || instruction >= owner->image_instruction_count)
+        return false;
+    const SolMirMaterializedInstruction *item = &m->instructions[instruction];
+    const SolMirRuntimeLoweredImageInstruction *row = &owner->image_instructions[instruction];
+    return (item->kind == SOL_MIR_INST_TEMPORARY_DROP
+            || item->kind == SOL_MIR_INST_DROP_IF_INITIALIZED
+            || item->kind == SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED)
+        && row->state == SOL_MIR_RUNTIME_LOWERED_PRESENT && row->image == function->image_id
+        && row->instruction == instruction && row->block == item->block && row->kind == item->kind
+        && row->runtime_class == SOL_MIR_RUNTIME_LOWERED_CLASS_CONTROL
+        && row->plan_family == SOL_MIR_RUNTIME_LOWERED_PLAN_CLEANUP
+        && row->cleanup_event == SOL_MIR_RUNTIME_LOWERED_NONE
+        && row->failure_site == SOL_MIR_RUNTIME_NONE;
+}
+
+/* An explicit marker has exactly three outcomes.  An action is selected only
+ * from its own event.  An eventless marker is accepted only after the exact
+ * lowered control row proves P3 replay found no owned value.  In particular,
+ * the absence of a selected action never converts a present event into a
+ * local-init clear. */
+static RepresentedCleanupMarkerRoute represented_cleanup_instruction_route(
+    const RepresentedFunction *function, size_t instruction,
+    const SolMirRuntimeCleanupAction **action_out) {
+    if (action_out == NULL) return REPRESENTED_CLEANUP_MARKER_INVALID;
+    *action_out = represented_cleanup_instruction_action(function, instruction);
+    if (*action_out != NULL) return REPRESENTED_CLEANUP_MARKER_ACTION;
+    if (represented_eventless_old_root_marker(function, instruction)
+        || represented_eventless_cleanup_marker(function, instruction))
+        return REPRESENTED_CLEANUP_MARKER_EVENTLESS;
+    return REPRESENTED_CLEANUP_MARKER_INVALID;
 }
 
 static bool represented_callable_product_zero_hole_drop(const SolWasmRepresentedBuildRequest *request,
@@ -6314,44 +6393,58 @@ static bool represented_instruction_emit(const RepresentedFunction *function, si
                     (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(1))));
         case SOL_MIR_INST_STORAGE_LIVE:
         case SOL_MIR_INST_STORAGE_DEAD:
-        case SOL_MIR_INST_DROP_IF_INITIALIZED:
             init = local_init_index(function, item->local);
             local = local_hole_index(function, item->local);
-            if (item->kind == SOL_MIR_INST_DROP_IF_INITIALIZED && local != SIZE_MAX) {
-                if (represented_eventless_old_root_marker(function, instruction)) return true;
-                const SolMirRuntimeCleanupAction *action =
-                    represented_cleanup_instruction_drop_action(function, instruction);
-                if (action == NULL) return false;
-                return represented_cleanup_emit(function, action, nodes);
-            }
-#ifdef SOL_MIR_PLAN_TEST_HOOKS
-            if (item->kind == SOL_MIR_INST_DROP_IF_INITIALIZED
-                && represented_test_callable_hole_cleanup_probe) {
-                const SolMirRuntimeCleanupAction *action =
-                    represented_cleanup_instruction_drop_action(function, instruction);
-                if (action != NULL && represented_moved_callable_cleanup_action(function, action))
-                    return represented_cleanup_emit(function, action, nodes);
-            }
-#endif
             return init != SIZE_MAX && (local == SIZE_MAX || represented_nodes_push(nodes,
                     BinaryenLocalSet(function->module, (BinaryenIndex)local, BinaryenConst(
                         function->module, BinaryenLiteralInt32(0))))) && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
                 (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
+        case SOL_MIR_INST_DROP_IF_INITIALIZED: {
+            const SolMirRuntimeCleanupAction *action =
+                NULL;
+            RepresentedCleanupMarkerRoute route = represented_cleanup_instruction_route(function,
+                instruction, &action);
+            if (route == REPRESENTED_CLEANUP_MARKER_EVENTLESS) {
+                if (represented_eventless_old_root_marker(function, instruction)) return true;
+                init = local_init_index(function, item->local);
+                local = local_hole_index(function, item->local);
+                return init != SIZE_MAX && (local == SIZE_MAX || represented_nodes_push(nodes,
+                    BinaryenLocalSet(function->module, (BinaryenIndex)local, BinaryenConst(
+                        function->module, BinaryenLiteralInt32(0))))) && represented_nodes_push(nodes,
+                    BinaryenLocalSet(function->module, (BinaryenIndex)init, BinaryenConst(
+                        function->module, BinaryenLiteralInt32(0))));
+            }
+            if (route != REPRESENTED_CLEANUP_MARKER_ACTION) return false;
+            local = local_hole_index(function, item->local);
+            if (local != SIZE_MAX || represented_moved_callable_cleanup_action(function, action))
+                return represented_cleanup_emit(function, action, nodes);
+            init = local_init_index(function, item->local);
+            return init != SIZE_MAX && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
+                (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
+        }
         case SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED:
             if (item->place >= materialization->place_count) return false;
-            local = local_hole_index(function, materialization->places[item->place].local);
-            if (local != SIZE_MAX) {
+            {
                 const SolMirRuntimeCleanupAction *action =
-                    represented_cleanup_instruction_drop_action(function, instruction);
-                if (action == NULL) return false;
+                    NULL;
+                RepresentedCleanupMarkerRoute route = represented_cleanup_instruction_route(function,
+                    instruction, &action);
+                if (route == REPRESENTED_CLEANUP_MARKER_EVENTLESS) {
+                    init = local_init_index(function, materialization->places[item->place].local);
+                    return init != SIZE_MAX && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
+                        (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
+                }
+                if (route != REPRESENTED_CLEANUP_MARKER_ACTION) return false;
                 if (materialization->places[item->place].projections.count != 0)
                     return represented_projected_pre_store_action(function->request, function->image,
                         instruction, action);
-                return represented_cleanup_emit(function, action, nodes);
+                local = local_hole_index(function, materialization->places[item->place].local);
+                if (local != SIZE_MAX || represented_moved_callable_cleanup_action(function, action))
+                    return represented_cleanup_emit(function, action, nodes);
+                init = local_init_index(function, materialization->places[item->place].local);
+                return init != SIZE_MAX && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
+                    (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
             }
-            init = local_init_index(function, materialization->places[item->place].local);
-            return init != SIZE_MAX && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
-                (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
         case SOL_MIR_INST_LOAD_COPY:
         case SOL_MIR_INST_LOAD_MOVE:
         case SOL_MIR_INST_LOAD_UPDATE:
@@ -6465,21 +6558,31 @@ static bool represented_instruction_emit(const RepresentedFunction *function, si
                 && represented_nodes_push(nodes, BinaryenLocalSet(function->module, (BinaryenIndex)init,
                     BinaryenConst(function->module, BinaryenLiteralInt32(1))));
         case SOL_MIR_INST_TEMPORARY_DROP:
-            init = temporary_init_index(function, item->temporary);
-            if (init != SIZE_MAX && represented_moved_callable_temporary(function, item->temporary)) {
-                BinaryenExpressionRef body[] = {
-                    represented_cleanup_probe_increment(function->module,
-                        P43_CLEANUP_MOVED_CALLABLE),
-                    BinaryenLocalSet(function->module, (BinaryenIndex)init,
-                        BinaryenConst(function->module, BinaryenLiteralInt32(0))),
-                };
-                return body[0] != NULL && body[1] != NULL && represented_nodes_push(nodes,
-                    BinaryenIf(function->module, BinaryenLocalGet(function->module,
-                        (BinaryenIndex)init, BinaryenTypeInt32()), BinaryenBlock(function->module, NULL,
-                            body, 2, BinaryenTypeNone()), NULL));
+            {
+                const SolMirRuntimeCleanupAction *action =
+                    NULL;
+                RepresentedCleanupMarkerRoute route = represented_cleanup_instruction_route(function,
+                    instruction, &action);
+                init = temporary_init_index(function, item->temporary);
+                if (route == REPRESENTED_CLEANUP_MARKER_EVENTLESS)
+                    return init != SIZE_MAX && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
+                        (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
+                if (route != REPRESENTED_CLEANUP_MARKER_ACTION || init == SIZE_MAX) return false;
+                if (represented_moved_callable_temporary(function, item->temporary)) {
+                    BinaryenExpressionRef body[] = {
+                        represented_cleanup_probe_increment(function->module,
+                            P43_CLEANUP_MOVED_CALLABLE),
+                        BinaryenLocalSet(function->module, (BinaryenIndex)init,
+                            BinaryenConst(function->module, BinaryenLiteralInt32(0))),
+                    };
+                    return body[0] != NULL && body[1] != NULL && represented_nodes_push(nodes,
+                        BinaryenIf(function->module, BinaryenLocalGet(function->module,
+                            (BinaryenIndex)init, BinaryenTypeInt32()), BinaryenBlock(function->module, NULL,
+                                body, 2, BinaryenTypeNone()), NULL));
+                }
+                return represented_nodes_push(nodes, BinaryenLocalSet(function->module,
+                    (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
             }
-            return init != SIZE_MAX && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
-                (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
         case SOL_MIR_INST_EXPRESSION_RESULT:
             return destination != SIZE_MAX && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
                 (BinaryenIndex)destination, get_value(function, item->left)));
@@ -6504,8 +6607,16 @@ static bool represented_instruction_emit(const RepresentedFunction *function, si
             }
             return ok;
         }
-        case SOL_MIR_INST_REGION_ENTER: case SOL_MIR_INST_REGION_EXIT:
-        case SOL_MIR_INST_SCOPE_ENTER: case SOL_MIR_INST_SCOPE_EXIT:
+        case SOL_MIR_INST_REGION_EXIT:
+        case SOL_MIR_INST_SCOPE_EXIT: {
+            const SolMirRuntimeCleanupAction *action =
+                NULL;
+            RepresentedCleanupMarkerRoute route = represented_cleanup_instruction_route(function,
+                instruction, &action);
+            return route == REPRESENTED_CLEANUP_MARKER_ACTION;
+        }
+        case SOL_MIR_INST_REGION_ENTER:
+        case SOL_MIR_INST_SCOPE_ENTER:
         case SOL_MIR_INST_CAPTURE_SNAPSHOT:
             return true;
         default:
@@ -8429,5 +8540,35 @@ bool sol_wasm_represented_test_control_transition(const SolWasmRepresentedBuildR
     *transition = (size_t)(selected - owner->cleanup->transitions);
     *actions = selected->actions;
     return true;
+}
+
+SolWasmRepresentedTestCleanupMarkerRoute sol_wasm_represented_test_cleanup_marker(
+    const SolWasmRepresentedBuildRequest *request, size_t instruction, size_t *action) {
+    if (action != NULL) *action = SOL_MIR_RUNTIME_NONE;
+    if (request == NULL || request->program == NULL) return SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_INVALID;
+    const SolMirRuntimeLoweredProgram *owner = request->program;
+    const SolMirMaterialization *m = &owner->conventions->concrete->materialization;
+    if (instruction >= m->instruction_count || instruction >= owner->image_instruction_count) {
+        return SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_INVALID;
+    }
+    const SolMirRuntimeLoweredImageInstruction *row = &owner->image_instructions[instruction];
+    if (row->image >= m->image_count) return SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_INVALID;
+    RepresentedFunction function = {0};
+    function.request = request;
+    function.image = &m->images[row->image];
+    function.image_id = row->image;
+    const SolMirRuntimeCleanupAction *selected = NULL;
+    switch (represented_cleanup_instruction_route(&function, instruction, &selected)) {
+        case REPRESENTED_CLEANUP_MARKER_EVENTLESS:
+            return SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_EVENTLESS;
+        case REPRESENTED_CLEANUP_MARKER_ACTION:
+            if (selected == NULL || selected < owner->cleanup->actions
+                || selected >= owner->cleanup->actions + owner->cleanup->action_count)
+                return SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_INVALID;
+            if (action != NULL) *action = (size_t)(selected - owner->cleanup->actions);
+            return SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_ACTION;
+        default:
+            return SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_INVALID;
+    }
 }
 #endif
