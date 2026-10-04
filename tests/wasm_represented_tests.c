@@ -64,7 +64,7 @@ typedef struct {
     wasm_instance_t *instance;
     wasm_extern_vec_t exports;
     wasm_func_t *entry;
-    wasm_global_t *code, *site, *writebacks;
+    wasm_global_t *code, *site, *panic_detail_offset, *panic_detail_length, *writebacks;
     wasm_global_t *cleanup_counters[4];
     wasm_memory_t *memory;
 } WasmInstance;
@@ -88,7 +88,8 @@ static bool wasm_instance_open(const SolWasmBackendBytes *bytes, const char *ent
     instance->module = instance->store == NULL ? NULL : wasm_module_new(instance->store, &module_bytes);
     wasm_importtype_vec_t imports;
     wasm_exporttype_vec_t types;
-    size_t function = SIZE_MAX, code = SIZE_MAX, site = SIZE_MAX, writebacks = SIZE_MAX, memory = SIZE_MAX;
+    size_t function = SIZE_MAX, code = SIZE_MAX, site = SIZE_MAX, panic_detail_offset = SIZE_MAX,
+        panic_detail_length = SIZE_MAX, writebacks = SIZE_MAX, memory = SIZE_MAX;
     size_t cleanup_counters[4] = {SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX};
     bool ok = instance->module != NULL;
     if (ok) {
@@ -104,6 +105,14 @@ static bool wasm_instance_open(const SolWasmBackendBytes *bytes, const char *ent
             if (name_equal(name, entry)) { if (kind != WASM_EXTERN_FUNC || function != SIZE_MAX) ok = false; function = i; }
             if (name_equal(name, SOL_WASM_REPRESENTED_FAILURE_CODE_EXPORT)) { if (kind != WASM_EXTERN_GLOBAL || code != SIZE_MAX) ok = false; code = i; }
             if (name_equal(name, SOL_WASM_REPRESENTED_FAILURE_SITE_EXPORT)) { if (kind != WASM_EXTERN_GLOBAL || site != SIZE_MAX) ok = false; site = i; }
+            if (name_equal(name, SOL_WASM_REPRESENTED_PANIC_DETAIL_OFFSET_EXPORT)) {
+                if (kind != WASM_EXTERN_GLOBAL || panic_detail_offset != SIZE_MAX) ok = false;
+                panic_detail_offset = i;
+            }
+            if (name_equal(name, SOL_WASM_REPRESENTED_PANIC_DETAIL_LENGTH_EXPORT)) {
+                if (kind != WASM_EXTERN_GLOBAL || panic_detail_length != SIZE_MAX) ok = false;
+                panic_detail_length = i;
+            }
             if (name_equal(name, SOL_WASM_REPRESENTED_TEST_WRITEBACK_EXPORT)) {
                 if (kind != WASM_EXTERN_GLOBAL || writebacks != SIZE_MAX) ok = false;
                 writebacks = i;
@@ -133,6 +142,10 @@ static bool wasm_instance_open(const SolWasmBackendBytes *bytes, const char *ent
         instance->entry = function < instance->exports.size ? wasm_extern_as_func(instance->exports.data[function]) : NULL;
         instance->code = code < instance->exports.size ? wasm_extern_as_global(instance->exports.data[code]) : NULL;
         instance->site = site < instance->exports.size ? wasm_extern_as_global(instance->exports.data[site]) : NULL;
+        instance->panic_detail_offset = panic_detail_offset < instance->exports.size
+            ? wasm_extern_as_global(instance->exports.data[panic_detail_offset]) : NULL;
+        instance->panic_detail_length = panic_detail_length < instance->exports.size
+            ? wasm_extern_as_global(instance->exports.data[panic_detail_length]) : NULL;
         instance->writebacks = writebacks < instance->exports.size
             ? wasm_extern_as_global(instance->exports.data[writebacks]) : NULL;
         for (size_t i = 0; i < sizeof cleanup_counters / sizeof *cleanup_counters; ++i)
@@ -217,6 +230,21 @@ static bool wasm_instance_cleanup_counters(WasmInstance *instance, const int32_t
         if (value.kind != WASM_I32 || value.of.i32 != expected[i]) return false;
     }
     return true;
+}
+
+static bool wasm_instance_panic_detail(WasmInstance *instance, const uint8_t *expected,
+    size_t expected_count) {
+    wasm_val_t offset, length;
+    if (instance == NULL || instance->panic_detail_offset == NULL || instance->panic_detail_length == NULL
+        || instance->memory == NULL || expected_count > 191) return false;
+    wasm_global_get(instance->panic_detail_offset, &offset);
+    wasm_global_get(instance->panic_detail_length, &length);
+    if (offset.kind != WASM_I32 || length.kind != WASM_I32 || length.of.i32 < 0
+        || (size_t)length.of.i32 != expected_count || offset.of.i32 < 0
+        || (size_t)offset.of.i32 > wasm_memory_data_size(instance->memory)
+        || expected_count + 1 > wasm_memory_data_size(instance->memory) - (size_t)offset.of.i32) return false;
+    uint8_t *bytes = (uint8_t *)wasm_memory_data(instance->memory) + offset.of.i32;
+    return memcmp(bytes, expected, expected_count) == 0 && bytes[expected_count] == 0;
 }
 
 static bool invoke_named(const SolWasmBackendBytes *bytes, const char *entry, int64_t value,
@@ -428,6 +456,74 @@ static bool write_uleb_same_width(uint8_t *bytes, size_t width, uint32_t value) 
     return value == 0;
 }
 
+typedef struct {
+    size_t type[32], mutability[32], initial[32], initial_width[32];
+    uint32_t initial_value[32], count;
+    size_t offset_export_index, length_export_index;
+    uint32_t offset_global, length_global;
+} P44WireLayout;
+
+/* Independent minimal parser for the private P4.4 global/export envelope.
+ * It intentionally records byte locations so raw tests mutate a single
+ * semantic field while keeping the surrounding Wasm structurally valid. */
+static bool p44_wire_layout(const SolWasmBackendBytes *module, P44WireLayout *layout) {
+    const uint8_t *cursor = module->bytes + 8, *end = module->bytes + module->count;
+    bool globals = false, exports = false;
+    memset(layout, 0, sizeof *layout);
+    while (cursor < end) {
+        uint8_t id = *cursor++; uint32_t size = 0;
+        if (!read_uleb32(&cursor, end, &size) || size > (size_t)(end - cursor)) return false;
+        const uint8_t *section_end = cursor + size;
+        if (id == 6) {
+            if (globals || !read_uleb32(&cursor, section_end, &layout->count)
+                || layout->count > 32) return false;
+            globals = true;
+            for (uint32_t i = 0; i < layout->count; ++i) {
+                if ((size_t)(section_end - cursor) < 3) return false;
+                layout->type[i] = (size_t)(cursor - module->bytes);
+                uint8_t type = *cursor++;
+                layout->mutability[i] = (size_t)(cursor - module->bytes); ++cursor;
+                if (*cursor++ != (type == UINT8_C(0x7f) ? UINT8_C(0x41) : UINT8_C(0x42))) return false;
+                layout->initial[i] = (size_t)(cursor - module->bytes);
+                const uint8_t *value = cursor;
+                if (type == UINT8_C(0x7f)) {
+                    if (!read_uleb32(&cursor, section_end, &layout->initial_value[i])) return false;
+                } else {
+                    do { if (cursor == section_end) return false; } while (*cursor++ & UINT8_C(0x80));
+                }
+                if (cursor == section_end || *cursor++ != UINT8_C(0x0b)) return false;
+                layout->initial_width[i] = (size_t)(cursor - 1 - value);
+            }
+        } else if (id == 7) {
+            uint32_t count = 0;
+            if (exports || !read_uleb32(&cursor, section_end, &count)) return false;
+            exports = true;
+            for (uint32_t i = 0; i < count; ++i) {
+                const uint8_t *name = NULL; uint32_t name_count = 0, index = 0;
+                if (!read_uleb32(&cursor, section_end, &name_count)
+                    || name_count > (size_t)(section_end - cursor)) return false;
+                name = cursor; cursor += name_count;
+                if (cursor == section_end || *cursor++ != 3) {
+                    if (cursor == section_end) return false;
+                    if (!read_uleb32(&cursor, section_end, &index)) return false;
+                    continue;
+                }
+                size_t index_at = (size_t)(cursor - module->bytes);
+                if (!read_uleb32(&cursor, section_end, &index)) return false;
+                if (bytes_equal(name, name_count, SOL_WASM_REPRESENTED_PANIC_DETAIL_OFFSET_EXPORT)) {
+                    layout->offset_export_index = index_at; layout->offset_global = index;
+                }
+                if (bytes_equal(name, name_count, SOL_WASM_REPRESENTED_PANIC_DETAIL_LENGTH_EXPORT)) {
+                    layout->length_export_index = index_at; layout->length_global = index;
+                }
+            }
+        }
+        cursor = section_end;
+    }
+    return globals && exports && layout->offset_export_index != 0 && layout->length_export_index != 0
+        && layout->offset_global < layout->count && layout->length_global < layout->count;
+}
+
 /* Keep the raw table-absence case independent of Binaryen: removing an active
  * callback table makes the module Wasmtime-invalid, but private validation
  * must still reject it safely before handing bytes to the engine. */
@@ -526,13 +622,15 @@ static bool build_multiroot(const char *directory, bool reverse, SolWasmRepresen
     bool method_roots = strstr(directory, "p43_method_prereq") != NULL || method_failure_entry_roots;
     bool callable_hole_roots = strstr(directory, "p43_callable_hole_prereq") != NULL
         || strstr(directory, "p43_callable_hole_c32_repair") != NULL;
-    if (ok && (callback_roots || callback_inout_roots || method_roots || callable_hole_roots)) {
+    bool p44_terminal_roots = strstr(directory, "p44_nested_panic") != NULL;
+    if (ok && (callback_roots || callback_inout_roots || method_roots || callable_hole_roots
+            || p44_terminal_roots)) {
         for (size_t i = 0; i < ir.callable_count; ++i) {
             if (ir.callables[i].kind != SOL_IR_CALLABLE_FUNCTION) continue;
             if (!strcmp(ir.callables[i].name, "launch")) ids[0] = i;
             else if (!strcmp(ir.callables[i].name,
                 (callback_inout_roots || method_roots) ? "fail"
-                    : callable_hole_roots ? "answer" : "increment")) ids[1] = i;
+                    : callable_hole_roots ? "answer" : p44_terminal_roots ? "inner" : "increment")) ids[1] = i;
         }
         if (ids[0] != SIZE_MAX && ids[1] != SIZE_MAX && ids[0] != ids[1]) {
             roots[root_count++] = (SolMirProgramRoot){ids[0], method_failure_entry_roots
@@ -541,7 +639,8 @@ static bool build_multiroot(const char *directory, bool reverse, SolWasmRepresen
                 ? SOL_MIR_PROGRAM_ROOT_ENTRY : SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
         }
     }
-    if (ok && !callback_roots && !callback_inout_roots && !method_roots && !callable_hole_roots)
+    if (ok && !callback_roots && !callback_inout_roots && !method_roots && !callable_hole_roots
+        && !p44_terminal_roots)
         for (size_t i = 0; i < ir.callable_count; ++i) {
         if (ir.callables[i].kind != SOL_IR_CALLABLE_FUNCTION) continue;
         if (!strcmp(ir.callables[i].name, "first")) ids[0] = i;
@@ -729,6 +828,327 @@ static bool propagation_pipeline_build(PropagationPipeline *pipeline, const char
             &pipeline->conventions, &pipeline->values, &pipeline->cleanup, &pipeline->host,
             &pipeline->handler, NULL}, &pipeline->lowered, &pipeline->diagnostics)
              == SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_SUCCEEDED;
+}
+
+typedef struct {
+    SolMirTerminatorKind kind;
+    SolMirRuntimeFailureOriginKind origin;
+    size_t row, image, block, event, site, transition, action;
+    uint32_t record, start, end, mask;
+    int32_t action_target;
+    bool source_reachable;
+} P44TerminalOwner;
+
+static const char *p44_symbol_for_image(const PropagationPipeline *pipeline, size_t image) {
+    const SolMirLinkage *linkage = &pipeline->concrete.linkage;
+    const char *symbol = NULL;
+    for (size_t i = 0; i < linkage->callable_count; ++i)
+        if (linkage->callables[i].instance == image) {
+            if (symbol != NULL) return NULL;
+            symbol = linkage->callables[i].symbol.bytes;
+        }
+    return symbol;
+}
+
+static bool p44_terminal_owner_controls(const char *directory, const P44TerminalOwner *want) {
+    PropagationPipeline pipeline; propagation_pipeline_init(&pipeline);
+    SolWasmRepresentedOutput baseline, output;
+    sol_wasm_represented_output_init(&baseline); sol_wasm_represented_output_init(&output);
+    bool ok = want != NULL && propagation_pipeline_build(&pipeline, directory)
+        && sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL)
+        && sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory,
+            NULL}, &baseline, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK;
+    SolMirRuntimeLoweredImageTerminator *row = ok && want->row < pipeline.lowered.image_terminator_count
+        ? &pipeline.lowered.image_terminators[want->row] : NULL;
+    SolMirRuntimeCleanupEvent *event = row != NULL && row->cleanup_event < pipeline.cleanup.event_count
+        ? &pipeline.cleanup.events[row->cleanup_event] : NULL;
+    SolMirRuntimeCleanupTransition *transition = event != NULL && want->transition < pipeline.cleanup.transition_count
+        ? &pipeline.cleanup.transitions[want->transition] : NULL;
+    SolMirRuntimeCleanupAction *action = transition != NULL && want->action < pipeline.cleanup.action_count
+        ? &pipeline.cleanup.actions[want->action] : NULL;
+    SolMirRuntimeFailureSite *site = row != NULL && row->failure_site < pipeline.conventions.failure_site_count
+        ? &pipeline.conventions.failure_sites[row->failure_site] : NULL;
+    const char *symbol = row == NULL ? NULL : p44_symbol_for_image(&pipeline, row->image);
+    ProvenanceRecord record = {0};
+    if (ok) ok = row != NULL && event != NULL && transition != NULL && action != NULL && site != NULL
+        && row->state == SOL_MIR_RUNTIME_LOWERED_PRESENT && row->kind == want->kind
+        && row->image == want->image && row->block == want->block && row->cleanup_event == want->event
+        && row->failure_site == want->site && site->origin_kind == want->origin
+        && site->owner == want->image && site->block == want->block
+        && site->instruction == SOL_MIR_RUNTIME_NONE && site->source.file == 0
+        && site->source.start == want->start && site->source.end == want->end
+        && site->allowed_codes == want->mask && event->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+        && event->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+        && event->origin == SOL_MIR_RUNTIME_CLEANUP_ORIGIN_EXPLICIT && event->owner == want->image
+        && event->block == want->block && event->operation == SOL_MIR_RUNTIME_NONE
+        && event->semantic_site == SOL_MIR_RUNTIME_NONE && event->inherited_failure_site == want->site
+        && event->supplemental_site == SOL_MIR_RUNTIME_NONE && event->transitions.offset == want->transition
+        && event->transitions.count == 1 && event->actions.offset == want->action && event->actions.count == 1
+        && transition->event == want->event && transition->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE
+        && transition->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_TERMINAL_FAILURE
+        && transition->source_edge == SOL_MIR_RUNTIME_NONE && transition->destination == SOL_MIR_RUNTIME_NONE
+        && transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31
+        && transition->failure_site == want->site && transition->failure_mask == want->mask
+        && transition->actions.offset == want->action && transition->actions.count == 1
+        && action->kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE
+        && action->flags == SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY
+        && action->target == (size_t)want->action_target && action->recipe == SOL_MIR_RECIPE_NONE
+        && action->drop_path == SOL_MIR_RUNTIME_NONE && provenance_record(&baseline.bytes, want->record, &record)
+        && symbol != NULL && record.tag == 3 && record.kind == want->origin
+        && bytes_equal(record.symbol, record.symbol_count, symbol)
+        && bytes_equal(record.path, record.path_count, "main.sol")
+        && record.start == want->start && record.end == want->end && record.ordinal == 0;
+    char entry[256];
+    if (ok) ok = entry_symbol(&baseline.bytes, entry, sizeof entry)
+        && (want->source_reachable
+            ? invoke_named(&baseline.bytes, entry, 0, (int32_t)(__builtin_ctz(want->mask) + 1),
+                (int32_t)want->record)
+            : invoke_named(&baseline.bytes, entry, 7, 0, 0));
+#define CHECK_P44_OWNER_REJECT(cleanup_valid, edit, restore) do { \
+    edit; pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+    sol_wasm_represented_output_init(&output); \
+    ok = ok && (sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL) == (cleanup_valid)) \
+        && !sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL) \
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, \
+            &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE \
+        && output.bytes.bytes == NULL && output.bytes.count == 0 && usage_zero(&output.usage); \
+    sol_wasm_represented_output_free(&output); restore; \
+    pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+    ok = ok && sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL) \
+        && sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL); \
+} while (0)
+    if (ok) {
+        size_t saved = event->inherited_failure_site;
+        CHECK_P44_OWNER_REJECT(false, event->inherited_failure_site = SOL_MIR_RUNTIME_NONE,
+            event->inherited_failure_site = saved);
+        uint32_t mask = transition->failure_mask;
+        CHECK_P44_OWNER_REJECT(false, transition->failure_mask = 0, transition->failure_mask = mask);
+        saved = row->cleanup_event;
+        CHECK_P44_OWNER_REJECT(true, row->cleanup_event = SOL_MIR_RUNTIME_NONE, row->cleanup_event = saved);
+        SolMirRuntimeCleanupOutcome outcome = transition->outcome;
+        CHECK_P44_OWNER_REJECT(false, transition->outcome = SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,
+            transition->outcome = outcome);
+        SolMirRuntimeCleanupEdgeRole role = transition->edge_role;
+        CHECK_P44_OWNER_REJECT(false, transition->edge_role = SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO,
+            transition->edge_role = role);
+        SolMirRuntimeCleanupFailureSource source = transition->failure_source;
+        CHECK_P44_OWNER_REJECT(false, transition->failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE,
+            transition->failure_source = source);
+        saved = transition->failure_site;
+        CHECK_P44_OWNER_REJECT(false, transition->failure_site = SOL_MIR_RUNTIME_NONE,
+            transition->failure_site = saved);
+        SolMirRuntimeSlice actions = transition->actions;
+        CHECK_P44_OWNER_REJECT(false, transition->actions.count = 0, transition->actions = actions);
+        SolMirRuntimeCleanupAction saved_action = *action;
+        CHECK_P44_OWNER_REJECT(false, action->kind = SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_TEMPORARY,
+            *action = saved_action);
+        CHECK_P44_OWNER_REJECT(false, action->target = SOL_MIR_RUNTIME_NONE, *action = saved_action);
+    }
+#undef CHECK_P44_OWNER_REJECT
+    if (ok) {
+        sol_wasm_represented_output_init(&output);
+        ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory,
+            NULL}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+            && output.bytes.count == baseline.bytes.count
+            && memcmp(output.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+            && usage_equal(&output.usage, &baseline.usage);
+        sol_wasm_represented_output_free(&output);
+    }
+    sol_wasm_represented_output_free(&baseline); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+/* Test-only module shape: one source entry is instantiated once. The private
+ * probes share the entry reset builder but never run source code themselves. */
+static bool p44_same_instance_packet_reset(const char *directory, int32_t panic_site,
+    const uint8_t *detail, size_t detail_count) {
+    PropagationPipeline pipeline; propagation_pipeline_init(&pipeline);
+    SolWasmRepresentedOutput output; sol_wasm_represented_output_init(&output);
+    WasmInstance instance = {0}; char entry[256];
+    sol_wasm_represented_test_p44_packet_reset_probe(true);
+    bool ok = propagation_pipeline_build(&pipeline, directory)
+        && pipeline.conventions.entry_count == 1
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory,
+            NULL}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && sol_wasm_represented_validate(&output.bytes) == SOL_WASM_REPRESENTED_OK
+        && entry_symbol(&output.bytes, entry, sizeof entry)
+        && wasm_instance_open(&output.bytes, entry, &instance)
+        && wasm_instance_call(&instance, 0, 1, panic_site)
+        && wasm_instance_panic_detail(&instance, detail, detail_count)
+        && wasm_instance_call_named(&instance,
+            SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_SUCCESS_EXPORT, 0, 0, 0)
+        && wasm_instance_panic_detail(&instance, (const uint8_t *)"", 0)
+        && wasm_instance_call(&instance, 0, 1, panic_site)
+        && wasm_instance_panic_detail(&instance, detail, detail_count)
+        && wasm_instance_call_named(&instance,
+            SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_NONPANIC_EXPORT, 0, 2, 0)
+        && wasm_instance_panic_detail(&instance, (const uint8_t *)"", 0);
+    wasm_instance_close(&instance); sol_wasm_represented_output_free(&output);
+    sol_wasm_represented_test_p44_packet_reset_probe(false);
+    propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+static bool p44_bytes_contain(const SolWasmBackendBytes *bytes, const char *needle) {
+    size_t count = bytes == NULL || needle == NULL ? 0 : strlen(needle);
+    if (bytes == NULL || bytes->bytes == NULL || count == 0 || count > bytes->count) return false;
+    for (size_t i = 0; i <= bytes->count - count; ++i)
+        if (memcmp(bytes->bytes + i, needle, count) == 0) return true;
+    return false;
+}
+
+/* The sole source Text allocation has two logical requests and 34 logical
+ * bytes. Its supplemental P3.3 record, not the panic terminal record, owns
+ * both one-below runtime-quota failures. */
+static bool p44_panic_runtime_quota_controls(const char *directory) {
+    PropagationPipeline pipeline; propagation_pipeline_init(&pipeline);
+    SolWasmRepresentedOutput exact, limited;
+    sol_wasm_represented_output_init(&exact); sol_wasm_represented_output_init(&limited);
+    bool ok = propagation_pipeline_build(&pipeline, directory) && pipeline.conventions.entry_count == 1;
+    size_t instruction = SOL_MIR_RUNTIME_LOWERED_NONE;
+    if (ok) for (size_t i = 0; i < pipeline.concrete.materialization.instruction_count; ++i)
+        if (pipeline.concrete.materialization.instructions[i].kind == SOL_MIR_INST_CONST_TEXT) {
+            if (instruction != SOL_MIR_RUNTIME_LOWERED_NONE) ok = false;
+            instruction = i;
+        }
+    SolMirRuntimeLoweredImageInstruction *row = instruction < pipeline.lowered.image_instruction_count
+        ? &pipeline.lowered.image_instructions[instruction] : NULL;
+    SolMirRuntimeCleanupEvent *event = row != NULL && row->cleanup_event < pipeline.cleanup.event_count
+        ? &pipeline.cleanup.events[row->cleanup_event] : NULL;
+    SolMirRuntimeCleanupSupplementalSite *site = event != NULL
+        && event->supplemental_site < pipeline.cleanup.supplemental_site_count
+        ? &pipeline.cleanup.supplemental_sites[event->supplemental_site] : NULL;
+    SolWasmRepresentedLimits limits = sol_wasm_represented_default_limits();
+    limits.max_allocation_requests = 2; limits.max_allocation_bytes = 34;
+    if (ok) ok = instruction != SOL_MIR_RUNTIME_LOWERED_NONE && row != NULL && event != NULL
+        && site != NULL && row->state == SOL_MIR_RUNTIME_LOWERED_PRESENT
+        && event->supplemental_site < pipeline.cleanup.supplemental_site_count
+        && site->event == row->cleanup_event && site->allowed_codes
+            == ((UINT32_C(1) << (SOL_MIR_RUNTIME_FAILURE_ALLOCATION_FAILED - 1))
+                | (UINT32_C(1) << (SOL_MIR_RUNTIME_FAILURE_ALLOCATION_LIMIT - 1)))
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory,
+            &limits}, &exact, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK;
+    uint32_t allocation_record = 0; size_t allocation_records = 0; ProvenanceRecord record = {0};
+    const char *symbol = event == NULL ? NULL : p44_symbol_for_image(&pipeline, event->owner);
+    if (ok) {
+        for (uint32_t i = 1; i <= exact.usage.provenance_records; ++i) {
+            ProvenanceRecord candidate;
+            if (!provenance_record(&exact.bytes, i, &candidate)) { ok = false; break; }
+            if (candidate.tag == 4 && candidate.start == site->source.start
+                && candidate.end == site->source.end) {
+                ++allocation_records; allocation_record = i; record = candidate;
+            }
+        }
+        ok = ok && allocation_records == 1 && allocation_record == 4 && record.kind == 0
+            && bytes_equal(record.path, record.path_count, "main.sol")
+            && record.start == site->source.start && record.end == site->source.end
+            && record.ordinal == 0 && symbol != NULL
+            && bytes_equal(record.symbol, record.symbol_count, symbol);
+    }
+    char entry[256];
+    if (ok) ok = entry_symbol(&exact.bytes, entry, sizeof entry)
+        && invoke_named(&exact.bytes, entry, 0, 1, 3);
+    const struct { uint64_t requests, bytes; } one_below[] = {{1, 34}, {2, 33}};
+    for (size_t i = 0; ok && i < sizeof one_below / sizeof *one_below; ++i) {
+        SolWasmRepresentedLimits capped = sol_wasm_represented_default_limits();
+        capped.max_allocation_requests = one_below[i].requests;
+        capped.max_allocation_bytes = one_below[i].bytes;
+        sol_wasm_represented_output_init(&limited);
+        ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory,
+            &capped}, &limited, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK;
+        WasmInstance instance = {0};
+        if (ok) ok = wasm_instance_open(&limited.bytes, entry, &instance)
+            && wasm_instance_call(&instance, 0, 5, 4)
+            && wasm_instance_panic_detail(&instance, (const uint8_t *)"", 0)
+            /* A second invocation is a same-instance retry after the wrapper reset. */
+            && wasm_instance_call(&instance, 0, 5, 4)
+            && wasm_instance_panic_detail(&instance, (const uint8_t *)"", 0);
+        wasm_instance_close(&instance); sol_wasm_represented_output_free(&limited);
+    }
+    sol_wasm_represented_output_free(&exact); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+static bool p44_packet_reset_probe_authorization(const char *directory) {
+    PropagationPipeline pipeline; propagation_pipeline_init(&pipeline);
+    SolWasmRepresentedOutput production, probe;
+    sol_wasm_represented_output_init(&production); sol_wasm_represented_output_init(&probe);
+    sol_wasm_represented_test_p44_packet_reset_probe(false);
+    bool ok = propagation_pipeline_build(&pipeline, directory)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory,
+            NULL}, &production, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && !p44_bytes_contain(&production.bytes,
+            SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_SUCCESS_EXPORT)
+        && !p44_bytes_contain(&production.bytes,
+            SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_NONPANIC_EXPORT)
+        && sol_wasm_represented_validate(&production.bytes) == SOL_WASM_REPRESENTED_OK;
+    sol_wasm_represented_test_p44_packet_reset_probe(true);
+    if (ok) ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+        directory, NULL}, &probe, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && p44_bytes_contain(&probe.bytes, SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_SUCCESS_EXPORT)
+        && p44_bytes_contain(&probe.bytes, SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_NONPANIC_EXPORT)
+        && sol_wasm_represented_validate(&probe.bytes) == SOL_WASM_REPRESENTED_OK;
+    char entry[256]; WasmInstance instance = {0};
+    if (ok) ok = entry_symbol(&probe.bytes, entry, sizeof entry)
+        && wasm_instance_open(&probe.bytes, entry, &instance)
+        && wasm_instance_call_named(&instance,
+            SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_SUCCESS_EXPORT, 0, 0, 0);
+    wasm_instance_close(&instance);
+    sol_wasm_represented_test_p44_packet_reset_probe(false);
+    if (ok) ok = sol_wasm_represented_validate(&probe.bytes) == SOL_WASM_REPRESENTED_INVALID_INPUT;
+    sol_wasm_represented_output_free(&probe); sol_wasm_represented_output_free(&production);
+    propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+static bool p44_terminal_multiroot(const char *directory) {
+    SolWasmRepresentedOutput forward, reverse, repeat, relocated;
+    size_t forward_ids[2], reverse_ids[2], repeat_ids[2], relocated_ids[2];
+    sol_wasm_represented_output_init(&forward); sol_wasm_represented_output_init(&reverse);
+    sol_wasm_represented_output_init(&repeat); sol_wasm_represented_output_init(&relocated);
+    bool ok = build_multiroot(directory, false, &forward, forward_ids, NULL,
+        SOL_WASM_REPRESENTED_OK) && build_multiroot(directory, true, &reverse, reverse_ids, NULL,
+        SOL_WASM_REPRESENTED_OK) && build_multiroot(directory, false, &repeat, repeat_ids, NULL,
+        SOL_WASM_REPRESENTED_OK) && forward_ids[0] != forward_ids[1]
+        && forward_ids[0] == reverse_ids[0] && forward_ids[1] == reverse_ids[1]
+        && forward_ids[0] == repeat_ids[0] && forward_ids[1] == repeat_ids[1]
+        && forward.bytes.count == reverse.bytes.count && forward.bytes.count == repeat.bytes.count
+        && memcmp(forward.bytes.bytes, reverse.bytes.bytes, forward.bytes.count) == 0
+        && memcmp(forward.bytes.bytes, repeat.bytes.bytes, forward.bytes.count) == 0
+        && usage_equal(&forward.usage, &reverse.usage) && usage_equal(&forward.usage, &repeat.usage);
+    uint8_t forward_hash[32], reverse_hash[32], repeat_hash[32];
+    if (ok) { sha256(forward.bytes.bytes, forward.bytes.count, forward_hash);
+        sha256(reverse.bytes.bytes, reverse.bytes.count, reverse_hash);
+        sha256(repeat.bytes.bytes, repeat.bytes.count, repeat_hash);
+        ok = memcmp(forward_hash, reverse_hash, sizeof forward_hash) == 0
+            && memcmp(forward_hash, repeat_hash, sizeof forward_hash) == 0; }
+    char entry[256];
+    if (ok) ok = entry_symbol(&forward.bytes, entry, sizeof entry)
+        && invoke_named(&forward.bytes, entry, 0, 1, 4)
+        && invoke_named(&reverse.bytes, entry, 0, 1, 4);
+    char relocation[512], source[768], destination[768];
+    (void)mkdir(SOL_TEST_BINARY_DIR, 0700);
+    (void)snprintf(relocation, sizeof relocation, "%s/p44_nested_panic_relocated", SOL_TEST_BINARY_DIR);
+    (void)mkdir(relocation, 0700);
+    (void)snprintf(source, sizeof source, "%s/main.sol", directory);
+    (void)snprintf(destination, sizeof destination, "%s/main.sol", relocation);
+    FILE *input = fopen(source, "rb"), *copied = fopen(destination, "wb");
+    if (input == NULL || copied == NULL) ok = false;
+    if (input != NULL && copied != NULL) {
+        uint8_t buffer[256]; size_t count;
+        while ((count = fread(buffer, 1, sizeof buffer, input)) != 0)
+            if (fwrite(buffer, 1, count, copied) != count) ok = false;
+    }
+    if (input != NULL) fclose(input); if (copied != NULL) fclose(copied);
+    if (ok) ok = build_multiroot(relocation, false, &relocated, relocated_ids, NULL,
+        SOL_WASM_REPRESENTED_OK) && relocated_ids[0] == forward_ids[0]
+        && relocated_ids[1] == forward_ids[1] && relocated.bytes.count == forward.bytes.count
+        && memcmp(relocated.bytes.bytes, forward.bytes.bytes, forward.bytes.count) == 0
+        && usage_equal(&relocated.usage, &forward.usage) && invoke_named(&relocated.bytes, entry, 0, 1, 4);
+    sol_wasm_represented_output_free(&relocated); sol_wasm_represented_output_free(&repeat);
+    sol_wasm_represented_output_free(&reverse); sol_wasm_represented_output_free(&forward);
+    return ok;
 }
 
 static bool callable_hole_supplemental_record(const PropagationPipeline *pipeline,
@@ -4173,9 +4593,256 @@ int main(void) {
     CHECK(frontend_rejects_non_total(pattern_non_total_directory));
     sol_wasm_represented_output_init(&pattern);
     CHECK(build_multiroot(pattern_guard_directory, false, &pattern, pattern_ids, NULL,
-        SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE));
-    CHECK(pattern.bytes.bytes == NULL && pattern.bytes.count == 0 && usage_zero(&pattern.usage));
+        SOL_WASM_REPRESENTED_OK));
+    if (entry_symbol(&pattern.bytes, pattern_entry_name, sizeof pattern_entry_name))
+        CHECK(invoke_named(&pattern.bytes, pattern_entry_name, 42, 0, 0));
+    else CHECK(false);
     sol_wasm_represented_output_free(&pattern);
+    /* P4.4a terminal packets and guarded decisions are source-backed. Every
+     * packet site below is the exact canonical one-based provenance record. */
+    const struct {
+        const char *directory; int64_t value; int32_t code, site; const char *detail;
+        size_t detail_count; bool packet;
+    } p44_cases[] = {
+        {"p44_panic", 0, 1, 3, "represented terminal panic", 26, true},
+        {"p44_panic_empty", 0, 1, 3, "", 0, true},
+        {"p44_panic_191", 0, 1, 3,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 191, true},
+        {"p44_panic_192", 0, 1, 3,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 191, true},
+        {"p44_unreachable", 0, 12, 3, NULL, 0, false},
+        {"p44_guarded_match", 7, 0, 0, NULL, 0, false},
+        {"p44_guarded_true", 42, 0, 0, NULL, 0, false},
+        {"p44_require_true", 42, 0, 0, "", 0, true},
+        {"p44_require_panic", 0, 1, 3, "require fallback", 16, true},
+        {"p44_nested_panic", 0, 1, 4, "nested panic", 12, true},
+        {"p44_require_unreachable", 0, 12, 3, NULL, 0, false},
+    };
+    for (size_t p44 = 0; p44 < sizeof p44_cases / sizeof *p44_cases; ++p44) {
+        char p44_directory[512], p44_entry[256];
+        SolWasmRepresentedOutput p44_output;
+        (void)snprintf(p44_directory, sizeof p44_directory, "%s/tests/conformance/%s",
+            SOL_TEST_SOURCE_DIR, p44_cases[p44].directory);
+        sol_wasm_represented_output_init(&p44_output);
+        CHECK(build_named_root(p44_directory, "launch", &p44_output, NULL,
+            SOL_WASM_REPRESENTED_OK));
+        if (entry_symbol(&p44_output.bytes, p44_entry, sizeof p44_entry)) {
+            WasmInstance instance;
+            CHECK(wasm_instance_open(&p44_output.bytes, p44_entry, &instance)
+                && wasm_instance_call(&instance, p44_cases[p44].value, p44_cases[p44].code,
+                    p44_cases[p44].site)
+                && (p44_cases[p44].packet
+                    ? wasm_instance_panic_detail(&instance, (const uint8_t *)p44_cases[p44].detail,
+                        p44_cases[p44].detail_count)
+                    : instance.panic_detail_offset == NULL && instance.panic_detail_length == NULL));
+            wasm_instance_close(&instance);
+        } else CHECK(false);
+        sol_wasm_represented_output_free(&p44_output);
+    }
+    /* Exact P3.1-to-emitted-packet provenance. The guarded MATCH_FAILURE is
+     * intentionally cold: the unguarded fallback makes the source exhaustive,
+     * but code 11 remains emitted, source-owned, and mutation-tested. */
+    CHECK(p44_terminal_owner_controls(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_panic",
+        &(P44TerminalOwner){SOL_MIR_TERM_PANIC, SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_PANIC,
+            0, 0, 0, 3, 0, 4, 5, 3, 95, 129, 1, 0, true}));
+    CHECK(p44_terminal_owner_controls(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_nested_panic",
+        &(P44TerminalOwner){SOL_MIR_TERM_PANIC, SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_PANIC,
+            0, 0, 0, 3, 1, 4, 5, 4, 95, 115, 1, 1, true}));
+    CHECK(p44_terminal_owner_controls(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_unreachable",
+        &(P44TerminalOwner){SOL_MIR_TERM_UNREACHABLE,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_UNREACHABLE,
+            0, 0, 0, 2, 0, 2, 2, 3, 100, 128, 2048, 0, true}));
+    CHECK(p44_terminal_owner_controls(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_guarded_match",
+        &(P44TerminalOwner){SOL_MIR_TERM_MATCH_FAILURE,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_NO_MATCH,
+            7, 0, 7, 20, 0, 24, 16, 3, 149, 245, 1024, 0, false}));
+    CHECK(p44_same_instance_packet_reset(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_panic", 3,
+        (const uint8_t *)"represented terminal panic", 26));
+    CHECK(p44_panic_runtime_quota_controls(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_panic"));
+    CHECK(p44_packet_reset_probe_authorization(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_panic"));
+    CHECK(p44_terminal_multiroot(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_nested_panic"));
+    {
+        char p44_guard_call_directory[512];
+        SolWasmRepresentedOutput p44_guard_call;
+        (void)snprintf(p44_guard_call_directory, sizeof p44_guard_call_directory,
+            "%s/tests/conformance/p44_guard_call_reject", SOL_TEST_SOURCE_DIR);
+        sol_wasm_represented_output_init(&p44_guard_call);
+        CHECK(build_named_root(p44_guard_call_directory, "launch", &p44_guard_call, NULL,
+            SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE));
+        sol_wasm_represented_output_free(&p44_guard_call);
+    }
+    /* P4.4a's packet exports are private envelope fields: with panic provenance
+     * either exact paired names exist or raw validation rejects the module. */
+    {
+        char p44_panic_directory[512];
+        SolWasmRepresentedOutput p44_panic_wire;
+        (void)snprintf(p44_panic_directory, sizeof p44_panic_directory,
+            "%s/tests/conformance/p44_panic", SOL_TEST_SOURCE_DIR);
+        sol_wasm_represented_output_init(&p44_panic_wire);
+        CHECK(build_named_root(p44_panic_directory, "launch", &p44_panic_wire, NULL,
+            SOL_WASM_REPRESENTED_OK));
+        static const SolWasmRepresentedUsage expected_p44_panic_usage = {
+            .functions = 5, .blocks = 1, .edges = 0, .values = 1, .locals = 31,
+            .generated_nodes = 514, .table_elements = 0, .static_data_bytes = 34,
+            .allocation_requests = 0, .allocation_bytes = 0, .provenance_records = 4,
+            .work_bytes = 11862, .scratch_bytes = 10240, .owned_bytes = 12168,
+            .output_bytes = 1928,
+        };
+        static const uint8_t expected_p44_panic_hash[32] = {
+            0x18,0x78,0x48,0x69,0x06,0xab,0xb2,0xf6,0x28,0x26,0x68,0x93,0x1e,0xdb,0xf1,0xca,
+            0x36,0x97,0xef,0x38,0x94,0xe7,0x8f,0x58,0x55,0xe3,0x2d,0x16,0xa8,0xe8,0x3f,0x5e,
+        };
+        uint8_t p44_panic_hash[32];
+        sha256(p44_panic_wire.bytes.bytes, p44_panic_wire.bytes.count, p44_panic_hash);
+        CHECK(usage_equal(&p44_panic_wire.usage, &expected_p44_panic_usage)
+            && memcmp(p44_panic_hash, expected_p44_panic_hash, sizeof p44_panic_hash) == 0
+            && sol_wasm_represented_test_allocation_attempts() == 19);
+#define CHECK_P44_LIMIT(field, exact) do { \
+    SolWasmRepresentedLimits p44_limit = sol_wasm_represented_default_limits(); \
+    SolWasmRepresentedOutput p44_limited; sol_wasm_represented_output_init(&p44_limited); \
+    p44_limit.field = (exact); \
+    CHECK(build_named_root(p44_panic_directory, "launch", &p44_limited, &p44_limit, \
+        SOL_WASM_REPRESENTED_OK) && usage_equal(&p44_limited.usage, &expected_p44_panic_usage)); \
+    sol_wasm_represented_output_free(&p44_limited); sol_wasm_represented_output_init(&p44_limited); \
+    p44_limit.field = (exact) - 1; \
+    CHECK(build_named_root(p44_panic_directory, "launch", &p44_limited, &p44_limit, \
+        (exact) == 1 ? SOL_WASM_REPRESENTED_INVALID_ARGUMENT : SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED) \
+        && p44_limited.bytes.bytes == NULL && p44_limited.bytes.count == 0 && usage_zero(&p44_limited.usage)); \
+    sol_wasm_represented_output_free(&p44_limited); \
+} while (0)
+        CHECK_P44_LIMIT(max_functions, expected_p44_panic_usage.functions);
+        CHECK_P44_LIMIT(max_blocks, expected_p44_panic_usage.blocks);
+        CHECK_P44_LIMIT(max_values, expected_p44_panic_usage.values);
+        CHECK_P44_LIMIT(max_locals, expected_p44_panic_usage.locals);
+        CHECK_P44_LIMIT(max_generated_nodes, expected_p44_panic_usage.generated_nodes);
+        CHECK_P44_LIMIT(max_static_data_bytes, expected_p44_panic_usage.static_data_bytes);
+        CHECK_P44_LIMIT(max_provenance_records, expected_p44_panic_usage.provenance_records);
+        CHECK_P44_LIMIT(max_work_bytes, expected_p44_panic_usage.work_bytes);
+        CHECK_P44_LIMIT(max_scratch_bytes, expected_p44_panic_usage.scratch_bytes);
+        CHECK_P44_LIMIT(max_owned_bytes, expected_p44_panic_usage.owned_bytes);
+        CHECK_P44_LIMIT(max_output_bytes, expected_p44_panic_usage.output_bytes);
+#undef CHECK_P44_LIMIT
+        /* The panic packet capture itself has zero allocator demand; its source
+         * Text construction has the exact public demand of two requests/34
+         * bytes. Zero remains the API's invalid partial-limit form. */
+        { SolWasmRepresentedLimits p44_quota = sol_wasm_represented_default_limits();
+          SolWasmRepresentedOutput p44_limited; char p44_entry[256];
+          sol_wasm_represented_output_init(&p44_limited);
+          p44_quota.max_allocation_requests = 2; p44_quota.max_allocation_bytes = 34;
+          CHECK(build_named_root(p44_panic_directory, "launch", &p44_limited, &p44_quota,
+              SOL_WASM_REPRESENTED_OK) && entry_symbol(&p44_limited.bytes, p44_entry,
+                  sizeof p44_entry) && invoke_named(&p44_limited.bytes, p44_entry, 0, 1, 3));
+          sol_wasm_represented_output_free(&p44_limited);
+          p44_quota.max_allocation_requests = 0;
+          CHECK(build_named_root(p44_panic_directory, "launch", &p44_limited, &p44_quota,
+              SOL_WASM_REPRESENTED_INVALID_ARGUMENT) && p44_limited.bytes.bytes == NULL
+              && usage_zero(&p44_limited.usage));
+          sol_wasm_represented_output_free(&p44_limited);
+          p44_quota = sol_wasm_represented_default_limits();
+          p44_quota.max_allocation_bytes = 0;
+          CHECK(build_named_root(p44_panic_directory, "launch", &p44_limited, &p44_quota,
+              SOL_WASM_REPRESENTED_INVALID_ARGUMENT) && p44_limited.bytes.bytes == NULL
+              && usage_zero(&p44_limited.usage));
+          sol_wasm_represented_output_free(&p44_limited); }
+        for (size_t ordinal = 0; ordinal < 19; ++ordinal) {
+            SolWasmRepresentedOutput failed;
+            sol_wasm_represented_output_init(&failed);
+            sol_wasm_represented_test_fail_allocation_after(ordinal + 1);
+            CHECK(build_named_root(p44_panic_directory, "launch", &failed, NULL,
+                SOL_WASM_REPRESENTED_ALLOCATION_FAILED) && failed.bytes.bytes == NULL
+                && failed.bytes.count == 0 && usage_zero(&failed.usage));
+            sol_wasm_represented_test_fail_allocation_after(0);
+            sol_wasm_represented_output_free(&failed);
+            /* Retry before moving to the next ordinal: no failed build may
+             * leave accounting, bytes, or allocator-attempt state behind. */
+            SolWasmRepresentedOutput retry; uint8_t retry_hash[32];
+            sol_wasm_represented_output_init(&retry);
+            CHECK(build_named_root(p44_panic_directory, "launch", &retry, NULL,
+                SOL_WASM_REPRESENTED_OK));
+            sha256(retry.bytes.bytes, retry.bytes.count, retry_hash);
+            CHECK(usage_equal(&retry.usage, &expected_p44_panic_usage)
+                && memcmp(retry_hash, expected_p44_panic_hash, sizeof retry_hash) == 0
+                && sol_wasm_represented_test_allocation_attempts() == 19);
+            sol_wasm_represented_output_free(&retry);
+        }
+        { SolWasmRepresentedOutput retry; uint8_t retry_hash[32];
+          sol_wasm_represented_output_init(&retry);
+          CHECK(build_named_root(p44_panic_directory, "launch", &retry, NULL,
+              SOL_WASM_REPRESENTED_OK));
+          sha256(retry.bytes.bytes, retry.bytes.count, retry_hash);
+          CHECK(usage_equal(&retry.usage, &expected_p44_panic_usage)
+              && memcmp(retry_hash, expected_p44_panic_hash, sizeof retry_hash) == 0
+              && sol_wasm_represented_test_allocation_attempts() == 19);
+          sol_wasm_represented_output_free(&retry); }
+        const char *packet_exports[] = {SOL_WASM_REPRESENTED_PANIC_DETAIL_OFFSET_EXPORT,
+            SOL_WASM_REPRESENTED_PANIC_DETAIL_LENGTH_EXPORT};
+        for (size_t field = 0; field < sizeof packet_exports / sizeof *packet_exports; ++field) {
+            const size_t name_count = strlen(packet_exports[field]);
+            size_t at = 0;
+            while (at + name_count <= p44_panic_wire.bytes.count
+                && memcmp(p44_panic_wire.bytes.bytes + at, packet_exports[field], name_count) != 0) ++at;
+            CHECK(at + name_count <= p44_panic_wire.bytes.count);
+            if (at + name_count <= p44_panic_wire.bytes.count) {
+                uint8_t *mutated = malloc(p44_panic_wire.bytes.count);
+                CHECK(mutated != NULL);
+                if (mutated != NULL) {
+                    memcpy(mutated, p44_panic_wire.bytes.bytes, p44_panic_wire.bytes.count);
+                    mutated[at] = 'x';
+                    CHECK(sol_wasm_represented_validate(&(SolWasmBackendBytes){mutated,
+                        p44_panic_wire.bytes.count}) == SOL_WASM_REPRESENTED_INVALID_INPUT);
+                    free(mutated);
+                }
+            }
+        }
+        P44WireLayout wire;
+        CHECK(p44_wire_layout(&p44_panic_wire.bytes, &wire) && wire.offset_global != wire.length_global
+            && wire.offset_global < wire.count && wire.length_global < wire.count && wire.count > 2);
+        /* A page-edge heap is valid only when it still contains the whole
+         * reserved packet; a raised effective heap is rejected before module
+         * creation, so no self-invalidating output can escape. */
+        { SolWasmRepresentedOutput p44_heap; sol_wasm_represented_output_init(&p44_heap);
+          sol_wasm_represented_test_allocator_memory(1, UINT32_C(65536));
+          CHECK(build_named_root(p44_panic_directory, "launch", &p44_heap, NULL,
+              SOL_WASM_REPRESENTED_OK) && sol_wasm_represented_validate(&p44_heap.bytes)
+              == SOL_WASM_REPRESENTED_OK);
+          sol_wasm_represented_output_free(&p44_heap);
+          sol_wasm_represented_test_allocator_memory(1, UINT32_C(65537));
+          CHECK(build_named_root(p44_panic_directory, "launch", &p44_heap, NULL,
+              SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED) && p44_heap.bytes.bytes == NULL
+              && usage_zero(&p44_heap.usage));
+          sol_wasm_represented_test_allocator_memory(0, 0);
+          sol_wasm_represented_output_free(&p44_heap); }
+#define CHECK_P44_WIRE_MUTATION(edit) do { \
+    uint8_t *mutated = malloc(p44_panic_wire.bytes.count); \
+    CHECK(mutated != NULL); \
+    if (mutated != NULL) { \
+        memcpy(mutated, p44_panic_wire.bytes.bytes, p44_panic_wire.bytes.count); edit; \
+        CHECK(sol_wasm_represented_validate(&(SolWasmBackendBytes){mutated, \
+            p44_panic_wire.bytes.count}) == SOL_WASM_REPRESENTED_INVALID_INPUT); \
+        free(mutated); \
+    } \
+} while (0)
+        if (wire.offset_global < wire.count && wire.length_global < wire.count && wire.count > 2) {
+            CHECK_P44_WIRE_MUTATION(mutated[wire.type[wire.offset_global]] = UINT8_C(0x7e));
+            CHECK_P44_WIRE_MUTATION(mutated[wire.mutability[wire.offset_global]] = 1);
+            CHECK_P44_WIRE_MUTATION(write_uleb_same_width(mutated + wire.initial[wire.offset_global],
+                wire.initial_width[wire.offset_global], 0));
+            CHECK_P44_WIRE_MUTATION(mutated[wire.type[wire.length_global]] = UINT8_C(0x7e));
+            CHECK_P44_WIRE_MUTATION(mutated[wire.mutability[wire.length_global]] = 0);
+            CHECK_P44_WIRE_MUTATION(write_uleb_same_width(mutated + wire.initial[wire.length_global],
+                wire.initial_width[wire.length_global], 1));
+            CHECK_P44_WIRE_MUTATION(write_uleb_same_width(mutated + wire.offset_export_index, 1,
+                wire.length_global));
+            CHECK_P44_WIRE_MUTATION(write_uleb_same_width(mutated + wire.initial[2],
+                wire.initial_width[2], wire.initial_value[wire.offset_global] + 191));
+        }
+#undef CHECK_P44_WIRE_MUTATION
+        sol_wasm_represented_output_free(&p44_panic_wire);
+    }
     /* This is a source-valid, authenticated P3.6 closure: the only rejected
      * operation is a whole scalar-product Copy.  It must not reach the raw
      * handle load emitter or publish output. */

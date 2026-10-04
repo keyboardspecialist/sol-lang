@@ -72,12 +72,20 @@ typedef struct {
 
 #define SOL_WASM_REPRESENTED_FAILURE_CODE_EXPORT "sol.p43.failure_code.unstable"
 #define SOL_WASM_REPRESENTED_FAILURE_SITE_EXPORT "sol.p43.failure_site.unstable"
+/* Present iff the authenticated provenance contains an image PANIC site.
+ * These are deliberately unstable private represented-Wasm observability, not
+ * a host adapter ABI. Offset is immutable; length is the captured byte count
+ * and is reset by every entry. */
+#define SOL_WASM_REPRESENTED_PANIC_DETAIL_OFFSET_EXPORT "sol.p44.panic_detail_offset.unstable"
+#define SOL_WASM_REPRESENTED_PANIC_DETAIL_LENGTH_EXPORT "sol.p44.panic_detail_length.unstable"
 #define SOL_WASM_REPRESENTED_TEST_WRITEBACK_EXPORT "sol.p43.test.writebacks"
 #define SOL_WASM_REPRESENTED_TEST_FAILURE_ENTRY_EXPORT "sol.p43.test.c2b-failure"
 #define SOL_WASM_REPRESENTED_TEST_CLEANUP_OLD_CALLABLE_EXPORT "sol.p43.test.cleanup.old-callable"
 #define SOL_WASM_REPRESENTED_TEST_CLEANUP_MOVED_CALLABLE_EXPORT "sol.p43.test.cleanup.moved-callable"
 #define SOL_WASM_REPRESENTED_TEST_CLEANUP_TEXT_SIBLING_EXPORT "sol.p43.test.cleanup.text-sibling"
 #define SOL_WASM_REPRESENTED_TEST_CLEANUP_ROOT_EXPORT "sol.p43.test.cleanup.root"
+#define SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_SUCCESS_EXPORT "sol.p44.test.packet-reset-success"
+#define SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_NONPANIC_EXPORT "sol.p44.test.packet-reset-nonpanic"
 #define SOL_WASM_REPRESENTED_PROVENANCE_SECTION "sol.p43.provenance.v1"
 
 /* Private `sol.p43.provenance.v1` payload: `P43P`, u32 version (=1), u32
@@ -150,6 +158,10 @@ void sol_wasm_represented_test_callback_writeback_probe(bool enabled);
 /* Emits hook-only counters for the admitted callable-product cleanup path.
  * Disabled by default; no production module bytes or exports depend on it. */
 void sol_wasm_represented_test_callable_hole_cleanup_probe(bool enabled);
+/* Emits two test-only P4.4 packet-reset probes. Both run the exact entry
+ * reset prologue; the second publishes code 2 with the test sentinel site 0.
+ * Disabled by default and absent from production module bytes. */
+void sol_wasm_represented_test_p44_packet_reset_probe(bool enabled);
 #endif
 
 #endif

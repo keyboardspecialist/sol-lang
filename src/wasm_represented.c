@@ -30,6 +30,11 @@
 #define P43_TEXT_EQUAL "sol.p43.text.equal"
 #define P43_FIXED_ALLOC "sol.p43.fixed.alloc"
 #define P43_TABLE "sol.p43.functions"
+#define P44_PANIC_DETAIL_OFFSET "sol.p44.panic-detail-offset"
+#define P44_PANIC_DETAIL_LENGTH "sol.p44.panic-detail-length"
+#define P44_PANIC_CAPTURE "sol.p44.panic-capture"
+#define P44_TEST_PACKET_RESET_SUCCESS "sol.p44.test.packet-reset-success"
+#define P44_TEST_PACKET_RESET_NONPANIC "sol.p44.test.packet-reset-nonpanic"
 
 static size_t allocation_attempts;
 static size_t fail_allocation_after;
@@ -41,6 +46,7 @@ static uint32_t represented_test_heap_base;
 static bool represented_test_inactive_payload_probe;
 static bool represented_test_callback_writeback_probe;
 static bool represented_test_callable_hole_cleanup_probe;
+static bool represented_test_p44_packet_reset_probe;
 #endif
 
 typedef enum {
@@ -758,7 +764,9 @@ static bool represented_terminator(const SolMirMaterializedTerminator *terminato
         case SOL_MIR_TERM_CONTINUE:
         case SOL_MIR_TERM_RETURN:
         case SOL_MIR_TERM_INVOKE:
+        case SOL_MIR_TERM_PANIC:
         case SOL_MIR_TERM_MATCH_FAILURE:
+        case SOL_MIR_TERM_UNREACHABLE:
         case SOL_MIR_TERM_PROPAGATE:
             return true;
         default:
@@ -1254,7 +1262,8 @@ typedef struct RepresentedLiteral {
     uint32_t handle, data;
 } RepresentedLiteral;
 
-enum { P43_STATIC_BASE = 8, P43_FIXED_SCRATCH = 1024 };
+enum { P43_STATIC_BASE = 8, P43_FIXED_SCRATCH = 1024, P44_PANIC_DETAIL_BYTES = 192,
+    P44_PANIC_DETAIL_MAX = P44_PANIC_DETAIL_BYTES - 1 };
 
 static bool represented_align8(size_t input, size_t *output) {
     if (input > SIZE_MAX - 7) return false;
@@ -1399,6 +1408,14 @@ static const RepresentedLiteral *represented_literal_for(const RepresentedFuncti
     for (size_t i = 0; i < function->literal_count; ++i)
         if (function->literals[i].instruction == instruction) return &function->literals[i];
     return NULL;
+}
+
+static bool represented_panic_detail_needed(const SolWasmRepresentedBuildRequest *request) {
+    const SolMirRuntimeConventions *conventions = request->program->conventions;
+    for (size_t i = 0; i < conventions->failure_site_count; ++i)
+        if (conventions->failure_sites[i].origin_kind
+            == SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_PANIC) return true;
+    return false;
 }
 
 static bool recipe_represented(const SolMirConcreteProgram *concrete,
@@ -1752,6 +1769,17 @@ static bool represented_function_propagation_scratch_needed(
     return false;
 }
 
+static bool represented_function_terminal_scratch_needed(
+    const SolWasmRepresentedBuildRequest *request, const SolMirMaterializedImage *image) {
+    const SolMirMaterialization *m = &request->program->conventions->concrete->materialization;
+    for (size_t b = 0; b < image->blocks.count; ++b) {
+        size_t block = image->blocks.offset + b;
+        if (block >= m->block_count) return false;
+        if (m->blocks[block].terminator.kind == SOL_MIR_TERM_PANIC) return true;
+    }
+    return false;
+}
+
 static bool represented_function_callable_hole_count(const SolWasmRepresentedBuildRequest *request,
     const SolMirMaterializedImage *image, size_t *count) {
     const SolMirConcreteProgram *concrete = request->program->conventions->concrete;
@@ -1780,7 +1808,8 @@ static bool represented_function_local_count(const SolWasmRepresentedBuildReques
     size_t scratch = (request->program->conventions->call_count == 0
         && !represented_fixed_products_needed(request)
         && !represented_function_pattern_scratch_needed(request, image)
-        && !represented_function_propagation_scratch_needed(request, image)) ? 0 : 1;
+        && !represented_function_propagation_scratch_needed(request, image)
+        && !represented_function_terminal_scratch_needed(request, image)) ? 0 : 1;
     for (size_t i = 0; i < image->blocks.count; ++i) {
         size_t block = image->blocks.offset + i;
         if (block >= m->block_count) return false;
@@ -3248,9 +3277,70 @@ static const RepresentedCallCatalog *represented_catalog_for(const RepresentedCa
     return found;
 }
 
-/* 3B admits only a proof that every emitted image is success-only.  This is
- * intentionally conservative: an otherwise unreachable checked operation or
- * unfamiliar failure producer defers the entire closure to 3C. */
+/* The catalogue admits normal P4.3 producers and the three exact P4.4a
+ * terminal producers only.  In particular, a new cleanup producer cannot be
+ * made callable merely by adding it to the switch below. */
+static bool represented_catalog_terminal_event_supported(
+    const SolWasmRepresentedBuildRequest *request, const SolMirRuntimeCleanupEvent *event) {
+    const SolMirRuntimeCleanup *cleanup = request->program->cleanup;
+    const SolMirRuntimeConventions *conventions = request->program->conventions;
+    SolMirRuntimeFailureOriginKind origin;
+    SolMirRuntimeFailureCode code;
+    SolMirRuntimeFailureDetailKind detail;
+    switch (event->producer) {
+        case SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_PANIC:
+            origin = SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_PANIC;
+            code = SOL_MIR_RUNTIME_FAILURE_PANIC;
+            detail = SOL_MIR_RUNTIME_FAILURE_DETAIL_PANIC_TEXT;
+            break;
+        case SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_NO_MATCH:
+            origin = SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_NO_MATCH;
+            code = SOL_MIR_RUNTIME_FAILURE_NO_MATCH;
+            detail = SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE;
+            break;
+        case SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_UNREACHABLE:
+            origin = SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_UNREACHABLE;
+            code = SOL_MIR_RUNTIME_FAILURE_REACHED_UNREACHABLE;
+            detail = SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE;
+            break;
+        default: return false;
+    }
+    if (event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+        || event->phase != SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+        || event->origin != SOL_MIR_RUNTIME_CLEANUP_ORIGIN_EXPLICIT
+        || !event->captures_failure_detail || event->capture_detail_kind != detail
+        || event->inherited_failure_site >= conventions->failure_site_count
+        || event->transitions.offset > cleanup->transition_count
+        || event->transitions.count > cleanup->transition_count - event->transitions.offset) return false;
+    const SolMirRuntimeFailureSite *site = &conventions->failure_sites[event->inherited_failure_site];
+    if (site->origin_kind != origin || site->allowed_codes != (UINT32_C(1) << (code - 1))) return false;
+    const SolMirRuntimeCleanupTransition *failure = NULL;
+    for (size_t i = 0; i < event->transitions.count; ++i) {
+        const SolMirRuntimeCleanupTransition *candidate = &cleanup->transitions[
+            event->transitions.offset + i];
+        if (candidate->outcome != SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE) continue;
+        if (failure != NULL || candidate->edge_role != SOL_MIR_RUNTIME_CLEANUP_EDGE_TERMINAL_FAILURE
+            || candidate->failure_source != SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31
+            || candidate->failure_site != event->inherited_failure_site
+            || candidate->failure_mask != site->allowed_codes
+            || candidate->continuation != SOL_MIR_RUNTIME_NONE
+            || candidate->actions.offset > cleanup->action_count
+            || candidate->actions.count > cleanup->action_count - candidate->actions.offset) return false;
+        failure = candidate;
+    }
+    if (failure == NULL || failure->actions.count == 0) return false;
+    for (size_t i = 0; i < failure->actions.count; ++i) {
+        const SolMirRuntimeCleanupAction *action = &cleanup->actions[failure->actions.offset + i];
+        if (!represented_cleanup_action(request, action)
+            || (action->kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE)
+                != (i + 1 == failure->actions.count)) return false;
+    }
+    return true;
+}
+
+/* 3B admits only supported P4.3 producers plus the independently authenticated
+ * terminal set above.  An otherwise unreachable checked operation or unfamiliar
+ * failure producer still defers the entire closure to 3C. */
 static bool represented_catalog_failures_supported(const SolWasmRepresentedBuildRequest *request,
     const RepresentedCallCatalogGraph *graph) {
     const SolMirRuntimeCleanup *cleanup = request->program->cleanup;
@@ -3263,7 +3353,8 @@ static bool represented_catalog_failures_supported(const SolWasmRepresentedBuild
             && event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_INVOKE
             && event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_ARITHMETIC
             && event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_SUPPLEMENTAL_ALLOCATION
-            && event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PROPAGATION_RESIDUAL)
+            && event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PROPAGATION_RESIDUAL
+            && !represented_catalog_terminal_event_supported(request, event))
             return false;
         if (event->transitions.offset > cleanup->transition_count
             || event->transitions.count > cleanup->transition_count - event->transitions.offset)
@@ -3624,6 +3715,84 @@ static bool represented_match_failure_certified(const SolWasmRepresentedBuildReq
         && represented_match_total(request, term->source_expression);
 }
 
+/* Terminal failures have no inferred fallback.  P3.3 must name the exact P3.1
+ * site, terminal transition, and ordered cleanup actions before this backend
+ * is allowed to publish a packet.  This is deliberately shared by PANIC,
+ * reached UNREACHABLE, and a genuine exhausted match. */
+static bool represented_terminal_failure_route(const SolWasmRepresentedBuildRequest *request,
+    const SolMirMaterializedImage *image, size_t image_id, size_t block,
+    SolMirTerminatorKind kind, SolMirRuntimeFailureOriginKind origin,
+    SolMirRuntimeFailureCode code, SolMirRuntimeFailureDetailKind detail) {
+    const SolMirRuntimeLoweredProgram *owner = request->program;
+    const SolMirRuntimeConventions *conventions = owner->conventions;
+    const SolMirRuntimeCleanup *cleanup = owner->cleanup;
+    const SolMirMaterialization *m = &conventions->concrete->materialization;
+    uint32_t allowed = UINT32_C(1) << (code - 1);
+    if (image == NULL || block >= m->block_count || block >= owner->image_terminator_count
+        || image_id >= m->image_count || m->blocks[block].terminator.kind != kind) return false;
+    const SolMirRuntimeLoweredImageTerminator *row = &owner->image_terminators[block];
+    if (row->state != SOL_MIR_RUNTIME_LOWERED_PRESENT || row->image != image_id
+        || row->block != block || row->kind != kind || row->cleanup_event >= cleanup->event_count
+        || row->failure_site >= conventions->failure_site_count) return false;
+    const SolMirRuntimeCleanupEvent *event = &cleanup->events[row->cleanup_event];
+    const SolMirRuntimeFailureSite *site = &conventions->failure_sites[row->failure_site];
+    if (event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+        || event->phase != SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+        || event->origin != SOL_MIR_RUNTIME_CLEANUP_ORIGIN_EXPLICIT || event->owner != image_id
+        || event->block != block || event->operation != SOL_MIR_RUNTIME_NONE
+        || event->semantic_site != SOL_MIR_RUNTIME_NONE
+        || event->inherited_failure_site != row->failure_site
+        || event->supplemental_site != SOL_MIR_RUNTIME_NONE
+        || !event->captures_failure_detail || event->capture_detail_kind != detail
+        || event->producer != (kind == SOL_MIR_TERM_PANIC
+            ? SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_PANIC
+            : kind == SOL_MIR_TERM_MATCH_FAILURE
+            ? SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_NO_MATCH
+            : SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_UNREACHABLE)
+        || site->origin_kind != origin || site->owner != image_id || site->block != block
+        || site->instruction != SOL_MIR_RUNTIME_NONE || site->allowed_codes != allowed
+        || event->source.file != site->source.file || event->source.start != site->source.start
+        || event->source.end != site->source.end
+        || event->transitions.offset > cleanup->transition_count
+        || event->transitions.count > cleanup->transition_count - event->transitions.offset) return false;
+    const SolMirRuntimeCleanupTransition *failure = NULL;
+    for (size_t i = 0; i < event->transitions.count; ++i) {
+        const SolMirRuntimeCleanupTransition *candidate = &cleanup->transitions[
+            event->transitions.offset + i];
+        if (candidate->event != row->cleanup_event
+            || candidate->outcome != SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE
+            || candidate->edge_role != SOL_MIR_RUNTIME_CLEANUP_EDGE_TERMINAL_FAILURE
+            || candidate->failure_source != SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31
+            || candidate->failure_site != row->failure_site || candidate->failure_mask != allowed
+            || candidate->continuation != SOL_MIR_RUNTIME_NONE
+            || candidate->actions.offset > cleanup->action_count
+            || candidate->actions.count > cleanup->action_count - candidate->actions.offset
+            || failure != NULL) return false;
+        failure = candidate;
+    }
+    if (failure == NULL || failure->actions.count == 0) return false;
+    for (size_t i = 0; i < failure->actions.count; ++i) {
+        const SolMirRuntimeCleanupAction *action = &cleanup->actions[failure->actions.offset + i];
+        if (!represented_cleanup_action(request, action)
+            || (action->kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE
+                && i + 1 != failure->actions.count)
+            || (action->kind != SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE
+                && i + 1 == failure->actions.count)) return false;
+    }
+    return cleanup->actions[failure->actions.offset + failure->actions.count - 1].kind
+        == SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE;
+}
+
+static bool represented_guard_call(const SolMirConcreteProgram *concrete,
+    const SolMirMaterializedTerminator *term) {
+    if (term->kind != SOL_MIR_TERM_INVOKE || term->source_expression >= concrete->program.ir->expression_count)
+        return false;
+    const SolIr *ir = concrete->program.ir;
+    for (size_t arm = 0; arm < ir->arm_count; ++arm)
+        if (ir->arms[arm].guard == term->source_expression) return true;
+    return false;
+}
+
 static bool represented_pattern_test_supported(const SolWasmRepresentedBuildRequest *request,
     const SolMirMaterializedImage *image, size_t instruction) {
     const SolMirConcreteProgram *concrete = request->program->conventions->concrete;
@@ -3880,8 +4049,10 @@ static bool represented_function_preflight(const SolWasmRepresentedBuildRequest 
                     if (!represented_pattern_extraction_supported(request, image, instruction)) return false;
                     break;
                 case SOL_MIR_INST_MATCH_ARM:
-                    if (item->source_arm >= concrete->program.ir->arm_count
-                        || concrete->program.ir->arms[item->source_arm].guard != SOL_IR_NONE) return false;
+                    /* The CFG has already evaluated a guard before it reaches
+                     * its arm marker.  Keep the marker authenticated, but do
+                     * not mistake a guarded arm for an unsupported intrinsic. */
+                    if (item->source_arm >= concrete->program.ir->arm_count) return false;
                     break;
                 case SOL_MIR_INST_CONSTRUCT:
                     {
@@ -4031,6 +4202,7 @@ static bool represented_function_preflight(const SolWasmRepresentedBuildRequest 
         if ((!represented_terminator(term) && term->kind != SOL_MIR_TERM_RESUME_FAILURE)
             || (term->kind == SOL_MIR_TERM_INVOKE && call == NULL)
             || (term->kind != SOL_MIR_TERM_INVOKE && call != NULL)
+            || represented_guard_call(concrete, term)
             || (term->kind == SOL_MIR_TERM_RESUME_FAILURE
                 && (catalog == NULL || !catalog->resume_blocks[block_id]))) return false;
         switch (term->kind) {
@@ -4050,8 +4222,27 @@ static bool represented_function_preflight(const SolWasmRepresentedBuildRequest 
                 break;
             case SOL_MIR_TERM_RESUME_FAILURE:
                 break;
+            case SOL_MIR_TERM_PANIC:
+                if (!image_value(concrete, image, term->value)
+                    || !represented_text_recipe(concrete, concrete->layout.types[
+                        materialization->values[term->value].type].recipe)
+                    || !represented_terminal_failure_route(request, image, linkage->instance, block_id,
+                        term->kind, SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_PANIC,
+                        SOL_MIR_RUNTIME_FAILURE_PANIC,
+                        SOL_MIR_RUNTIME_FAILURE_DETAIL_PANIC_TEXT)) return false;
+                break;
             case SOL_MIR_TERM_MATCH_FAILURE:
-                if (!represented_match_failure_certified(request, term)) return false;
+                if (!represented_match_failure_certified(request, term)
+                    && !represented_terminal_failure_route(request, image, linkage->instance, block_id,
+                        term->kind, SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_NO_MATCH,
+                        SOL_MIR_RUNTIME_FAILURE_NO_MATCH,
+                        SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE)) return false;
+                break;
+            case SOL_MIR_TERM_UNREACHABLE:
+                if (!represented_terminal_failure_route(request, image, linkage->instance, block_id,
+                        term->kind, SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_UNREACHABLE,
+                        SOL_MIR_RUNTIME_FAILURE_REACHED_UNREACHABLE,
+                        SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE)) return false;
                 break;
             case SOL_MIR_TERM_PROPAGATE: {
                 const SolMirOperationPropagationPlan *plan = NULL;
@@ -4327,6 +4518,95 @@ static BinaryenExpressionRef represented_text_copy_fail(BinaryenModuleRef module
         BinaryenReturn(module, BinaryenConst(module, BinaryenLiteralInt64(0))),
     };
     return BinaryenBlock(module, NULL, items, 3, BinaryenTypeNone());
+}
+
+/* P3.3's panic detail is an owned bounded byte packet, not a borrowed Text
+ * handle.  The slot is reserved between active data and the heap, so capture
+ * neither allocates nor changes the represented allocator's quotas. */
+static bool represented_panic_capture_function(BinaryenModuleRef module) {
+    BinaryenType parameters[] = {BinaryenTypeInt64()};
+    BinaryenType locals[] = {BinaryenTypeInt32(), BinaryenTypeInt32(), BinaryenTypeInt32(),
+        BinaryenTypeInt32(), BinaryenTypeInt32(), BinaryenTypeInt32()};
+    enum { SOURCE = 1, DATA, LENGTH, COUNT, CURSOR, MEMORY_BYTES };
+    BinaryenExpressionRef items[13]; size_t item_count = 0;
+    BinaryenExpressionRef base = BinaryenGlobalGet(module, P44_PANIC_DETAIL_OFFSET,
+        BinaryenTypeInt32());
+    items[item_count++] = BinaryenGlobalSet(module, P44_PANIC_DETAIL_LENGTH,
+        BinaryenConst(module, BinaryenLiteralInt32(0)));
+    items[item_count++] = BinaryenStore(module, 1, 0, 1, base,
+        BinaryenConst(module, BinaryenLiteralInt32(0)), BinaryenTypeInt32(), P43_MEMORY);
+    items[item_count++] = BinaryenIf(module, BinaryenBinary(module, BinaryenGtUInt64(),
+        BinaryenLocalGet(module, 0, BinaryenTypeInt64()), BinaryenConst(module,
+            BinaryenLiteralInt64((int64_t)UINT32_MAX))), BinaryenReturn(module, NULL), NULL);
+    items[item_count++] = BinaryenLocalSet(module, SOURCE, wrap_i64(module,
+        BinaryenLocalGet(module, 0, BinaryenTypeInt64())));
+    items[item_count++] = BinaryenLocalSet(module, MEMORY_BYTES, BinaryenBinary(module,
+        BinaryenShlInt32(), BinaryenMemorySize(module, P43_MEMORY, false), BinaryenConst(module,
+            BinaryenLiteralInt32(16))));
+    items[item_count++] = BinaryenIf(module, BinaryenBinary(module, BinaryenOrInt32(),
+        BinaryenBinary(module, BinaryenLtUInt32(), BinaryenLocalGet(module, SOURCE,
+            BinaryenTypeInt32()), BinaryenConst(module, BinaryenLiteralInt32(P43_STATIC_BASE))),
+        BinaryenBinary(module, BinaryenGtUInt32(), BinaryenLocalGet(module, SOURCE,
+            BinaryenTypeInt32()), BinaryenBinary(module, BinaryenSubInt32(), BinaryenLocalGet(module,
+                MEMORY_BYTES, BinaryenTypeInt32()), BinaryenConst(module, BinaryenLiteralInt32(8))))),
+        BinaryenReturn(module, NULL), NULL);
+    items[item_count++] = BinaryenLocalSet(module, DATA, BinaryenLoad(module, 4, false, 0, 4,
+        BinaryenTypeInt32(), BinaryenLocalGet(module, SOURCE, BinaryenTypeInt32()), P43_MEMORY));
+    items[item_count++] = BinaryenLocalSet(module, LENGTH, BinaryenLoad(module, 4, false, 4, 4,
+        BinaryenTypeInt32(), BinaryenLocalGet(module, SOURCE, BinaryenTypeInt32()), P43_MEMORY));
+    items[item_count++] = BinaryenIf(module, BinaryenBinary(module, BinaryenOrInt32(),
+        BinaryenBinary(module, BinaryenAndInt32(), BinaryenBinary(module, BinaryenEqInt32(),
+            BinaryenLocalGet(module, LENGTH, BinaryenTypeInt32()), BinaryenConst(module,
+                BinaryenLiteralInt32(0))), BinaryenBinary(module, BinaryenNeInt32(),
+            BinaryenLocalGet(module, DATA, BinaryenTypeInt32()), BinaryenConst(module,
+                BinaryenLiteralInt32(0)))), BinaryenBinary(module, BinaryenAndInt32(),
+            BinaryenBinary(module, BinaryenNeInt32(), BinaryenLocalGet(module, LENGTH,
+                BinaryenTypeInt32()), BinaryenConst(module, BinaryenLiteralInt32(0))),
+            BinaryenBinary(module, BinaryenOrInt32(), BinaryenBinary(module, BinaryenEqInt32(),
+                BinaryenLocalGet(module, DATA, BinaryenTypeInt32()), BinaryenConst(module,
+                    BinaryenLiteralInt32(0))), BinaryenBinary(module, BinaryenOrInt32(),
+                BinaryenBinary(module, BinaryenGtUInt32(), BinaryenLocalGet(module, DATA,
+                    BinaryenTypeInt32()), BinaryenLocalGet(module, MEMORY_BYTES,
+                        BinaryenTypeInt32())),
+                BinaryenBinary(module, BinaryenGtUInt32(), BinaryenLocalGet(module, LENGTH,
+                    BinaryenTypeInt32()), BinaryenBinary(module, BinaryenSubInt32(),
+                        BinaryenLocalGet(module, MEMORY_BYTES, BinaryenTypeInt32()),
+                        BinaryenLocalGet(module, DATA, BinaryenTypeInt32()))))))),
+        BinaryenReturn(module, NULL), NULL);
+    items[item_count++] = BinaryenLocalSet(module, COUNT, BinaryenIf(module,
+        BinaryenBinary(module, BinaryenGtUInt32(), BinaryenLocalGet(module, LENGTH,
+            BinaryenTypeInt32()), BinaryenConst(module, BinaryenLiteralInt32(P44_PANIC_DETAIL_MAX))),
+        BinaryenConst(module, BinaryenLiteralInt32(P44_PANIC_DETAIL_MAX)),
+        BinaryenLocalGet(module, LENGTH, BinaryenTypeInt32())));
+    items[item_count++] = BinaryenGlobalSet(module, P44_PANIC_DETAIL_LENGTH,
+        BinaryenLocalGet(module, COUNT, BinaryenTypeInt32()));
+    BinaryenExpressionRef loop[] = {
+        BinaryenIf(module, BinaryenBinary(module, BinaryenEqInt32(), BinaryenLocalGet(module, CURSOR,
+            BinaryenTypeInt32()), BinaryenLocalGet(module, COUNT, BinaryenTypeInt32())),
+            BinaryenBreak(module, "p44.panic.capture.done", NULL, NULL), NULL),
+        BinaryenStore(module, 1, 0, 1, BinaryenBinary(module, BinaryenAddInt32(),
+            BinaryenGlobalGet(module, P44_PANIC_DETAIL_OFFSET, BinaryenTypeInt32()),
+            BinaryenLocalGet(module, CURSOR, BinaryenTypeInt32())), BinaryenLoad(module, 1, false, 0, 1,
+            BinaryenTypeInt32(), BinaryenBinary(module, BinaryenAddInt32(), BinaryenLocalGet(module, DATA,
+                BinaryenTypeInt32()), BinaryenLocalGet(module, CURSOR, BinaryenTypeInt32())), P43_MEMORY),
+            BinaryenTypeInt32(), P43_MEMORY),
+        BinaryenLocalSet(module, CURSOR, BinaryenBinary(module, BinaryenAddInt32(),
+            BinaryenLocalGet(module, CURSOR, BinaryenTypeInt32()), BinaryenConst(module,
+                BinaryenLiteralInt32(1)))),
+        BinaryenBreak(module, "p44.panic.capture.loop", NULL, NULL),
+    };
+    BinaryenExpressionRef captured = BinaryenBlock(module, "p44.panic.capture.done",
+        (BinaryenExpressionRef[]){BinaryenLocalSet(module, CURSOR, BinaryenConst(module,
+            BinaryenLiteralInt32(0))), BinaryenLoop(module, "p44.panic.capture.loop",
+            BinaryenBlock(module, NULL, loop, 4, BinaryenTypeNone()))}, 2, BinaryenTypeNone());
+    items[item_count++] = captured;
+    items[item_count++] = BinaryenStore(module, 1, 0, 1, BinaryenBinary(module, BinaryenAddInt32(),
+        BinaryenGlobalGet(module, P44_PANIC_DETAIL_OFFSET, BinaryenTypeInt32()),
+        BinaryenLocalGet(module, COUNT, BinaryenTypeInt32())), BinaryenConst(module,
+            BinaryenLiteralInt32(0)), BinaryenTypeInt32(), P43_MEMORY);
+    return BinaryenAddFunction(module, P44_PANIC_CAPTURE, BinaryenTypeCreate(parameters, 1),
+        BinaryenTypeNone(), locals, 6, BinaryenBlock(module, NULL, items,
+            (BinaryenIndex)item_count, BinaryenTypeNone())) != NULL;
 }
 
 /* Fixed P2 product allocation.  The helper validates quota before attempting
@@ -5456,6 +5736,51 @@ static bool represented_failure_emit(const RepresentedFunction *function, size_t
     return represented_nodes_push(nodes, BinaryenReturn(function->module, i64(function, 0)));
 }
 
+static bool represented_terminal_failure_emit(const RepresentedFunction *function, size_t block,
+    SolMirRuntimeFailureOriginKind origin, SolMirRuntimeFailureCode code,
+    SolMirRuntimeFailureDetailKind detail, RepresentedNodes *nodes) {
+    const SolWasmRepresentedBuildRequest *request = function->request;
+    const SolMirRuntimeLoweredProgram *owner = request->program;
+    const SolMirMaterialization *m = &owner->conventions->concrete->materialization;
+    if (block >= m->block_count || block >= owner->image_terminator_count) return false;
+    const SolMirMaterializedTerminator *term = &m->blocks[block].terminator;
+    const SolMirRuntimeLoweredImageTerminator *row = &owner->image_terminators[block];
+    if (!represented_terminal_failure_route(request, function->image, function->image_id, block,
+            term->kind, origin, code, detail)) return false;
+    /* Capture before cleanup: P3.3 owns the original byte length and the
+     * bounded copied prefix, while this private helper never touches the heap. */
+    if (detail == SOL_MIR_RUNTIME_FAILURE_DETAIL_PANIC_TEXT) {
+        BinaryenExpressionRef value = get_value(function, term->value);
+        BinaryenExpressionRef arguments[] = {value};
+        if (value == NULL || !represented_nodes_push(nodes, BinaryenCall(function->module,
+                P44_PANIC_CAPTURE, arguments, 1, BinaryenTypeNone()))) return false;
+    }
+    size_t record = 0;
+    if (!represented_failure_record_index(function->provenance, row->failure_site, &record)
+        || !represented_nodes_push(nodes, BinaryenGlobalSet(function->module, P43_CODE,
+            BinaryenConst(function->module, BinaryenLiteralInt32((int32_t)code))))
+        || !represented_nodes_push(nodes, BinaryenGlobalSet(function->module, P43_SITE,
+            BinaryenConst(function->module, BinaryenLiteralInt32((int32_t)record))))) return false;
+    const SolMirRuntimeCleanupEvent *event = &owner->cleanup->events[row->cleanup_event];
+    const SolMirRuntimeCleanupTransition *failure = NULL;
+    for (size_t i = 0; i < event->transitions.count; ++i) {
+        const SolMirRuntimeCleanupTransition *candidate = &owner->cleanup->transitions[
+            event->transitions.offset + i];
+        if (candidate->event == row->cleanup_event
+            && candidate->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE
+            && candidate->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_TERMINAL_FAILURE) {
+            if (failure != NULL) return false;
+            failure = candidate;
+        }
+    }
+    if (failure == NULL || failure->actions.offset > owner->cleanup->action_count
+        || failure->actions.count > owner->cleanup->action_count - failure->actions.offset) return false;
+    for (size_t i = 0; i < failure->actions.count; ++i)
+        if (!represented_cleanup_emit(function,
+                &owner->cleanup->actions[failure->actions.offset + i], nodes)) return false;
+    return represented_nodes_push(nodes, BinaryenReturn(function->module, i64(function, 0)));
+}
+
 /* The allocation helper has already written the authenticated code and site.
  * This emits precisely the terminal supplemental transition's actions once. */
 static bool represented_supplemental_failure_emit(const RepresentedFunction *function,
@@ -5878,8 +6203,7 @@ static bool represented_instruction_emit(const RepresentedFunction *function, si
         case SOL_MIR_INST_PATTERN_VALUE:
             return represented_pattern_value_emit(function, instruction, nodes);
         case SOL_MIR_INST_MATCH_ARM:
-            return item->source_arm < concrete->program.ir->arm_count
-                && concrete->program.ir->arms[item->source_arm].guard == SOL_IR_NONE;
+            return item->source_arm < concrete->program.ir->arm_count;
         case SOL_MIR_INST_CONSTRUCT: {
             const SolMirOperationConstructPlan *plan = constructor_for_instruction(function->request,
                 instruction);
@@ -6503,12 +6827,26 @@ static bool represented_terminator_emit(const RepresentedFunction *function, siz
             return function->calls_enabled && represented_call_emit(function, block, nodes);
         case SOL_MIR_TERM_RESUME_FAILURE:
             return function->calls_enabled && represented_resume_failure_emit(function, block, nodes);
+        case SOL_MIR_TERM_PANIC:
+            return represented_terminal_failure_emit(function, block,
+                SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_PANIC, SOL_MIR_RUNTIME_FAILURE_PANIC,
+                SOL_MIR_RUNTIME_FAILURE_DETAIL_PANIC_TEXT, nodes);
         case SOL_MIR_TERM_MATCH_FAILURE:
             /* Preflight has independently certified this terminal as unreachable
-             * from the authenticated unguarded decision rows.  It is retained
-             * only as a defensive dispatch fallthrough, never a no-match packet. */
+             * from the authenticated unguarded decision rows.  A guarded or
+             * otherwise non-total decision instead names its genuine P3 no-match
+             * terminal; it is a packet return, never a Wasm `unreachable`. */
             return represented_match_failure_certified(function->request, term)
-                && represented_nodes_push(nodes, BinaryenReturn(function->module, i64(function, 0)));
+                ? represented_nodes_push(nodes, BinaryenReturn(function->module, i64(function, 0)))
+                : represented_terminal_failure_emit(function, block,
+                    SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_NO_MATCH,
+                    SOL_MIR_RUNTIME_FAILURE_NO_MATCH,
+                    SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE, nodes);
+        case SOL_MIR_TERM_UNREACHABLE:
+            return represented_terminal_failure_emit(function, block,
+                SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_UNREACHABLE,
+                SOL_MIR_RUNTIME_FAILURE_REACHED_UNREACHABLE,
+                SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE, nodes);
         case SOL_MIR_TERM_PROPAGATE:
             return represented_propagation_emit(function, block, nodes);
         default:
@@ -6526,7 +6864,9 @@ static bool represented_function_emit(const SolWasmRepresentedBuildRequest *requ
     const SolMirMaterializedImage *image = &materialization->images[
         concrete->linkage.callables[callable].instance];
     size_t scratch_count = catalog == NULL && !represented_fixed_products_needed(request)
-        && !represented_function_pattern_scratch_needed(request, image) ? 0 : 1;
+        && !represented_function_pattern_scratch_needed(request, image)
+        && !represented_function_propagation_scratch_needed(request, image)
+        && !represented_function_terminal_scratch_needed(request, image) ? 0 : 1;
     for (size_t i = 0; i < image->blocks.count; ++i) {
         const SolMirMaterializedBlock *block = &materialization->blocks[image->blocks.offset + i];
         if (block->parameters.count > scratch_count) scratch_count = block->parameters.count;
@@ -6617,24 +6957,46 @@ static int entry_order_compare(const void *left, const void *right) {
         b->conventions->entries[b->entry].symbol.bytes);
 }
 
+/* Keep every entry-like probe on the exact entry reset sequence.  The test-only
+ * reset functions below deliberately reuse this builder instead of duplicating
+ * a nearly-identical packet clear. */
+static bool represented_entry_packet_reset_emit(BinaryenModuleRef module, uint32_t heap_base,
+    bool panic_detail, BinaryenExpressionRef *items, size_t capacity, size_t *count) {
+    if (items == NULL || count == NULL || capacity < 5 + (panic_detail ? 2 : 0)) return false;
+    *count = 0;
+    items[(*count)++] = BinaryenGlobalSet(module, P43_CODE,
+        BinaryenConst(module, BinaryenLiteralInt32(0)));
+    items[(*count)++] = BinaryenGlobalSet(module, P43_SITE,
+        BinaryenConst(module, BinaryenLiteralInt32(0)));
+    items[(*count)++] = BinaryenGlobalSet(module, P43_HEAP, BinaryenConst(module,
+        BinaryenLiteralInt32((int32_t)heap_base)));
+    items[(*count)++] = BinaryenGlobalSet(module, P43_REQUESTS,
+        BinaryenConst(module, BinaryenLiteralInt64(0)));
+    items[(*count)++] = BinaryenGlobalSet(module, P43_BYTES,
+        BinaryenConst(module, BinaryenLiteralInt64(0)));
+    if (panic_detail) {
+        items[(*count)++] = BinaryenGlobalSet(module, P44_PANIC_DETAIL_LENGTH,
+            BinaryenConst(module, BinaryenLiteralInt32(0)));
+        items[(*count)++] = BinaryenStore(module, 1, 0, 1,
+            BinaryenGlobalGet(module, P44_PANIC_DETAIL_OFFSET, BinaryenTypeInt32()),
+            BinaryenConst(module, BinaryenLiteralInt32(0)), BinaryenTypeInt32(), P43_MEMORY);
+    }
+    for (size_t i = 0; i < *count; ++i)
+        if (items[i] == NULL) return false;
+    return true;
+}
+
 static bool represented_entry_wrapper_emit(BinaryenModuleRef module,
     const SolMirRuntimeEntry *entry, const SolMirLinkage *linkage,
-    const SolMirRuntimeConventions *conventions, uint32_t heap_base) {
+    const SolMirRuntimeConventions *conventions, uint32_t heap_base, bool panic_detail) {
     if (entry->callable >= linkage->callable_count) return false;
     const SolMirRuntimeSignature *signature = signature_for(conventions, entry->callable);
     if (signature == NULL || signature->slots.count != 0) return false;
-    BinaryenExpressionRef body_items[11] = {
-        BinaryenGlobalSet(module, P43_CODE, BinaryenConst(module, BinaryenLiteralInt32(0))),
-        BinaryenGlobalSet(module, P43_SITE, BinaryenConst(module, BinaryenLiteralInt32(0))),
-        BinaryenGlobalSet(module, P43_HEAP, BinaryenConst(module,
-            BinaryenLiteralInt32((int32_t)heap_base))),
-        BinaryenGlobalSet(module, P43_REQUESTS, BinaryenConst(module, BinaryenLiteralInt64(0))),
-        BinaryenGlobalSet(module, P43_BYTES, BinaryenConst(module, BinaryenLiteralInt64(0))),
-        BinaryenReturn(module, BinaryenCall(module, linkage->callables[entry->callable].symbol.bytes,
-            NULL, 0, BinaryenTypeInt64())),
-    };
-    BinaryenExpressionRef result = body_items[5];
-    size_t body_count = 5;
+    BinaryenExpressionRef body_items[13]; size_t body_count = 0;
+    if (!represented_entry_packet_reset_emit(module, heap_base, panic_detail, body_items,
+            sizeof body_items / sizeof *body_items, &body_count)) return false;
+    BinaryenExpressionRef result = BinaryenReturn(module, BinaryenCall(module,
+        linkage->callables[entry->callable].symbol.bytes, NULL, 0, BinaryenTypeInt64()));
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
     if (represented_test_callback_writeback_probe)
         body_items[body_count++] = BinaryenGlobalSet(module, P43_WRITEBACKS,
@@ -6659,6 +7021,31 @@ static bool represented_entry_wrapper_emit(BinaryenModuleRef module,
 }
 
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
+/* Test-only observability for a single instantiated panic module. The success
+ * form proves the packet clear; the nonpanic form uses code 2 and sentinel site
+ * zero because no source P3.1 code-2 occurrence belongs to this module. */
+static bool represented_p44_packet_reset_probe_functions(BinaryenModuleRef module,
+    uint32_t heap_base) {
+    const char *const names[] = {P44_TEST_PACKET_RESET_SUCCESS, P44_TEST_PACKET_RESET_NONPANIC};
+    for (size_t probe = 0; probe < sizeof names / sizeof *names; ++probe) {
+        BinaryenExpressionRef items[10]; size_t count = 0;
+        if (!represented_entry_packet_reset_emit(module, heap_base, true, items,
+                sizeof items / sizeof *items, &count)) return false;
+        if (probe != 0) {
+            items[count++] = BinaryenGlobalSet(module, P43_CODE,
+                BinaryenConst(module, BinaryenLiteralInt32(2)));
+            items[count++] = BinaryenGlobalSet(module, P43_SITE,
+                BinaryenConst(module, BinaryenLiteralInt32(0)));
+        }
+        items[count++] = BinaryenReturn(module, BinaryenConst(module, BinaryenLiteralInt64(0)));
+        if (BinaryenAddFunction(module, names[probe], BinaryenTypeNone(), BinaryenTypeInt64(),
+                NULL, 0, BinaryenBlock(module, NULL, items, (BinaryenIndex)count,
+                    BinaryenTypeNone())) == NULL
+            || BinaryenAddFunctionExport(module, names[probe], names[probe]) == NULL) return false;
+    }
+    return true;
+}
+
 /* The probe reaches the one non-entry, zero-parameter C2b fixture directly.
  * It is deliberately unavailable unless the counter probe is enabled. */
 static bool represented_callback_writeback_failure_export(BinaryenModuleRef module,
@@ -6704,6 +7091,15 @@ static bool represented_read_uleb32(const uint8_t **cursor, const uint8_t *end,
         uint8_t byte = *(*cursor)++;
         result |= (uint32_t)(byte & UINT8_C(0x7f)) << shift;
         if ((byte & UINT8_C(0x80)) == 0) { *value = result; return true; }
+    }
+    return false;
+}
+
+static bool represented_skip_leb(const uint8_t **cursor, const uint8_t *end,
+    unsigned maximum_bytes) {
+    for (unsigned i = 0; i < maximum_bytes; ++i) {
+        if (*cursor == end) return false;
+        if ((*(*cursor)++ & UINT8_C(0x80)) == 0) return true;
     }
     return false;
 }
@@ -6879,10 +7275,12 @@ static void represented_wire_exports_free(RepresentedWireExports *exports) {
  * canonical v1 grammar.  Entry names are indexed during this one pass, rather
  * than reparsing the provenance section once for every module export. */
 static RepresentedWireValidation represented_provenance_validate(const uint8_t *payload,
-    size_t size, RepresentedWireEntryMap *entries) {
+    size_t size, RepresentedWireEntryMap *entries, bool *has_panic) {
     const uint8_t *cursor = payload, *end = payload + size;
     uint32_t version = 0, count = 0;
-    if (size < 12 || memcmp(cursor, "P43P", 4) != 0) return REPRESENTED_WIRE_INVALID;
+    if (has_panic == NULL || size < 12 || memcmp(cursor, "P43P", 4) != 0)
+        return REPRESENTED_WIRE_INVALID;
+    *has_panic = false;
     cursor += 4;
     if (!represented_read_u32le(&cursor, end, &version)
         || !represented_read_u32le(&cursor, end, &count) || version != 1
@@ -6912,6 +7310,8 @@ static RepresentedWireValidation represented_provenance_validate(const uint8_t *
             || record.symbol_count == 0 || !represented_utf8(record.symbol, record.symbol_count)
             || (i != 0 && represented_wire_provenance_order(&previous, &record) >= 0)) goto invalid;
         previous = record;
+        if (record.tag == 3 && record.kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_PANIC)
+            *has_panic = true;
         if (record.tag == 1 && !represented_wire_entry_insert(entries, record.symbol,
                 record.symbol_count)) goto invalid;
     }
@@ -6955,11 +7355,19 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
     uint32_t function_count = 0, table_initial = 0, element_count = 0;
     RepresentedWireEntryMap provenance_entries = {0};
     RepresentedWireExports entry_exports = {0};
-    bool saw_provenance_payload = false, saw_exports_payload = false;
+    bool saw_provenance_payload = false, saw_exports_payload = false, provenance_has_panic = false;
     uint32_t table_function_type = 0;
     uint32_t function_types[REPRESENTED_WIRE_MAX_FUNCTIONS] = {0};
     bool table_function_type_set = false;
     bool saw_memory_export = false, saw_code_export = false, saw_site_export = false;
+    bool saw_panic_detail_offset_export = false, saw_panic_detail_length_export = false;
+    bool saw_p44_packet_reset_success = false, saw_p44_packet_reset_nonpanic = false;
+    uint32_t panic_detail_offset_index = 0, panic_detail_length_index = 0;
+    uint8_t global_type[REPRESENTED_WIRE_MAX_FUNCTIONS] = {0};
+    bool global_mutable[REPRESENTED_WIRE_MAX_FUNCTIONS] = {0};
+    uint32_t global_initial[REPRESENTED_WIRE_MAX_FUNCTIONS] = {0};
+    uint32_t global_count = 0, active_data_end = 0, heap_base = 0;
+    bool saw_active_data = false;
     bool saw_writeback_export = false;
     bool saw_failure_probe_export = false;
     bool saw_cleanup_old_callable_export = false, saw_cleanup_moved_callable_export = false;
@@ -6983,15 +7391,41 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
             if (represented_name_equal(name, name_count, SOL_WASM_REPRESENTED_PROVENANCE_SECTION)) {
                 if (++provenance_sections != 1) goto invalid;
                 RepresentedWireValidation validation = represented_provenance_validate(cursor,
-                    (size_t)(section_end - cursor), &provenance_entries);
+                    (size_t)(section_end - cursor), &provenance_entries, &provenance_has_panic);
                 if (validation == REPRESENTED_WIRE_ALLOCATION) goto allocation;
                 if (validation != REPRESENTED_WIRE_VALID) goto invalid;
                 saw_provenance_payload = true;
             }
-        } else if (id == 1 || id == 6) {
+        } else if (id == 1) {
             uint32_t count = 0;
             if (!represented_read_uleb32(&cursor, section_end, &count)
                 || count > REPRESENTED_WIRE_MAX_FUNCTIONS) goto invalid;
+        } else if (id == 6) {
+            if (!represented_read_uleb32(&cursor, section_end, &global_count)
+                || global_count > REPRESENTED_WIRE_MAX_FUNCTIONS) goto invalid;
+            for (uint32_t i = 0; i < global_count; ++i) {
+                uint32_t initial = 0;
+                if (cursor == section_end || (*cursor != UINT8_C(0x7f)
+                        && *cursor != UINT8_C(0x7e))) goto invalid;
+                global_type[i] = *cursor++;
+                if (cursor == section_end || (*cursor != 0 && *cursor != 1)) goto invalid;
+                global_mutable[i] = *cursor++ != 0;
+                if (cursor == section_end) goto invalid;
+                uint8_t opcode = *cursor++;
+                if ((global_type[i] == UINT8_C(0x7f) && opcode != UINT8_C(0x41))
+                    || (global_type[i] == UINT8_C(0x7e) && opcode != UINT8_C(0x42))) goto invalid;
+                if (global_type[i] == UINT8_C(0x7f)) {
+                    if (!represented_read_uleb32(&cursor, section_end, &initial)) goto invalid;
+                    global_initial[i] = initial;
+                } else if (!represented_skip_leb(&cursor, section_end, 10)) goto invalid;
+                if (cursor == section_end || *cursor++ != UINT8_C(0x0b)) goto invalid;
+            }
+            if (cursor != section_end) goto invalid;
+            /* Heap is deliberately private. Its fixed physical index is
+             * authenticated below only when the P4.4 packet relies on it;
+             * P4.3 table-shape controls intentionally permit their legacy
+             * synthetic global layouts. */
+            if (global_count > 2) heap_base = global_initial[2];
         } else if (id == 2) {
             uint32_t count = 0;
             if (!represented_read_uleb32(&cursor, section_end, &count) || count != 0) goto invalid;
@@ -7051,6 +7485,44 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
                     if (kind != 3 || saw_site_export) goto invalid;
                     saw_site_export = true;
                 }
+                bool panic_detail_offset = represented_name_equal(name, name_count,
+                    SOL_WASM_REPRESENTED_PANIC_DETAIL_OFFSET_EXPORT);
+                bool panic_detail_length = represented_name_equal(name, name_count,
+                    SOL_WASM_REPRESENTED_PANIC_DETAIL_LENGTH_EXPORT);
+                bool p44_packet_reset_success = represented_name_equal(name, name_count,
+                    SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_SUCCESS_EXPORT);
+                bool p44_packet_reset_nonpanic = represented_name_equal(name, name_count,
+                    SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_NONPANIC_EXPORT);
+                if (panic_detail_offset) {
+                    if (kind != 3 || saw_panic_detail_offset_export) goto invalid;
+                    saw_panic_detail_offset_export = true; panic_detail_offset_index = ignored;
+                }
+                if (panic_detail_length) {
+                    if (kind != 3 || saw_panic_detail_length_export) goto invalid;
+                    saw_panic_detail_length_export = true; panic_detail_length_index = ignored;
+                }
+                if (p44_packet_reset_success) {
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+                    if (!represented_test_p44_packet_reset_probe || kind != 0
+                        || saw_p44_packet_reset_success) goto invalid;
+                    saw_p44_packet_reset_success = true;
+#else
+                    goto invalid;
+#endif
+                }
+                if (p44_packet_reset_nonpanic) {
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+                    if (!represented_test_p44_packet_reset_probe || kind != 0
+                        || saw_p44_packet_reset_nonpanic) goto invalid;
+                    saw_p44_packet_reset_nonpanic = true;
+#else
+                    goto invalid;
+#endif
+                }
+                if (name_count >= strlen("sol.p44.") && memcmp(name, "sol.p44.",
+                        strlen("sol.p44.")) == 0
+                    && !panic_detail_offset && !panic_detail_length
+                    && !p44_packet_reset_success && !p44_packet_reset_nonpanic) goto invalid;
                 if (represented_name_equal(name, name_count, SOL_WASM_REPRESENTED_TEST_WRITEBACK_EXPORT)) {
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
                     if (!represented_test_callback_writeback_probe || kind != 3
@@ -7116,6 +7588,8 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
                     test_probe = represented_test_callback_writeback_probe
                         && represented_name_equal(name, name_count,
                             SOL_WASM_REPRESENTED_TEST_FAILURE_ENTRY_EXPORT);
+                    test_probe = test_probe || (represented_test_p44_packet_reset_probe
+                        && (p44_packet_reset_success || p44_packet_reset_nonpanic));
 #endif
                     if (!test_probe && (!represented_name_prefix(name, name_count, "sol.e1.")
                             || entry_exports.count >= REPRESENTED_WIRE_MAX_FUNCTIONS)) goto invalid;
@@ -7157,8 +7631,22 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
             if (!represented_read_uleb32(&cursor, section_end, &count)
                 || count > REPRESENTED_WIRE_MAX_FUNCTIONS || count != function_count) goto invalid;
         } else if (id == 11) {
-            uint32_t count = 0;
+            uint32_t count = 0, flags = 0, offset = 0, payload = 0;
             if (!represented_read_uleb32(&cursor, section_end, &count) || count > 1) goto invalid;
+            if (count == 1) {
+                if (!represented_read_uleb32(&cursor, section_end, &flags) || flags != 0
+                    || cursor == section_end || *cursor++ != UINT8_C(0x41)
+                    || !represented_read_uleb32(&cursor, section_end, &offset)
+                    || cursor == section_end || *cursor++ != UINT8_C(0x0b)
+                    || !represented_read_uleb32(&cursor, section_end, &payload)
+                    || payload > (size_t)(section_end - cursor)
+                    || offset > UINT32_C(65536) || payload > UINT32_C(65536) - offset)
+                    goto invalid;
+                active_data_end = offset + payload;
+                saw_active_data = true;
+                cursor += payload;
+            }
+            if (cursor != section_end) goto invalid;
         } else if (id == 12) {
             goto invalid;
         }
@@ -7170,6 +7658,21 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
         && ((table_sections == 0 && element_sections == 0)
             || (table_sections == 1 && element_sections == 1)) && saw_memory_export
         && saw_code_export && saw_site_export && saw_provenance_payload && saw_exports_payload
+        && (saw_panic_detail_offset_export == saw_panic_detail_length_export)
+        && (provenance_has_panic == saw_panic_detail_offset_export)
+        && (!provenance_has_panic || (saw_active_data
+            && global_count >= 7 && global_type[2] == UINT8_C(0x7f) && global_mutable[2]
+            && heap_base >= active_data_end && heap_base <= UINT32_C(65536)
+            && panic_detail_offset_index < global_count && panic_detail_length_index < global_count
+            && global_type[panic_detail_offset_index] == UINT8_C(0x7f)
+            && !global_mutable[panic_detail_offset_index]
+            && global_initial[panic_detail_offset_index] == active_data_end
+            && global_type[panic_detail_length_index] == UINT8_C(0x7f)
+            && global_mutable[panic_detail_length_index]
+            && global_initial[panic_detail_length_index] == 0
+            && active_data_end <= UINT32_C(65536) - P44_PANIC_DETAIL_BYTES
+            && heap_base >= P44_PANIC_DETAIL_BYTES
+            && active_data_end <= heap_base - P44_PANIC_DETAIL_BYTES))
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
         && (represented_test_callback_writeback_probe == saw_writeback_export)
         && (represented_test_callback_writeback_probe == saw_failure_probe_export)
@@ -7177,10 +7680,15 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
         && (represented_test_callable_hole_cleanup_probe == saw_cleanup_moved_callable_export)
         && (represented_test_callable_hole_cleanup_probe == saw_cleanup_text_sibling_export)
         && (represented_test_callable_hole_cleanup_probe == saw_cleanup_root_export)
+        && (saw_p44_packet_reset_success
+            == (represented_test_p44_packet_reset_probe && provenance_has_panic))
+        && (saw_p44_packet_reset_nonpanic
+            == (represented_test_p44_packet_reset_probe && provenance_has_panic))
 #else
         && !saw_writeback_export && !saw_failure_probe_export
         && !saw_cleanup_old_callable_export && !saw_cleanup_moved_callable_export
         && !saw_cleanup_text_sibling_export && !saw_cleanup_root_export
+        && !saw_p44_packet_reset_success && !saw_p44_packet_reset_nonpanic
 #endif
         && represented_exports_match_provenance(&entry_exports, &provenance_entries);
     represented_wire_entry_map_free(&provenance_entries);
@@ -7247,6 +7755,7 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     const SolMirConcreteProgram *concrete = conventions->concrete;
     bool fixed_products = represented_fixed_products_needed(request);
     bool function_table = represented_function_table_needed(request);
+    bool panic_detail = represented_panic_detail_needed(request);
     if (function_table && (!represented_function_table_preflight(request)
             || !represented_add(usage.table_elements, concrete->linkage.table_entry_count,
                 &usage.table_elements)
@@ -7268,6 +7777,14 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     if (!represented_add(usage.functions, 2, &usage.functions)
         || !represented_add(usage.locals, 21, &usage.locals)) {
         diagnostic(diagnostics, "P4.3 represented helper census overflowed");
+        return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
+    }
+    /* One i64 parameter plus six declared locals is seven physical slots in
+     * the census convention.  The helper is emitted iff PANIC provenance is
+     * present and consequently participates in every function/local limit. */
+    if (panic_detail && (!represented_add(usage.functions, 1, &usage.functions)
+            || !represented_add(usage.locals, 7, &usage.locals))) {
+        diagnostic(diagnostics, "P4.4 panic-detail helper census overflowed");
         return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
     }
     if (fixed_products && (!represented_add(usage.functions, 1, &usage.functions)
@@ -7382,6 +7899,7 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     uint8_t *static_data = NULL;
     size_t literal_count = 0, static_size = 0;
     uint32_t heap_base = 0;
+    uint32_t panic_detail_offset = 0;
     if (!represented_static_literals(request, &literals, &literal_count, &static_data,
             &static_size, &heap_base) || static_size > limits.max_static_data_bytes) {
         deallocate(literals); deallocate(static_data); deallocate(callables); deallocate(entries);
@@ -7389,6 +7907,13 @@ SolWasmRepresentedResult sol_wasm_represented_build(
         SolWasmRepresentedResult result = accounting.status == REPRESENTED_BACKEND_OK
             ? SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED : represented_backend_result();
         represented_accounting = NULL; return result;
+    }
+    if (panic_detail && (static_size > UINT32_MAX - P43_STATIC_BASE
+            || (panic_detail_offset = (uint32_t)(P43_STATIC_BASE + static_size)) > UINT32_C(65536)
+            || P44_PANIC_DETAIL_BYTES > UINT32_C(65536) - panic_detail_offset)) {
+        deallocate(static_data); deallocate(literals); deallocate(callables); deallocate(entries);
+        represented_call_catalog_free(&catalog); represented_accounting = NULL;
+        return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
     }
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
     if (represented_test_heap_base != 0) {
@@ -7400,6 +7925,12 @@ SolWasmRepresentedResult sol_wasm_represented_build(
         heap_base = represented_test_heap_base;
     }
 #endif
+    if (panic_detail && (heap_base > UINT32_C(65536) || panic_detail_offset > heap_base
+            || P44_PANIC_DETAIL_BYTES > heap_base - panic_detail_offset)) {
+        deallocate(static_data); deallocate(literals); deallocate(callables); deallocate(entries);
+        represented_call_catalog_free(&catalog); represented_accounting = NULL;
+        return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
+    }
     usage.static_data_bytes = static_size;
     RepresentedProvenance provenance = {0};
     if (!represented_provenance_build(request, &provenance)) {
@@ -7449,7 +7980,12 @@ SolWasmRepresentedResult sol_wasm_represented_build(
         && BinaryenAddGlobal(module, P43_REQUESTS, BinaryenTypeInt64(), true,
         BinaryenConst(module, BinaryenLiteralInt64(0))) != NULL
         && BinaryenAddGlobal(module, P43_BYTES, BinaryenTypeInt64(), true,
-        BinaryenConst(module, BinaryenLiteralInt64(0))) != NULL;
+        BinaryenConst(module, BinaryenLiteralInt64(0))) != NULL
+        && (!panic_detail || (BinaryenAddGlobal(module, P44_PANIC_DETAIL_OFFSET,
+                BinaryenTypeInt32(), false, BinaryenConst(module,
+                    BinaryenLiteralInt32((int32_t)panic_detail_offset))) != NULL
+            && BinaryenAddGlobal(module, P44_PANIC_DETAIL_LENGTH, BinaryenTypeInt32(), true,
+                BinaryenConst(module, BinaryenLiteralInt32(0))) != NULL));
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
     if (ok && represented_test_callback_writeback_probe)
         ok = BinaryenAddGlobal(module, P43_WRITEBACKS, BinaryenTypeInt32(), true,
@@ -7465,6 +8001,12 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     if (ok) {
         BinaryenAddGlobalExport(module, P43_CODE, SOL_WASM_REPRESENTED_FAILURE_CODE_EXPORT);
         BinaryenAddGlobalExport(module, P43_SITE, SOL_WASM_REPRESENTED_FAILURE_SITE_EXPORT);
+        if (panic_detail) {
+            BinaryenAddGlobalExport(module, P44_PANIC_DETAIL_OFFSET,
+                SOL_WASM_REPRESENTED_PANIC_DETAIL_OFFSET_EXPORT);
+            BinaryenAddGlobalExport(module, P44_PANIC_DETAIL_LENGTH,
+                SOL_WASM_REPRESENTED_PANIC_DETAIL_LENGTH_EXPORT);
+        }
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
         if (represented_test_callback_writeback_probe)
             BinaryenAddGlobalExport(module, P43_WRITEBACKS,
@@ -7483,6 +8025,7 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     }
     if (ok) ok = represented_text_copy_function(module);
     if (ok) ok = represented_text_equal_function(module);
+    if (ok && panic_detail) ok = represented_panic_capture_function(module);
     if (ok && fixed_products) ok = represented_fixed_alloc_function(module);
     for (size_t recipe = 0; ok && recipe < concrete->representation.recipe_count; ++recipe)
         if (represented_product_copy_needed(request, recipe))
@@ -7511,9 +8054,12 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     for (size_t i = 0; ok && i < conventions->entry_count; ++i) {
         const SolMirRuntimeEntry *entry = &conventions->entries[entries[i].entry];
         if (entry->callable >= linkage->callable_count) { ok = false; break; }
-        ok = represented_entry_wrapper_emit(module, entry, linkage, conventions, heap_base);
+        ok = represented_entry_wrapper_emit(module, entry, linkage, conventions, heap_base,
+            panic_detail);
     }
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
+    if (ok && represented_test_p44_packet_reset_probe && panic_detail)
+        ok = represented_p44_packet_reset_probe_functions(module, heap_base);
     if (ok && represented_test_callback_writeback_probe)
         ok = represented_callback_writeback_failure_export(module, conventions, linkage);
 #endif
@@ -7761,5 +8307,8 @@ void sol_wasm_represented_test_callback_writeback_probe(bool enabled) {
 }
 void sol_wasm_represented_test_callable_hole_cleanup_probe(bool enabled) {
     represented_test_callable_hole_cleanup_probe = enabled;
+}
+void sol_wasm_represented_test_p44_packet_reset_probe(bool enabled) {
+    represented_test_p44_packet_reset_probe = enabled;
 }
 #endif
