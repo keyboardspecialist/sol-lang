@@ -162,6 +162,12 @@ void sol_wasm_represented_test_callable_hole_cleanup_probe(bool enabled);
  * reset prologue; the second publishes code 2 with the test sentinel site 0.
  * Disabled by default and absent from production module bytes. */
 void sol_wasm_represented_test_p44_packet_reset_probe(bool enabled);
+/* Runs B1's selector without the outer whole-owner validation, so hostile
+ * owner mutations can exercise the selector itself. `transition` and `actions`
+ * name borrowed P3.3 records on success. */
+bool sol_wasm_represented_test_control_transition(const SolWasmRepresentedBuildRequest *,
+    size_t block, SolMirRuntimeCleanupEdgeRole role, size_t *transition,
+    SolMirRuntimeSlice *actions);
 #endif
 
 #endif

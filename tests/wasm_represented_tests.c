@@ -3004,6 +3004,297 @@ static bool wasmtime_module_valid(const SolWasmBackendBytes *bytes) {
     return valid;
 }
 
+/* B1's normal controls are deliberately tested from a source-built P3.6 owner:
+ * GOTO includes lowered break/continue, each branch arm is independently named,
+ * and the fixture contains both value and Unit return exits.  The mutations are
+ * made only after the complete owner is built and are resealed so the backend's
+ * hostile-input boundary, rather than an unsealed-token shortcut, is exercised. */
+static bool p44_b1_control_owners(const char *directory) {
+    PropagationPipeline pipeline; propagation_pipeline_init(&pipeline);
+    SolWasmRepresentedOutput baseline, output;
+    sol_wasm_represented_output_init(&baseline); sol_wasm_represented_output_init(&output);
+    bool ok = propagation_pipeline_build(&pipeline, directory)
+        && sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL)
+        && sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory,
+            NULL}, &baseline, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK;
+    const SolMirMaterialization *m = &pipeline.concrete.materialization;
+    SolMirRuntimeLoweredImageTerminator *branch_row = NULL;
+    SolMirRuntimeCleanupEvent *branch_event = NULL;
+    SolMirRuntimeCleanupTransition *branch_true = NULL, *branch_false = NULL;
+    size_t branch_block = SOL_MIR_RUNTIME_LOWERED_NONE;
+    SolMirRuntimeLoweredImageTerminator *goto_row = NULL, *return_row = NULL;
+    SolMirRuntimeCleanupEvent *goto_event = NULL, *return_event = NULL;
+    SolMirRuntimeCleanupTransition *goto_transition = NULL, *return_transition = NULL;
+    size_t goto_block = SOL_MIR_RUNTIME_LOWERED_NONE, return_block = SOL_MIR_RUNTIME_LOWERED_NONE;
+    size_t gotos = 0, breaks = 0, continues = 0, branches = 0, returns = 0, unit_returns = 0;
+    for (size_t block = 0; ok && block < m->block_count; ++block) {
+        const SolMirMaterializedTerminator *term = &m->blocks[block].terminator;
+        SolMirRuntimeCleanupEdgeRole role;
+        SolMirRuntimeCleanupOutcome outcome;
+        size_t expected = 0;
+        if (term->kind == SOL_MIR_TERM_GOTO || term->kind == SOL_MIR_TERM_BREAK
+            || term->kind == SOL_MIR_TERM_CONTINUE) {
+            role = SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO;
+            outcome = SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL; expected = 1;
+            ++gotos;
+            if (term->kind == SOL_MIR_TERM_BREAK) ++breaks;
+            if (term->kind == SOL_MIR_TERM_CONTINUE) ++continues;
+        } else if (term->kind == SOL_MIR_TERM_BRANCH) {
+            role = SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_TRUE;
+            outcome = SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL; expected = 2; ++branches;
+        } else if (term->kind == SOL_MIR_TERM_RETURN) {
+            role = SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN;
+            outcome = SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT; expected = 1; ++returns;
+            if (term->value < m->value_count
+                && m->values[term->value].type < pipeline.concrete.layout.type_count
+                && pipeline.concrete.representation.recipes[pipeline.concrete.layout.types[
+                    m->values[term->value].type].recipe].kind == SOL_MIR_RECIPE_UNIT) ++unit_returns;
+        } else continue;
+        SolMirRuntimeLoweredImageTerminator *row = block < pipeline.lowered.image_terminator_count
+            ? &pipeline.lowered.image_terminators[block] : NULL;
+        SolMirRuntimeCleanupEvent *event = row != NULL && row->cleanup_event < pipeline.cleanup.event_count
+            ? &pipeline.cleanup.events[row->cleanup_event] : NULL;
+        if (row == NULL || event == NULL || row->state != SOL_MIR_RUNTIME_LOWERED_PRESENT
+            || row->image >= m->image_count || row->block != block || row->kind != term->kind
+            || event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+            || event->phase != SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+            || event->owner != row->image || event->block != block
+            || event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL
+            || event->inherited_failure_site != SOL_MIR_RUNTIME_NONE
+            || event->supplemental_site != SOL_MIR_RUNTIME_NONE || event->captures_failure_detail
+            || event->transitions.count != expected) { ok = false; break; }
+        size_t seen = 0;
+        SolMirRuntimeCleanupTransition *local_true = NULL, *local_false = NULL;
+        for (size_t i = 0; i < event->transitions.count; ++i) {
+            SolMirRuntimeCleanupTransition *transition = &pipeline.cleanup.transitions[
+                event->transitions.offset + i];
+            if (transition->event != row->cleanup_event || transition->outcome != outcome
+                || transition->failure_source != SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE
+                || transition->failure_site != SOL_MIR_RUNTIME_NONE || transition->failure_mask != 0)
+                { ok = false; break; }
+            if (term->kind == SOL_MIR_TERM_BRANCH) {
+                if (transition->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_TRUE
+                    && transition->continuation == term->true_edge) {
+                    ++seen;
+                    if (local_true != NULL) ok = false;
+                    local_true = transition;
+                } else if (transition->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_FALSE
+                    && transition->continuation == term->false_edge) {
+                    ++seen;
+                    if (local_false != NULL) ok = false;
+                    local_false = transition;
+                } else ok = false;
+            } else if (transition->edge_role == role) ++seen;
+            else ok = false;
+            if (transition->continuation == SOL_MIR_RUNTIME_NONE) {
+                if (transition->source_edge != SOL_MIR_RUNTIME_NONE
+                    || transition->destination != SOL_MIR_RUNTIME_NONE) ok = false;
+            } else if (transition->continuation >= m->edge_count
+                || transition->source_edge != transition->continuation
+                || transition->destination != m->edges[transition->continuation].block) ok = false;
+        }
+        if (seen != expected) ok = false;
+        SolMirRuntimeSlice direct_actions = {0};
+        size_t direct_transition = SOL_MIR_RUNTIME_LOWERED_NONE;
+        if (term->kind == SOL_MIR_TERM_BRANCH) {
+            size_t true_transition = SOL_MIR_RUNTIME_LOWERED_NONE;
+            SolMirRuntimeSlice true_actions = {0};
+            ok = ok && sol_wasm_represented_test_control_transition(
+                &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, block,
+                SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_TRUE, &true_transition, &true_actions)
+                && sol_wasm_represented_test_control_transition(
+                    &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, block,
+                    SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_FALSE, &direct_transition, &direct_actions)
+                && local_true != NULL && local_false != NULL
+                && true_transition == (size_t)(local_true - pipeline.cleanup.transitions)
+                && direct_transition == (size_t)(local_false - pipeline.cleanup.transitions)
+                && true_actions.offset == local_true->actions.offset && true_actions.count == 0
+                && direct_actions.offset == local_false->actions.offset && direct_actions.count == 0;
+        } else {
+            ok = ok && sol_wasm_represented_test_control_transition(
+                &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, block, role,
+                &direct_transition, &direct_actions)
+                && direct_transition == event->transitions.offset && direct_actions.offset
+                    == event->actions.offset && direct_actions.count == 0;
+        }
+        if (term->kind == SOL_MIR_TERM_BRANCH && branch_row == NULL) {
+            branch_row = row; branch_event = event;
+            branch_true = local_true; branch_false = local_false;
+            branch_block = block;
+        }
+        if ((term->kind == SOL_MIR_TERM_GOTO || term->kind == SOL_MIR_TERM_BREAK
+                || term->kind == SOL_MIR_TERM_CONTINUE) && goto_row == NULL) {
+            goto_row = row; goto_event = event; goto_transition = &pipeline.cleanup.transitions[
+                event->transitions.offset]; goto_block = block;
+        }
+        if (term->kind == SOL_MIR_TERM_RETURN && return_row == NULL) {
+            return_row = row; return_event = event; return_transition = &pipeline.cleanup.transitions[
+                event->transitions.offset]; return_block = block;
+        }
+    }
+    char entry[256];
+    if (ok) ok = gotos != 0 && breaks != 0 && continues != 0 && branches >= 2
+        && returns >= 3 && unit_returns >= 2 && branch_row != NULL && branch_event != NULL
+        && branch_true != NULL && branch_false != NULL && goto_row != NULL && goto_event != NULL
+        && goto_transition != NULL && return_row != NULL && return_event != NULL
+        && return_transition != NULL
+        && sol_wasm_represented_test_control_transition(
+            &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, branch_block,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_TRUE, &(size_t){0}, &(SolMirRuntimeSlice){0})
+        && entry_symbol(&baseline.bytes, entry, sizeof entry)
+        && invoke_named(&baseline.bytes, entry, 43, 0, 0);
+    static const uint8_t expected_hash[32] = {
+        0xce,0x52,0x97,0x27,0xa4,0x80,0x98,0xb8,0x58,0x93,0x93,0x4e,0x40,0xe5,0x02,0x1b,
+        0x27,0xa5,0x12,0x2d,0xbb,0xd3,0xe2,0x3a,0x39,0xf0,0x77,0xf5,0xba,0x73,0xe9,0x57,
+    };
+    uint8_t baseline_hash[32];
+    if (ok) sha256(baseline.bytes.bytes, baseline.bytes.count, baseline_hash);
+    if (ok) ok = baseline.usage.functions == 5 && baseline.usage.blocks == 23
+        && baseline.usage.edges == 26 && baseline.usage.values == 56 && baseline.usage.locals == 100
+        && baseline.usage.generated_nodes == 1014 && baseline.usage.table_elements == 0
+        && baseline.usage.static_data_bytes == 0 && baseline.usage.allocation_requests == 0
+        && baseline.usage.allocation_bytes == 0 && baseline.usage.provenance_records == 8
+        && baseline.usage.output_bytes == 3335
+        && memcmp(baseline_hash, expected_hash, sizeof baseline_hash) == 0;
+#define CHECK_P44_B1_REJECT_ROUTE(test_block, test_role, edit, restore) do { \
+    edit; pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+    sol_wasm_represented_output_init(&output); \
+    ok = ok && !sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL) \
+        && !sol_wasm_represented_test_control_transition( \
+            &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, (test_block), \
+            (test_role), &(size_t){0}, &(SolMirRuntimeSlice){0}) \
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, \
+            &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE \
+        && output.bytes.bytes == NULL && output.bytes.count == 0 && usage_zero(&output.usage); \
+    sol_wasm_represented_output_free(&output); restore; \
+    pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+    ok = ok && sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL) \
+        && sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL) \
+        && sol_wasm_represented_test_control_transition( \
+            &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, (test_block), \
+            (test_role), &(size_t){0}, &(SolMirRuntimeSlice){0}); \
+} while (0)
+#define CHECK_P44_B1_REJECT(edit, restore) \
+    CHECK_P44_B1_REJECT_ROUTE(branch_block, SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_TRUE, edit, restore)
+    if (ok) {
+        size_t saved_event = branch_row->cleanup_event;
+        CHECK_P44_B1_REJECT(branch_row->cleanup_event = SOL_MIR_RUNTIME_LOWERED_NONE,
+            branch_row->cleanup_event = saved_event);
+        if (m->image_count > 1) {
+            size_t row_image = branch_row->image;
+            CHECK_P44_B1_REJECT(branch_row->image = row_image == 0 ? 1 : 0,
+                branch_row->image = row_image);
+        }
+        SolMirRuntimeCleanupPhase phase = branch_event->phase;
+        CHECK_P44_B1_REJECT(branch_event->phase = SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_INVOKE_CALLABLE,
+            branch_event->phase = phase);
+        SolMirRuntimeCleanupProducerKind producer = branch_event->producer;
+        CHECK_P44_B1_REJECT(branch_event->producer = SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_INVOKE,
+            branch_event->producer = producer);
+        SolMirRuntimeCleanupEdgeRole true_role = branch_true->edge_role;
+        SolMirRuntimeCleanupEdgeRole false_role = branch_false->edge_role;
+        CHECK_P44_B1_REJECT(branch_true->edge_role = false_role; branch_false->edge_role = true_role,
+            branch_true->edge_role = true_role; branch_false->edge_role = false_role);
+        SolMirRuntimeCleanupOutcome outcome = branch_true->outcome;
+        CHECK_P44_B1_REJECT(branch_true->outcome = SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT,
+            branch_true->outcome = outcome);
+        size_t continuation = branch_true->continuation;
+        CHECK_P44_B1_REJECT(branch_true->continuation = SOL_MIR_RUNTIME_NONE,
+            branch_true->continuation = continuation);
+        size_t source_edge = branch_true->source_edge;
+        CHECK_P44_B1_REJECT(branch_true->source_edge = SOL_MIR_RUNTIME_NONE,
+            branch_true->source_edge = source_edge);
+        size_t destination = branch_true->destination;
+        CHECK_P44_B1_REJECT(branch_true->destination = SOL_MIR_RUNTIME_NONE,
+            branch_true->destination = destination);
+        CHECK_P44_B1_REJECT(branch_false->edge_role = true_role,
+            branch_false->edge_role = false_role);
+        size_t transition_count = branch_event->transitions.count;
+        CHECK_P44_B1_REJECT(branch_event->transitions.count = 1,
+            branch_event->transitions.count = transition_count);
+        SolMirRuntimeSlice actions = branch_true->actions;
+        CHECK_P44_B1_REJECT(branch_true->actions.count = pipeline.cleanup.action_count + 1,
+            branch_true->actions = actions);
+        SolMirRuntimeCleanupFailureSource failure = branch_true->failure_source;
+        CHECK_P44_B1_REJECT(branch_true->failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31,
+            branch_true->failure_source = failure);
+        size_t failure_site = branch_true->failure_site;
+        CHECK_P44_B1_REJECT(branch_true->failure_site = 0, branch_true->failure_site = failure_site);
+        uint32_t failure_mask = branch_true->failure_mask;
+        CHECK_P44_B1_REJECT(branch_true->failure_mask = 1, branch_true->failure_mask = failure_mask);
+        SolMirRuntimeSlice false_actions = branch_false->actions;
+        CHECK_P44_B1_REJECT_ROUTE(branch_block, SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_FALSE,
+            branch_false->actions.offset = 0; branch_false->actions.count = 1,
+            branch_false->actions = false_actions);
+        CHECK_P44_B1_REJECT_ROUTE(branch_block, SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_FALSE,
+            branch_false->actions.count = pipeline.cleanup.action_count + 1,
+            branch_false->actions = false_actions);
+        size_t false_continuation = branch_false->continuation;
+        CHECK_P44_B1_REJECT_ROUTE(branch_block, SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_FALSE,
+            branch_false->continuation = SOL_MIR_RUNTIME_NONE,
+            branch_false->continuation = false_continuation);
+        SolMirRuntimeCleanupEdgeRole goto_role = goto_transition->edge_role;
+        CHECK_P44_B1_REJECT_ROUTE(goto_block, SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO,
+            goto_transition->edge_role = SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_TRUE,
+            goto_transition->edge_role = goto_role);
+        size_t goto_destination = goto_transition->destination;
+        CHECK_P44_B1_REJECT_ROUTE(goto_block, SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO,
+            goto_transition->destination = SOL_MIR_RUNTIME_NONE,
+            goto_transition->destination = goto_destination);
+        SolMirRuntimeSlice goto_actions = goto_transition->actions;
+        CHECK_P44_B1_REJECT_ROUTE(goto_block, SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO,
+            goto_transition->actions.offset = 0; goto_transition->actions.count = 1,
+            goto_transition->actions = goto_actions);
+        SolMirRuntimeCleanupEdgeRole return_role = return_transition->edge_role;
+        CHECK_P44_B1_REJECT_ROUTE(return_block, SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN,
+            return_transition->edge_role = SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO,
+            return_transition->edge_role = return_role);
+        size_t return_destination = return_transition->destination;
+        CHECK_P44_B1_REJECT_ROUTE(return_block, SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN,
+            return_transition->destination = 0, return_transition->destination = return_destination);
+        SolMirRuntimeSlice return_actions = return_transition->actions;
+        CHECK_P44_B1_REJECT_ROUTE(return_block, SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN,
+            return_transition->actions.offset = 0; return_transition->actions.count = 1,
+            return_transition->actions = return_actions);
+    }
+#undef CHECK_P44_B1_REJECT
+#undef CHECK_P44_B1_REJECT_ROUTE
+    if (ok) {
+        SolWasmRepresentedLimits limits = sol_wasm_represented_default_limits();
+        limits.max_generated_nodes = baseline.usage.generated_nodes;
+        sol_wasm_represented_output_init(&output);
+        ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+            directory, &limits}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+            && usage_equal(&output.usage, &baseline.usage) && output.bytes.count == baseline.bytes.count
+            && memcmp(output.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0;
+        sol_wasm_represented_output_free(&output);
+        limits.max_generated_nodes = baseline.usage.generated_nodes - 1;
+        sol_wasm_represented_output_init(&output);
+        ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+            directory, &limits}, &output, &pipeline.diagnostics)
+                == SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED
+            && output.bytes.bytes == NULL && usage_zero(&output.usage);
+        sol_wasm_represented_output_free(&output);
+        sol_wasm_represented_test_fail_allocation_after(1);
+        sol_wasm_represented_output_init(&output);
+        ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+            directory, NULL}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_ALLOCATION_FAILED
+            && output.bytes.bytes == NULL && usage_zero(&output.usage);
+        sol_wasm_represented_test_fail_allocation_after(0);
+        sol_wasm_represented_output_free(&output);
+        sol_wasm_represented_output_init(&output);
+        ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+            directory, NULL}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+            && usage_equal(&output.usage, &baseline.usage) && output.bytes.count == baseline.bytes.count
+            && memcmp(output.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0;
+        sol_wasm_represented_output_free(&output);
+    }
+    sol_wasm_represented_output_free(&output); sol_wasm_represented_output_free(&baseline);
+    propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
 int main(void) {
     enum {
         P43_LITERAL_SITE = 4,
@@ -4665,6 +4956,7 @@ int main(void) {
     CHECK(p44_panic_runtime_quota_controls(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_panic"));
     CHECK(p44_packet_reset_probe_authorization(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_panic"));
     CHECK(p44_terminal_multiroot(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_nested_panic"));
+    CHECK(p44_b1_control_owners(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_b1"));
     {
         char p44_guard_call_directory[512];
         SolWasmRepresentedOutput p44_guard_call;

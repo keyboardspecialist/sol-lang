@@ -2131,6 +2131,60 @@ static bool image_edge_preflight(const SolWasmRepresentedBuildRequest *request,
     return true;
 }
 
+/* Normal image control is not an inferred CFG convenience. P3.3 names the
+ * one empty cleanup transition which owns each P2 edge (or return exit). P3
+ * controls edge identity; P2 alone assigns edge arguments. Any normal-control
+ * action is deliberately deferred rather than silently reinterpreted here. */
+static const SolMirRuntimeCleanupTransition *represented_control_transition(
+    const SolWasmRepresentedBuildRequest *request, const SolMirMaterializedImage *image,
+    size_t image_id, size_t block, SolMirRuntimeCleanupEdgeRole role,
+    SolMirRuntimeCleanupOutcome outcome, size_t edge, size_t expected_transitions) {
+    const SolMirRuntimeLoweredProgram *owner = request->program;
+    const SolMirRuntimeCleanup *cleanup = owner->cleanup;
+    const SolMirMaterialization *m = &owner->conventions->concrete->materialization;
+    if (image == NULL || block >= m->block_count || block >= owner->image_terminator_count
+        || image_id >= m->image_count || expected_transitions == 0) return NULL;
+    const SolMirRuntimeLoweredImageTerminator *row = &owner->image_terminators[block];
+    if (row->state != SOL_MIR_RUNTIME_LOWERED_PRESENT || row->image != image_id
+        || row->block != block || row->kind != m->blocks[block].terminator.kind
+        || row->cleanup_event >= cleanup->event_count) return NULL;
+    const SolMirRuntimeCleanupEvent *event = &cleanup->events[row->cleanup_event];
+    if (event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+        || event->phase != SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+        || event->origin != SOL_MIR_RUNTIME_CLEANUP_ORIGIN_EXPLICIT
+        || event->owner != image_id || event->block != block
+        || event->operation != SOL_MIR_RUNTIME_NONE || event->semantic_site != SOL_MIR_RUNTIME_NONE
+        || event->inherited_failure_site != SOL_MIR_RUNTIME_NONE
+        || event->supplemental_site != SOL_MIR_RUNTIME_NONE
+        || event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL
+        || event->captures_failure_detail
+        || event->capture_detail_kind != SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE
+        || event->transitions.count != expected_transitions
+        || event->transitions.offset > cleanup->transition_count
+        || event->transitions.count > cleanup->transition_count - event->transitions.offset
+        || event->actions.offset > cleanup->action_count
+        || event->actions.count != 0) return NULL;
+    const SolMirRuntimeCleanupTransition *selected = NULL;
+    size_t action_at = event->actions.offset;
+    for (size_t i = 0; i < event->transitions.count; ++i) {
+        const SolMirRuntimeCleanupTransition *candidate = &cleanup->transitions[
+            event->transitions.offset + i];
+        if (candidate->event != row->cleanup_event || candidate->outcome != outcome
+            || !candidate->primary_failure_wins
+            || candidate->failure_source != SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE
+            || candidate->failure_site != SOL_MIR_RUNTIME_NONE || candidate->failure_mask != 0
+            || candidate->actions.offset != action_at || candidate->actions.count != 0) return NULL;
+        if (candidate->edge_role != role) continue;
+        if (selected != NULL || candidate->continuation != edge
+            || candidate->source_edge != edge) return NULL;
+        if (edge == SOL_MIR_RUNTIME_NONE) {
+            if (candidate->destination != SOL_MIR_RUNTIME_NONE) return NULL;
+        } else if (edge >= m->edge_count || candidate->destination != m->edges[edge].block) return NULL;
+        selected = candidate;
+    }
+    return action_at == event->actions.offset ? selected : NULL;
+}
+
 static bool represented_same_projection(const SolMirMaterialization *m, size_t left,
     size_t right) {
     if (left >= m->place_count || right >= m->place_count) return false;
@@ -4207,16 +4261,30 @@ static bool represented_function_preflight(const SolWasmRepresentedBuildRequest 
                 && (catalog == NULL || !catalog->resume_blocks[block_id]))) return false;
         switch (term->kind) {
             case SOL_MIR_TERM_GOTO: case SOL_MIR_TERM_BREAK: case SOL_MIR_TERM_CONTINUE:
-                if (!image_edge_preflight(request, image, linkage->instance, block_id, term->edge)) return false;
+                if (represented_control_transition(request, image, linkage->instance, block_id,
+                        SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO,
+                        SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL, term->edge, 1) == NULL
+                    || !image_edge_preflight(request, image, linkage->instance, block_id, term->edge))
+                    return false;
                 break;
             case SOL_MIR_TERM_BRANCH:
                 if (!image_value(concrete, image, term->condition)
+                    || represented_control_transition(request, image, linkage->instance, block_id,
+                        SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_TRUE,
+                        SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL, term->true_edge, 2) == NULL
+                    || represented_control_transition(request, image, linkage->instance, block_id,
+                        SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_FALSE,
+                        SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL, term->false_edge, 2) == NULL
                     || !image_edge_preflight(request, image, linkage->instance, block_id, term->true_edge)
                     || !image_edge_preflight(request, image, linkage->instance, block_id, term->false_edge)) return false;
                 break;
             case SOL_MIR_TERM_RETURN:
                 if (signature->result_class != SOL_MIR_RUNTIME_RESULT_UNIT
                     && !image_value(concrete, image, term->value)) return false;
+                if (represented_control_transition(request, image, linkage->instance, block_id,
+                        SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN,
+                        SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT, SOL_MIR_RUNTIME_NONE, 1) == NULL)
+                    return false;
                 break;
             case SOL_MIR_TERM_INVOKE:
                 break;
@@ -6800,12 +6868,26 @@ static bool represented_terminator_emit(const RepresentedFunction *function, siz
     const SolMirMaterializedTerminator *term = &function->request->program->conventions
         ->concrete->materialization.blocks[block].terminator;
     switch (term->kind) {
-        case SOL_MIR_TERM_GOTO: case SOL_MIR_TERM_BREAK: case SOL_MIR_TERM_CONTINUE:
-            return represented_edge(function, term->edge, nodes);
+        case SOL_MIR_TERM_GOTO: case SOL_MIR_TERM_BREAK: case SOL_MIR_TERM_CONTINUE: {
+            const SolMirRuntimeCleanupTransition *transition = represented_control_transition(
+                function->request, function->image, function->image_id, block,
+                SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO, SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,
+                term->edge, 1);
+            return transition != NULL && represented_edge(function, transition->continuation, nodes);
+        }
         case SOL_MIR_TERM_BRANCH: {
             RepresentedNodes left = {0}, right = {0};
-            bool ok = represented_edge(function, term->true_edge, &left)
-                && represented_edge(function, term->false_edge, &right);
+            const SolMirRuntimeCleanupTransition *true_transition = represented_control_transition(
+                function->request, function->image, function->image_id, block,
+                SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_TRUE, SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,
+                term->true_edge, 2);
+            const SolMirRuntimeCleanupTransition *false_transition = represented_control_transition(
+                function->request, function->image, function->image_id, block,
+                SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_FALSE, SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,
+                term->false_edge, 2);
+            bool ok = true_transition != NULL && false_transition != NULL
+                && represented_edge(function, true_transition->continuation, &left)
+                && represented_edge(function, false_transition->continuation, &right);
             BinaryenExpressionRef condition = get_value(function, term->condition);
             BinaryenExpressionRef yes = ok ? BinaryenBlock(function->module, NULL, left.items,
                 (BinaryenIndex)left.count, BinaryenTypeNone()) : NULL;
@@ -6820,7 +6902,11 @@ static bool represented_terminator_emit(const RepresentedFunction *function, siz
             BinaryenExpressionRef value = function->signature->result_class == SOL_MIR_RUNTIME_RESULT_UNIT
                 ? represented_return_value(function)
                 : get_value(function, term->value);
-            if (value == NULL) return false;
+            const SolMirRuntimeCleanupTransition *transition = represented_control_transition(
+                function->request, function->image, function->image_id, block,
+                SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN, SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT,
+                SOL_MIR_RUNTIME_NONE, 1);
+            if (value == NULL || transition == NULL) return false;
             return represented_nodes_push(nodes, BinaryenReturn(function->module, value));
         }
         case SOL_MIR_TERM_INVOKE:
@@ -8310,5 +8396,38 @@ void sol_wasm_represented_test_callable_hole_cleanup_probe(bool enabled) {
 }
 void sol_wasm_represented_test_p44_packet_reset_probe(bool enabled) {
     represented_test_p44_packet_reset_probe = enabled;
+}
+bool sol_wasm_represented_test_control_transition(const SolWasmRepresentedBuildRequest *request,
+    size_t block, SolMirRuntimeCleanupEdgeRole role, size_t *transition,
+    SolMirRuntimeSlice *actions) {
+    if (request == NULL || request->program == NULL || transition == NULL || actions == NULL) return false;
+    const SolMirRuntimeLoweredProgram *owner = request->program;
+    const SolMirMaterialization *m = &owner->conventions->concrete->materialization;
+    if (block >= m->block_count || block >= owner->image_terminator_count) return false;
+    const SolMirMaterializedTerminator *term = &m->blocks[block].terminator;
+    const SolMirRuntimeLoweredImageTerminator *row = &owner->image_terminators[block];
+    if (row->image >= m->image_count) return false;
+    size_t edge = SOL_MIR_RUNTIME_NONE, count = 0;
+    SolMirRuntimeCleanupOutcome outcome;
+    switch (term->kind) {
+        case SOL_MIR_TERM_GOTO: case SOL_MIR_TERM_BREAK: case SOL_MIR_TERM_CONTINUE:
+            if (role != SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO) return false;
+            edge = term->edge; count = 1; outcome = SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL; break;
+        case SOL_MIR_TERM_BRANCH:
+            if (role == SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_TRUE) edge = term->true_edge;
+            else if (role == SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_FALSE) edge = term->false_edge;
+            else return false;
+            count = 2; outcome = SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL; break;
+        case SOL_MIR_TERM_RETURN:
+            if (role != SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN) return false;
+            count = 1; outcome = SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT; break;
+        default: return false;
+    }
+    const SolMirRuntimeCleanupTransition *selected = represented_control_transition(request,
+        &m->images[row->image], row->image, block, role, outcome, edge, count);
+    if (selected == NULL) return false;
+    *transition = (size_t)(selected - owner->cleanup->transitions);
+    *actions = selected->actions;
+    return true;
 }
 #endif
