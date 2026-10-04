@@ -66,8 +66,13 @@ typedef struct {
     wasm_func_t *entry;
     wasm_global_t *code, *site, *panic_detail_offset, *panic_detail_length, *writebacks;
     wasm_global_t *cleanup_counters[4];
+    wasm_global_t *trace_offset, *trace_count, *trace_overflow;
     wasm_memory_t *memory;
 } WasmInstance;
+
+typedef struct {
+    uint32_t action, disposition, record;
+} P44TraceSlot;
 
 static void wasm_instance_close(WasmInstance *instance) {
     wasm_extern_vec_delete(&instance->exports);
@@ -89,7 +94,8 @@ static bool wasm_instance_open(const SolWasmBackendBytes *bytes, const char *ent
     wasm_importtype_vec_t imports;
     wasm_exporttype_vec_t types;
     size_t function = SIZE_MAX, code = SIZE_MAX, site = SIZE_MAX, panic_detail_offset = SIZE_MAX,
-        panic_detail_length = SIZE_MAX, writebacks = SIZE_MAX, memory = SIZE_MAX;
+        panic_detail_length = SIZE_MAX, writebacks = SIZE_MAX, trace_offset = SIZE_MAX,
+        trace_count = SIZE_MAX, trace_overflow = SIZE_MAX, memory = SIZE_MAX;
     size_t cleanup_counters[4] = {SIZE_MAX, SIZE_MAX, SIZE_MAX, SIZE_MAX};
     bool ok = instance->module != NULL;
     if (ok) {
@@ -116,6 +122,18 @@ static bool wasm_instance_open(const SolWasmBackendBytes *bytes, const char *ent
             if (name_equal(name, SOL_WASM_REPRESENTED_TEST_WRITEBACK_EXPORT)) {
                 if (kind != WASM_EXTERN_GLOBAL || writebacks != SIZE_MAX) ok = false;
                 writebacks = i;
+            }
+            if (name_equal(name, SOL_WASM_REPRESENTED_TEST_P44_TRACE_OFFSET_EXPORT)) {
+                if (kind != WASM_EXTERN_GLOBAL || trace_offset != SIZE_MAX) ok = false;
+                trace_offset = i;
+            }
+            if (name_equal(name, SOL_WASM_REPRESENTED_TEST_P44_TRACE_COUNT_EXPORT)) {
+                if (kind != WASM_EXTERN_GLOBAL || trace_count != SIZE_MAX) ok = false;
+                trace_count = i;
+            }
+            if (name_equal(name, SOL_WASM_REPRESENTED_TEST_P44_TRACE_OVERFLOW_EXPORT)) {
+                if (kind != WASM_EXTERN_GLOBAL || trace_overflow != SIZE_MAX) ok = false;
+                trace_overflow = i;
             }
             const char *const cleanup_exports[] = {
                 SOL_WASM_REPRESENTED_TEST_CLEANUP_OLD_CALLABLE_EXPORT,
@@ -148,6 +166,12 @@ static bool wasm_instance_open(const SolWasmBackendBytes *bytes, const char *ent
             ? wasm_extern_as_global(instance->exports.data[panic_detail_length]) : NULL;
         instance->writebacks = writebacks < instance->exports.size
             ? wasm_extern_as_global(instance->exports.data[writebacks]) : NULL;
+        instance->trace_offset = trace_offset < instance->exports.size
+            ? wasm_extern_as_global(instance->exports.data[trace_offset]) : NULL;
+        instance->trace_count = trace_count < instance->exports.size
+            ? wasm_extern_as_global(instance->exports.data[trace_count]) : NULL;
+        instance->trace_overflow = trace_overflow < instance->exports.size
+            ? wasm_extern_as_global(instance->exports.data[trace_overflow]) : NULL;
         for (size_t i = 0; i < sizeof cleanup_counters / sizeof *cleanup_counters; ++i)
             instance->cleanup_counters[i] = cleanup_counters[i] < instance->exports.size
                 ? wasm_extern_as_global(instance->exports.data[cleanup_counters[i]]) : NULL;
@@ -229,6 +253,36 @@ static bool wasm_instance_cleanup_counters(WasmInstance *instance, const int32_t
         wasm_global_get(instance->cleanup_counters[i], &value);
         if (value.kind != WASM_I32 || value.of.i32 != expected[i]) return false;
     }
+    return true;
+}
+
+/* Read the hook ledger as raw Wasm memory: every slot is three little-endian
+ * i32 words (action index, disposition, failure provenance record). */
+static bool wasm_instance_trace(WasmInstance *instance, P44TraceSlot *slots, size_t capacity,
+    size_t *count, bool *overflow) {
+    wasm_val_t offset, length, lost;
+    if (instance == NULL || slots == NULL || count == NULL || overflow == NULL
+        || instance->trace_offset == NULL || instance->trace_count == NULL
+        || instance->trace_overflow == NULL || instance->memory == NULL) return false;
+    wasm_global_get(instance->trace_offset, &offset); wasm_global_get(instance->trace_count, &length);
+    wasm_global_get(instance->trace_overflow, &lost);
+    if (offset.kind != WASM_I32 || length.kind != WASM_I32 || lost.kind != WASM_I32
+        || offset.of.i32 < 0 || length.of.i32 < 0 || length.of.i32 > 64
+        || (lost.of.i32 != 0 && lost.of.i32 != 1) || (size_t)length.of.i32 > capacity
+        || (size_t)offset.of.i32 > wasm_memory_data_size(instance->memory)
+        || (size_t)length.of.i32 > (wasm_memory_data_size(instance->memory)
+            - (size_t)offset.of.i32) / 12) return false;
+    const uint8_t *bytes = (const uint8_t *)wasm_memory_data(instance->memory) + offset.of.i32;
+    for (size_t i = 0; i < (size_t)length.of.i32; ++i) {
+        const uint8_t *slot = bytes + i * 12;
+        slots[i] = (P44TraceSlot){(uint32_t)slot[0] | (uint32_t)slot[1] << 8
+            | (uint32_t)slot[2] << 16 | (uint32_t)slot[3] << 24,
+            (uint32_t)slot[4] | (uint32_t)slot[5] << 8 | (uint32_t)slot[6] << 16
+                | (uint32_t)slot[7] << 24,
+            (uint32_t)slot[8] | (uint32_t)slot[9] << 8 | (uint32_t)slot[10] << 16
+                | (uint32_t)slot[11] << 24};
+    }
+    *count = (size_t)length.of.i32; *overflow = lost.of.i32 != 0;
     return true;
 }
 
@@ -444,6 +498,47 @@ static bool export_layout(const SolWasmBackendBytes *module, ExportLayout *layou
         return read_uleb32(&cursor, section_end, &ignored);
     }
     return false;
+}
+
+typedef struct {
+    size_t name, kind, index, index_width;
+    uint32_t name_count, global;
+} NamedExportLayout;
+
+/* Locate one export independently of the backend envelope reader. */
+static bool named_global_export_layout(const SolWasmBackendBytes *module, const char *wanted,
+    NamedExportLayout *layout) {
+    const uint8_t *cursor = module->bytes + 8, *end = module->bytes + module->count;
+    bool found = false;
+    memset(layout, 0, sizeof *layout);
+    while (cursor < end) {
+        uint8_t id = *cursor++; uint32_t bytes = 0;
+        if (!read_uleb32(&cursor, end, &bytes) || bytes > (size_t)(end - cursor)) return false;
+        const uint8_t *section_end = cursor + bytes;
+        if (id == 7) {
+            uint32_t count = 0;
+            if (!read_uleb32(&cursor, section_end, &count)) return false;
+            for (uint32_t i = 0; i < count; ++i) {
+                uint32_t name_count = 0, global = 0;
+                if (!read_uleb32(&cursor, section_end, &name_count)
+                    || name_count > (size_t)(section_end - cursor)) return false;
+                const uint8_t *name = cursor; cursor += name_count;
+                if (cursor == section_end) return false;
+                size_t kind = (size_t)(cursor - module->bytes); uint8_t export_kind = *cursor++;
+                size_t index = (size_t)(cursor - module->bytes); const uint8_t *before = cursor;
+                if (!read_uleb32(&cursor, section_end, &global)) return false;
+                if (bytes_equal(name, name_count, wanted)) {
+                    if (found || export_kind != 3) return false;
+                    *layout = (NamedExportLayout){(size_t)(name - module->bytes), kind, index,
+                        (size_t)(cursor - before), name_count, global};
+                    found = true;
+                }
+            }
+            if (cursor != section_end) return false;
+        }
+        cursor = section_end;
+    }
+    return found;
 }
 
 static bool write_uleb_same_width(uint8_t *bytes, size_t width, uint32_t value) {
@@ -3372,6 +3467,604 @@ static bool p44_b1_control_owners(const char *directory) {
     return ok;
 }
 
+static bool p44_trace_slots_authentic(const PropagationPipeline *pipeline,
+    const P44TraceSlot *slots, size_t count, int32_t failure_record, bool *kinds) {
+    const SolMirRuntimeCleanup *cleanup = &pipeline->cleanup;
+    const unsigned known = SOL_WASM_REPRESENTED_TEST_P44_TRACE_EXECUTED
+        | SOL_WASM_REPRESENTED_TEST_P44_TRACE_SKIPPED | SOL_WASM_REPRESENTED_TEST_P44_TRACE_FAILURE
+        | SOL_WASM_REPRESENTED_TEST_P44_TRACE_IMPLICIT | SOL_WASM_REPRESENTED_TEST_P44_TRACE_PENDING
+        | SOL_WASM_REPRESENTED_TEST_P44_TRACE_NORMAL | SOL_WASM_REPRESENTED_TEST_P44_TRACE_ACTION_FAILURE
+        | SOL_WASM_REPRESENTED_TEST_P44_TRACE_GUARDED;
+    if (kinds != NULL) memset(kinds, 0, 5 * sizeof *kinds);
+    for (size_t i = 0; i < count; ++i) {
+        if (slots[i].action >= cleanup->action_count
+            || (slots[i].disposition & ~known) != 0
+            || (slots[i].disposition & (SOL_WASM_REPRESENTED_TEST_P44_TRACE_EXECUTED
+                | SOL_WASM_REPRESENTED_TEST_P44_TRACE_SKIPPED)) == 0
+            || (slots[i].disposition & (SOL_WASM_REPRESENTED_TEST_P44_TRACE_EXECUTED
+                | SOL_WASM_REPRESENTED_TEST_P44_TRACE_SKIPPED))
+                == (SOL_WASM_REPRESENTED_TEST_P44_TRACE_EXECUTED
+                    | SOL_WASM_REPRESENTED_TEST_P44_TRACE_SKIPPED)
+            || ((slots[i].disposition & SOL_WASM_REPRESENTED_TEST_P44_TRACE_FAILURE) != 0
+                ? slots[i].record != (uint32_t)failure_record : slots[i].record != 0)) return false;
+        if (kinds != NULL) switch (cleanup->actions[slots[i].action].kind) {
+            case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_TEMPORARY: kinds[0] = true; break;
+            case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE: kinds[1] = true; break;
+            case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PARAMETER: kinds[2] = true; break;
+            case SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_SCOPE: kinds[3] = true; break;
+            case SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_REGION: kinds[4] = true; break;
+            default: break;
+        }
+    }
+    return true;
+}
+
+/* Each expected word is reconstructed from the P3.6 transition that owns its
+ * action. The fixture's known path then supplies only the ordered selection of
+ * those authenticated slices, never a backend-side action identity. */
+static bool p44_trace_expected_from_selected(const PropagationPipeline *pipeline,
+    const P44TraceSlot *expected, size_t count, int32_t failure_record) {
+    const SolMirRuntimeCleanup *cleanup = &pipeline->cleanup;
+    for (size_t slot = 0; slot < count; ++slot) {
+        bool found = false;
+        for (size_t event_id = 0; event_id < cleanup->event_count; ++event_id) {
+            const SolMirRuntimeCleanupEvent *event = &cleanup->events[event_id];
+            for (size_t item = 0; item < event->transitions.count; ++item) {
+                const SolMirRuntimeCleanupTransition *transition = &cleanup->transitions[
+                    event->transitions.offset + item];
+                if (expected[slot].action < transition->actions.offset
+                    || expected[slot].action - transition->actions.offset >= transition->actions.count)
+                    continue;
+                const SolMirRuntimeCleanupAction *action = &cleanup->actions[expected[slot].action];
+                unsigned disposition = SOL_WASM_REPRESENTED_TEST_P44_TRACE_EXECUTED;
+                if (transition->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE)
+                    disposition |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_FAILURE;
+                if (event->origin == SOL_MIR_RUNTIME_CLEANUP_ORIGIN_IMPLICIT)
+                    disposition |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_IMPLICIT;
+                if (transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING)
+                    disposition |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_PENDING;
+                if ((action->flags & SOL_MIR_RUNTIME_CLEANUP_ACTION_NORMAL_ONLY) != 0)
+                    disposition |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_NORMAL;
+                if ((action->flags & SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY) != 0)
+                    disposition |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_ACTION_FAILURE;
+                if ((action->flags & SOL_MIR_RUNTIME_CLEANUP_ACTION_GUARDED) != 0)
+                    disposition |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_GUARDED;
+                if (expected[slot].disposition != disposition
+                    || expected[slot].record != ((disposition
+                        & SOL_WASM_REPRESENTED_TEST_P44_TRACE_FAILURE) != 0
+                            ? (uint32_t)failure_record : 0)) continue;
+                if (found) return false;
+                found = true;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
+}
+
+/* B2 deliberately obtains every expectation from the authenticated P3.6
+ * actions.  The Wasm reader above is the only decoding of the wire ledger. */
+static bool p44_cleanup_trace_case(const char *directory, int64_t value,
+    int32_t code, int32_t site, const P44TraceSlot *expected, size_t expected_count,
+    bool require_all_kinds) {
+    PropagationPipeline pipeline; propagation_pipeline_init(&pipeline);
+    SolWasmRepresentedOutput plain, traced;
+    sol_wasm_represented_output_init(&plain); sol_wasm_represented_output_init(&traced);
+    P44TraceSlot first[64], second[64]; size_t first_count = 0, second_count = 0;
+    bool first_overflow = false, second_overflow = false, kinds[5] = {false};
+    WasmInstance instance = {0}; char entry[256];
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false);
+    bool pipeline_ok = propagation_pipeline_build(&pipeline, directory);
+    SolWasmRepresentedResult plain_result = pipeline_ok ? sol_wasm_represented_build(
+        &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, &plain,
+        &pipeline.diagnostics) : SOL_WASM_REPRESENTED_INVALID_INPUT;
+    bool ok = pipeline_ok && plain_result == SOL_WASM_REPRESENTED_OK
+        && !p44_bytes_contain(&plain.bytes, SOL_WASM_REPRESENTED_TEST_P44_TRACE_OFFSET_EXPORT)
+        && !p44_bytes_contain(&plain.bytes, SOL_WASM_REPRESENTED_TEST_P44_TRACE_COUNT_EXPORT)
+        && !p44_bytes_contain(&plain.bytes, SOL_WASM_REPRESENTED_TEST_P44_TRACE_OVERFLOW_EXPORT);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(true);
+    SolWasmRepresentedResult traced_result = ok ? sol_wasm_represented_build(
+        &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, &traced,
+        &pipeline.diagnostics) : SOL_WASM_REPRESENTED_INVALID_INPUT;
+    if (ok) ok = traced_result == SOL_WASM_REPRESENTED_OK
+        && sol_wasm_represented_validate(&traced.bytes) == SOL_WASM_REPRESENTED_OK
+        && entry_symbol(&traced.bytes, entry, sizeof entry)
+        && wasm_instance_open(&traced.bytes, entry, &instance)
+        && instance.trace_offset != NULL && instance.trace_count != NULL && instance.trace_overflow != NULL
+        && wasm_instance_call(&instance, value, code, site)
+        && wasm_instance_trace(&instance, first, 64, &first_count, &first_overflow)
+        && first_count != 0 && !first_overflow
+        && p44_trace_slots_authentic(&pipeline, first, first_count, site, kinds)
+        && p44_trace_expected_from_selected(&pipeline, expected, expected_count, site);
+    /* The source-owned Text equality temporary is first; the owned formal is
+     * released only after the nested lexical scope, explicit region, and place
+     * cleanup have completed. */
+    if (ok && require_all_kinds)
+        for (size_t i = 0; i < sizeof kinds / sizeof *kinds; ++i) ok = ok && kinds[i];
+    if (ok) ok = first_count == expected_count
+        && memcmp(first, expected, expected_count * sizeof *expected) == 0
+        && wasm_instance_call(&instance, value, code, site)
+        && wasm_instance_trace(&instance, second, 64, &second_count, &second_overflow)
+        && second_count == first_count && second_overflow == first_overflow
+        && memcmp(first, second, first_count * sizeof *first) == 0;
+    wasm_instance_close(&instance);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false);
+    if (ok) ok = sol_wasm_represented_validate(&traced.bytes) == SOL_WASM_REPRESENTED_INVALID_INPUT;
+    sol_wasm_represented_output_free(&traced); sol_wasm_represented_output_free(&plain);
+    propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+/* The trace exports are a hook-only envelope over the existing P4.4 packet.
+ * Keep every malformed wire case raw: no Binaryen rewrite is used to make a
+ * hostile export look acceptable. */
+static bool p44_trace_wire_controls(const char *directory) {
+    SolWasmRepresentedOutput output;
+    P44WireLayout wire;
+    NamedExportLayout offset, count, overflow;
+    sol_wasm_represented_output_init(&output);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(true);
+    char entry[256]; WasmInstance instance = {0}; P44TraceSlot slots[64]; size_t slot_count = 0;
+    bool slot_overflow = false;
+    bool ok = build_named_root(directory, "launch", &output, NULL, SOL_WASM_REPRESENTED_OK)
+        && sol_wasm_represented_validate(&output.bytes) == SOL_WASM_REPRESENTED_OK
+        && p44_wire_layout(&output.bytes, &wire)
+        && named_global_export_layout(&output.bytes, SOL_WASM_REPRESENTED_TEST_P44_TRACE_OFFSET_EXPORT,
+            &offset)
+        && named_global_export_layout(&output.bytes, SOL_WASM_REPRESENTED_TEST_P44_TRACE_COUNT_EXPORT,
+            &count)
+        && named_global_export_layout(&output.bytes, SOL_WASM_REPRESENTED_TEST_P44_TRACE_OVERFLOW_EXPORT,
+            &overflow)
+        && offset.global < wire.count && count.global < wire.count && overflow.global < wire.count
+        && offset.global != count.global && offset.global != overflow.global
+        && count.global != overflow.global && wire.offset_global < wire.count
+        && wire.initial_value[offset.global] == wire.initial_value[wire.offset_global] + 192
+        /* The adjacent D..D+192 panic packet and D+192..D+960 ledger remain
+         * independently readable in one hook-on panic invocation. */
+        && entry_symbol(&output.bytes, entry, sizeof entry)
+        && wasm_instance_open(&output.bytes, entry, &instance)
+        && wasm_instance_call(&instance, 0, 1, 3)
+        && wasm_instance_panic_detail(&instance, (const uint8_t *)"represented terminal panic", 26)
+        && wasm_instance_trace(&instance, slots, 64, &slot_count, &slot_overflow)
+        && !slot_overflow;
+    wasm_instance_close(&instance);
+#define CHECK_P44_TRACE_WIRE(edit) do { \
+    uint8_t *mutated = malloc(output.bytes.count); \
+    if (mutated == NULL) ok = false; \
+    else { memcpy(mutated, output.bytes.bytes, output.bytes.count); edit; \
+        ok = ok && sol_wasm_represented_validate(&(SolWasmBackendBytes){mutated, output.bytes.count}) \
+            == SOL_WASM_REPRESENTED_INVALID_INPUT; free(mutated); } \
+} while (0)
+    if (ok) {
+        const NamedExportLayout exports[] = {offset, count, overflow};
+        for (size_t i = 0; i < sizeof exports / sizeof *exports; ++i) {
+            /* Each individual missing/unknown trace export is invalid. */
+            CHECK_P44_TRACE_WIRE(mutated[exports[i].name] = 'x');
+            CHECK_P44_TRACE_WIRE(mutated[exports[i].name + exports[i].name_count - 1] = 'x');
+            CHECK_P44_TRACE_WIRE(mutated[exports[i].kind] = 0);
+            CHECK_P44_TRACE_WIRE(write_uleb_same_width(mutated + exports[i].index,
+                exports[i].index_width, i == 0 ? count.global : offset.global));
+            CHECK_P44_TRACE_WIRE(mutated[wire.type[exports[i].global]] = UINT8_C(0x7e));
+            CHECK_P44_TRACE_WIRE(mutated[wire.mutability[exports[i].global]] =
+                i == 0 ? 1 : 0);
+            CHECK_P44_TRACE_WIRE(write_uleb_same_width(mutated + wire.initial[exports[i].global],
+                wire.initial_width[exports[i].global], wire.initial_value[exports[i].global] ^ 1));
+        }
+        uint32_t data = wire.initial_value[wire.offset_global];
+        CHECK_P44_TRACE_WIRE(write_uleb_same_width(mutated + wire.initial[offset.global],
+            wire.initial_width[offset.global], data + 191)); /* before D + 192 */
+        CHECK_P44_TRACE_WIRE(write_uleb_same_width(mutated + wire.initial[offset.global],
+            wire.initial_width[offset.global], UINT32_C(16383))); /* after heap/one-page bounds */
+        CHECK_P44_TRACE_WIRE(write_uleb_same_width(mutated + wire.initial[offset.global],
+            wire.initial_width[offset.global], data + 100)); /* overlaps panic detail */
+        CHECK_P44_TRACE_WIRE(write_uleb_same_width(mutated + wire.initial[2],
+            wire.initial_width[2], data + 959)); /* heap below D + 960 */
+    }
+#undef CHECK_P44_TRACE_WIRE
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false);
+    ok = ok && sol_wasm_represented_validate(&output.bytes) == SOL_WASM_REPRESENTED_INVALID_INPUT;
+    sol_wasm_represented_output_free(&output);
+    return ok;
+}
+
+static bool p44_trace_stress_case(const char *directory, const P44TraceSlot *prefix,
+    size_t prefix_count, const P44TraceSlot *repeat, size_t repeat_count,
+    const P44TraceSlot *tail, size_t tail_count) {
+    PropagationPipeline pipeline; SolWasmRepresentedOutput output;
+    P44TraceSlot first[64], second[64]; size_t first_count = 0, second_count = 0;
+    bool first_overflow = false, second_overflow = false; WasmInstance instance = {0}; char entry[256];
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&output);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(true);
+    sol_wasm_represented_test_p44_packet_reset_probe(true);
+    bool pipeline_ok = propagation_pipeline_build(&pipeline, directory);
+    SolWasmRepresentedResult build_result = pipeline_ok ? sol_wasm_represented_build(
+        &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, &output,
+        &pipeline.diagnostics) : SOL_WASM_REPRESENTED_INVALID_INPUT;
+    bool ok = prefix != NULL && prefix_count != 0 && repeat != NULL && repeat_count != 0
+        && tail != NULL && tail_count != 0 && prefix_count + repeat_count * 5 + tail_count == 64 && pipeline_ok
+        && build_result == SOL_WASM_REPRESENTED_OK
+        && entry_symbol(&output.bytes, entry, sizeof entry)
+        && wasm_instance_open(&output.bytes, entry, &instance)
+        && wasm_instance_call(&instance, 43, 0, 0)
+        && wasm_instance_trace(&instance, first, 64, &first_count, &first_overflow)
+        && first_count == 64 && first_overflow && wasm_instance_panic_detail(&instance,
+            (const uint8_t *)"", 0)
+        && p44_trace_slots_authentic(&pipeline, first, first_count, 0, NULL);
+    for (size_t i = 0; ok && i < first_count; ++i) {
+        const P44TraceSlot *expected = i < prefix_count ? &prefix[i]
+            : i < prefix_count + repeat_count * 5 ? &repeat[(i - prefix_count) % repeat_count]
+            : &tail[i - prefix_count - repeat_count * 5];
+        ok = first[i].action == expected->action && first[i].disposition == expected->disposition
+            && first[i].record == expected->record;
+    }
+    /* This short export shares the exact entry reset prologue. Its packet and
+     * trace metadata must be blank before the next overflowing source entry. */
+    if (ok) ok = wasm_instance_call_named(&instance,
+        SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_SUCCESS_EXPORT, 0, 0, 0)
+        && wasm_instance_panic_detail(&instance, (const uint8_t *)"", 0)
+        && wasm_instance_trace(&instance, second, 64, &second_count, &second_overflow)
+        && second_count == 0 && !second_overflow
+        && wasm_instance_call(&instance, 43, 0, 0)
+        && wasm_instance_trace(&instance, second, 64, &second_count, &second_overflow)
+        && second_count == 64 && second_overflow
+        && memcmp(first, second, sizeof first) == 0;
+    wasm_instance_close(&instance); sol_wasm_represented_test_p44_cleanup_trace_probe(false);
+    sol_wasm_represented_test_p44_packet_reset_probe(false);
+    sol_wasm_represented_output_free(&output); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+static bool p44_trace_skipped_case(const char *directory) {
+    PropagationPipeline pipeline; SolWasmRepresentedOutput output; WasmInstance instance = {0};
+    P44TraceSlot slots[64]; size_t count = 0, action = SOL_MIR_RUNTIME_NONE, instruction = SOL_MIR_RUNTIME_NONE;
+    bool overflow = false; char entry[256];
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&output);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(true);
+    bool ok = propagation_pipeline_build(&pipeline, directory);
+    SolWasmRepresentedBuildRequest request = {&pipeline.lowered, directory, NULL};
+    if (ok) for (size_t i = 0; i < pipeline.concrete.materialization.instruction_count; ++i) {
+        const SolMirMaterializedInstruction *item = &pipeline.concrete.materialization.instructions[i];
+        size_t candidate = SOL_MIR_RUNTIME_NONE;
+        if (item->kind == SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED
+            && item->place < pipeline.concrete.materialization.place_count
+            && pipeline.concrete.materialization.places[item->place].projections.count != 0
+            && sol_wasm_represented_test_cleanup_marker(&request, i, &candidate)
+                == SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_ACTION
+            && candidate < pipeline.cleanup.action_count
+            && (pipeline.cleanup.actions[candidate].flags & SOL_MIR_RUNTIME_CLEANUP_ACTION_GUARDED) != 0) {
+            if (action != SOL_MIR_RUNTIME_NONE) ok = false;
+            action = candidate; instruction = i;
+        }
+    }
+    static const P44TraceSlot expected[] = {
+        {14, 1026, 0}, {15, 1, 0}, {16, 1, 0}, {17, 1, 0},
+    };
+    const SolMirRuntimeCleanupAction *selected = action < pipeline.cleanup.action_count
+        ? &pipeline.cleanup.actions[action] : NULL;
+    if (ok) ok = action == 14 && instruction == 21 && selected != NULL
+        && selected->kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE
+        && (selected->flags & SOL_MIR_RUNTIME_CLEANUP_ACTION_GUARDED) != 0
+        && sol_wasm_represented_build(&request, &output, &pipeline.diagnostics)
+            == SOL_WASM_REPRESENTED_OK && entry_symbol(&output.bytes, entry, sizeof entry)
+        && wasm_instance_open(&output.bytes, entry, &instance) && wasm_instance_call(&instance, 42, 0, 0)
+        && wasm_instance_trace(&instance, slots, 64, &count, &overflow) && !overflow
+        && count == sizeof expected / sizeof *expected && memcmp(slots, expected, sizeof expected) == 0;
+    wasm_instance_close(&instance); sol_wasm_represented_output_free(&output);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+static bool p44_trace_eventless_case(const char *directory) {
+    PropagationPipeline pipeline; SolWasmRepresentedOutput output; WasmInstance instance = {0};
+    P44TraceSlot slots[64]; size_t count = 0, markers = 0, eventless[2] = {SOL_MIR_RUNTIME_NONE,
+        SOL_MIR_RUNTIME_NONE};
+    bool overflow = false; char entry[256];
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&output);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(true);
+    bool ok = propagation_pipeline_build(&pipeline, directory);
+    SolWasmRepresentedBuildRequest request = {&pipeline.lowered, directory, NULL};
+    static const P44TraceSlot expected[] = {{14, 1, 0}, {15, 1, 0}, {16, 1, 0}};
+    if (ok) for (size_t i = 0; i < pipeline.concrete.materialization.instruction_count; ++i) {
+        size_t action = SOL_MIR_RUNTIME_NONE;
+        if (sol_wasm_represented_test_cleanup_marker(&request, i, &action)
+            == SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_EVENTLESS) {
+            if (markers < sizeof eventless / sizeof *eventless) eventless[markers] = i;
+            ++markers;
+            ok = ok && action == SOL_MIR_RUNTIME_NONE;
+        }
+    }
+    if (ok) ok = markers == 2 && eventless[0] == 23 && eventless[1] == 25
+        && sol_wasm_represented_build(&request, &output, &pipeline.diagnostics)
+            == SOL_WASM_REPRESENTED_OK && entry_symbol(&output.bytes, entry, sizeof entry)
+        && wasm_instance_open(&output.bytes, entry, &instance) && wasm_instance_call(&instance, 42, 0, 0)
+        && wasm_instance_trace(&instance, slots, 64, &count, &overflow) && !overflow
+        && count == sizeof expected / sizeof *expected && memcmp(slots, expected, sizeof expected) == 0;
+    for (size_t i = 0; ok && i < count; ++i)
+        ok = slots[i].action != eventless[0] && slots[i].action != eventless[1];
+    wasm_instance_close(&instance); sol_wasm_represented_output_free(&output);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+/* Direct internal calls route LOCAL_OR_PENDING through an empty call-failure
+ * slice: the still-live caller Text is released by the successor RESUME_FAILURE
+ * terminal's PENDING slice. This fixture freezes that exact structural gate. */
+static bool p44_trace_pending_case(const char *directory) {
+    PropagationPipeline pipeline; SolWasmRepresentedOutput output; WasmInstance instance = {0};
+    P44TraceSlot slots[64]; size_t count = 0, call_id = SOL_MIR_RUNTIME_NONE;
+    bool overflow = false; char entry[256];
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&output);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(true);
+    bool ok = propagation_pipeline_build(&pipeline, directory);
+    if (ok) for (size_t i = 0; i < pipeline.conventions.call_count; ++i)
+        if (pipeline.conventions.calls[i].target_kind == SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL) {
+            if (call_id != SOL_MIR_RUNTIME_NONE) ok = false;
+            call_id = i;
+        }
+    const SolMirRuntimeCall *call = call_id < pipeline.conventions.call_count
+        ? &pipeline.conventions.calls[call_id] : NULL;
+    const SolMirRuntimeLoweredImageTerminator *row = call != NULL
+        && call->block < pipeline.lowered.image_terminator_count
+        ? &pipeline.lowered.image_terminators[call->block] : NULL;
+    const SolMirRuntimeCleanupEvent *event = row != NULL && row->cleanup_event < pipeline.cleanup.event_count
+        ? &pipeline.cleanup.events[row->cleanup_event] : NULL;
+    const SolMirRuntimeCleanupTransition *failure = NULL;
+    if (ok && event != NULL) for (size_t i = 0; i < event->transitions.count; ++i) {
+        const SolMirRuntimeCleanupTransition *candidate = &pipeline.cleanup.transitions[
+            event->transitions.offset + i];
+        if (candidate->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_FAILURE) failure = candidate;
+    }
+    size_t resume_block = call != NULL && call->failure_edge < pipeline.concrete.materialization.edge_count
+        ? pipeline.concrete.materialization.edges[call->failure_edge].block : SOL_MIR_RUNTIME_NONE;
+    const SolMirRuntimeLoweredImageTerminator *resume_row = resume_block
+        < pipeline.lowered.image_terminator_count ? &pipeline.lowered.image_terminators[resume_block] : NULL;
+    const SolMirRuntimeCleanupEvent *resume = resume_row != NULL
+        && resume_row->cleanup_event < pipeline.cleanup.event_count
+        ? &pipeline.cleanup.events[resume_row->cleanup_event] : NULL;
+    const SolMirRuntimeCleanupTransition *pending = resume != NULL && resume->transitions.count == 1
+        ? &pipeline.cleanup.transitions[resume->transitions.offset] : NULL;
+    static const P44TraceSlot expected[] = {
+        {3, 1, 0}, {4, 1, 0}, {5, 517, 4}, {9, 1, 0},
+        {10, 1, 0}, {11, 1, 0}, {12, 533, 4},
+    };
+    if (ok) ok = call != NULL && event != NULL && failure != NULL
+        && failure->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING
+        && failure->failure_site == call->failure_site && failure->actions.count == 0
+        && failure->actions.offset <= pipeline.cleanup.action_count
+        && failure->actions.count <= pipeline.cleanup.action_count - failure->actions.offset
+        && resume != NULL && pending != NULL && pending->failure_source
+            == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING
+        && pending->actions.offset == 12 && pending->actions.count == 1
+        && pipeline.cleanup.actions[12].kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory,
+            NULL}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && entry_symbol(&output.bytes, entry, sizeof entry) && wasm_instance_open(&output.bytes, entry, &instance)
+        && wasm_instance_call(&instance, 0, 1, -1)
+        && wasm_instance_trace(&instance, slots, 64, &count, &overflow) && !overflow
+        && count == sizeof expected / sizeof *expected && memcmp(slots, expected, sizeof expected) == 0
+        && (slots[6].disposition & SOL_WASM_REPRESENTED_TEST_P44_TRACE_PENDING) != 0
+        && (slots[6].disposition & SOL_WASM_REPRESENTED_TEST_P44_TRACE_IMPLICIT) == 0;
+    wasm_instance_close(&instance); sol_wasm_represented_output_free(&output);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+static bool p44_trace_freeze_case(const char *directory, const SolWasmRepresentedUsage *expected_usage,
+    const uint8_t expected_hash[32]) {
+    PropagationPipeline pipeline; SolWasmRepresentedOutput traced, copy;
+    SolWasmRepresentedLimits zero = {0}, cap;
+    uint8_t hash[32];
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&traced);
+    sol_wasm_represented_output_init(&copy); sol_wasm_represented_test_p44_cleanup_trace_probe(true);
+    bool ok = expected_usage != NULL && expected_hash != NULL && propagation_pipeline_build(&pipeline, directory)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+            directory, NULL}, &traced, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK;
+    if (ok) {
+        sha256(traced.bytes.bytes, traced.bytes.count, hash);
+        ok = usage_equal(&traced.usage, expected_usage)
+            && memcmp(hash, expected_hash, sizeof hash) == 0;
+    }
+    if (ok) ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+        directory, &zero}, &copy, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && usage_equal(&copy.usage, expected_usage) && copy.bytes.count == traced.bytes.count
+        && memcmp(copy.bytes.bytes, traced.bytes.bytes, traced.bytes.count) == 0;
+    sol_wasm_represented_output_free(&copy);
+#define CHECK_P44_TRACE_FREEZE_CAP(field, exact) do { \
+    cap = sol_wasm_represented_default_limits(); cap.field = (exact); \
+    sol_wasm_represented_output_init(&copy); \
+    ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
+        directory, &cap}, &copy, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK \
+        && usage_equal(&copy.usage, expected_usage) && copy.bytes.count == traced.bytes.count \
+        && memcmp(copy.bytes.bytes, traced.bytes.bytes, traced.bytes.count) == 0; \
+    sol_wasm_represented_output_free(&copy); cap.field = (exact) - 1; \
+    sol_wasm_represented_output_init(&copy); \
+    ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
+        directory, &cap}, &copy, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED \
+        && copy.bytes.bytes == NULL && usage_zero(&copy.usage); \
+    sol_wasm_represented_output_free(&copy); \
+} while (0)
+    if (ok) {
+        CHECK_P44_TRACE_FREEZE_CAP(max_generated_nodes, expected_usage->generated_nodes);
+        CHECK_P44_TRACE_FREEZE_CAP(max_output_bytes, expected_usage->output_bytes);
+    }
+#undef CHECK_P44_TRACE_FREEZE_CAP
+#define CHECK_P44_TRACE_PARTIAL_ZERO(field) do { \
+    cap = sol_wasm_represented_default_limits(); cap.field = 0; \
+    sol_wasm_represented_output_init(&copy); \
+    ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
+        directory, &cap}, &copy, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_INVALID_ARGUMENT \
+        && copy.bytes.bytes == NULL && usage_zero(&copy.usage); \
+    sol_wasm_represented_output_free(&copy); \
+} while (0)
+    if (ok) {
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_functions);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_blocks);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_edges);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_values);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_locals);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_generated_nodes);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_table_elements);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_static_data_bytes);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_allocation_requests);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_allocation_bytes);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_provenance_records);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_work_bytes);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_scratch_bytes);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_owned_bytes);
+        CHECK_P44_TRACE_PARTIAL_ZERO(max_output_bytes);
+    }
+#undef CHECK_P44_TRACE_PARTIAL_ZERO
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false);
+    sol_wasm_represented_output_free(&traced); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+static bool p44_trace_owner_reject(const SolWasmRepresentedBuildRequest *request,
+    SolDiagnostics *diagnostics, const char *directory) {
+    SolWasmRepresentedOutput output;
+    sol_wasm_represented_output_init(&output);
+    SolMirRuntimeLoweredProgram *owner = (SolMirRuntimeLoweredProgram *)request->program;
+    owner->authentication = sol_mir_runtime_lowered_program_test_seal(owner);
+    SolWasmRepresentedResult result = sol_wasm_represented_build(request, &output, diagnostics);
+    bool ok = !sol_mir_runtime_lowered_program_validate(owner, NULL)
+        && result == SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE && output.bytes.bytes == NULL
+        && output.bytes.count == 0 && usage_zero(&output.usage);
+    sol_wasm_represented_output_free(&output);
+    (void)directory;
+    return ok;
+}
+
+/* These are source-backed owner attacks, not synthetic trace records.  The
+ * selector proves the marker/action pairing before the whole-owner build
+ * validator rejects every hostile mutation and the restored bytes match. */
+static bool p44_trace_marker_owner_mutations(const char *directory) {
+    PropagationPipeline pipeline; SolWasmRepresentedOutput baseline, restored;
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&baseline);
+    sol_wasm_represented_output_init(&restored);
+    bool ok = propagation_pipeline_build(&pipeline, directory);
+    SolWasmRepresentedBuildRequest request = {&pipeline.lowered, directory, NULL};
+    size_t instruction = SOL_MIR_RUNTIME_NONE, action = SOL_MIR_RUNTIME_NONE;
+    if (ok) for (size_t i = 0; i < pipeline.lowered.image_instruction_count; ++i) {
+        size_t candidate = SOL_MIR_RUNTIME_NONE;
+        if (sol_wasm_represented_test_cleanup_marker(&request, i, &candidate)
+            == SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_ACTION) {
+            instruction = i; action = candidate; break;
+        }
+    }
+    if (ok) ok = instruction != SOL_MIR_RUNTIME_NONE && action < pipeline.cleanup.action_count
+        && sol_wasm_represented_build(&request, &baseline, &pipeline.diagnostics)
+            == SOL_WASM_REPRESENTED_OK;
+#define CHECK_P44_TRACE_OWNER_REJECT(name, edit, restore) do { \
+    edit; bool rejected = p44_trace_owner_reject(&request, &pipeline.diagnostics, directory); \
+    ok = ok && rejected; restore; \
+    pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+    size_t selected = SOL_MIR_RUNTIME_NONE; \
+    ok = ok && sol_wasm_represented_test_cleanup_marker(&request, instruction, &selected) \
+        == SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_ACTION && selected == action; \
+} while (0)
+    if (ok) {
+        SolMirRuntimeLoweredImageInstruction *marker = &pipeline.lowered.image_instructions[instruction];
+        size_t event_id = marker->cleanup_event;
+        SolMirRuntimeCleanupEvent *event = &pipeline.cleanup.events[event_id];
+        SolMirRuntimeCleanupTransition *transition = &pipeline.cleanup.transitions[event->transitions.offset];
+        SolMirRuntimeCleanupAction *owner_action = &pipeline.cleanup.actions[action];
+        size_t saved_event = marker->cleanup_event;
+        marker->cleanup_event = pipeline.cleanup.event_count;
+        size_t rejected_action = SOL_MIR_RUNTIME_NONE;
+        ok = ok && sol_wasm_represented_test_cleanup_marker(&request, instruction, &rejected_action)
+            == SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_INVALID
+            && rejected_action == SOL_MIR_RUNTIME_NONE
+            && p44_trace_owner_reject(&request, &pipeline.diagnostics, directory);
+        marker->cleanup_event = saved_event;
+        pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered);
+        { size_t selected = SOL_MIR_RUNTIME_NONE;
+          ok = ok && sol_wasm_represented_test_cleanup_marker(&request, instruction, &selected)
+              == SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_ACTION && selected == action; }
+        SolMirRuntimeSlice saved_slice = transition->actions;
+        CHECK_P44_TRACE_OWNER_REJECT("slice", transition->actions.count = pipeline.cleanup.action_count + 1,
+            transition->actions = saved_slice);
+        SolMirRuntimeCleanupActionKind saved_kind = owner_action->kind;
+        CHECK_P44_TRACE_OWNER_REJECT("kind", owner_action->kind = SOL_MIR_RUNTIME_CLEANUP_ACTION_WRITEBACK,
+            owner_action->kind = saved_kind);
+        size_t saved_target = owner_action->target;
+        CHECK_P44_TRACE_OWNER_REJECT("target", owner_action->target = SOL_MIR_RUNTIME_NONE,
+            owner_action->target = saved_target);
+        unsigned saved_flags = owner_action->flags;
+        CHECK_P44_TRACE_OWNER_REJECT("flags", owner_action->flags ^= SOL_MIR_RUNTIME_CLEANUP_ACTION_NORMAL_ONLY,
+            owner_action->flags = saved_flags);
+    }
+#undef CHECK_P44_TRACE_OWNER_REJECT
+    if (ok) ok = sol_wasm_represented_build(&request, &restored, &pipeline.diagnostics)
+        == SOL_WASM_REPRESENTED_OK && restored.bytes.count == baseline.bytes.count
+        && memcmp(restored.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+        && usage_equal(&restored.usage, &baseline.usage);
+    sol_wasm_represented_output_free(&restored); sol_wasm_represented_output_free(&baseline);
+    propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+static bool p44_trace_writeback_owner_mutations(const char *directory) {
+    PropagationPipeline pipeline; SolWasmRepresentedOutput baseline, restored;
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&baseline);
+    sol_wasm_represented_output_init(&restored);
+    bool ok = propagation_pipeline_build(&pipeline, directory);
+    SolWasmRepresentedBuildRequest request = {&pipeline.lowered, directory, NULL};
+    SolMirRuntimeCleanupTransition *normal = NULL, *failure = NULL;
+    SolMirRuntimeCleanupAction *writeback = NULL;
+    if (ok) for (size_t event = 0; event < pipeline.cleanup.event_count; ++event) {
+        SolMirRuntimeCleanupEvent *candidate = &pipeline.cleanup.events[event];
+        SolMirRuntimeCleanupTransition *n = NULL, *f = NULL;
+        for (size_t i = 0; i < candidate->transitions.count; ++i) {
+            SolMirRuntimeCleanupTransition *transition = &pipeline.cleanup.transitions[
+                candidate->transitions.offset + i];
+            if (transition->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL) n = transition;
+            if (transition->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE) f = transition;
+        }
+        if (n != NULL && f != NULL)
+            for (size_t i = 0; i < n->actions.count; ++i) {
+                SolMirRuntimeCleanupAction *candidate_action = &pipeline.cleanup.actions[
+                    n->actions.offset + i];
+                if (candidate_action->kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_WRITEBACK) {
+                    normal = n; failure = f; writeback = candidate_action; break;
+                }
+            }
+        if (writeback != NULL) break;
+    }
+    if (ok) ok = normal != NULL && failure != NULL && writeback != NULL
+        && sol_wasm_represented_build(&request, &baseline, &pipeline.diagnostics)
+            == SOL_WASM_REPRESENTED_OK;
+#define CHECK_P44_WRITEBACK_OWNER_REJECT(name, edit, restore) do { \
+    edit; bool rejected = p44_trace_owner_reject(&request, &pipeline.diagnostics, directory); \
+    ok = ok && rejected; restore; \
+    pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+} while (0)
+    if (ok) {
+        SolMirRuntimeSlice saved_normal = normal->actions, saved_failure = failure->actions;
+        CHECK_P44_WRITEBACK_OWNER_REJECT("removed", normal->actions.count = 0, normal->actions = saved_normal);
+        CHECK_P44_WRITEBACK_OWNER_REJECT("moved", failure->actions = saved_normal, failure->actions = saved_failure);
+        unsigned saved_flags = writeback->flags;
+        CHECK_P44_WRITEBACK_OWNER_REJECT("flags", writeback->flags ^= SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY,
+            writeback->flags = saved_flags);
+        SolMirRuntimeCleanupFailureSource saved_source = failure->failure_source;
+        CHECK_P44_WRITEBACK_OWNER_REJECT("source", failure->failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE,
+            failure->failure_source = saved_source);
+        size_t saved_site = failure->failure_site;
+        CHECK_P44_WRITEBACK_OWNER_REJECT("site", failure->failure_site = SOL_MIR_RUNTIME_NONE,
+            failure->failure_site = saved_site);
+        uint32_t saved_mask = failure->failure_mask;
+        CHECK_P44_WRITEBACK_OWNER_REJECT("mask", failure->failure_mask ^= UINT32_C(1),
+            failure->failure_mask = saved_mask);
+    }
+#undef CHECK_P44_WRITEBACK_OWNER_REJECT
+    if (ok) ok = sol_wasm_represented_build(&request, &restored, &pipeline.diagnostics)
+        == SOL_WASM_REPRESENTED_OK && restored.bytes.count == baseline.bytes.count
+        && memcmp(restored.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+        && usage_equal(&restored.usage, &baseline.usage);
+    sol_wasm_represented_output_free(&restored); sol_wasm_represented_output_free(&baseline);
+    propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
 int main(void) {
     enum {
         P43_LITERAL_SITE = 4,
@@ -3886,20 +4579,43 @@ int main(void) {
         wasm_instance_close(&instance);
     }
     sol_wasm_represented_test_callback_writeback_probe(true);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(true);
     sol_wasm_represented_output_init(&callback_inout_probe);
     CHECK(build_multiroot(callback_inout_directory, false, &callback_inout_probe, callback_inout_ids,
         NULL, SOL_WASM_REPRESENTED_OK) && sol_wasm_represented_validate(&callback_inout_probe.bytes)
         == SOL_WASM_REPRESENTED_OK);
     if (callback_inout_probe.bytes.bytes != NULL) {
         WasmInstance instance;
+        P44TraceSlot failed_trace[64], success_trace[64]; size_t failed_count = 0, success_count = 0;
+        bool failed_overflow = false, success_overflow = false;
+        static const P44TraceSlot expected_failure[] = {
+            {0, 13, 5}, {1, 13, 5}, {2, 13, 5}, {3, 525, 5},
+            {24, 1, 0}, {25, 1, 0}, {26, 1, 0}, {27, 533, 5},
+        };
+        static const P44TraceSlot expected_success[] = {
+            {4, 1, 0}, {5, 1, 0}, {6, 1, 0}, {11, 257, 0},
+            {16, 1, 0}, {17, 1, 0}, {18, 1, 0},
+        };
         CHECK(wasm_instance_open(&callback_inout_probe.bytes, callback_inout_entry_name, &instance)
-            && wasm_instance_call_named(&instance, SOL_WASM_REPRESENTED_TEST_FAILURE_ENTRY_EXPORT, 0, 2, 5)
-            && wasm_instance_writebacks(&instance, 0) && wasm_instance_call(&instance, 42, 0, 0)
-            && wasm_instance_writebacks(&instance, 1));
+        && wasm_instance_call_named(&instance, SOL_WASM_REPRESENTED_TEST_FAILURE_ENTRY_EXPORT, 0, 2, 5)
+            && wasm_instance_writebacks(&instance, 0)
+            && wasm_instance_trace(&instance, failed_trace, 64, &failed_count, &failed_overflow)
+            && wasm_instance_call(&instance, 42, 0, 0) && wasm_instance_writebacks(&instance, 1)
+            && wasm_instance_trace(&instance, success_trace, 64, &success_count, &success_overflow)
+            && !failed_overflow && !success_overflow
+            && failed_count == sizeof expected_failure / sizeof *expected_failure
+            && success_count == sizeof expected_success / sizeof *expected_success
+            && memcmp(failed_trace, expected_failure, sizeof expected_failure) == 0
+            && memcmp(success_trace, expected_success, sizeof expected_success) == 0);
+        for (size_t i = 0; i < failed_count; ++i) CHECK(failed_trace[i].action != 11);
+        size_t writebacks = 0;
+        for (size_t i = 0; i < success_count; ++i) writebacks += success_trace[i].action == 11;
+        CHECK(writebacks == 1);
         wasm_instance_close(&instance);
     }
     sol_wasm_represented_output_free(&callback_inout_probe);
     sol_wasm_represented_test_callback_writeback_probe(false);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false);
     sol_wasm_represented_output_free(&callback_inout_roots);
     char method_directory[512];
     (void)snprintf(method_directory, sizeof method_directory,
@@ -5034,6 +5750,74 @@ int main(void) {
     CHECK(p44_packet_reset_probe_authorization(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_panic"));
     CHECK(p44_terminal_multiroot(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_nested_panic"));
     CHECK(p44_b1_control_owners(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_b1"));
+    /* B2 is source-owned through P3.6: its owned formal, nested lexical scopes,
+     * and explicit region yield the full normal-path cleanup order.  The first
+     * action is the authenticated Text equality temporary; DROP_PARAMETER is
+     * deliberately later, after place, scope, and region cleanup. */
+    static const P44TraceSlot b2_normal_trace[] = {
+        {13, 1, 0}, {14, 1, 0}, {31, 1, 0}, {32, 1, 0}, {33, 1, 0}, {34, 1, 0},
+        {35, 1, 0}, {36, 1, 0}, {37, 1, 0}, {38, 1, 0}, {39, 1, 0}, {40, 1, 0},
+        {47, 1, 0}, {48, 1, 0},
+    };
+    static const P44TraceSlot b2_fold_trace[] = {
+        {13, 1, 0}, {14, 1, 0}, {31, 1, 0}, {32, 1, 0}, {33, 1, 0}, {34, 1, 0},
+        {35, 1, 0}, {36, 1, 0}, {37, 1, 0}, {38, 1, 0}, {39, 1, 0}, {40, 1, 0},
+    };
+    static const P44TraceSlot b2_stress_prefix[] = {{49, 1, 0}};
+    static const P44TraceSlot b2_stress_tail[] = {
+        {110, 1, 0}, {111, 1, 0}, {112, 1, 0},
+    };
+    static const P44TraceSlot callable_hole_failure_trace[] = {
+        {14, 13, 4}, {15, 1037, 4}, {16, 13, 4}, {17, 13, 4}, {18, 525, 4},
+    };
+    static const P44TraceSlot callback_success_trace[] = {
+        {4, 1, 0}, {5, 1, 0}, {6, 1, 0}, {11, 257, 0}, {16, 1, 0}, {17, 1, 0},
+        {18, 1, 0},
+    };
+    static const P44TraceSlot nested_panic_trace[] = {
+        {3, 1, 0}, {4, 1, 0}, {5, 517, 4}, {6, 1, 0}, {7, 1, 0}, {8, 533, 4},
+    };
+    static const SolWasmRepresentedUsage b2_trace_usage = {
+        5,7,5,15,53,1692,0,56,0,0,10,16511,10240,16123,5883,
+    };
+    static const uint8_t b2_trace_hash[32] = {0x31,0xf9,0xaa,0x89,0xd7,0xd5,0xb3,0xa8,
+        0xf6,0x3e,0x06,0x1c,0xfb,0x71,0xca,0x5a,0x98,0xd1,0x1e,0xee,0xeb,0xdc,0x03,0x6a,
+        0x0c,0x61,0xaa,0x4f,0xee,0xe6,0xd0,0x99};
+    static const SolWasmRepresentedUsage trace_failure_usage = {
+        6,2,0,9,54,1256,2,15,0,0,7,14691,10240,14528,4288,
+    };
+    static const uint8_t trace_failure_hash[32] = {0x10,0xdc,0x69,0xf0,0x37,0x6e,0x81,0x24,
+        0x47,0x83,0x71,0x72,0xad,0xcf,0xd7,0x0f,0xfa,0xa7,0x5c,0x34,0x3f,0xc5,0x0b,0x86,
+        0xf7,0x7a,0xc4,0x88,0x02,0xa3,0x17,0x8f};
+    CHECK(p44_cleanup_trace_case(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_b2_trace", 43, 0,
+        0, b2_normal_trace, sizeof b2_normal_trace / sizeof *b2_normal_trace, true));
+    CHECK(p44_trace_stress_case(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_b2_trace_stress",
+        b2_stress_prefix, sizeof b2_stress_prefix / sizeof *b2_stress_prefix, b2_fold_trace,
+        sizeof b2_fold_trace / sizeof *b2_fold_trace, b2_stress_tail,
+        sizeof b2_stress_tail / sizeof *b2_stress_tail));
+    CHECK(p44_trace_skipped_case(
+        SOL_TEST_SOURCE_DIR "/tests/conformance/p43_callable_hole_c32_repair"));
+    CHECK(p44_trace_eventless_case(
+        SOL_TEST_SOURCE_DIR "/tests/conformance/p43_callable_hole_c32_whole"));
+    CHECK(p44_trace_pending_case(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_b2_pending"));
+    CHECK(p44_cleanup_trace_case(SOL_TEST_SOURCE_DIR "/tests/conformance/p43_callable_hole_failure",
+        0, 2, 4, callable_hole_failure_trace, sizeof callable_hole_failure_trace
+            / sizeof *callable_hole_failure_trace, false));
+    CHECK(p44_trace_freeze_case(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_b2_trace",
+        &b2_trace_usage, b2_trace_hash));
+    CHECK(p44_trace_freeze_case(SOL_TEST_SOURCE_DIR "/tests/conformance/p43_callable_hole_failure",
+        &trace_failure_usage, trace_failure_hash));
+    CHECK(p44_trace_marker_owner_mutations(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_b2_trace"));
+    CHECK(p44_trace_writeback_owner_mutations(
+        SOL_TEST_SOURCE_DIR "/tests/conformance/p43_callback_inout"));
+    CHECK(p44_cleanup_trace_case(SOL_TEST_SOURCE_DIR "/tests/conformance/p43_callback_inout", 42,
+        0, 0, callback_success_trace, sizeof callback_success_trace / sizeof *callback_success_trace,
+        false));
+    /* The nested panic retains its original one-based provenance record through
+     * the callee and caller cleanup sequence. */
+    CHECK(p44_cleanup_trace_case(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_nested_panic", 0,
+        1, 4, nested_panic_trace, sizeof nested_panic_trace / sizeof *nested_panic_trace, false));
+    CHECK(p44_trace_wire_controls(SOL_TEST_SOURCE_DIR "/tests/conformance/p44_panic"));
     {
         char p44_guard_call_directory[512];
         SolWasmRepresentedOutput p44_guard_call;

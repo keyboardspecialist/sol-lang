@@ -35,6 +35,9 @@
 #define P44_PANIC_CAPTURE "sol.p44.panic-capture"
 #define P44_TEST_PACKET_RESET_SUCCESS "sol.p44.test.packet-reset-success"
 #define P44_TEST_PACKET_RESET_NONPANIC "sol.p44.test.packet-reset-nonpanic"
+#define P44_TRACE_OFFSET "sol.p44.trace-offset"
+#define P44_TRACE_COUNT "sol.p44.trace-count"
+#define P44_TRACE_OVERFLOW "sol.p44.trace-overflow"
 
 static size_t allocation_attempts;
 static size_t fail_allocation_after;
@@ -47,6 +50,7 @@ static bool represented_test_inactive_payload_probe;
 static bool represented_test_callback_writeback_probe;
 static bool represented_test_callable_hole_cleanup_probe;
 static bool represented_test_p44_packet_reset_probe;
+static bool represented_test_p44_cleanup_trace_probe;
 #endif
 
 typedef enum {
@@ -1263,7 +1267,12 @@ typedef struct RepresentedLiteral {
 } RepresentedLiteral;
 
 enum { P43_STATIC_BASE = 8, P43_FIXED_SCRATCH = 1024, P44_PANIC_DETAIL_BYTES = 192,
-    P44_PANIC_DETAIL_MAX = P44_PANIC_DETAIL_BYTES - 1 };
+    P44_PANIC_DETAIL_MAX = P44_PANIC_DETAIL_BYTES - 1, P44_TRACE_OFFSET_IN_SCRATCH = 192,
+    P44_TRACE_SLOT_BYTES = 12, P44_TRACE_CAPACITY = 64,
+    P44_TRACE_BYTES = P44_TRACE_SLOT_BYTES * P44_TRACE_CAPACITY,
+    P44_ENTRY_RESET_MAX_ITEMS = 5 + 2 + 2,
+    P44_ENTRY_WRAPPER_MAX_ITEMS = P44_ENTRY_RESET_MAX_ITEMS + 1 + 4 + 1,
+    P44_PACKET_RESET_PROBE_MAX_ITEMS = P44_ENTRY_RESET_MAX_ITEMS + 2 + 1 };
 
 static bool represented_align8(size_t input, size_t *output) {
     if (input > SIZE_MAX - 7) return false;
@@ -5661,6 +5670,92 @@ static BinaryenExpressionRef represented_cleanup_probe_increment(BinaryenModuleR
     return BinaryenNop(module);
 }
 
+typedef struct {
+    const SolMirRuntimeCleanupEvent *event;
+    const SolMirRuntimeCleanupTransition *transition;
+    /* LOCAL_OR_PENDING has a static P3.3 source but its actual packet is only
+     * pending after the direct callee has published it. */
+    bool pending_from_packet;
+} RepresentedCleanupTraceContext;
+
+static bool represented_cleanup_trace_enabled(void) {
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+    return represented_test_p44_cleanup_trace_probe;
+#else
+    return false;
+#endif
+}
+
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+static unsigned represented_cleanup_trace_disposition(const SolMirRuntimeCleanupAction *action,
+    const RepresentedCleanupTraceContext *context, bool executed) {
+    unsigned disposition = executed ? SOL_WASM_REPRESENTED_TEST_P44_TRACE_EXECUTED
+        : SOL_WASM_REPRESENTED_TEST_P44_TRACE_SKIPPED;
+    if (context->transition->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE)
+        disposition |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_FAILURE;
+    if (context->event->origin == SOL_MIR_RUNTIME_CLEANUP_ORIGIN_IMPLICIT)
+        disposition |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_IMPLICIT;
+    if (context->transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING)
+        disposition |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_PENDING;
+    if ((action->flags & SOL_MIR_RUNTIME_CLEANUP_ACTION_NORMAL_ONLY) != 0)
+        disposition |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_NORMAL;
+    if ((action->flags & SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY) != 0)
+        disposition |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_ACTION_FAILURE;
+    if ((action->flags & SOL_MIR_RUNTIME_CLEANUP_ACTION_GUARDED) != 0)
+        disposition |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_GUARDED;
+    return disposition;
+}
+#endif
+
+/* A direct bounded record in D+192..D+960 of P4.3's existing fixed scratch. */
+static BinaryenExpressionRef represented_cleanup_trace_emit(const RepresentedFunction *function,
+    const SolMirRuntimeCleanupAction *action, const RepresentedCleanupTraceContext *context,
+    bool executed) {
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+    const SolMirRuntimeCleanup *cleanup = function->request->program->cleanup;
+    if (!represented_test_p44_cleanup_trace_probe || context == NULL) return BinaryenNop(function->module);
+    if (action < cleanup->actions || action >= cleanup->actions + cleanup->action_count
+        || context->event == NULL || context->transition == NULL) return NULL;
+    size_t action_id = (size_t)(action - cleanup->actions);
+    if (action_id > UINT32_MAX) return NULL;
+    unsigned disposition = represented_cleanup_trace_disposition(action, context, executed);
+    BinaryenExpressionRef base = BinaryenBinary(function->module, BinaryenAddInt32(),
+        BinaryenGlobalGet(function->module, P44_TRACE_OFFSET, BinaryenTypeInt32()),
+        BinaryenBinary(function->module, BinaryenMulInt32(), BinaryenGlobalGet(function->module,
+            P44_TRACE_COUNT, BinaryenTypeInt32()), BinaryenConst(function->module,
+                BinaryenLiteralInt32(P44_TRACE_SLOT_BYTES))));
+    BinaryenExpressionRef disposition_value = BinaryenConst(function->module,
+        BinaryenLiteralInt32((int32_t)disposition));
+    if (context->pending_from_packet) {
+        disposition_value = BinaryenIf(function->module, BinaryenBinary(function->module,
+            BinaryenNeInt32(), BinaryenGlobalGet(function->module, P43_CODE, BinaryenTypeInt32()),
+            BinaryenConst(function->module, BinaryenLiteralInt32(0))), BinaryenConst(function->module,
+                BinaryenLiteralInt32((int32_t)(disposition
+                    | SOL_WASM_REPRESENTED_TEST_P44_TRACE_PENDING))), disposition_value);
+    }
+    BinaryenExpressionRef write[] = {
+        BinaryenStore(function->module, 4, 0, 4, base, BinaryenConst(function->module,
+            BinaryenLiteralInt32((int32_t)action_id)), BinaryenTypeInt32(), P43_MEMORY),
+        BinaryenStore(function->module, 4, 4, 4, base, disposition_value, BinaryenTypeInt32(), P43_MEMORY),
+        BinaryenStore(function->module, 4, 8, 4, base, (disposition
+                    & SOL_WASM_REPRESENTED_TEST_P44_TRACE_FAILURE) != 0
+                    ? BinaryenGlobalGet(function->module, P43_SITE, BinaryenTypeInt32())
+                    : BinaryenConst(function->module, BinaryenLiteralInt32(0)), BinaryenTypeInt32(), P43_MEMORY),
+        BinaryenGlobalSet(function->module, P44_TRACE_COUNT, BinaryenBinary(function->module,
+            BinaryenAddInt32(), BinaryenGlobalGet(function->module, P44_TRACE_COUNT,
+                BinaryenTypeInt32()), BinaryenConst(function->module, BinaryenLiteralInt32(1)))),
+    };
+    return BinaryenIf(function->module, BinaryenBinary(function->module, BinaryenLtUInt32(),
+        BinaryenGlobalGet(function->module, P44_TRACE_COUNT, BinaryenTypeInt32()), BinaryenConst(
+            function->module, BinaryenLiteralInt32(P44_TRACE_CAPACITY))), BinaryenBlock(function->module,
+                NULL, write, 4, BinaryenTypeNone()), BinaryenGlobalSet(function->module,
+                    P44_TRACE_OVERFLOW, BinaryenConst(function->module, BinaryenLiteralInt32(1))));
+#else
+    (void)action; (void)context; (void)executed;
+    return BinaryenNop(function->module);
+#endif
+}
+
 static bool represented_cleanup_emit(const RepresentedFunction *function,
     const SolMirRuntimeCleanupAction *action, RepresentedNodes *nodes) {
     const SolMirConcreteProgram *concrete = function->request->program->conventions->concrete;
@@ -5791,13 +5886,85 @@ static bool represented_cleanup_emit(const RepresentedFunction *function,
         (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
 }
 
+/* Keep the pre-existing emitter authoritative for action semantics. The ledger
+ * is appended only at authenticated emission sites; callers with no event
+ * deliberately keep using represented_cleanup_emit directly. */
+static size_t represented_cleanup_action_init_index(const RepresentedFunction *function,
+    const SolMirRuntimeCleanupAction *action) {
+    const SolMirMaterialization *m = &function->request->program->conventions->concrete->materialization;
+    switch (action->kind) {
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_TEMPORARY:
+            return temporary_init_index(function, action->target);
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PARAMETER:
+            return local_init_index(function, action->target);
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE:
+            return action->target < m->place_count
+                ? local_init_index(function, m->places[action->target].local) : SIZE_MAX;
+        default: return SIZE_MAX;
+    }
+}
+
+static bool represented_cleanup_emit_traced(const RepresentedFunction *function,
+    const SolMirRuntimeCleanupAction *action, const RepresentedCleanupTraceContext *trace,
+    RepresentedNodes *nodes) {
+    if (!represented_cleanup_trace_enabled()) return represented_cleanup_emit(function, action, nodes);
+    if ((action->flags & SOL_MIR_RUNTIME_CLEANUP_ACTION_GUARDED) != 0) {
+        size_t init = represented_cleanup_action_init_index(function, action);
+        if (init == SIZE_MAX) return false;
+        BinaryenExpressionRef executed = represented_cleanup_trace_emit(function, action, trace, true);
+        BinaryenExpressionRef skipped = represented_cleanup_trace_emit(function, action, trace, false);
+        RepresentedNodes consumed = {0};
+        bool ok = executed != NULL && skipped != NULL
+            && represented_nodes_push(&consumed, executed)
+            && represented_cleanup_emit(function, action, &consumed);
+        BinaryenExpressionRef consume = ok ? BinaryenBlock(function->module, NULL, consumed.items,
+            (BinaryenIndex)consumed.count, BinaryenTypeNone()) : NULL;
+        deallocate(consumed.items);
+        return ok && represented_nodes_push(nodes,
+            BinaryenIf(function->module, BinaryenLocalGet(function->module, (BinaryenIndex)init,
+                BinaryenTypeInt32()), consume, skipped));
+    }
+    return represented_cleanup_emit(function, action, nodes)
+        && represented_nodes_push(nodes, represented_cleanup_trace_emit(function, action, trace, true));
+}
+
+static bool represented_cleanup_actions_emit_traced(const RepresentedFunction *function,
+    const SolMirRuntimeCleanupEvent *event, const SolMirRuntimeCleanupTransition *transition,
+    RepresentedNodes *nodes) {
+    const SolMirRuntimeCleanup *cleanup = function->request->program->cleanup;
+    if (event == NULL || transition == NULL || transition->event >= cleanup->event_count
+        || &cleanup->events[transition->event] != event
+        || transition->actions.offset > cleanup->action_count
+        || transition->actions.count > cleanup->action_count - transition->actions.offset) return false;
+    RepresentedCleanupTraceContext trace = {event, transition, false};
+    for (size_t i = 0; i < transition->actions.count; ++i)
+        if (!represented_cleanup_emit_traced(function,
+                &cleanup->actions[transition->actions.offset + i], &trace, nodes)) return false;
+    return true;
+}
+
+static bool represented_cleanup_marker_trace_context(const RepresentedFunction *function,
+    size_t instruction, RepresentedCleanupTraceContext *trace) {
+    const SolMirRuntimeLoweredProgram *owner = function->request->program;
+    const SolMirRuntimeCleanup *cleanup = owner->cleanup;
+    if (trace == NULL || instruction >= owner->image_instruction_count) return false;
+    size_t event_id = owner->image_instructions[instruction].cleanup_event;
+    if (event_id >= cleanup->event_count) return false;
+    const SolMirRuntimeCleanupEvent *event = &cleanup->events[event_id];
+    if (event->transitions.count != 1 || event->transitions.offset >= cleanup->transition_count) return false;
+    const SolMirRuntimeCleanupTransition *transition = &cleanup->transitions[event->transitions.offset];
+    if (transition->event != event_id) return false;
+    *trace = (RepresentedCleanupTraceContext){event, transition, false};
+    return true;
+}
+
 /* The checked C2b preflight has proved that this is the sole normal-only
  * WRITEBACK action for the callback.  Its result word is retained in scratch
  * until the packet branch selects this normal body; neither failure cleanup nor
  * a projected/aliased place can reach this store. */
 static bool represented_receiver_writeback_emit(const RepresentedFunction *function,
     const RepresentedCallCatalog *call, const SolMirRuntimeCleanupAction *action,
-    RepresentedNodes *nodes) {
+    const RepresentedCleanupTraceContext *trace, RepresentedNodes *nodes) {
     const SolMirRuntimeConventions *conventions = function->request->program->conventions;
     const SolMirMaterialization *m = &conventions->concrete->materialization;
     if (call->call >= conventions->call_count || action == NULL
@@ -5831,6 +5998,8 @@ static bool represented_receiver_writeback_emit(const RepresentedFunction *funct
                 P43_WRITEBACKS, BinaryenTypeInt32()), BinaryenConst(function->module,
                 BinaryenLiteralInt32(1)))));
 #endif
+    if (ok && represented_cleanup_trace_enabled()) ok = represented_nodes_push(nodes,
+        represented_cleanup_trace_emit(function, action, trace, true));
     return ok;
 }
 
@@ -5877,9 +6046,7 @@ static bool represented_failure_emit(const RepresentedFunction *function, size_t
         || !represented_nodes_push(nodes, BinaryenGlobalSet(function->module, P43_SITE,
             BinaryenConst(function->module, BinaryenLiteralInt32((int32_t)record)))))
         return false;
-    for (size_t i = 0; i < failure->actions.count; ++i)
-        if (!represented_cleanup_emit(function, &cleanup->actions[failure->actions.offset + i], nodes))
-            return false;
+    if (!represented_cleanup_actions_emit_traced(function, event, failure, nodes)) return false;
     return represented_nodes_push(nodes, BinaryenReturn(function->module, i64(function, 0)));
 }
 
@@ -5922,9 +6089,7 @@ static bool represented_terminal_failure_emit(const RepresentedFunction *functio
     }
     if (failure == NULL || failure->actions.offset > owner->cleanup->action_count
         || failure->actions.count > owner->cleanup->action_count - failure->actions.offset) return false;
-    for (size_t i = 0; i < failure->actions.count; ++i)
-        if (!represented_cleanup_emit(function,
-                &owner->cleanup->actions[failure->actions.offset + i], nodes)) return false;
+    if (!represented_cleanup_actions_emit_traced(function, event, failure, nodes)) return false;
     return represented_nodes_push(nodes, BinaryenReturn(function->module, i64(function, 0)));
 }
 
@@ -5950,9 +6115,7 @@ static bool represented_supplemental_failure_emit(const RepresentedFunction *fun
     }
     if (failure == NULL || failure->actions.offset > cleanup->action_count
         || failure->actions.count > cleanup->action_count - failure->actions.offset) return false;
-    for (size_t i = 0; i < failure->actions.count; ++i)
-        if (!represented_cleanup_emit(function, &cleanup->actions[
-                failure->actions.offset + i], nodes)) return false;
+    if (!represented_cleanup_actions_emit_traced(function, event, failure, nodes)) return false;
     return represented_nodes_push(nodes, BinaryenReturn(function->module, i64(function, 0)));
 }
 
@@ -5976,9 +6139,7 @@ static bool represented_supplemental_normal_emit(const RepresentedFunction *func
     }
     if (normal == NULL || normal->actions.offset > cleanup->action_count
         || normal->actions.count > cleanup->action_count - normal->actions.offset) return false;
-    for (size_t i = 0; i < normal->actions.count; ++i)
-        if (!represented_cleanup_emit(function, &cleanup->actions[
-                normal->actions.offset + i], nodes)) return false;
+    if (!represented_cleanup_actions_emit_traced(function, event, normal, nodes)) return false;
     return true;
 }
 
@@ -6415,12 +6576,12 @@ static bool represented_instruction_emit(const RepresentedFunction *function, si
                         function->module, BinaryenLiteralInt32(0))));
             }
             if (route != REPRESENTED_CLEANUP_MARKER_ACTION) return false;
+            RepresentedCleanupTraceContext trace;
+            if (!represented_cleanup_marker_trace_context(function, instruction, &trace)) return false;
             local = local_hole_index(function, item->local);
             if (local != SIZE_MAX || represented_moved_callable_cleanup_action(function, action))
-                return represented_cleanup_emit(function, action, nodes);
-            init = local_init_index(function, item->local);
-            return init != SIZE_MAX && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
-                (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
+                return represented_cleanup_emit_traced(function, action, &trace, nodes);
+            return represented_cleanup_emit_traced(function, action, &trace, nodes);
         }
         case SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED:
             if (item->place >= materialization->place_count) return false;
@@ -6435,15 +6596,16 @@ static bool represented_instruction_emit(const RepresentedFunction *function, si
                         (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
                 }
                 if (route != REPRESENTED_CLEANUP_MARKER_ACTION) return false;
+                RepresentedCleanupTraceContext trace;
+                if (!represented_cleanup_marker_trace_context(function, instruction, &trace)) return false;
                 if (materialization->places[item->place].projections.count != 0)
                     return represented_projected_pre_store_action(function->request, function->image,
-                        instruction, action);
+                        instruction, action) && (!represented_cleanup_trace_enabled() || represented_nodes_push(nodes,
+                            represented_cleanup_trace_emit(function, action, &trace, false)));
                 local = local_hole_index(function, materialization->places[item->place].local);
                 if (local != SIZE_MAX || represented_moved_callable_cleanup_action(function, action))
-                    return represented_cleanup_emit(function, action, nodes);
-                init = local_init_index(function, materialization->places[item->place].local);
-                return init != SIZE_MAX && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
-                    (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
+                    return represented_cleanup_emit_traced(function, action, &trace, nodes);
+                return represented_cleanup_emit_traced(function, action, &trace, nodes);
             }
         case SOL_MIR_INST_LOAD_COPY:
         case SOL_MIR_INST_LOAD_MOVE:
@@ -6568,20 +6730,35 @@ static bool represented_instruction_emit(const RepresentedFunction *function, si
                     return init != SIZE_MAX && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
                         (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
                 if (route != REPRESENTED_CLEANUP_MARKER_ACTION || init == SIZE_MAX) return false;
+                RepresentedCleanupTraceContext trace;
+                if (!represented_cleanup_marker_trace_context(function, instruction, &trace)) return false;
                 if (represented_moved_callable_temporary(function, item->temporary)) {
+                    if (!represented_cleanup_trace_enabled()) {
+                        BinaryenExpressionRef body[] = {
+                            represented_cleanup_probe_increment(function->module,
+                                P43_CLEANUP_MOVED_CALLABLE), BinaryenLocalSet(function->module,
+                                (BinaryenIndex)init, BinaryenConst(function->module,
+                                    BinaryenLiteralInt32(0))),
+                        };
+                        return body[0] != NULL && body[1] != NULL && represented_nodes_push(nodes,
+                            BinaryenIf(function->module, BinaryenLocalGet(function->module,
+                                (BinaryenIndex)init, BinaryenTypeInt32()), BinaryenBlock(function->module,
+                                    NULL, body, 2, BinaryenTypeNone()), NULL));
+                    }
                     BinaryenExpressionRef body[] = {
+                        represented_cleanup_trace_emit(function, action, &trace, true),
                         represented_cleanup_probe_increment(function->module,
                             P43_CLEANUP_MOVED_CALLABLE),
                         BinaryenLocalSet(function->module, (BinaryenIndex)init,
                             BinaryenConst(function->module, BinaryenLiteralInt32(0))),
                     };
-                    return body[0] != NULL && body[1] != NULL && represented_nodes_push(nodes,
+                    return body[0] != NULL && body[1] != NULL && body[2] != NULL && represented_nodes_push(nodes,
                         BinaryenIf(function->module, BinaryenLocalGet(function->module,
                             (BinaryenIndex)init, BinaryenTypeInt32()), BinaryenBlock(function->module, NULL,
-                                body, 2, BinaryenTypeNone()), NULL));
+                                body, 3, BinaryenTypeNone()), represented_cleanup_trace_emit(function,
+                                    action, &trace, false)));
                 }
-                return represented_nodes_push(nodes, BinaryenLocalSet(function->module,
-                    (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0))));
+                return represented_cleanup_emit_traced(function, action, &trace, nodes);
             }
         case SOL_MIR_INST_EXPRESSION_RESULT:
             return destination != SIZE_MAX && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
@@ -6613,7 +6790,11 @@ static bool represented_instruction_emit(const RepresentedFunction *function, si
                 NULL;
             RepresentedCleanupMarkerRoute route = represented_cleanup_instruction_route(function,
                 instruction, &action);
-            return route == REPRESENTED_CLEANUP_MARKER_ACTION;
+            RepresentedCleanupTraceContext trace;
+            return route == REPRESENTED_CLEANUP_MARKER_ACTION
+                && represented_cleanup_marker_trace_context(function, instruction, &trace)
+                && (!represented_cleanup_trace_enabled() || represented_nodes_push(nodes,
+                    represented_cleanup_trace_emit(function, action, &trace, true)));
         }
         case SOL_MIR_INST_REGION_ENTER:
         case SOL_MIR_INST_SCOPE_ENTER:
@@ -6732,6 +6913,10 @@ static bool represented_call_emit(const RepresentedFunction *function, size_t bl
         }
     }
     if (normal == NULL || failure == NULL) return false;
+    RepresentedCleanupTraceContext normal_trace = {event, normal, false};
+    RepresentedCleanupTraceContext failure_trace = {event, failure,
+        callback == NULL && failure->failure_source
+            == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING};
     RepresentedNodes success = {0};
     bool ok = true;
     if (call->result_class == SOL_MIR_RUNTIME_RESULT_VALUE) {
@@ -6743,8 +6928,9 @@ static bool represented_call_emit(const RepresentedFunction *function, size_t bl
     for (size_t i = 0; ok && i < normal->actions.count; ++i) {
         const SolMirRuntimeCleanupAction *action = &owner->cleanup->actions[normal->actions.offset + i];
         ok = action->kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_WRITEBACK
-            ? receiver_writeback && represented_receiver_writeback_emit(function, call, action, &success)
-            : represented_cleanup_emit(function, action, &success);
+            ? receiver_writeback && represented_receiver_writeback_emit(function, call, action,
+                &normal_trace, &success)
+            : represented_cleanup_emit_traced(function, action, &normal_trace, &success);
     }
     if (ok) ok = represented_edge(function, call->normal_edge, &success);
     BinaryenExpressionRef success_body = ok ? BinaryenBlock(function->module, NULL, success.items,
@@ -6755,7 +6941,7 @@ static bool represented_call_emit(const RepresentedFunction *function, size_t bl
     for (size_t i = 0; ok && i < failure->actions.count; ++i) {
         const SolMirRuntimeCleanupAction *action = &owner->cleanup->actions[failure->actions.offset + i];
         ok = action->kind != SOL_MIR_RUNTIME_CLEANUP_ACTION_WRITEBACK
-            && represented_cleanup_emit(function, action, &failed);
+            && represented_cleanup_emit_traced(function, action, &failure_trace, &failed);
     }
     if (ok) ok = represented_edge(function, call->failure_edge, &failed);
     BinaryenExpressionRef failure_body = ok ? BinaryenBlock(function->module, NULL, failed.items,
@@ -6790,21 +6976,15 @@ static bool represented_resume_failure_emit(const RepresentedFunction *function,
         pending = candidate;
     }
     if (pending == NULL) return false;
-    for (size_t i = 0; i < pending->actions.count; ++i)
-        if (!represented_cleanup_emit(function,
-                &owner->cleanup->actions[pending->actions.offset + i], nodes)) return false;
+    if (!represented_cleanup_actions_emit_traced(function, event, pending, nodes)) return false;
     return represented_nodes_push(nodes, BinaryenReturn(function->module, i64(function, 0)));
 }
 
 static bool represented_propagation_actions_emit(const RepresentedFunction *function,
     const SolMirRuntimeCleanupTransition *transition, RepresentedNodes *nodes) {
     const SolMirRuntimeCleanup *cleanup = function->request->program->cleanup;
-    if (transition->actions.offset > cleanup->action_count
-        || transition->actions.count > cleanup->action_count - transition->actions.offset) return false;
-    for (size_t i = 0; i < transition->actions.count; ++i)
-        if (!represented_cleanup_emit(function,
-                &cleanup->actions[transition->actions.offset + i], nodes)) return false;
-    return true;
+    return transition->event < cleanup->event_count && represented_cleanup_actions_emit_traced(function,
+        &cleanup->events[transition->event], transition, nodes);
 }
 
 static bool represented_propagation_pre_failure_emit(const RepresentedFunction *function,
@@ -7159,7 +7339,11 @@ static int entry_order_compare(const void *left, const void *right) {
  * a nearly-identical packet clear. */
 static bool represented_entry_packet_reset_emit(BinaryenModuleRef module, uint32_t heap_base,
     bool panic_detail, BinaryenExpressionRef *items, size_t capacity, size_t *count) {
-    if (items == NULL || count == NULL || capacity < 5 + (panic_detail ? 2 : 0)) return false;
+    size_t trace_items = 0;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+    trace_items = represented_test_p44_cleanup_trace_probe ? 2 : 0;
+#endif
+    if (items == NULL || count == NULL || capacity < 5 + (panic_detail ? 2 : 0) + trace_items) return false;
     *count = 0;
     items[(*count)++] = BinaryenGlobalSet(module, P43_CODE,
         BinaryenConst(module, BinaryenLiteralInt32(0)));
@@ -7178,6 +7362,14 @@ static bool represented_entry_packet_reset_emit(BinaryenModuleRef module, uint32
             BinaryenGlobalGet(module, P44_PANIC_DETAIL_OFFSET, BinaryenTypeInt32()),
             BinaryenConst(module, BinaryenLiteralInt32(0)), BinaryenTypeInt32(), P43_MEMORY);
     }
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+    if (represented_test_p44_cleanup_trace_probe) {
+        items[(*count)++] = BinaryenGlobalSet(module, P44_TRACE_COUNT,
+            BinaryenConst(module, BinaryenLiteralInt32(0)));
+        items[(*count)++] = BinaryenGlobalSet(module, P44_TRACE_OVERFLOW,
+            BinaryenConst(module, BinaryenLiteralInt32(0)));
+    }
+#endif
     for (size_t i = 0; i < *count; ++i)
         if (items[i] == NULL) return false;
     return true;
@@ -7189,23 +7381,28 @@ static bool represented_entry_wrapper_emit(BinaryenModuleRef module,
     if (entry->callable >= linkage->callable_count) return false;
     const SolMirRuntimeSignature *signature = signature_for(conventions, entry->callable);
     if (signature == NULL || signature->slots.count != 0) return false;
-    BinaryenExpressionRef body_items[13]; size_t body_count = 0;
+    BinaryenExpressionRef body_items[P44_ENTRY_WRAPPER_MAX_ITEMS]; size_t body_count = 0;
     if (!represented_entry_packet_reset_emit(module, heap_base, panic_detail, body_items,
             sizeof body_items / sizeof *body_items, &body_count)) return false;
     BinaryenExpressionRef result = BinaryenReturn(module, BinaryenCall(module,
         linkage->callables[entry->callable].symbol.bytes, NULL, 0, BinaryenTypeInt64()));
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
-    if (represented_test_callback_writeback_probe)
+    if (represented_test_callback_writeback_probe) {
+        if (body_count >= P44_ENTRY_WRAPPER_MAX_ITEMS) return false;
         body_items[body_count++] = BinaryenGlobalSet(module, P43_WRITEBACKS,
             BinaryenConst(module, BinaryenLiteralInt32(0)));
+    }
     if (represented_test_callable_hole_cleanup_probe) {
         const char *const cleanup_counters[] = {P43_CLEANUP_OLD_CALLABLE,
             P43_CLEANUP_MOVED_CALLABLE, P43_CLEANUP_TEXT_SIBLING, P43_CLEANUP_ROOT};
-        for (size_t i = 0; i < sizeof cleanup_counters / sizeof *cleanup_counters; ++i)
+        for (size_t i = 0; i < sizeof cleanup_counters / sizeof *cleanup_counters; ++i) {
+            if (body_count >= P44_ENTRY_WRAPPER_MAX_ITEMS) return false;
             body_items[body_count++] = BinaryenGlobalSet(module, cleanup_counters[i],
                 BinaryenConst(module, BinaryenLiteralInt32(0)));
+        }
     }
 #endif
+    if (body_count >= P44_ENTRY_WRAPPER_MAX_ITEMS) return false;
     body_items[body_count++] = result;
     for (size_t i = 0; i < body_count; ++i)
         if (body_items[i] == NULL) return false;
@@ -7225,15 +7422,17 @@ static bool represented_p44_packet_reset_probe_functions(BinaryenModuleRef modul
     uint32_t heap_base) {
     const char *const names[] = {P44_TEST_PACKET_RESET_SUCCESS, P44_TEST_PACKET_RESET_NONPANIC};
     for (size_t probe = 0; probe < sizeof names / sizeof *names; ++probe) {
-        BinaryenExpressionRef items[10]; size_t count = 0;
+        BinaryenExpressionRef items[P44_PACKET_RESET_PROBE_MAX_ITEMS]; size_t count = 0;
         if (!represented_entry_packet_reset_emit(module, heap_base, true, items,
                 sizeof items / sizeof *items, &count)) return false;
         if (probe != 0) {
+            if (count + 2 > P44_PACKET_RESET_PROBE_MAX_ITEMS) return false;
             items[count++] = BinaryenGlobalSet(module, P43_CODE,
                 BinaryenConst(module, BinaryenLiteralInt32(2)));
             items[count++] = BinaryenGlobalSet(module, P43_SITE,
                 BinaryenConst(module, BinaryenLiteralInt32(0)));
         }
+        if (count >= P44_PACKET_RESET_PROBE_MAX_ITEMS) return false;
         items[count++] = BinaryenReturn(module, BinaryenConst(module, BinaryenLiteralInt64(0)));
         if (BinaryenAddFunction(module, names[probe], BinaryenTypeNone(), BinaryenTypeInt64(),
                 NULL, 0, BinaryenBlock(module, NULL, items, (BinaryenIndex)count,
@@ -7560,6 +7759,8 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
     bool saw_panic_detail_offset_export = false, saw_panic_detail_length_export = false;
     bool saw_p44_packet_reset_success = false, saw_p44_packet_reset_nonpanic = false;
     uint32_t panic_detail_offset_index = 0, panic_detail_length_index = 0;
+    bool saw_trace_offset_export = false, saw_trace_count_export = false, saw_trace_overflow_export = false;
+    uint32_t trace_offset_index = 0, trace_count_index = 0, trace_overflow_index = 0;
     uint8_t global_type[REPRESENTED_WIRE_MAX_FUNCTIONS] = {0};
     bool global_mutable[REPRESENTED_WIRE_MAX_FUNCTIONS] = {0};
     uint32_t global_initial[REPRESENTED_WIRE_MAX_FUNCTIONS] = {0};
@@ -7690,6 +7891,12 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
                     SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_SUCCESS_EXPORT);
                 bool p44_packet_reset_nonpanic = represented_name_equal(name, name_count,
                     SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_NONPANIC_EXPORT);
+                bool trace_offset = represented_name_equal(name, name_count,
+                    SOL_WASM_REPRESENTED_TEST_P44_TRACE_OFFSET_EXPORT);
+                bool trace_count = represented_name_equal(name, name_count,
+                    SOL_WASM_REPRESENTED_TEST_P44_TRACE_COUNT_EXPORT);
+                bool trace_overflow = represented_name_equal(name, name_count,
+                    SOL_WASM_REPRESENTED_TEST_P44_TRACE_OVERFLOW_EXPORT);
                 if (panic_detail_offset) {
                     if (kind != 3 || saw_panic_detail_offset_export) goto invalid;
                     saw_panic_detail_offset_export = true; panic_detail_offset_index = ignored;
@@ -7716,10 +7923,24 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
                     goto invalid;
 #endif
                 }
+                if (trace_offset || trace_count || trace_overflow) {
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+                    if (!represented_test_p44_cleanup_trace_probe || kind != 3) goto invalid;
+                    if (trace_offset) { if (saw_trace_offset_export) goto invalid;
+                        saw_trace_offset_export = true; trace_offset_index = ignored; }
+                    if (trace_count) { if (saw_trace_count_export) goto invalid;
+                        saw_trace_count_export = true; trace_count_index = ignored; }
+                    if (trace_overflow) { if (saw_trace_overflow_export) goto invalid;
+                        saw_trace_overflow_export = true; trace_overflow_index = ignored; }
+#else
+                    goto invalid;
+#endif
+                }
                 if (name_count >= strlen("sol.p44.") && memcmp(name, "sol.p44.",
                         strlen("sol.p44.")) == 0
                     && !panic_detail_offset && !panic_detail_length
-                    && !p44_packet_reset_success && !p44_packet_reset_nonpanic) goto invalid;
+                    && !p44_packet_reset_success && !p44_packet_reset_nonpanic
+                    && !trace_offset && !trace_count && !trace_overflow) goto invalid;
                 if (represented_name_equal(name, name_count, SOL_WASM_REPRESENTED_TEST_WRITEBACK_EXPORT)) {
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
                     if (!represented_test_callback_writeback_probe || kind != 3
@@ -7856,6 +8077,8 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
             || (table_sections == 1 && element_sections == 1)) && saw_memory_export
         && saw_code_export && saw_site_export && saw_provenance_payload && saw_exports_payload
         && (saw_panic_detail_offset_export == saw_panic_detail_length_export)
+        && (saw_trace_offset_export == saw_trace_count_export)
+        && (saw_trace_offset_export == saw_trace_overflow_export)
         && (provenance_has_panic == saw_panic_detail_offset_export)
         && (!provenance_has_panic || (saw_active_data
             && global_count >= 7 && global_type[2] == UINT8_C(0x7f) && global_mutable[2]
@@ -7871,6 +8094,17 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
             && heap_base >= P44_PANIC_DETAIL_BYTES
             && active_data_end <= heap_base - P44_PANIC_DETAIL_BYTES))
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
+        && (!represented_test_p44_cleanup_trace_probe || (saw_trace_offset_export
+            && trace_offset_index < global_count && trace_count_index < global_count
+            && trace_overflow_index < global_count && global_type[trace_offset_index] == UINT8_C(0x7f)
+            && !global_mutable[trace_offset_index] && global_initial[trace_offset_index]
+                == (saw_active_data ? active_data_end : P43_STATIC_BASE) + P44_TRACE_OFFSET_IN_SCRATCH
+            && global_type[trace_count_index] == UINT8_C(0x7f) && global_mutable[trace_count_index]
+            && global_initial[trace_count_index] == 0 && global_type[trace_overflow_index] == UINT8_C(0x7f)
+            && global_mutable[trace_overflow_index] && global_initial[trace_overflow_index] == 0
+            && heap_base >= P44_TRACE_OFFSET_IN_SCRATCH + P44_TRACE_BYTES
+            && (saw_active_data ? active_data_end : P43_STATIC_BASE)
+                <= heap_base - (P44_TRACE_OFFSET_IN_SCRATCH + P44_TRACE_BYTES)))
         && (represented_test_callback_writeback_probe == saw_writeback_export)
         && (represented_test_callback_writeback_probe == saw_failure_probe_export)
         && (represented_test_callable_hole_cleanup_probe == saw_cleanup_old_callable_export)
@@ -7881,11 +8115,13 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
             == (represented_test_p44_packet_reset_probe && provenance_has_panic))
         && (saw_p44_packet_reset_nonpanic
             == (represented_test_p44_packet_reset_probe && provenance_has_panic))
+        && (represented_test_p44_cleanup_trace_probe == saw_trace_offset_export)
 #else
         && !saw_writeback_export && !saw_failure_probe_export
         && !saw_cleanup_old_callable_export && !saw_cleanup_moved_callable_export
         && !saw_cleanup_text_sibling_export && !saw_cleanup_root_export
         && !saw_p44_packet_reset_success && !saw_p44_packet_reset_nonpanic
+        && !saw_trace_offset_export && !saw_trace_count_export && !saw_trace_overflow_export
 #endif
         && represented_exports_match_provenance(&entry_exports, &provenance_entries);
     represented_wire_entry_map_free(&provenance_entries);
@@ -8097,6 +8333,9 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     size_t literal_count = 0, static_size = 0;
     uint32_t heap_base = 0;
     uint32_t panic_detail_offset = 0;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+    uint32_t trace_offset = 0;
+#endif
     if (!represented_static_literals(request, &literals, &literal_count, &static_data,
             &static_size, &heap_base) || static_size > limits.max_static_data_bytes) {
         deallocate(literals); deallocate(static_data); deallocate(callables); deallocate(entries);
@@ -8112,6 +8351,19 @@ SolWasmRepresentedResult sol_wasm_represented_build(
         represented_call_catalog_free(&catalog); represented_accounting = NULL;
         return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
     }
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+    if (represented_test_p44_cleanup_trace_probe
+        && (static_size > UINT32_MAX - P43_STATIC_BASE
+            || (trace_offset = (uint32_t)(P43_STATIC_BASE + static_size)) > UINT32_MAX
+                - P44_TRACE_OFFSET_IN_SCRATCH
+            || trace_offset + P44_TRACE_OFFSET_IN_SCRATCH > UINT32_C(65536)
+                - P44_TRACE_BYTES)) {
+        deallocate(static_data); deallocate(literals); deallocate(callables); deallocate(entries);
+        represented_call_catalog_free(&catalog); represented_accounting = NULL;
+        return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
+    }
+    trace_offset += P44_TRACE_OFFSET_IN_SCRATCH;
+#endif
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
     if (represented_test_heap_base != 0) {
         if (represented_test_heap_base < heap_base) {
@@ -8181,9 +8433,16 @@ SolWasmRepresentedResult sol_wasm_represented_build(
         && (!panic_detail || (BinaryenAddGlobal(module, P44_PANIC_DETAIL_OFFSET,
                 BinaryenTypeInt32(), false, BinaryenConst(module,
                     BinaryenLiteralInt32((int32_t)panic_detail_offset))) != NULL
-            && BinaryenAddGlobal(module, P44_PANIC_DETAIL_LENGTH, BinaryenTypeInt32(), true,
+             && BinaryenAddGlobal(module, P44_PANIC_DETAIL_LENGTH, BinaryenTypeInt32(), true,
                 BinaryenConst(module, BinaryenLiteralInt32(0))) != NULL));
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
+    if (ok && represented_test_p44_cleanup_trace_probe)
+        ok = BinaryenAddGlobal(module, P44_TRACE_OFFSET, BinaryenTypeInt32(), false,
+                BinaryenConst(module, BinaryenLiteralInt32((int32_t)trace_offset))) != NULL
+            && BinaryenAddGlobal(module, P44_TRACE_COUNT, BinaryenTypeInt32(), true,
+                BinaryenConst(module, BinaryenLiteralInt32(0))) != NULL
+            && BinaryenAddGlobal(module, P44_TRACE_OVERFLOW, BinaryenTypeInt32(), true,
+                BinaryenConst(module, BinaryenLiteralInt32(0))) != NULL;
     if (ok && represented_test_callback_writeback_probe)
         ok = BinaryenAddGlobal(module, P43_WRITEBACKS, BinaryenTypeInt32(), true,
             BinaryenConst(module, BinaryenLiteralInt32(0))) != NULL;
@@ -8205,6 +8464,14 @@ SolWasmRepresentedResult sol_wasm_represented_build(
                 SOL_WASM_REPRESENTED_PANIC_DETAIL_LENGTH_EXPORT);
         }
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
+        if (represented_test_p44_cleanup_trace_probe) {
+            BinaryenAddGlobalExport(module, P44_TRACE_OFFSET,
+                SOL_WASM_REPRESENTED_TEST_P44_TRACE_OFFSET_EXPORT);
+            BinaryenAddGlobalExport(module, P44_TRACE_COUNT,
+                SOL_WASM_REPRESENTED_TEST_P44_TRACE_COUNT_EXPORT);
+            BinaryenAddGlobalExport(module, P44_TRACE_OVERFLOW,
+                SOL_WASM_REPRESENTED_TEST_P44_TRACE_OVERFLOW_EXPORT);
+        }
         if (represented_test_callback_writeback_probe)
             BinaryenAddGlobalExport(module, P43_WRITEBACKS,
                 SOL_WASM_REPRESENTED_TEST_WRITEBACK_EXPORT);
@@ -8507,6 +8774,9 @@ void sol_wasm_represented_test_callable_hole_cleanup_probe(bool enabled) {
 }
 void sol_wasm_represented_test_p44_packet_reset_probe(bool enabled) {
     represented_test_p44_packet_reset_probe = enabled;
+}
+void sol_wasm_represented_test_p44_cleanup_trace_probe(bool enabled) {
+    represented_test_p44_cleanup_trace_probe = enabled;
 }
 bool sol_wasm_represented_test_control_transition(const SolWasmRepresentedBuildRequest *request,
     size_t block, SolMirRuntimeCleanupEdgeRole role, size_t *transition,

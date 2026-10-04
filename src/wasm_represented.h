@@ -86,6 +86,23 @@ typedef struct {
 #define SOL_WASM_REPRESENTED_TEST_CLEANUP_ROOT_EXPORT "sol.p43.test.cleanup.root"
 #define SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_SUCCESS_EXPORT "sol.p44.test.packet-reset-success"
 #define SOL_WASM_REPRESENTED_TEST_P44_PACKET_RESET_NONPANIC_EXPORT "sol.p44.test.packet-reset-nonpanic"
+#define SOL_WASM_REPRESENTED_TEST_P44_TRACE_OFFSET_EXPORT "sol.p44.test.trace-offset"
+#define SOL_WASM_REPRESENTED_TEST_P44_TRACE_COUNT_EXPORT "sol.p44.test.trace-count"
+#define SOL_WASM_REPRESENTED_TEST_P44_TRACE_OVERFLOW_EXPORT "sol.p44.test.trace-overflow"
+/* Compatibility spellings for the hook-only cleanup action ledger. */
+#define SOL_WASM_REPRESENTED_TEST_TRACE_OFFSET_EXPORT SOL_WASM_REPRESENTED_TEST_P44_TRACE_OFFSET_EXPORT
+#define SOL_WASM_REPRESENTED_TEST_TRACE_COUNT_EXPORT SOL_WASM_REPRESENTED_TEST_P44_TRACE_COUNT_EXPORT
+#define SOL_WASM_REPRESENTED_TEST_TRACE_OVERFLOW_EXPORT SOL_WASM_REPRESENTED_TEST_P44_TRACE_OVERFLOW_EXPORT
+enum {
+    SOL_WASM_REPRESENTED_TEST_P44_TRACE_EXECUTED = 1u,
+    SOL_WASM_REPRESENTED_TEST_P44_TRACE_SKIPPED = 2u,
+    SOL_WASM_REPRESENTED_TEST_P44_TRACE_FAILURE = 4u,
+    SOL_WASM_REPRESENTED_TEST_P44_TRACE_IMPLICIT = 8u,
+    SOL_WASM_REPRESENTED_TEST_P44_TRACE_PENDING = 16u,
+    SOL_WASM_REPRESENTED_TEST_P44_TRACE_NORMAL = 256u,
+    SOL_WASM_REPRESENTED_TEST_P44_TRACE_ACTION_FAILURE = 512u,
+    SOL_WASM_REPRESENTED_TEST_P44_TRACE_GUARDED = 1024u,
+};
 #define SOL_WASM_REPRESENTED_PROVENANCE_SECTION "sol.p43.provenance.v1"
 
 /* Private `sol.p43.provenance.v1` payload: `P43P`, u32 version (=1), u32
@@ -168,6 +185,9 @@ void sol_wasm_represented_test_callable_hole_cleanup_probe(bool enabled);
  * reset prologue; the second publishes code 2 with the test sentinel site 0.
  * Disabled by default and absent from production module bytes. */
 void sol_wasm_represented_test_p44_packet_reset_probe(bool enabled);
+/* Emits the hook-only 64-slot cleanup-action ledger in the already reserved
+ * scratch interval. Disabled by default and absent from production bytes. */
+void sol_wasm_represented_test_p44_cleanup_trace_probe(bool enabled);
 /* Runs B1's selector without the outer whole-owner validation, so hostile
  * owner mutations can exercise the selector itself. `transition` and `actions`
  * name borrowed P3.3 records on success. */
