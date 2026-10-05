@@ -718,13 +718,14 @@ static bool build_multiroot(const char *directory, bool reverse, SolWasmRepresen
     bool callable_hole_roots = strstr(directory, "p43_callable_hole_prereq") != NULL
         || strstr(directory, "p43_callable_hole_c32_repair") != NULL;
     bool p44_terminal_roots = strstr(directory, "p44_nested_panic") != NULL;
+    bool c1_parameter_forward_roots = strstr(directory, "p44c_requires_parameter_forward") != NULL;
     if (ok && (callback_roots || callback_inout_roots || method_roots || callable_hole_roots
-            || p44_terminal_roots)) {
+            || p44_terminal_roots || c1_parameter_forward_roots)) {
         for (size_t i = 0; i < ir.callable_count; ++i) {
             if (ir.callables[i].kind != SOL_IR_CALLABLE_FUNCTION) continue;
             if (!strcmp(ir.callables[i].name, "launch")) ids[0] = i;
             else if (!strcmp(ir.callables[i].name,
-                (callback_inout_roots || method_roots) ? "fail"
+                (callback_inout_roots || method_roots || c1_parameter_forward_roots) ? "fail"
                     : callable_hole_roots ? "answer" : p44_terminal_roots ? "inner" : "increment")) ids[1] = i;
         }
         if (ids[0] != SIZE_MAX && ids[1] != SIZE_MAX && ids[0] != ids[1]) {
@@ -735,7 +736,7 @@ static bool build_multiroot(const char *directory, bool reverse, SolWasmRepresen
         }
     }
     if (ok && !callback_roots && !callback_inout_roots && !method_roots && !callable_hole_roots
-        && !p44_terminal_roots)
+        && !p44_terminal_roots && !c1_parameter_forward_roots)
         for (size_t i = 0; i < ir.callable_count; ++i) {
         if (ir.callables[i].kind != SOL_IR_CALLABLE_FUNCTION) continue;
         if (!strcmp(ir.callables[i].name, "first")) ids[0] = i;
@@ -809,14 +810,26 @@ static bool build_named_root(const char *directory, const char *entry,
             &diagnostics)
         && sol_ir_lower_scoped(&package.source, &package.syntax, &hir, &types, &effects, &contracts,
             package.files, 1, &ir, &diagnostics);
-    SolIrCallableId callable = SOL_IR_NONE;
+    SolIrCallableId callable = SOL_IR_NONE, launch = SOL_IR_NONE;
     if (ok) for (size_t i = 0; i < ir.callable_count; ++i)
-        if (ir.callables[i].kind == SOL_IR_CALLABLE_FUNCTION && !strcmp(ir.callables[i].name, entry))
-            callable = i;
+        if (ir.callables[i].kind == SOL_IR_CALLABLE_FUNCTION) {
+            if (!strcmp(ir.callables[i].name, entry)) callable = i;
+            if (!strcmp(ir.callables[i].name, "launch")) launch = i;
+        }
     SolMirTargetDescriptor target = sol_mir_target_wasm32();
-    SolMirProgramRoot root = {callable, SOL_MIR_PROGRAM_ROOT_ENTRY};
-    if (ok) ok = callable != SOL_IR_NONE && sol_mir_concrete_program_build(
-        &(SolMirConcreteBuildRequest){&ir, &root, 1, NULL, 0, &target, NULL}, &concrete, &diagnostics)
+    bool internal_fail = callable != SOL_IR_NONE && !strcmp(entry, "fail")
+        && !ir.definitions[ir.callables[callable].owner].is_entrypoint;
+    SolMirProgramRoot roots[2] = {{callable, SOL_MIR_PROGRAM_ROOT_ENTRY},
+        {SOL_IR_NONE, SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE}};
+    size_t root_count = 1;
+    if (internal_fail) {
+        roots[0] = (SolMirProgramRoot){launch, SOL_MIR_PROGRAM_ROOT_ENTRY};
+        roots[1] = (SolMirProgramRoot){callable, SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+        root_count = 2;
+    }
+    if (ok) ok = callable != SOL_IR_NONE && (!internal_fail || launch != SOL_IR_NONE)
+        && sol_mir_concrete_program_build(&(SolMirConcreteBuildRequest){&ir, roots, root_count, NULL,
+            0, &target, NULL}, &concrete, &diagnostics)
             == SOL_MIR_CONCRETE_BUILD_SUCCEEDED
         && sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){&concrete, NULL},
             &conventions, &diagnostics) == SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED
@@ -909,7 +922,8 @@ static bool propagation_pipeline_build_named(PropagationPipeline *pipeline, cons
     bool paired_method_failure = pair_method_failure && ((entry != NULL && !strcmp(entry, "fail")
         && strstr(directory, "p43_method_failure_entry") != NULL)
         || (entry != NULL && !strcmp(entry, "launch")
-            && strstr(directory, "p43_method_prereq") != NULL));
+            && (strstr(directory, "p43_method_prereq") != NULL
+                || strstr(directory, "p44c_requires_") != NULL)));
     SolMirProgramRoot roots[2] = {{callable, SOL_MIR_PROGRAM_ROOT_ENTRY},
         {companion, SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE}};
     size_t root_count = paired_method_failure ? 2 : 1;
@@ -4257,6 +4271,950 @@ static bool p44_allocation_failure_trace_case(const char *directory) {
     return ok;
 }
 
+/* C1 is deliberately source-built.  The expected ledgers below are not an
+ * action-kind smoke test: they freeze the ordered P3.3 slices selected by the
+ * source execution, including the provenance record carried on failure. */
+typedef struct {
+    const char *leaf, *callable, *symbol;
+    int32_t code;
+    uint32_t record, code_mask, start, end;
+    SolMirRuntimeFailureOriginKind origin;
+    const P44TraceSlot *success;
+    size_t success_count;
+    const P44TraceSlot *failure;
+    size_t failure_count;
+} C1TraceCase;
+
+static bool c1_slice_valid(const SolMirRuntimeCleanup *cleanup, SolMirRuntimeSlice slice) {
+    return cleanup != NULL && slice.offset <= cleanup->action_count
+        && slice.count <= cleanup->action_count - slice.offset;
+}
+
+static unsigned c1_trace_disposition(const SolMirRuntimeCleanupEvent *event,
+    const SolMirRuntimeCleanupTransition *transition, const SolMirRuntimeCleanupAction *action) {
+    unsigned result = SOL_WASM_REPRESENTED_TEST_P44_TRACE_EXECUTED;
+    if (transition->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE)
+        result |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_FAILURE;
+    if (event->origin == SOL_MIR_RUNTIME_CLEANUP_ORIGIN_IMPLICIT)
+        result |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_IMPLICIT;
+    if (transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING)
+        result |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_PENDING;
+    if ((action->flags & SOL_MIR_RUNTIME_CLEANUP_ACTION_NORMAL_ONLY) != 0)
+        result |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_NORMAL;
+    if ((action->flags & SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY) != 0)
+        result |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_ACTION_FAILURE;
+    if ((action->flags & SOL_MIR_RUNTIME_CLEANUP_ACTION_GUARDED) != 0)
+        result |= SOL_WASM_REPRESENTED_TEST_P44_TRACE_GUARDED;
+    return result;
+}
+
+/* Reconstruct a slot from the one P3.3 action slice which owns it.  C1's
+ * selected transition list is represented by the literal action order below;
+ * an action must have one and only one owning transition before it is accepted. */
+static bool c1_trace_from_selected_slices(const PropagationPipeline *pipeline,
+    const P44TraceSlot *literal, size_t literal_count, uint32_t record,
+    P44TraceSlot *derived, size_t capacity) {
+    const SolMirRuntimeCleanup *cleanup = &pipeline->cleanup;
+    if (literal == NULL || derived == NULL || literal_count == 0 || literal_count > capacity) return false;
+    for (size_t slot = 0; slot < literal_count; ++slot) {
+        const SolMirRuntimeCleanupEvent *event = NULL;
+        const SolMirRuntimeCleanupTransition *transition = NULL;
+        if (literal[slot].action >= cleanup->action_count) return false;
+        for (size_t event_id = 0; event_id < cleanup->event_count; ++event_id) {
+            const SolMirRuntimeCleanupEvent *candidate_event = &cleanup->events[event_id];
+            if (candidate_event->transitions.offset > cleanup->transition_count
+                || candidate_event->transitions.count > cleanup->transition_count
+                    - candidate_event->transitions.offset) return false;
+            for (size_t item = 0; item < candidate_event->transitions.count; ++item) {
+                const SolMirRuntimeCleanupTransition *candidate = &cleanup->transitions[
+                    candidate_event->transitions.offset + item];
+                if (!c1_slice_valid(cleanup, candidate->actions)) return false;
+                if (literal[slot].action < candidate->actions.offset
+                    || literal[slot].action - candidate->actions.offset >= candidate->actions.count) continue;
+                if (transition != NULL) return false;
+                event = candidate_event;
+                transition = candidate;
+            }
+        }
+        if (event == NULL || transition == NULL) return false;
+        const SolMirRuntimeCleanupAction *action = &cleanup->actions[literal[slot].action];
+        derived[slot] = (P44TraceSlot){literal[slot].action,
+            c1_trace_disposition(event, transition, action),
+            transition->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE ? record : 0};
+    }
+    return memcmp(derived, literal, literal_count * sizeof *literal) == 0;
+}
+
+static bool c1_trace_matches(const PropagationPipeline *pipeline, const P44TraceSlot *literal,
+    size_t literal_count, uint32_t record, const P44TraceSlot *actual, size_t actual_count,
+    bool overflow) {
+    P44TraceSlot derived[64];
+    return literal_count != 0 && literal_count <= sizeof derived / sizeof *derived && !overflow
+        && actual_count == literal_count
+        && c1_trace_from_selected_slices(pipeline, literal, literal_count, record, derived,
+            sizeof derived / sizeof *derived)
+        && memcmp(actual, derived, literal_count * sizeof *literal) == 0;
+}
+
+static bool c1_trace_excludes(const P44TraceSlot *evaluated, size_t evaluated_count,
+    const P44TraceSlot *violation, size_t violation_count) {
+    if (evaluated == NULL || violation == NULL || evaluated_count == 0 || violation_count == 0)
+        return false;
+    for (size_t i = 0; i < evaluated_count; ++i)
+        for (size_t j = 0; j < violation_count; ++j)
+            if (evaluated[i].action == violation[j].action) return false;
+    return true;
+}
+
+/* The plan/body selector is intentionally independent of the emitted record.
+ * It starts at the named callable's contract predicate plan, binds it to the
+ * exact IR predicate expression, then accepts one P3.1 site of the requested
+ * origin and complete code mask. */
+static bool c1_failure_site(const PropagationPipeline *pipeline, const C1TraceCase *want,
+    size_t *site_out) {
+    const SolMirOperations *operations;
+    const SolMirMaterialization *materialization;
+    size_t body = SOL_MIR_RUNTIME_NONE, context_id = SOL_MIR_RUNTIME_NONE, plans = 0, sites = 0,
+        selected = SOL_MIR_RUNTIME_NONE;
+    if (pipeline == NULL || want == NULL || site_out == NULL) return false;
+    operations = &pipeline->concrete.operations;
+    materialization = &pipeline->concrete.materialization;
+    for (size_t body_id = 0; body_id < operations->predicate_body_count; ++body_id) {
+        const SolMirPredicateBody *predicate = &operations->predicate_bodies[body_id];
+        if (predicate->context >= materialization->context_count) continue;
+        const SolMirPlanContext *context = &materialization->contexts[predicate->context];
+        if (context->obligation >= pipeline->ir.obligation_count) continue;
+        const SolIrObligation *obligation = &pipeline->ir.obligations[context->obligation];
+        if (obligation->predicate >= pipeline->ir.expression_count || obligation->owner >= pipeline->ir.callable_count
+            || strcmp(pipeline->ir.callables[obligation->owner].name, want->callable) != 0) continue;
+        body = body_id;
+        context_id = predicate->context;
+        ++plans;
+    }
+    if (plans != 1 || body == SOL_MIR_RUNTIME_NONE) return false;
+    plans = 0;
+    for (size_t plan_id = 0; plan_id < operations->predicate_count; ++plan_id) {
+        const SolMirOperationPredicatePlan *plan = &operations->predicates[plan_id];
+        if (plan->kind == SOL_MIR_OPERATION_PREDICATE_CONTRACT && plan->body == body
+            && plan->context == context_id) ++plans;
+    }
+    if (plans != 1) return false;
+    for (size_t site = 0; site < pipeline->conventions.failure_site_count; ++site) {
+        const SolMirRuntimeFailureSite *candidate = &pipeline->conventions.failure_sites[site];
+        const SolSpan expression = pipeline->ir.expressions[
+            pipeline->ir.obligations[materialization->contexts[context_id].obligation].predicate].span;
+        if (candidate->owner != body || candidate->origin_kind != want->origin
+            || candidate->allowed_codes != want->code_mask
+            || (candidate->allowed_codes & (UINT32_C(1) << (unsigned)(want->code - 1))) == 0) continue;
+        if (candidate->source.file != 0 || candidate->source.start != want->start
+            || candidate->source.end != want->end || candidate->source.start < expression.start
+            || candidate->source.end > expression.end) continue;
+        selected = site;
+        ++sites;
+    }
+    if (sites != 1) return false;
+    *site_out = selected;
+    return true;
+}
+
+static bool c1_canonical_record(const SolWasmRepresentedOutput *output, const C1TraceCase *want,
+    uint32_t observed) {
+    size_t candidates = 0;
+    if (output == NULL || want == NULL || observed == 0 || want->record != observed
+        || output->usage.provenance_records == 0) return false;
+    for (uint32_t index = 1; index <= output->usage.provenance_records; ++index) {
+        ProvenanceRecord record;
+        if (!provenance_record(&output->bytes, index, &record)) return false;
+        bool match = record.tag == 3 && record.kind == want->origin
+            && bytes_equal(record.path, record.path_count, "main.sol")
+            && record.start == want->start && record.end == want->end && record.ordinal == 0
+            && bytes_equal(record.symbol, record.symbol_count, want->symbol);
+        if (match) { ++candidates; if (index != observed) return false; }
+    }
+    return candidates == 1;
+}
+
+static bool c1_run_trace_case(const C1TraceCase *want) {
+    char directory[512], entry[256];
+    PropagationPipeline pipeline; SolWasmRepresentedOutput output; WasmInstance instance = {0};
+    P44TraceSlot slots[64]; size_t count = 0, site = SOL_MIR_RUNTIME_NONE; bool overflow = false;
+    wasm_val_t observed;
+    if (want == NULL || snprintf(directory, sizeof directory, "%s/tests/conformance/%s",
+        SOL_TEST_SOURCE_DIR, want->leaf) < 0) return false;
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&output);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(true);
+    sol_wasm_represented_test_callback_writeback_probe(true);
+    bool ok = propagation_pipeline_build_named(&pipeline, directory, "launch", true)
+        && sol_mir_operations_validate(&pipeline.concrete.operations, NULL)
+        && sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL)
+        && sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL)
+        && c1_failure_site(&pipeline, want, &site)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL},
+            &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && sol_wasm_represented_validate(&output.bytes) == SOL_WASM_REPRESENTED_OK
+        && entry_symbol(&output.bytes, entry, sizeof entry)
+        && wasm_instance_open(&output.bytes, entry, &instance);
+    if (ok && want->success != NULL) {
+        ok = wasm_instance_call(&instance, 42, 0, 0)
+            && wasm_instance_trace(&instance, slots, sizeof slots / sizeof *slots, &count, &overflow)
+            && c1_trace_matches(&pipeline, want->success, want->success_count, 0, slots, count, overflow);
+        wasm_instance_close(&instance);
+        if (ok) ok = wasm_instance_open(&output.bytes, entry, &instance);
+    }
+    if (ok) {
+        ok = wasm_instance_call_named(&instance, SOL_WASM_REPRESENTED_TEST_FAILURE_ENTRY_EXPORT,
+            0, want->code, -1)
+            && wasm_instance_trace(&instance, slots, sizeof slots / sizeof *slots, &count, &overflow);
+        if (ok) wasm_global_get(instance.site, &observed);
+        ok = ok && observed.kind == WASM_I32 && observed.of.i32 > 0
+            && (uint32_t)observed.of.i32 == want->record && c1_canonical_record(&output, want,
+                (uint32_t)observed.of.i32)
+            && c1_trace_matches(&pipeline, want->failure, want->failure_count, want->record, slots,
+                count, overflow);
+    }
+    wasm_instance_close(&instance); sol_wasm_represented_output_free(&output);
+    sol_wasm_represented_test_callback_writeback_probe(false);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+static bool p44c_exact_requires_traces(void) {
+    static const P44TraceSlot satisfied[] = {{0,257,0}, {3,1,0}, {2,1,0}};
+    static const P44TraceSlot evaluated[] = {{14,1,0}, {15,533,6}};
+    static const P44TraceSlot bool_satisfied[] = {
+        {0,257,0}, {3,1,0}, {2,1,0}, {11,1,0}, {12,1,0},
+    };
+    static const P44TraceSlot bool_violation[] = {
+        {1,5,5}, {4,1,0}, {5,517,5}, {13,1,0}, {14,1,0}, {15,533,5},
+    };
+    static const P44TraceSlot violation_only[] = {{1,5,5}, {4,1,0}, {5,517,5}};
+    static const C1TraceCase cases[] = {
+        {"p44c_requires_divzero", "fail",
+            "sol.i1.a398578f1ec73646b6fb03e760d48d7f.ed5dc01c0688627d86c5d6345e71dbcffd189991a0bf3cae43d2ad2287b1bb95",
+            3, 6, 6, 202, 207, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC,
+            satisfied, sizeof satisfied / sizeof *satisfied, evaluated, sizeof evaluated / sizeof *evaluated},
+        {"p44c_requires_neg_overflow", "fail",
+            "sol.i1.a26514c31202139a1030be6938167d0d.0f8f5616c98052d439c4459800f914b9a519d229bd0c3958d4d40ab5c99b523d",
+            2, 6, 2, 204, 230, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC,
+            satisfied, sizeof satisfied / sizeof *satisfied, evaluated, sizeof evaluated / sizeof *evaluated},
+        {"p44c_requires_bool_forward", "forward",
+            "sol.i1.4ab8ff9162ad3aeaa02f4796bca6093b.a60800343682b54f54785d2dd3df2d09fa064f40b329000f0d44def9c3995b8c",
+            13, 5, UINT32_C(0x1000), 122, 139, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT,
+            bool_satisfied, sizeof bool_satisfied / sizeof *bool_satisfied,
+            bool_violation, sizeof bool_violation / sizeof *bool_violation},
+    };
+    bool ok = c1_trace_excludes(evaluated, sizeof evaluated / sizeof *evaluated,
+        violation_only, sizeof violation_only / sizeof *violation_only);
+    for (size_t i = 0; ok && i < sizeof cases / sizeof *cases; ++i) ok = c1_run_trace_case(&cases[i]);
+    /* The forwarding failure's first three slots are the callee's violation and
+     * terminal, followed by the caller's RESUME_FAILURE/terminal slices. */
+    return ok && bool_violation[0].action == 1 && bool_violation[2].action == 5
+        && bool_violation[3].action == 13 && bool_violation[5].action == 15
+        && bool_violation[0].record == 5 && bool_violation[2].record == 5
+        && bool_violation[5].record == 5;
+}
+
+static bool p44c_false_violation_trace(void) {
+    static const P44TraceSlot expected[] = {{1,5,3}, {4,1,0}, {5,517,3}};
+    static const C1TraceCase want = {"p44c_requires_false", "launch",
+        "sol.i1.7764055811eae60d659fb0fcabc6a840.f0a811ff804c1d8b046c21f20aef17ce9393f2a352343fae3f55cd68d919e8ed",
+        13, 3, UINT32_C(0x1000), 109, 114, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT,
+        NULL, 0, expected, sizeof expected / sizeof *expected};
+    char directory[512], entry[256]; PropagationPipeline pipeline;
+    SolWasmRepresentedOutput output; WasmInstance instance = {0};
+    P44TraceSlot actual[64]; size_t count = 0, selected = SOL_MIR_RUNTIME_NONE;
+    bool overflow = false; wasm_val_t site;
+    (void)snprintf(directory, sizeof directory, "%s/tests/conformance/p44c_requires_false",
+        SOL_TEST_SOURCE_DIR);
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&output);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(true);
+    bool ok = propagation_pipeline_build_named(&pipeline, directory, "launch", false)
+        && c1_failure_site(&pipeline, &want, &selected)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL},
+            &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && entry_symbol(&output.bytes, entry, sizeof entry) && wasm_instance_open(&output.bytes, entry, &instance)
+        && wasm_instance_call(&instance, 0, 13, -1)
+        && wasm_instance_trace(&instance, actual, sizeof actual / sizeof *actual, &count, &overflow);
+    if (ok) wasm_global_get(instance.site, &site);
+    ok = ok && selected < pipeline.conventions.failure_site_count && site.kind == WASM_I32
+        && site.of.i32 == 3 && c1_canonical_record(&output, &want, (uint32_t)site.of.i32)
+        && c1_trace_matches(&pipeline, expected, sizeof expected / sizeof *expected, 3, actual, count, overflow);
+    wasm_instance_close(&instance); sol_wasm_represented_output_free(&output);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+/* C1's Bool formal is carried through a predicate edge argument.  All range
+ * checks precede dereference, including mutation target discovery. */
+static bool p44c_bool_forward_routes(const char *directory) {
+    PropagationPipeline pipeline; propagation_pipeline_init(&pipeline);
+    bool direct = false, ok = propagation_pipeline_build_named(&pipeline, directory, "launch", true);
+    const SolMirOperations *operations = &pipeline.concrete.operations;
+    for (size_t body_id = 0; ok && body_id < operations->predicate_body_count; ++body_id) {
+        const SolMirPredicateBody *body = &operations->predicate_bodies[body_id];
+        if (body->inputs.offset > operations->predicate_input_count || body->inputs.count
+            > operations->predicate_input_count - body->inputs.offset || body->values.offset
+            > operations->predicate_value_count || body->values.count > operations->predicate_value_count
+                - body->values.offset || body->blocks.offset > operations->predicate_block_count
+            || body->blocks.count > operations->predicate_block_count - body->blocks.offset) { ok = false; break; }
+        size_t input = SOL_MIR_OPERATION_NONE, inputs = 0;
+        for (size_t value = body->values.offset; value < body->values.offset + body->values.count; ++value) {
+            const SolMirPredicateValue *candidate = &operations->predicate_values[value];
+            if (candidate->kind == SOL_MIR_PREDICATE_VALUE_INPUT && candidate->definition >= body->inputs.offset
+                && candidate->definition < body->inputs.offset + body->inputs.count
+                && operations->predicate_inputs[candidate->definition].kind == SOL_MIR_PREDICATE_INPUT_PARAMETER) {
+                input = value; ++inputs;
+            }
+        }
+        if (inputs > 1) { ok = false; break; }
+        for (size_t edge = 0; inputs == 1 && edge < operations->predicate_edge_count; ++edge) {
+            const SolMirPredicateEdge *candidate = &operations->predicate_edges[edge];
+            if (candidate->source < body->blocks.offset || candidate->source >= body->blocks.offset + body->blocks.count
+                || candidate->target < body->blocks.offset || candidate->target >= body->blocks.offset + body->blocks.count
+                || candidate->arguments.offset > operations->predicate_edge_value_count || candidate->arguments.count
+                    > operations->predicate_edge_value_count - candidate->arguments.offset) continue;
+            const SolMirPredicateBlock *target = &operations->predicate_blocks[candidate->target];
+            for (size_t argument = candidate->arguments.offset;
+                argument < candidate->arguments.offset + candidate->arguments.count; ++argument)
+                if (operations->predicate_edge_values[argument] == input && target->parameters.count != 0) direct = true;
+        }
+    }
+    ok = ok && direct && sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL)
+        && sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL);
+    propagation_pipeline_free(&pipeline); return ok;
+}
+
+static bool p44c_owner_mutations(const char *directory) {
+    PropagationPipeline pipeline; propagation_pipeline_init(&pipeline);
+    SolWasmRepresentedOutput baseline; sol_wasm_represented_output_init(&baseline);
+    bool ok = propagation_pipeline_build_named(&pipeline, directory, "launch", true);
+    SolMirOperations *operations = &pipeline.concrete.operations;
+    SolMirMaterialization *materialization = &pipeline.concrete.materialization;
+    SolMirRuntimeCleanup *cleanup = &pipeline.cleanup;
+    SolMirRuntimeConventions *conventions = &pipeline.conventions;
+    uint8_t baseline_hash[32] = {0};
+    if (ok) ok = sol_wasm_represented_build(
+        &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, &baseline,
+        &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && sol_wasm_represented_validate(&baseline.bytes) == SOL_WASM_REPRESENTED_OK;
+    if (ok) sha256(baseline.bytes.bytes, baseline.bytes.count, baseline_hash);
+#define C1_REJECT(layer, edit, restore) do { \
+    SolWasmRepresentedOutput rejected, restored; sol_wasm_represented_output_init(&rejected); \
+    sol_wasm_represented_output_init(&restored); \
+    edit; pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+    bool rejected_ok = !(layer) && !sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL) \
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, \
+            &rejected, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE \
+        && rejected.bytes.bytes == NULL && rejected.bytes.count == 0 && usage_zero(&rejected.usage); \
+    restore; pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+    bool restored_ok = sol_mir_operations_validate(operations, NULL) \
+        && sol_mir_materialization_validate(materialization, NULL) \
+        && sol_mir_runtime_conventions_validate(conventions, NULL) \
+        && sol_mir_runtime_cleanup_validate(cleanup, NULL) \
+        && sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL) \
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, \
+            &restored, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK \
+        && restored.bytes.count == baseline.bytes.count && usage_equal(&restored.usage, &baseline.usage) \
+        && memcmp(restored.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0; \
+    if (restored_ok) { uint8_t restored_hash[32]; sha256(restored.bytes.bytes, restored.bytes.count, restored_hash); \
+        restored_ok = memcmp(restored_hash, baseline_hash, sizeof baseline_hash) == 0; } \
+    ok = ok && rejected_ok && restored_ok; \
+    sol_wasm_represented_output_free(&restored); sol_wasm_represented_output_free(&rejected); \
+} while (0)
+    size_t edge_id = SOL_MIR_RUNTIME_NONE, edge_matches = 0;
+    for (size_t i = 0; ok && i < operations->predicate_edge_count; ++i) {
+        SolMirPredicateEdge *edge = &operations->predicate_edges[i];
+        if (edge->source >= operations->predicate_block_count || edge->target >= operations->predicate_block_count
+            || edge->arguments.offset > operations->predicate_edge_value_count || edge->arguments.count
+                > operations->predicate_edge_value_count - edge->arguments.offset) continue;
+        const SolMirPredicateBlock *target = &operations->predicate_blocks[edge->target];
+        bool parameter = false;
+        for (size_t a = edge->arguments.offset; a < edge->arguments.offset + edge->arguments.count; ++a) {
+            size_t value = operations->predicate_edge_values[a];
+            if (value < operations->predicate_value_count && operations->predicate_values[value].kind
+                == SOL_MIR_PREDICATE_VALUE_INPUT) parameter = true;
+        }
+        if (parameter && target->parameters.count != 0) { edge_id = i; ++edge_matches; }
+    }
+    if (ok) ok = edge_matches == 1;
+    if (ok) {
+        SolMirPredicateEdge *edge = &operations->predicate_edges[edge_id]; size_t source = edge->source, target = edge->target;
+        size_t body_id = operations->predicate_blocks[source].body;
+        if (body_id >= operations->predicate_body_count) ok = false;
+        const SolMirPredicateBody *body = ok ? &operations->predicate_bodies[body_id] : NULL;
+        size_t input_id = SOL_MIR_OPERATION_NONE, value_id = SOL_MIR_OPERATION_NONE, matches = 0;
+        if (body == NULL || body->inputs.offset > operations->predicate_input_count || body->inputs.count
+            > operations->predicate_input_count - body->inputs.offset || body->entry >= operations->predicate_block_count)
+            ok = false;
+        for (size_t argument = ok ? edge->arguments.offset : 0;
+            ok && argument < edge->arguments.offset + edge->arguments.count; ++argument) {
+            size_t candidate_value = operations->predicate_edge_values[argument];
+            if (candidate_value >= operations->predicate_value_count) { ok = false; break; }
+            SolMirPredicateValue *value = &operations->predicate_values[candidate_value];
+            if (value->kind != SOL_MIR_PREDICATE_VALUE_INPUT || value->definition < body->inputs.offset
+                || value->definition >= body->inputs.offset + body->inputs.count
+                || value->definition >= operations->predicate_input_count) continue;
+            if (operations->predicate_inputs[value->definition].recipe == SOL_MIR_RECIPE_NONE
+                || value->recipe == SOL_MIR_RECIPE_NONE) continue;
+            input_id = value->definition; value_id = candidate_value; ++matches;
+        }
+        if (ok) ok = matches == 1 && input_id < operations->predicate_input_count
+            && value_id < operations->predicate_value_count;
+        if (ok) {
+            SolMirPredicateBody *mutable_body = &operations->predicate_bodies[body_id];
+            size_t entry = mutable_body->entry;
+            C1_REJECT(sol_mir_operations_validate(operations, NULL), mutable_body->entry = SOL_MIR_OPERATION_NONE,
+                mutable_body->entry = entry);
+            SolMirPredicateValue *value = &operations->predicate_values[value_id]; SolMirRecipeId recipe = value->recipe;
+            C1_REJECT(sol_mir_operations_validate(operations, NULL), value->recipe = SOL_MIR_RECIPE_NONE,
+                value->recipe = recipe);
+            SolMirPredicateInput *input = &operations->predicate_inputs[input_id]; recipe = input->recipe;
+            C1_REJECT(sol_mir_operations_validate(operations, NULL), input->recipe = SOL_MIR_RECIPE_NONE,
+                input->recipe = recipe);
+        }
+        C1_REJECT(sol_mir_operations_validate(operations, NULL), edge->source = target, edge->source = source);
+        C1_REJECT(sol_mir_operations_validate(operations, NULL), edge->target = source, edge->target = target);
+    }
+    size_t arithmetic = SOL_MIR_RUNTIME_NONE, arithmetic_matches = 0;
+    for (size_t i = 0; ok && i < conventions->failure_site_count; ++i) {
+        SolMirRuntimeFailureSite *site = &conventions->failure_sites[i];
+        if (site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC
+            && (site->allowed_codes & UINT32_C(6)) != 0) { arithmetic = i; ++arithmetic_matches; }
+    }
+    if (ok) ok = arithmetic_matches == 0 || arithmetic_matches == 1;
+    if (ok && arithmetic_matches == 1 && arithmetic < conventions->failure_site_count) {
+        SolMirRuntimeFailureSite *site = &conventions->failure_sites[arithmetic]; uint32_t mask = site->allowed_codes;
+        C1_REJECT(sol_mir_runtime_conventions_validate(conventions, NULL), site->allowed_codes = 0, site->allowed_codes = mask);
+    }
+    size_t check_row = SOL_MIR_RUNTIME_NONE, checks = 0;
+    for (size_t i = 0; ok && i < pipeline.lowered.image_terminator_count; ++i) {
+        SolMirRuntimeLoweredImageTerminator *row = &pipeline.lowered.image_terminators[i];
+        if (row->kind == SOL_MIR_TERM_CHECK_CONTRACT && row->cleanup_event < cleanup->event_count) {
+            check_row = i; ++checks;
+        }
+    }
+    if (ok) ok = checks == 1;
+    if (ok) {
+        SolMirRuntimeLoweredImageTerminator *row = &pipeline.lowered.image_terminators[check_row];
+        size_t event_id = row->cleanup_event, saved_event = event_id;
+        C1_REJECT(sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL),
+            row->cleanup_event = cleanup->event_count, row->cleanup_event = saved_event);
+        if (row->block >= materialization->block_count) ok = false;
+        SolMirMaterializedTerminator *check = ok ? &materialization->blocks[row->block].terminator : NULL;
+        if (check == NULL || check->kind != SOL_MIR_TERM_CHECK_CONTRACT
+            || check->failure_edge >= materialization->edge_count
+            || check->satisfied_edge >= materialization->edge_count
+            || check->failure_edge == check->satisfied_edge) ok = false;
+        if (ok) {
+            size_t failure_edge = check->failure_edge;
+            /* Redirect the CHECK_CONTRACT evaluation-failure edge to the
+             * in-range satisfied edge rather than its RESUME_FAILURE block. */
+            C1_REJECT(sol_mir_materialization_validate(materialization, NULL),
+                check->failure_edge = check->satisfied_edge, check->failure_edge = failure_edge);
+        }
+        SolMirRuntimeCleanupEvent *event = &cleanup->events[event_id];
+        SolMirRuntimeCleanupTransition *satisfied = NULL, *failure = NULL, *violation = NULL;
+        size_t satisfied_n = 0, failure_n = 0, violation_n = 0;
+        if (event->transitions.offset > cleanup->transition_count || event->transitions.count
+            > cleanup->transition_count - event->transitions.offset) ok = false;
+        for (size_t i = 0; ok && i < event->transitions.count; ++i) {
+            SolMirRuntimeCleanupTransition *t = &cleanup->transitions[event->transitions.offset + i];
+            if (!c1_slice_valid(cleanup, t->actions)) { ok = false; break; }
+            if (t->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_SATISFIED) { satisfied = t; ++satisfied_n; }
+            if (t->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_FAILURE) { failure = t; ++failure_n; }
+            if (t->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_VIOLATION) { violation = t; ++violation_n; }
+        }
+        if (ok) ok = satisfied_n == 1 && failure_n == 1 && violation_n == 1 && satisfied != NULL
+            && failure != NULL && violation != NULL;
+        if (ok) {
+            size_t continuation = satisfied->continuation;
+            C1_REJECT(sol_mir_runtime_cleanup_validate(cleanup, NULL), satisfied->continuation = SOL_MIR_RUNTIME_NONE,
+                satisfied->continuation = continuation);
+            continuation = failure->continuation;
+            C1_REJECT(sol_mir_runtime_cleanup_validate(cleanup, NULL), failure->continuation = SOL_MIR_RUNTIME_NONE,
+                failure->continuation = continuation);
+            SolMirRuntimeCleanupEdgeRole role = violation->edge_role; SolMirRuntimeSlice actions = violation->actions;
+            size_t site = violation->failure_site; uint32_t mask = violation->failure_mask;
+            C1_REJECT(sol_mir_runtime_cleanup_validate(cleanup, NULL),
+                violation->edge_role = SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_FAILURE, violation->edge_role = role);
+            C1_REJECT(sol_mir_runtime_cleanup_validate(cleanup, NULL), violation->actions.count = 0,
+                violation->actions = actions);
+            C1_REJECT(sol_mir_runtime_cleanup_validate(cleanup, NULL), violation->failure_site = SOL_MIR_RUNTIME_NONE,
+                violation->failure_site = site);
+            C1_REJECT(sol_mir_runtime_cleanup_validate(cleanup, NULL), violation->failure_mask = 0,
+                violation->failure_mask = mask);
+        }
+    }
+    size_t resume_call = SOL_MIR_RUNTIME_NONE, wrong_failure_edge = SOL_MIR_RUNTIME_NONE;
+    size_t resume_calls = 0, wrong_calls = 0;
+    for (size_t i = 0; ok && i < conventions->call_count; ++i) {
+        SolMirRuntimeCall *call = &conventions->calls[i];
+        if (call->image >= materialization->image_count || call->failure_edge >= materialization->edge_count)
+            continue;
+        const SolMirMaterializedImage *image = &materialization->images[call->image];
+        if (image->source_callable >= pipeline.ir.callable_count) continue;
+        size_t block = materialization->edges[call->failure_edge].block;
+        if (block >= materialization->block_count || materialization->blocks[block].terminator.kind
+            != SOL_MIR_TERM_RESUME_FAILURE) continue;
+        if (!strcmp(pipeline.ir.callables[image->source_callable].name, "fail")) {
+            resume_call = i; ++resume_calls;
+        } else if (!strcmp(pipeline.ir.callables[image->source_callable].name, "launch")) {
+            wrong_failure_edge = call->failure_edge; ++wrong_calls;
+        }
+    }
+    if (ok) ok = resume_calls == 1 && wrong_calls == 1 && wrong_failure_edge < materialization->edge_count;
+    if (ok) {
+        SolMirRuntimeCall *call = &conventions->calls[resume_call]; size_t failure_edge = call->failure_edge;
+        /* Associate fail's RESUME_FAILURE with launch's distinct check/caller source. */
+        C1_REJECT(sol_mir_runtime_conventions_validate(conventions, NULL), call->failure_edge = wrong_failure_edge,
+            call->failure_edge = failure_edge);
+    }
+#undef C1_REJECT
+    sol_wasm_represented_output_free(&baseline); propagation_pipeline_free(&pipeline); return ok;
+}
+
+static bool p44c_arithmetic_site_mutation(const char *directory) {
+    static const C1TraceCase want = {"p44c_requires_divzero", "fail", "", 3, 6, 6, 202, 207,
+        SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, NULL, 0, NULL, 0};
+    PropagationPipeline pipeline; SolWasmRepresentedOutput baseline;
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&baseline);
+    size_t selected = SOL_MIR_RUNTIME_NONE, alternate = SOL_MIR_RUNTIME_NONE;
+    bool ok = propagation_pipeline_build_named(&pipeline, directory, "launch", true)
+        && c1_failure_site(&pipeline, &want, &selected)
+        && selected < pipeline.conventions.failure_site_count;
+    if (ok) for (size_t i = 0; i < pipeline.conventions.failure_site_count; ++i)
+        if (i != selected) { alternate = i; break; }
+    if (ok) ok = alternate < pipeline.conventions.failure_site_count;
+    if (ok) ok = sol_wasm_represented_build(
+        &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, &baseline,
+        &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && sol_wasm_represented_validate(&baseline.bytes) == SOL_WASM_REPRESENTED_OK;
+    uint8_t baseline_hash[32] = {0};
+    if (ok) sha256(baseline.bytes.bytes, baseline.bytes.count, baseline_hash);
+#define C1_ARITH_REJECT(layer, edit, restore) do { \
+    SolWasmRepresentedOutput rejected, restored; sol_wasm_represented_output_init(&rejected); \
+    sol_wasm_represented_output_init(&restored); \
+    edit; pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+    bool rejected_ok = !(layer) && !sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL) \
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, \
+            &rejected, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE \
+        && rejected.bytes.bytes == NULL && rejected.bytes.count == 0 && usage_zero(&rejected.usage); \
+    restore; pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+    bool restored_ok = sol_mir_operations_validate(&pipeline.concrete.operations, NULL) \
+        && sol_mir_materialization_validate(&pipeline.concrete.materialization, NULL) \
+        && sol_mir_runtime_conventions_validate(&pipeline.conventions, NULL) \
+        && sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL) \
+        && sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL) \
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, \
+            &restored, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK \
+        && restored.bytes.count == baseline.bytes.count && usage_equal(&restored.usage, &baseline.usage) \
+        && memcmp(restored.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0; \
+    if (restored_ok) { uint8_t restored_hash[32]; sha256(restored.bytes.bytes, restored.bytes.count, restored_hash); \
+        restored_ok = memcmp(restored_hash, baseline_hash, sizeof baseline_hash) == 0; } \
+    ok = ok && rejected_ok && restored_ok; \
+    sol_wasm_represented_output_free(&restored); sol_wasm_represented_output_free(&rejected); \
+} while (0)
+    size_t lowered_instruction = SOL_MIR_RUNTIME_NONE, lowered_matches = 0;
+    for (size_t i = 0; ok && i < pipeline.lowered.predicate_instruction_count; ++i) {
+        SolMirRuntimeLoweredPredicateInstruction *row = &pipeline.lowered.predicate_instructions[i];
+        if (row->failure_site != selected || row->instruction >= pipeline.concrete.operations.predicate_instruction_count)
+            continue;
+        const SolMirPredicateInstruction *instruction = &pipeline.concrete.operations.predicate_instructions[
+            row->instruction];
+        if (instruction->kind == SOL_MIR_PREDICATE_INST_BINARY
+            && (instruction->failures & UINT32_C(6)) != 0) { lowered_instruction = i; ++lowered_matches; }
+    }
+    if (ok) ok = lowered_matches == 1;
+    if (ok) {
+        SolMirRuntimeLoweredPredicateInstruction *row = &pipeline.lowered.predicate_instructions[lowered_instruction];
+        size_t saved = row->failure_site;
+        C1_ARITH_REJECT(sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL),
+            row->failure_site = alternate, row->failure_site = saved);
+    }
+    size_t event_id = SOL_MIR_RUNTIME_NONE, events = 0, transition_id = SOL_MIR_RUNTIME_NONE, transitions = 0;
+    for (size_t i = 0; ok && i < pipeline.cleanup.event_count; ++i) {
+        SolMirRuntimeCleanupEvent *event = &pipeline.cleanup.events[i];
+        if (event->inherited_failure_site != selected || event->transitions.offset > pipeline.cleanup.transition_count
+            || event->transitions.count > pipeline.cleanup.transition_count - event->transitions.offset) continue;
+        event_id = i; ++events;
+        for (size_t j = 0; j < event->transitions.count; ++j) {
+            SolMirRuntimeCleanupTransition *transition = &pipeline.cleanup.transitions[event->transitions.offset + j];
+            if (transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31
+                && transition->failure_site == selected) { transition_id = event->transitions.offset + j; ++transitions; }
+        }
+    }
+    if (ok) ok = events == 1 && transitions == 1 && event_id < pipeline.cleanup.event_count
+        && transition_id < pipeline.cleanup.transition_count;
+    if (ok) {
+        SolMirRuntimeCleanupEvent *event = &pipeline.cleanup.events[event_id];
+        size_t saved = event->inherited_failure_site;
+        C1_ARITH_REJECT(sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL),
+            event->inherited_failure_site = alternate, event->inherited_failure_site = saved);
+        SolMirRuntimeCleanupTransition *transition = &pipeline.cleanup.transitions[transition_id];
+        saved = transition->failure_site;
+        C1_ARITH_REJECT(sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL),
+            transition->failure_site = alternate, transition->failure_site = saved);
+    }
+    if (ok) {
+        SolMirRuntimeFailureSite *site = &pipeline.conventions.failure_sites[selected];
+        uint32_t saved = site->allowed_codes;
+        C1_ARITH_REJECT(sol_mir_runtime_conventions_validate(&pipeline.conventions, NULL),
+            site->allowed_codes = 0, site->allowed_codes = saved);
+    }
+#undef C1_ARITH_REJECT
+    sol_wasm_represented_output_free(&baseline); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+/* C1's paired parameter predicate has enough control-flow to ensure the
+ * resource census counts the emitted predicate closure, rather than merely a
+ * scalar entry body.  The source package supplies launch as the public root
+ * and fail as a genuine internal root. */
+static bool p44c_parameter_forward_resource_determinism(const char *directory) {
+    static const SolWasmRepresentedUsage expected = {6,15,12,16,52,637,0,0,
+        0,0,7,16463,10240,12672,2432};
+    static const uint8_t expected_hash[32] = {0x82,0xb8,0xcb,0xde,0xa5,0xa8,0xc5,0x5a,
+        0x6a,0xfc,0x2e,0x13,0xf2,0x7b,0x94,0x74,0xc6,0xa4,0x24,0x4b,0x35,0xda,0xf2,0xfe,
+        0xc8,0x23,0x6f,0x20,0x7d,0xd5,0x76,0xf7};
+    PropagationPipeline pipeline; SolWasmRepresentedOutput baseline, output;
+    SolWasmRepresentedOutput forward, reverse, relocated;
+    uint8_t hash[32]; size_t forward_ids[2], reverse_ids[2], relocated_ids[2];
+    char entry[256], relocation[512], source[768], destination[768];
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&baseline);
+    sol_wasm_represented_output_init(&output); sol_wasm_represented_output_init(&forward);
+    sol_wasm_represented_output_init(&reverse); sol_wasm_represented_output_init(&relocated);
+    sol_wasm_represented_test_fail_allocation_after(0);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false);
+    sol_wasm_represented_test_callback_writeback_probe(false);
+    bool ok = propagation_pipeline_build_named(&pipeline, directory, "launch", true)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory,
+            NULL}, &baseline, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK;
+    size_t attempts = sol_wasm_represented_test_allocation_attempts();
+    if (ok) {
+        sha256(baseline.bytes.bytes, baseline.bytes.count, hash);
+        ok = usage_equal(&baseline.usage, &expected) && attempts == 62
+            && memcmp(hash, expected_hash, sizeof hash) == 0
+            && sol_wasm_represented_validate(&baseline.bytes) == SOL_WASM_REPRESENTED_OK
+            && !p44_bytes_contain(&baseline.bytes,
+                SOL_WASM_REPRESENTED_TEST_P44_TRACE_OFFSET_EXPORT)
+            && !p44_bytes_contain(&baseline.bytes,
+                SOL_WASM_REPRESENTED_TEST_WRITEBACK_EXPORT);
+    }
+    /* Only body ranges owned by linked instances are emitted.  The four
+     * predicate edges have a one-word maximum parallel-copy requirement. */
+    if (ok) {
+        const SolMirConcreteProgram *concrete = &pipeline.concrete;
+        const SolMirOperations *operations = &concrete->operations;
+        size_t predicate_blocks = 0, predicate_values = 0, predicate_edges = 0, scratch = 0;
+        for (size_t body_id = 0; ok && body_id < operations->predicate_body_count; ++body_id) {
+            const SolMirPredicateBody *body = &operations->predicate_bodies[body_id];
+            bool admitted = false;
+            for (size_t callable = 0; callable < concrete->linkage.callable_count; ++callable)
+                admitted = admitted || (body->owner_kind == SOL_MIR_PREDICATE_OWNER_INSTANCE
+                    && body->instance == concrete->linkage.callables[callable].instance);
+            if (!admitted) continue;
+            if (body->blocks.offset > operations->predicate_block_count || body->blocks.count
+                > operations->predicate_block_count - body->blocks.offset || body->values.offset
+                > operations->predicate_value_count || body->values.count
+                > operations->predicate_value_count - body->values.offset) { ok = false; break; }
+            predicate_blocks += body->blocks.count; predicate_values += body->values.count;
+            for (size_t edge = 0; edge < operations->predicate_edge_count; ++edge) {
+                const SolMirPredicateEdge *item = &operations->predicate_edges[edge];
+                if (item->source < body->blocks.offset || item->source - body->blocks.offset
+                    >= body->blocks.count) continue;
+                if (item->target < body->blocks.offset || item->target - body->blocks.offset
+                    >= body->blocks.count || item->arguments.offset
+                        > operations->predicate_edge_value_count || item->arguments.count
+                        > operations->predicate_edge_value_count - item->arguments.offset) {
+                    ok = false; break;
+                }
+                ++predicate_edges;
+                if (item->arguments.count > scratch) scratch = item->arguments.count;
+            }
+        }
+        ok = ok && baseline.usage.blocks == concrete->materialization.block_count + predicate_blocks
+            && baseline.usage.values == concrete->materialization.value_count + predicate_values
+            && baseline.usage.edges == concrete->materialization.edge_count + predicate_edges
+            && predicate_edges == 4 && scratch == 1;
+    }
+    SolWasmRepresentedLimits exact = sol_wasm_represented_default_limits();
+    exact.max_functions = expected.functions; exact.max_blocks = expected.blocks;
+    exact.max_edges = expected.edges; exact.max_values = expected.values;
+    exact.max_locals = expected.locals; exact.max_generated_nodes = expected.generated_nodes;
+    exact.max_provenance_records = expected.provenance_records;
+    exact.max_work_bytes = expected.work_bytes; exact.max_scratch_bytes = expected.scratch_bytes;
+    exact.max_owned_bytes = expected.owned_bytes; exact.max_output_bytes = expected.output_bytes;
+    if (ok) ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+        directory, &exact}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && output.bytes.count == baseline.bytes.count
+        && memcmp(output.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+        && usage_equal(&output.usage, &baseline.usage);
+    sol_wasm_represented_output_free(&output);
+    SolWasmRepresentedLimits defaults = {0};
+    if (ok) ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+        directory, &defaults}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && output.bytes.count == baseline.bytes.count
+        && memcmp(output.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+        && usage_equal(&output.usage, &baseline.usage);
+    sol_wasm_represented_output_free(&output);
+#define CHECK_C1_RESOURCE_CAP(field, value) do { \
+    SolWasmRepresentedLimits cap = sol_wasm_represented_default_limits(); \
+    cap.field = (value); sol_wasm_represented_output_init(&output); \
+    ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
+        directory, &cap}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK \
+        && output.bytes.count == baseline.bytes.count && usage_equal(&output.usage, &baseline.usage); \
+    sol_wasm_represented_output_free(&output); cap.field = (value) - 1; \
+    sol_wasm_represented_output_init(&output); \
+    ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
+        directory, &cap}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED \
+        && output.bytes.bytes == NULL && output.bytes.count == 0 && usage_zero(&output.usage); \
+    sol_wasm_represented_output_free(&output); \
+} while (0)
+    CHECK_C1_RESOURCE_CAP(max_functions, expected.functions);
+    CHECK_C1_RESOURCE_CAP(max_blocks, expected.blocks);
+    CHECK_C1_RESOURCE_CAP(max_edges, expected.edges);
+    CHECK_C1_RESOURCE_CAP(max_values, expected.values);
+    CHECK_C1_RESOURCE_CAP(max_locals, expected.locals);
+    CHECK_C1_RESOURCE_CAP(max_generated_nodes, expected.generated_nodes);
+    CHECK_C1_RESOURCE_CAP(max_provenance_records, expected.provenance_records);
+    CHECK_C1_RESOURCE_CAP(max_work_bytes, expected.work_bytes);
+    CHECK_C1_RESOURCE_CAP(max_scratch_bytes, expected.scratch_bytes);
+    CHECK_C1_RESOURCE_CAP(max_owned_bytes, expected.owned_bytes);
+    CHECK_C1_RESOURCE_CAP(max_output_bytes, expected.output_bytes);
+#undef CHECK_C1_RESOURCE_CAP
+#define CHECK_C1_PARTIAL_LIMIT(field) do { \
+    SolWasmRepresentedLimits partial = sol_wasm_represented_default_limits(); \
+    partial.field = 0; sol_wasm_represented_output_init(&output); \
+    ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
+        directory, &partial}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_INVALID_ARGUMENT \
+        && output.bytes.bytes == NULL && output.bytes.count == 0 && usage_zero(&output.usage); \
+    sol_wasm_represented_output_free(&output); \
+} while (0)
+    CHECK_C1_PARTIAL_LIMIT(max_functions); CHECK_C1_PARTIAL_LIMIT(max_blocks);
+    CHECK_C1_PARTIAL_LIMIT(max_edges); CHECK_C1_PARTIAL_LIMIT(max_values);
+    CHECK_C1_PARTIAL_LIMIT(max_locals); CHECK_C1_PARTIAL_LIMIT(max_generated_nodes);
+    CHECK_C1_PARTIAL_LIMIT(max_table_elements); CHECK_C1_PARTIAL_LIMIT(max_static_data_bytes);
+    CHECK_C1_PARTIAL_LIMIT(max_allocation_requests); CHECK_C1_PARTIAL_LIMIT(max_allocation_bytes);
+    CHECK_C1_PARTIAL_LIMIT(max_provenance_records); CHECK_C1_PARTIAL_LIMIT(max_work_bytes);
+    CHECK_C1_PARTIAL_LIMIT(max_scratch_bytes); CHECK_C1_PARTIAL_LIMIT(max_owned_bytes);
+    CHECK_C1_PARTIAL_LIMIT(max_output_bytes);
+#undef CHECK_C1_PARTIAL_LIMIT
+    SolWasmRepresentedLimits hard_cap = sol_wasm_represented_default_limits();
+    hard_cap.max_functions = 256;
+    if (ok) ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+        directory, &hard_cap}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK;
+    sol_wasm_represented_output_free(&output); hard_cap.max_functions = 257;
+    if (ok) ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+        directory, &hard_cap}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_INVALID_ARGUMENT
+        && output.bytes.bytes == NULL && usage_zero(&output.usage);
+    sol_wasm_represented_output_free(&output); hard_cap = sol_wasm_represented_default_limits();
+    hard_cap.max_provenance_records = 32768;
+    if (ok) ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+        directory, &hard_cap}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK;
+    sol_wasm_represented_output_free(&output); hard_cap.max_provenance_records = 32769;
+    if (ok) ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+        directory, &hard_cap}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_INVALID_ARGUMENT
+        && output.bytes.bytes == NULL && usage_zero(&output.usage);
+    sol_wasm_represented_output_free(&output);
+    for (size_t ordinal = 1; ok && ordinal <= attempts; ++ordinal) {
+        sol_wasm_represented_test_fail_allocation_after(ordinal);
+        sol_wasm_represented_output_init(&output);
+        ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+                directory, NULL}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_ALLOCATION_FAILED
+            && output.bytes.bytes == NULL && output.bytes.count == 0 && usage_zero(&output.usage);
+        sol_wasm_represented_output_free(&output); sol_wasm_represented_test_fail_allocation_after(0);
+        sol_wasm_represented_output_init(&output);
+        if (ok) ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+                directory, NULL}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+            && output.bytes.count == baseline.bytes.count
+            && memcmp(output.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+            && usage_equal(&output.usage, &baseline.usage)
+            && sol_wasm_represented_test_allocation_attempts() == attempts;
+        sol_wasm_represented_output_free(&output);
+    }
+    sol_wasm_represented_test_fail_allocation_after(0);
+    if (ok) ok = build_multiroot(directory, false, &forward, forward_ids, NULL,
+        SOL_WASM_REPRESENTED_OK) && build_multiroot(directory, true, &reverse, reverse_ids, NULL,
+        SOL_WASM_REPRESENTED_OK) && forward_ids[0] == 1 && forward_ids[1] == 2
+        && reverse_ids[0] == forward_ids[0] && reverse_ids[1] == forward_ids[1]
+        && forward.bytes.count == baseline.bytes.count
+        && memcmp(forward.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+        && reverse.bytes.count == forward.bytes.count
+        && memcmp(reverse.bytes.bytes, forward.bytes.bytes, forward.bytes.count) == 0
+        && usage_equal(&forward.usage, &baseline.usage) && usage_equal(&reverse.usage, &baseline.usage);
+    if (ok) {
+        sha256(forward.bytes.bytes, forward.bytes.count, hash);
+        ok = memcmp(hash, expected_hash, sizeof hash) == 0 && entry_symbol(&forward.bytes, entry,
+            sizeof entry) && invoke_named(&forward.bytes, entry, 42, 0, 0)
+            && invoke_named(&reverse.bytes, entry, 42, 0, 0);
+    }
+    (void)mkdir(SOL_TEST_BINARY_DIR, 0700);
+    (void)snprintf(relocation, sizeof relocation, "%s/p44c_requires_parameter_forward_relocated",
+        SOL_TEST_BINARY_DIR);
+    (void)mkdir(relocation, 0700);
+    (void)snprintf(source, sizeof source, "%s/main.sol", directory);
+    (void)snprintf(destination, sizeof destination, "%s/main.sol", relocation);
+    FILE *input = fopen(source, "rb"), *copy = fopen(destination, "wb");
+    if (input == NULL || copy == NULL) ok = false;
+    if (input != NULL && copy != NULL) {
+        uint8_t buffer[256]; size_t count = 0;
+        while ((count = fread(buffer, 1, sizeof buffer, input)) != 0)
+            if (fwrite(buffer, 1, count, copy) != count) ok = false;
+    }
+    if (input != NULL) fclose(input);
+    if (copy != NULL) fclose(copy);
+    if (ok) ok = build_multiroot(relocation, false, &relocated, relocated_ids, NULL,
+        SOL_WASM_REPRESENTED_OK) && relocated_ids[0] == forward_ids[0]
+        && relocated_ids[1] == forward_ids[1] && relocated.bytes.count == forward.bytes.count
+        && memcmp(relocated.bytes.bytes, forward.bytes.bytes, forward.bytes.count) == 0
+        && usage_equal(&relocated.usage, &forward.usage) && invoke_named(&relocated.bytes, entry, 42, 0, 0);
+    sol_wasm_represented_output_free(&relocated); sol_wasm_represented_output_free(&reverse);
+    sol_wasm_represented_output_free(&forward); sol_wasm_represented_output_free(&output);
+    sol_wasm_represented_output_free(&baseline); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+/* Keep C1's public acceptance surface in one source-derived matrix.  A named
+ * `fail` root is paired with the source entry and made independently callable,
+ * so failure cases do not depend on launch retaining an unreachable companion. */
+typedef struct {
+    const char *leaf, *root, *provenance_callable;
+    int64_t value;
+    int32_t code;
+    uint32_t code_mask, start, end;
+    SolMirRuntimeFailureOriginKind origin;
+    SolWasmRepresentedResult build_result;
+} C1AcceptanceCase;
+
+static uint32_t c1_matrix_expected_ordinal(const C1AcceptanceCase *test) {
+    return !strcmp(test->leaf, "p44c_requires_sub_overflow")
+        || !strcmp(test->leaf, "p44c_requires_div_overflow")
+        || !strcmp(test->leaf, "p44c_requires_rem_overflow") ? 2 : 0;
+}
+
+static bool c1_matrix_failure_record(const PropagationPipeline *pipeline,
+    const C1AcceptanceCase *test, const SolWasmRepresentedOutput *output, uint32_t observed) {
+    C1TraceCase site = {test->leaf, test->provenance_callable, "", test->code, 0,
+        test->code_mask, test->start, test->end, test->origin, NULL, 0, NULL, 0};
+    ProvenanceRecord record;
+    size_t selected = SOL_MIR_RUNTIME_NONE;
+    bool selected_ok = observed != 0 && c1_failure_site(pipeline, &site, &selected);
+    bool record_ok = selected_ok && selected < pipeline->conventions.failure_site_count
+        && provenance_record(&output->bytes, observed, &record)
+        && record.tag == 3 && record.kind == test->origin
+        && bytes_equal(record.path, record.path_count, "main.sol")
+        && record.start == test->start && record.end == test->end
+        && record.ordinal == c1_matrix_expected_ordinal(test);
+    return record_ok;
+}
+
+static bool c1_run_acceptance_case(const C1AcceptanceCase *test) {
+    char directory[512], entry[256];
+    SolWasmRepresentedOutput output;
+    WasmInstance instance = {0};
+    PropagationPipeline pipeline;
+    wasm_val_t observed;
+    bool failure = test != NULL && test->code != 0;
+    bool internal_failure = failure && test != NULL && !strcmp(test->root, "fail");
+    if (test == NULL || snprintf(directory, sizeof directory, "%s/tests/conformance/%s",
+        SOL_TEST_SOURCE_DIR, test->leaf) < 0) return false;
+    sol_wasm_represented_output_init(&output);
+    sol_wasm_represented_test_callback_writeback_probe(internal_failure);
+    bool ok = build_named_root(directory, test->root, &output, NULL, test->build_result);
+    if (test->build_result != SOL_WASM_REPRESENTED_OK) {
+        ok = ok && output.bytes.bytes == NULL && output.bytes.count == 0 && usage_zero(&output.usage);
+        sol_wasm_represented_output_free(&output);
+        sol_wasm_represented_test_callback_writeback_probe(false);
+        return ok;
+    }
+    propagation_pipeline_init(&pipeline);
+    bool module_ready = ok && sol_wasm_represented_validate(&output.bytes) == SOL_WASM_REPRESENTED_OK
+        && entry_symbol(&output.bytes, entry, sizeof entry)
+        && wasm_instance_open(&output.bytes, entry, &instance);
+    ok = module_ready;
+    bool invoked = ok && (internal_failure
+        ? wasm_instance_call_named(&instance, SOL_WASM_REPRESENTED_TEST_FAILURE_ENTRY_EXPORT,
+            test->value, test->code, -1)
+        : wasm_instance_call(&instance, test->value, test->code, failure ? -1 : 0));
+    ok = invoked;
+    if (ok && failure) {
+        wasm_global_get(instance.site, &observed);
+        bool built = propagation_pipeline_build_named(&pipeline, directory, "launch", internal_failure);
+        bool exact = observed.kind == WASM_I32 && observed.of.i32 > 0 && built
+            && c1_matrix_failure_record(&pipeline, test, &output, (uint32_t)observed.of.i32);
+        ok = exact;
+    }
+    wasm_instance_close(&instance);
+    propagation_pipeline_free(&pipeline);
+    sol_wasm_represented_output_free(&output);
+    sol_wasm_represented_test_callback_writeback_probe(false);
+    return ok;
+}
+
+static bool p44c_acceptance_matrix(void) {
+    static const C1AcceptanceCase cases[] = {
+        {"p44c_requires_true", "launch", NULL, 42, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_false", "launch", "launch", 0, 13, UINT32_C(0x1000), 109, 114,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT, SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_short_circuit", "launch", NULL, 42, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_short_circuit", "fail", "fail", 0, 13, UINT32_C(0x1000), 218, 223,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT, SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_multiple", "launch", NULL, 42, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_multiple", "fail", "fail", 0, 13, UINT32_C(0x1000), 206, 211,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT, SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_parameter_forward", "launch", NULL, 42, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_parameter_forward", "fail", "forward", 0, 13, UINT32_C(0x1000),
+            124, 146, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT, SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_bool_forward", "launch", NULL, 42, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_bool_forward", "fail", "forward", 0, 13, UINT32_C(0x1000),
+            122, 139, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT, SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_neg_overflow", "launch", NULL, 42, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_neg_overflow", "fail", "fail", 0, 2, 2, 204, 230,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_add_overflow", "launch", NULL, 42, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_add_overflow", "fail", "fail", 0, 2, 2, 207, 230,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_sub_overflow", "launch", NULL, 42, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_sub_overflow", "fail", "fail", 0, 2, 2, 208, 237,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_mul_overflow", "launch", NULL, 42, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_mul_overflow", "fail", "fail", 0, 2, 2, 207, 230,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_div_overflow", "launch", NULL, 42, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_div_overflow", "fail", "fail", 0, 2, 6, 208, 238,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_rem_overflow", "launch", NULL, 42, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_rem_overflow", "fail", "fail", 0, 2, 6, 208, 238,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_divzero", "launch", NULL, 42, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_divzero", "fail", "fail", 0, 3, 6, 202, 207,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_rem_zero", "launch", NULL, 42, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_rem_zero", "fail", "fail", 0, 3, 6, 203, 208,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, SOL_WASM_REPRESENTED_OK},
+        {"p44c_requires_text", "launch", NULL, 0, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE},
+        {"p44_guard_call_reject", "launch", NULL, 0, 0, 0, 0, 0, 0,
+            SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i)
+        if (!c1_run_acceptance_case(&cases[i])) return false;
+    return true;
+}
+
 int main(void) {
     enum {
         P43_LITERAL_SITE = 4,
@@ -4283,6 +5241,28 @@ int main(void) {
     CHECK(sol_wasm_represented_test_sum_helper_items(124));
     CHECK(!sol_wasm_represented_test_sum_helper_items(125));
     sol_wasm_represented_output_free(&output);
+    CHECK(p44c_acceptance_matrix());
+    CHECK(p44c_false_violation_trace());
+    CHECK(p44c_exact_requires_traces());
+    {
+        char directory[512];
+        (void)snprintf(directory, sizeof directory,
+            "%s/tests/conformance/p44c_requires_parameter_forward", SOL_TEST_SOURCE_DIR);
+        CHECK(p44c_parameter_forward_resource_determinism(directory));
+    }
+    {
+        char directory[512];
+        (void)snprintf(directory, sizeof directory,
+            "%s/tests/conformance/p44c_requires_bool_forward", SOL_TEST_SOURCE_DIR);
+        CHECK(p44c_bool_forward_routes(directory));
+        CHECK(p44c_owner_mutations(directory));
+    }
+    {
+        char directory[512];
+        (void)snprintf(directory, sizeof directory,
+            "%s/tests/conformance/p44c_requires_divzero", SOL_TEST_SOURCE_DIR);
+        CHECK(p44c_arithmetic_site_mutation(directory));
+    }
     char callable_hole_directory[512];
     (void)snprintf(callable_hole_directory, sizeof callable_hole_directory,
         "%s/tests/conformance/p43_callable_hole_prereq", SOL_TEST_SOURCE_DIR);
