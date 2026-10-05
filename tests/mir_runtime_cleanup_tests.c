@@ -13,6 +13,9 @@ static int failures;
 
 typedef struct { SolDiagnostics diagnostics; SolHirModule hir; SolTypeTable types;
     SolEffectTable effects; SolContractTable contracts; SolIr ir; SolPackage package; } Compilation;
+static char *render_cleanup_text(const SolMirRuntimeCleanup *cleanup);
+static size_t affine_image(const SolMirConcreteProgram *program,
+    SolIrCallableId callable_id);
 static SolIrCallableId callable(const SolIr *ir, const char *name, SolIrCallableKind kind) {
     for (size_t i=0;i<ir->callable_count;++i) if (ir->callables[i].kind==kind && strcmp(ir->callables[i].name,name)==0) return i;
     return SOL_IR_NONE;
@@ -74,6 +77,21 @@ static bool build_affine_pair_fixture(Compilation *c, SolMirConcreteProgram *p) 
     return sol_mir_concrete_program_build(&request, p, &c->diagnostics)
         == SOL_MIR_CONCRETE_BUILD_SUCCEEDED;
 }
+static bool build_snapshot_fixture(Compilation *c, SolMirConcreteProgram *p, bool reverse) {
+    SolMirProgramRoot roots[32]; size_t count = 0;
+    if (reverse) {
+        for (size_t i = c->ir.callable_count; i; --i)
+            if (c->ir.callables[i - 1].kind == SOL_IR_CALLABLE_FUNCTION)
+                roots[count++] = (SolMirProgramRoot){i - 1,
+                    SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    } else for (size_t i = 0; i < c->ir.callable_count; ++i)
+        if (c->ir.callables[i].kind == SOL_IR_CALLABLE_FUNCTION)
+            roots[count++] = (SolMirProgramRoot){i, SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    SolMirTargetDescriptor target = sol_mir_target_wasm32();
+    return count == 21 && sol_mir_concrete_program_build(
+        &(SolMirConcreteBuildRequest){&c->ir, roots, count, NULL, 0, &target, NULL},
+        p, &c->diagnostics) == SOL_MIR_CONCRETE_BUILD_SUCCEEDED;
+}
 static void check_zero_supplemental_alias_preflight(void) {
     Compilation c; SolMirConcreteProgram program; SolMirRuntimeConventions conventions;
     SolMirRuntimeValues values; SolMirRuntimeCleanup cleanup, rebuilt;
@@ -99,6 +117,7 @@ static void check_zero_supplemental_alias_preflight(void) {
             &values, NULL}, &cleanup, &c.diagnostics) == SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED;
     CHECK(built);
     if (built) {
+        CHECK(program.operations.snapshot_count == 0);
         CHECK(cleanup.event_count != 0 && cleanup.action_count != 0
             && cleanup.transition_count != 0 && cleanup.supplemental_site_count == 0
             && cleanup.supplemental_site_capacity == 0 && cleanup.supplemental_sites == NULL
@@ -110,10 +129,264 @@ static void check_zero_supplemental_alias_preflight(void) {
             &values, NULL}, &rebuilt, &c.diagnostics) == SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED
             && sol_mir_runtime_cleanup_validate(&rebuilt, NULL)
             && memcmp(&cleanup.usage, &rebuilt.usage, sizeof(cleanup.usage)) == 0);
+        for (size_t i = 0; i < cleanup.action_count; ++i)
+            CHECK(cleanup.actions[i].kind != SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT);
     }
     sol_mir_runtime_cleanup_free(&rebuilt); sol_mir_runtime_cleanup_free(&cleanup);
     sol_mir_runtime_values_free(&values); sol_mir_runtime_conventions_free(&conventions);
     sol_mir_concrete_program_free(&program); compilation_free(&c);
+}
+static size_t snapshot_action_count(const SolMirRuntimeCleanup *cleanup,
+    const SolMirRuntimeCleanupTransition *transition) {
+    size_t count = 0;
+    for (size_t i = 0; i < transition->actions.count; ++i)
+        count += cleanup->actions[transition->actions.offset + i].kind
+            == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT;
+    return count;
+}
+static void check_snapshot_mutation(SolMirRuntimeCleanup *cleanup, size_t action,
+    SolMirRuntimeCleanupAction replacement) {
+    SolMirRuntimeCleanupAction saved = cleanup->actions[action];
+    cleanup->actions[action] = replacement;
+    CHECK(!sol_mir_runtime_cleanup_validate(cleanup, NULL));
+    cleanup->actions[action] = saved;
+    CHECK(sol_mir_runtime_cleanup_validate(cleanup, NULL));
+}
+static void check_snapshot_prerequisite(void) {
+    Compilation compilation; SolMirConcreteProgram program, reordered;
+    SolMirRuntimeConventions conventions, reordered_conventions;
+    SolMirRuntimeValues values, reordered_values;
+    SolMirRuntimeCleanup cleanup, reordered_cleanup;
+    sol_mir_concrete_program_init(&program); sol_mir_concrete_program_init(&reordered);
+    sol_mir_runtime_conventions_init(&conventions);
+    sol_mir_runtime_conventions_init(&reordered_conventions);
+    sol_mir_runtime_values_init(&values); sol_mir_runtime_values_init(&reordered_values);
+    sol_mir_runtime_cleanup_init(&cleanup); sol_mir_runtime_cleanup_init(&reordered_cleanup);
+    bool compiled = compile_directory(&compilation,
+        SOL_TEST_SOURCE_DIR "/tests/conformance/p33_snapshots");
+    bool built = compiled && build_snapshot_fixture(&compilation, &program, false)
+        && sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){
+            &program, NULL}, &conventions, &compilation.diagnostics)
+            == SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED
+        && sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){&conventions,
+            NULL}, &values, &compilation.diagnostics) == SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED
+        && sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){&conventions,
+            &values, NULL}, &cleanup, &compilation.diagnostics)
+            == SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED;
+    if (!built) sol_diagnostics_render_human(stderr, &compilation.package.source,
+        &compilation.diagnostics);
+    CHECK(built);
+    if (!built) goto done;
+    const SolMirOperations *operations = &program.operations;
+    const SolMirMaterialization *materialization = &program.materialization;
+    CHECK(operations->snapshot_count == 22 && sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+    SolIrCallableId two_callable = callable(&compilation.ir, "two_snapshots",
+        SOL_IR_CALLABLE_FUNCTION);
+    size_t two_image = affine_image(&program, two_callable);
+    size_t two_plans[2] = {SOL_MIR_RUNTIME_NONE, SOL_MIR_RUNTIME_NONE};
+    SolMirRecipeId scalar_recipe = SOL_MIR_RECIPE_NONE;
+    size_t slot_zero = 0, collision_plan = SOL_MIR_RUNTIME_NONE;
+    size_t collision_capture_plan = SOL_MIR_RUNTIME_NONE;
+    for (size_t i = 0; i < operations->snapshot_count; ++i) {
+        const SolMirOperationSnapshotPlan *plan = &operations->snapshots[i];
+        CHECK(plan->image < materialization->image_count
+            && plan->instruction < materialization->instruction_count
+            && materialization->instructions[plan->instruction].kind
+                == SOL_MIR_INST_CAPTURE_SNAPSHOT);
+        if (i == 0) scalar_recipe = plan->recipe;
+        CHECK(plan->recipe == scalar_recipe);
+        slot_zero += plan->slot == 0;
+        if (plan->image == two_image && plan->slot < 2) two_plans[plan->slot] = i;
+        for (size_t q = 0; q < operations->snapshot_count; ++q)
+            if (collision_plan == SOL_MIR_RUNTIME_NONE && q != i
+                && operations->snapshots[q].instruction == i) {
+                collision_plan = i; collision_capture_plan = q;
+            }
+    }
+    CHECK(two_image != SOL_MIR_RUNTIME_NONE && two_plans[0] != SOL_MIR_RUNTIME_NONE
+        && two_plans[1] != SOL_MIR_RUNTIME_NONE && slot_zero == 21
+        && collision_plan == 18 && collision_capture_plan == 0);
+    size_t return_event = SOL_MIR_RUNTIME_NONE, return_transition = SOL_MIR_RUNTIME_NONE;
+    size_t failure_event = SOL_MIR_RUNTIME_NONE, failure_transition = SOL_MIR_RUNTIME_NONE;
+    size_t pre_capture_failures = 0, returned_failure_checks = 0, return_paths = 0;
+    for (size_t e = 0; e < cleanup.event_count; ++e) {
+        const SolMirRuntimeCleanupEvent *event = &cleanup.events[e];
+        if (event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+            || event->block >= materialization->block_count) continue;
+        const SolMirMaterializedTerminator *term = &materialization->blocks[event->block].terminator;
+        for (size_t t = 0; t < event->transitions.count; ++t) {
+            size_t transition_id = event->transitions.offset + t;
+            const SolMirRuntimeCleanupTransition *transition
+                = &cleanup.transitions[transition_id];
+            size_t snapshots = snapshot_action_count(&cleanup, transition);
+            if (event->owner == two_image && term->kind == SOL_MIR_TERM_RETURN
+                && transition->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT) {
+                CHECK(transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE
+                    && transition->failure_site == SOL_MIR_RUNTIME_NONE
+                    && transition->failure_mask == 0 && snapshots == 2
+                    && transition->actions.count == 2);
+                if (transition->actions.count == 2) {
+                    const SolMirRuntimeCleanupAction *newest
+                        = &cleanup.actions[transition->actions.offset];
+                    const SolMirRuntimeCleanupAction *oldest
+                        = &cleanup.actions[transition->actions.offset + 1];
+                    CHECK(newest->kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT
+                        && newest->target == two_plans[1] && newest->recipe == scalar_recipe
+                        && newest->flags == 0 && newest->drop_path == SOL_MIR_RUNTIME_NONE
+                        && oldest->kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT
+                        && oldest->target == two_plans[0] && oldest->recipe == scalar_recipe
+                        && oldest->flags == 0 && oldest->drop_path == SOL_MIR_RUNTIME_NONE);
+                }
+                ++return_paths; return_event = e; return_transition = transition_id;
+            }
+            if (event->owner == two_image && transition->outcome
+                    == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE && snapshots == 2) {
+                size_t seen = 0;
+                for (size_t a = 0; a < transition->actions.count; ++a) {
+                    const SolMirRuntimeCleanupAction *action
+                        = &cleanup.actions[transition->actions.offset + a];
+                    if (action->kind != SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT) continue;
+                    CHECK(action->target == two_plans[1 - seen] && action->recipe == scalar_recipe
+                        && action->flags == 0 && action->drop_path == SOL_MIR_RUNTIME_NONE);
+                    ++seen;
+                }
+                CHECK(cleanup.actions[transition->actions.offset
+                    + transition->actions.count - 1].kind
+                    == SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE);
+                failure_event = e; failure_transition = transition_id;
+            }
+            if (event->owner == two_image && term->kind == SOL_MIR_TERM_CHECK_CONTRACT
+                && term->contract_phase == SOL_CONTRACT_REQUIRES
+                && transition->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE) {
+                CHECK(snapshots == 0); ++pre_capture_failures;
+            }
+            if (event->owner == two_image && term->kind == SOL_MIR_TERM_CHECK_CONTRACT
+                && term->contract_phase == SOL_CONTRACT_ENSURES
+                && term->contract_outcome == SOL_CONTRACT_OUTCOME_FAILURE
+                && transition->edge_role
+                    == SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_SATISFIED) {
+                CHECK(snapshots == 0); ++returned_failure_checks;
+            }
+        }
+    }
+    CHECK(return_paths == 1 && return_event != SOL_MIR_RUNTIME_NONE
+        && failure_event != SOL_MIR_RUNTIME_NONE && pre_capture_failures != 0
+        && returned_failure_checks != 0);
+    size_t collision_actions = 0;
+    for (size_t i = 0; i < cleanup.action_count; ++i)
+        if (cleanup.actions[i].kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT
+            && cleanup.actions[i].target == collision_plan) {
+            CHECK(cleanup.actions[i].target != collision_capture_plan
+                && cleanup.actions[i].recipe == operations->snapshots[collision_plan].recipe);
+            ++collision_actions;
+        }
+    CHECK(collision_actions != 0);
+    if (return_transition == SOL_MIR_RUNTIME_NONE
+        || failure_transition == SOL_MIR_RUNTIME_NONE
+        || cleanup.transitions[return_transition].actions.count < 2) goto rebuild;
+    size_t return_action = cleanup.transitions[return_transition].actions.offset;
+    SolMirRuntimeCleanupAction saved = cleanup.actions[return_action];
+    SolMirRuntimeCleanupAction mutated = saved;
+    mutated.target = cleanup.actions[return_action + 1].target;
+    check_snapshot_mutation(&cleanup, return_action, mutated); /* duplicate return drop */
+    size_t slot_action = SOL_MIR_RUNTIME_NONE;
+    for (size_t i = 0; i < cleanup.action_count; ++i)
+        if (cleanup.actions[i].kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT
+            && cleanup.actions[i].target
+                != operations->snapshots[cleanup.actions[i].target].slot) {
+            slot_action = i; break;
+        }
+    CHECK(slot_action != SOL_MIR_RUNTIME_NONE);
+    if (slot_action != SOL_MIR_RUNTIME_NONE) {
+        mutated = cleanup.actions[slot_action];
+        mutated.target = operations->snapshots[mutated.target].slot;
+        check_snapshot_mutation(&cleanup, slot_action, mutated);
+    }
+    mutated = saved; mutated.target = operations->snapshots[saved.target].instruction;
+    check_snapshot_mutation(&cleanup, return_action, mutated);
+    mutated = saved; mutated.recipe = SOL_MIR_RECIPE_NONE;
+    check_snapshot_mutation(&cleanup, return_action, mutated);
+    mutated = saved; mutated.flags = SOL_MIR_RUNTIME_CLEANUP_ACTION_GUARDED;
+    check_snapshot_mutation(&cleanup, return_action, mutated);
+    mutated = saved; mutated.drop_path = 0;
+    check_snapshot_mutation(&cleanup, return_action, mutated);
+    size_t left_target = cleanup.actions[return_action].target;
+    cleanup.actions[return_action].target = cleanup.actions[return_action + 1].target;
+    cleanup.actions[return_action + 1].target = left_target;
+    CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL)); /* equal-recipe target swap */
+    cleanup.actions[return_action + 1].target = cleanup.actions[return_action].target;
+    cleanup.actions[return_action].target = left_target;
+    SolMirRuntimeCleanupAction left = cleanup.actions[return_action];
+    cleanup.actions[return_action] = cleanup.actions[return_action + 1];
+    cleanup.actions[return_action + 1] = left;
+    CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+    cleanup.actions[return_action + 1] = cleanup.actions[return_action];
+    cleanup.actions[return_action] = left;
+    SolMirRuntimeSlice return_slice = cleanup.transitions[return_transition].actions;
+    --cleanup.transitions[return_transition].actions.count;
+    CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+    cleanup.transitions[return_transition].actions = return_slice;
+    ++cleanup.transitions[return_transition].actions.count;
+    CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+    cleanup.transitions[return_transition].actions = return_slice;
+    SolMirRuntimeSlice event_actions = cleanup.events[return_event].actions;
+    --cleanup.events[return_event].actions.count;
+    CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+    cleanup.events[return_event].actions = event_actions;
+    SolMirRuntimeSlice event_transitions = cleanup.events[return_event].transitions;
+    --cleanup.events[return_event].transitions.count;
+    CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+    cleanup.events[return_event].transitions = event_transitions;
+    SolMirRuntimeCleanupTransition transition_saved = cleanup.transitions[return_transition];
+    cleanup.transitions[return_transition].event = failure_event;
+    CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+    cleanup.transitions[return_transition] = transition_saved;
+    size_t failure_action = cleanup.transitions[failure_transition].actions.offset;
+    while (cleanup.actions[failure_action].kind
+            != SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT) ++failure_action;
+    left = cleanup.actions[failure_action];
+    cleanup.actions[failure_action] = cleanup.actions[failure_action + 1];
+    cleanup.actions[failure_action + 1] = left;
+    CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+    cleanup.actions[failure_action + 1] = cleanup.actions[failure_action];
+    cleanup.actions[failure_action] = left;
+    mutated = cleanup.actions[failure_action];
+    mutated.target = cleanup.actions[failure_action + 1].target;
+    check_snapshot_mutation(&cleanup, failure_action, mutated); /* duplicate failure drop */
+    SolMirRuntimeSlice failure_slice = cleanup.transitions[failure_transition].actions;
+    ++cleanup.transitions[failure_transition].actions.offset;
+    --cleanup.transitions[failure_transition].actions.count; /* missing first failure drop */
+    CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+    cleanup.transitions[failure_transition].actions = failure_slice;
+    ++cleanup.transitions[failure_transition].actions.count;
+    CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+    cleanup.transitions[failure_transition].actions = failure_slice;
+    CHECK(sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+rebuild: ;
+    bool rebuilt = build_snapshot_fixture(&compilation, &reordered, true)
+        && sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){
+            &reordered, NULL}, &reordered_conventions, &compilation.diagnostics)
+            == SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED
+        && sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){
+            &reordered_conventions, NULL}, &reordered_values, &compilation.diagnostics)
+            == SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED
+        && sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){
+            &reordered_conventions, &reordered_values, NULL}, &reordered_cleanup,
+            &compilation.diagnostics) == SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED;
+    CHECK(rebuilt);
+    if (rebuilt) {
+        char *first = render_cleanup_text(&cleanup);
+        char *second = render_cleanup_text(&reordered_cleanup);
+        CHECK(first != NULL && second != NULL && strcmp(first, second) == 0);
+        free(first); free(second);
+    }
+done:
+    sol_mir_runtime_cleanup_free(&reordered_cleanup); sol_mir_runtime_cleanup_free(&cleanup);
+    sol_mir_runtime_values_free(&reordered_values); sol_mir_runtime_values_free(&values);
+    sol_mir_runtime_conventions_free(&reordered_conventions);
+    sol_mir_runtime_conventions_free(&conventions);
+    sol_mir_concrete_program_free(&reordered); sol_mir_concrete_program_free(&program);
+    compilation_free(&compilation);
 }
 static bool occurrence_for_transition(const SolMirRuntimeCleanup *cleanup,
     const SolMirRuntimeConventions *conventions, const SolMirRuntimeCleanupTransition *transition,
@@ -948,6 +1221,7 @@ static void check_authenticated_contract_suppression(const SolMirRuntimeCleanup 
 int main(void) {
     check_predicate_propagate_schema();
     check_zero_supplemental_alias_preflight();
+    check_snapshot_prerequisite();
     SolMirRuntimeCleanup cleanup;
     sol_mir_runtime_cleanup_init(&cleanup);
     CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
@@ -1015,15 +1289,15 @@ int main(void) {
         && values.usage.validation_scratch_bytes == 763171604
         && values.usage.validation_work == 96028179);
     /* Final P3.3 E6 all-roots cleanup-policy census and exact metering. */
-    CHECK(cleanup.event_count == 375 && cleanup.action_count == 683
+    CHECK(cleanup.event_count == 375 && cleanup.action_count == 684
         && cleanup.transition_count == 466 && cleanup.supplemental_site_count == 51
         && cleanup.drop_path_count == 290);
-    CHECK(cleanup.usage.events == 375 && cleanup.usage.actions == 683
+    CHECK(cleanup.usage.events == 375 && cleanup.usage.actions == 684
         && cleanup.usage.transitions == 466 && cleanup.usage.supplemental_sites == 51
-        && cleanup.usage.drop_paths == 290 && cleanup.usage.owned_bytes == 133552
-        && cleanup.usage.build_scratch_bytes == 246744 && cleanup.usage.build_work == 76662
+        && cleanup.usage.drop_paths == 290 && cleanup.usage.owned_bytes == 133584
+        && cleanup.usage.build_scratch_bytes == 246744 && cleanup.usage.build_work == 76668
         && cleanup.usage.validation_scratch_bytes == 246744
-        && cleanup.usage.validation_work == 57603);
+        && cleanup.usage.validation_work == 57607);
     CHECK(sol_mir_runtime_cleanup_validate(&cleanup,NULL));
     size_t event_kinds[4] = {0}, phases[3] = {0}, producers[13] = {0};
     size_t action_kinds[10] = {0}, outcomes[3] = {0}, roles[16] = {0};
@@ -1048,7 +1322,7 @@ int main(void) {
     const size_t expected_phases[] = {368, 5, 2};
     const size_t expected_producers[] = {295, 5, 18, 1, 1, 0, 0, 0, 0,
         4, 44, 5, 2};
-    const size_t expected_action_kinds[] = {1, 7, 40, 137, 240, 2, 0, 20,
+    const size_t expected_action_kinds[] = {1, 7, 40, 137, 240, 2, 0, 21,
         153, 83};
     const size_t expected_outcomes[] = {341, 108, 17};
     const size_t expected_roles[] = {284, 12, 12, 18, 18, 1, 0, 1, 2, 2,

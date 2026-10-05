@@ -537,6 +537,20 @@ static size_t active_handler(const IndependentReplay *r, const size_t *handlers,
     }
     return SOL_MIR_RUNTIME_NONE;
 }
+/* Reconstruct snapshot destruction directly from the independently replayed
+ * capture stack.  This intentionally does not call a construction helper. */
+static bool emit_independent_snapshot_cleanup(IndependentSink *s,
+    const SolMirRuntimeCleanup *owner, const IndependentReplay *r,
+    const size_t *captures, size_t depth) {
+    const SolMirOperations *operations = &owner->conventions->concrete->operations;
+    for (size_t i = depth; i; --i) {
+        size_t plan = snapshot_plan(operations, r->image_id, captures[i - 1]);
+        if (plan == SOL_MIR_RUNTIME_NONE || !sink_action(s,
+                SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT, 0, plan,
+                operations->snapshots[plan].recipe)) return false;
+    }
+    return true;
+}
 static bool emit_implicit_cleanup(IndependentSink *s, const SolMirRuntimeCleanup *owner,
     const IndependentReplay *r, IndependentStorage *state, unsigned char *holes, size_t *temps,
     size_t *temp_scopes, size_t td, size_t *snapshots, size_t sd,
@@ -573,13 +587,7 @@ static bool emit_implicit_cleanup(IndependentSink *s, const SolMirRuntimeCleanup
         for (size_t i = 0; i < cd; ++i) active |= temp_scopes[q] == scopes[i];
         if (!active) return false;
     }
-    for (size_t i = sd; i; --i) {
-        const SolMirOperations *ops = &owner->conventions->concrete->operations;
-        size_t plan = snapshot_plan(ops, r->image_id, snapshots[i - 1]);
-        if (plan == SOL_MIR_RUNTIME_NONE || !sink_action(s,
-                SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT, 0, plan,
-                ops->snapshots[plan].recipe)) return false;
-    }
+    if (!emit_independent_snapshot_cleanup(s, owner, r, snapshots, sd)) return false;
     for (size_t ordinal = r->locals; ordinal; --ordinal) for (size_t i = 0; i < r->locals; ++i) {
         size_t local = r->image->locals.offset + i;
         const SolMirMaterializedLocal *item = &m->locals[local];
@@ -637,7 +645,7 @@ static bool emit_implicit(IndependentSink*s,const SolMirRuntimeCleanup *owner,co
  if(!sink_event(s,&e))return false;size_t at=action_pos(s);if(!sink_transition(s,id,SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,SOL_MIR_RUNTIME_NONE,at))return false;at=action_pos(s);if(!emit_implicit_cleanup(s,owner,r,stt,holes,tmp,tmpo,td,snap,sd,scope,cd,region,rd,handler,hd)||!sink_action(s,SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE,SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY,e.inherited_failure_site!=SOL_MIR_RUNTIME_NONE?e.inherited_failure_site:e.supplemental_site,SOL_MIR_RECIPE_NONE)||!sink_transition(s,id,SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE,SOL_MIR_RUNTIME_NONE,at))return false;return sink_finish_event(s, id); }
 static bool terminal_failure(SolMirTerminatorKind k){return k==SOL_MIR_TERM_PANIC||k==SOL_MIR_TERM_MATCH_FAILURE||k==SOL_MIR_TERM_UNREACHABLE||k==SOL_MIR_TERM_RESUME_FAILURE||k==SOL_MIR_TERM_CONTRACT_VIOLATION;}
 static bool emit_term(IndependentSink*s,const SolMirRuntimeCleanup*owner,const IndependentReplay*r,size_t block,const SolMirMaterializedTerminator*t,IndependentStorage *stt,unsigned char *holes,size_t *tmp,size_t *tmpo,size_t td,size_t *snap,size_t sd,size_t *scope,size_t cd,size_t *region,size_t rd,size_t *handler,size_t hd){SolMirRuntimeSource src;if(!source_for(owner->conventions->concrete->program.ir,t->span,&src))return false;SolMirRuntimeCleanupEvent e={SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR,SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION,SOL_MIR_RUNTIME_CLEANUP_ORIGIN_EXPLICIT,r->image_id,block,SOL_MIR_RUNTIME_NONE,SOL_MIR_RUNTIME_NONE,src,inherited(owner->conventions,r->image_id,block,SOL_MIR_RUNTIME_NONE),SOL_MIR_RUNTIME_NONE,{action_pos(s),0},{s->count.transitions,0},SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL,false,SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE};e.captures_failure_detail=terminal_failure(t->kind)||t->kind==SOL_MIR_TERM_INVOKE||t->kind==SOL_MIR_TERM_CHECK_REFINED||t->kind==SOL_MIR_TERM_CHECK_CONTRACT;e.capture_detail_kind=t->kind==SOL_MIR_TERM_PANIC?SOL_MIR_RUNTIME_FAILURE_DETAIL_PANIC_TEXT:SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE;size_t id=event_pos(s);if(!sink_event(s,&e))return false;size_t normal[3],n=edges(t,normal);bool is_failure=terminal_failure(t->kind);for(size_t i=0;i<n;i++){bool evaluation_failure=(t->kind==SOL_MIR_TERM_INVOKE&&normal[i]==t->failure_edge)||(t->kind==SOL_MIR_TERM_CHECK_REFINED&&normal[i]==t->failure_edge)||(t->kind==SOL_MIR_TERM_CHECK_CONTRACT&&normal[i]==t->failure_edge);bool violation=(t->kind==SOL_MIR_TERM_CHECK_CONTRACT&&normal[i]==t->violation_edge);size_t at=action_pos(s);if(!evaluation_failure&&!violation&&t->kind==SOL_MIR_TERM_INVOKE&&normal[i]==t->normal_edge)for(size_t q=0;q<t->writebacks.count;q++){const SolMirMaterializedWriteback*w=&r->m->writebacks[t->writebacks.offset+q];if(!sink_action(s,SOL_MIR_RUNTIME_CLEANUP_ACTION_WRITEBACK,SOL_MIR_RUNTIME_CLEANUP_ACTION_NORMAL_ONLY,w->place,w->type))return false;}if(!evaluation_failure&&(t->kind==SOL_MIR_TERM_CHECK_REFINED||t->kind==SOL_MIR_TERM_CHECK_CONTRACT)&&!sink_action(s,SOL_MIR_RUNTIME_CLEANUP_ACTION_CHECK_CONTRACT,normal[i]==t->satisfied_edge?SOL_MIR_RUNTIME_CLEANUP_ACTION_NORMAL_ONLY:0,t->source_obligation,SOL_MIR_RECIPE_NONE))return false;if(!sink_transition(s,id,(evaluation_failure||violation)?SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE:SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,normal[i],at))return false;}
- if(t->kind==SOL_MIR_TERM_RETURN||is_failure){size_t at=action_pos(s);if(is_failure&&!emit_implicit_cleanup(s,owner,r,stt,holes,tmp,tmpo,td,snap,sd,scope,cd,region,rd,handler,hd))return false;if(is_failure&&!sink_action(s,SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE,SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY,e.inherited_failure_site,SOL_MIR_RECIPE_NONE))return false;if(!sink_transition(s,id,is_failure?SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE:SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT,SOL_MIR_RUNTIME_NONE,at))return false;}
+ if(t->kind==SOL_MIR_TERM_RETURN||is_failure){size_t at=action_pos(s);if(t->kind==SOL_MIR_TERM_RETURN&&!emit_independent_snapshot_cleanup(s,owner,r,snap,sd))return false;if(is_failure&&!emit_implicit_cleanup(s,owner,r,stt,holes,tmp,tmpo,td,snap,sd,scope,cd,region,rd,handler,hd))return false;if(is_failure&&!sink_action(s,SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE,SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY,e.inherited_failure_site,SOL_MIR_RECIPE_NONE))return false;if(!sink_transition(s,id,is_failure?SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE:SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT,SOL_MIR_RUNTIME_NONE,at))return false;}
  return sink_finish_event(s, id); }
 static bool emit_cleanup_instruction(IndependentSink *s, const SolMirRuntimeCleanup *owner,
     const IndependentReplay *r, size_t block, size_t instruction,
