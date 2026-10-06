@@ -143,6 +143,12 @@ typedef struct {
     size_t chain_depth;
 } SolWasmRepresentedTestCallCatalogEntry;
 
+typedef struct {
+    size_t indexed_lookups;
+    size_t indexed_matches;
+    size_t legacy_fallback_scans;
+} SolWasmRepresentedTestControlTransitionStats;
+
 typedef enum {
     SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_INVALID,
     SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_EVENTLESS,
@@ -159,6 +165,13 @@ bool sol_wasm_represented_test_call_catalog_operand(const SolWasmRepresentedBuil
     size_t call, size_t ordinal, SolMirMaterializedTemporaryId *temporary);
 void sol_wasm_represented_test_fail_allocation_after(size_t attempt);
 size_t sol_wasm_represented_test_allocation_attempts(void);
+/* Number of qualified Result image certifications since the latest full-build
+ * reset. A request-local index certifies each image at most once. */
+size_t sol_wasm_represented_test_qualified_certifications(void);
+/* Build-local selector observability. Full builds reset these saturating
+ * counters; standalone selector hooks contribute until the next reset. */
+SolWasmRepresentedTestControlTransitionStats
+sol_wasm_represented_test_control_transition_stats(void);
 /* Test-only Binaryen/Wasmtime proof of the backend's parallel-copy sequence. */
 bool sol_wasm_represented_test_parallel_moves(void);
 /* Classifier-only hooks; these do not authenticate or expose raw MIR. */

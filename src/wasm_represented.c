@@ -46,6 +46,8 @@ static uint64_t represented_test_max_bytes = UINT64_MAX;
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
 static size_t represented_test_max_pages;
 static uint32_t represented_test_heap_base;
+static size_t represented_test_qualified_certifications;
+static SolWasmRepresentedTestControlTransitionStats represented_test_control_transition_stats;
 static bool represented_test_inactive_payload_probe;
 static bool represented_test_callback_writeback_probe;
 static bool represented_test_callable_hole_cleanup_probe;
@@ -931,6 +933,7 @@ static void put_u32(uint8_t **cursor, uint32_t value) {
 }
 
 typedef struct RepresentedCallCatalogGraph RepresentedCallCatalogGraph;
+typedef struct RepresentedQualifiedIndex RepresentedQualifiedIndex;
 
 typedef enum {
     REPRESENTED_PROVENANCE_SOURCE_NONE,
@@ -1254,6 +1257,7 @@ typedef struct {
     const SolMirMaterializedImage *image;
     const SolMirRuntimeSignature *signature;
     const RepresentedCallCatalogGraph *catalog;
+    const RepresentedQualifiedIndex *qualified;
     bool calls_enabled;
     size_t image_id, parameter_count;
     size_t value_base, temporary_base, local_base, predicate_value_base, predicate_result;
@@ -1505,6 +1509,337 @@ static bool represented_propagation_callable_recipe(const SolMirConcreteProgram 
         if (m->blocks[owner->blocks.offset + i].terminator.kind == SOL_MIR_TERM_PROPAGATE)
             return true;
     return false;
+}
+
+typedef struct {
+    SolMirRecipeId recipe;
+    SolMirRecipeId payload_recipe;
+    SolMirRecipeId failure_recipe;
+    size_t success_variant;
+    size_t failure_variant;
+    size_t success_field;
+    size_t failure_field;
+    uint32_t success_tag;
+    uint32_t failure_tag;
+} RepresentedQualifiedResult;
+
+typedef struct {
+    RepresentedQualifiedResult result;
+    SolMirRecipeId recipe;
+    size_t clause_count;
+    bool certified;
+} RepresentedQualifiedImage;
+
+enum {
+    REPRESENTED_QUALIFIED_CALLABLE_ENTRY = 1u,
+    REPRESENTED_QUALIFIED_CALLABLE_DIRECT_TARGET = 2u,
+    REPRESENTED_QUALIFIED_CALLABLE_CALLBACK_INOUT_TARGET = 4u,
+    REPRESENTED_QUALIFIED_CALLABLE_METHOD_TARGET = 8u,
+};
+
+struct RepresentedQualifiedIndex {
+    RepresentedQualifiedImage *images;
+    size_t *plan_by_body;
+    unsigned char *callable_flags;
+    size_t image_count, body_count, callable_count, qualified_clause_count;
+};
+
+typedef enum {
+    REPRESENTED_QUALIFIED_INDEX_VALID,
+    REPRESENTED_QUALIFIED_INDEX_INVALID,
+    REPRESENTED_QUALIFIED_INDEX_RESOURCE,
+    REPRESENTED_QUALIFIED_INDEX_ALLOCATION,
+} RepresentedQualifiedIndexResult;
+
+static bool represented_layout_range(uint64_t offset, uint64_t size, uint64_t object_size) {
+    return offset <= object_size && size <= object_size - offset;
+}
+
+/* C2b2's source-built envelope is intentionally exact.  Variant and recipe
+ * identities are discovered from the authenticated owners; only the semantic
+ * Result ordinals/tags and wasm32 physical contract are fixed here. */
+static bool represented_qualified_result(const SolMirConcreteProgram *concrete,
+    SolMirRecipeId recipe, RepresentedQualifiedResult *result) {
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+    ++represented_test_qualified_certifications;
+#endif
+    const SolMirRepresentation *r = &concrete->representation;
+    const SolMirLayout *layout = &concrete->layout;
+    const SolIr *ir = concrete->program.ir;
+    if (result == NULL || recipe >= r->recipe_count || recipe >= layout->type_count)
+        return false;
+    const SolMirRecipe *sum = &r->recipes[recipe];
+    const SolMirTypeLayout *sum_layout = &layout->types[recipe];
+    if (sum->kind != SOL_MIR_RECIPE_RESULT || sum->concrete_definition != SOL_IR_NONE
+        || sum->storage != SOL_MIR_STORAGE_AGGREGATE_VALUE || !sum->inhabited
+        || sum->zero_sized || sum->copy_kind != SOL_MIR_COPY_AGGREGATE
+        || sum->drop_kind != SOL_MIR_DROP_AGGREGATE || sum->variants.count != 2
+        || sum->variants.offset > r->variant_count
+        || sum->variants.count > r->variant_count - sum->variants.offset
+        || sum_layout->recipe != recipe || sum_layout->object_kind != SOL_MIR_LAYOUT_OBJECT_SUM
+        || !sum_layout->has_object || sum_layout->value_size != 4
+        || sum_layout->value_alignment != 4 || sum_layout->object_size == 0
+        || sum_layout->object_size > UINT32_MAX || sum_layout->object_alignment == 0
+        || sum_layout->object_alignment > 8 || sum_layout->tag_offset != 0
+        || sum_layout->tag_size != 4 || sum_layout->payload_offset > UINT32_MAX
+        || !represented_layout_range(sum_layout->tag_offset, sum_layout->tag_size,
+            sum_layout->object_size)
+        || !represented_layout_range(sum_layout->payload_offset, sum_layout->payload_size,
+            sum_layout->object_size)) return false;
+    size_t variants[2] = {SOL_MIR_RECIPE_NONE, SOL_MIR_RECIPE_NONE};
+    for (size_t i = 0; i < sum->variants.count; ++i) {
+        size_t id = sum->variants.offset + i;
+        const SolMirRecipeVariant *variant = &r->variants[id];
+        if (variant->source_variant != SOL_IR_NONE || variant->ordinal > 1
+            || variant->semantic_tag != variant->ordinal || variants[variant->ordinal]
+                != SOL_MIR_RECIPE_NONE || variant->fields.count != 1
+            || variant->fields.offset >= r->field_count || id >= layout->variant_count)
+            return false;
+        variants[variant->ordinal] = id;
+    }
+    if (variants[0] == SOL_MIR_RECIPE_NONE || variants[1] == SOL_MIR_RECIPE_NONE) return false;
+    const SolMirRecipeVariant *success = &r->variants[variants[0]];
+    const SolMirRecipeVariant *failure = &r->variants[variants[1]];
+    size_t success_field = success->fields.offset, failure_field = failure->fields.offset;
+    if (success_field >= layout->field_count || failure_field >= layout->field_count) return false;
+    const SolMirRecipeField *success_recipe_field = &r->fields[success_field];
+    const SolMirRecipeField *failure_recipe_field = &r->fields[failure_field];
+    const SolMirFieldLayout *success_layout = &layout->fields[success_field];
+    const SolMirFieldLayout *failure_layout = &layout->fields[failure_field];
+    SolMirRecipeId payload = success_recipe_field->type;
+    SolMirRecipeId error = failure_recipe_field->type;
+    if (payload >= r->recipe_count || payload >= layout->type_count
+        || error >= r->recipe_count || error >= layout->type_count
+        || (r->recipes[payload].kind != SOL_MIR_RECIPE_INT64
+            && r->recipes[payload].kind != SOL_MIR_RECIPE_BOOL)
+        || r->recipes[payload].storage != SOL_MIR_STORAGE_SCALAR
+        || !r->recipes[payload].is_copy || r->recipes[error].kind != SOL_MIR_RECIPE_ENUM
+        || r->recipes[error].storage != SOL_MIR_STORAGE_AGGREGATE_VALUE
+        || r->recipes[error].copy_kind != SOL_MIR_COPY_AGGREGATE
+        || r->recipes[error].drop_kind != SOL_MIR_DROP_AGGREGATE
+        || !r->recipes[error].inhabited || r->recipes[error].variants.count != 1
+        || r->recipes[error].variants.offset >= r->variant_count
+        || r->recipes[error].fields.count != 0 || r->recipes[error].concrete_definition >= ir->definition_count)
+        return false;
+    const SolIrDefinition *failure_definition = &ir->definitions[
+        r->recipes[error].concrete_definition];
+    size_t unit_variant = r->recipes[error].variants.offset;
+    const SolMirRecipeVariant *unit = &r->variants[unit_variant];
+    if (failure_definition->kind != SOL_IR_DEFINITION_ENUM || failure_definition->open
+        || failure_definition->variants.count != 1 || unit->source_variant
+            != failure_definition->variants.offset || unit->source_variant >= ir->variant_count
+        || ir->variants[unit->source_variant].owner != r->recipes[error].concrete_definition
+        || ir->variants[unit->source_variant].fields.count != 0 || unit->ordinal != 0
+        || unit->semantic_tag != 0 || unit->fields.count != 0 || unit_variant >= layout->variant_count)
+        return false;
+    const SolMirTypeLayout *error_layout = &layout->types[error];
+    const SolMirVariantLayout *unit_layout = &layout->variants[unit_variant];
+    if (error_layout->recipe != error || error_layout->object_kind != SOL_MIR_LAYOUT_OBJECT_SUM
+        || !error_layout->has_object || error_layout->value_size != 4
+        || error_layout->value_alignment != 4 || error_layout->object_size != 4
+        || error_layout->object_alignment != 4 || error_layout->tag_offset != 0
+        || error_layout->tag_size != 4 || error_layout->payload_offset != 4
+        || error_layout->payload_size != 0 || unit_layout->variant != unit_variant
+        || unit_layout->owner_recipe != error || unit_layout->tag != unit->semantic_tag
+        || !unit_layout->inhabited || !unit_layout->has_payload_storage
+        || unit_layout->payload_size != 0 || unit_layout->payload_alignment != 1
+        || unit_layout->tail_padding != 0) return false;
+    const SolMirVariantLayout *success_variant_layout = &layout->variants[variants[0]];
+    const SolMirVariantLayout *failure_variant_layout = &layout->variants[variants[1]];
+    uint64_t payload_size = r->recipes[payload].kind == SOL_MIR_RECIPE_INT64 ? 8 : 1;
+    uint64_t payload_alignment = r->recipes[payload].kind == SOL_MIR_RECIPE_INT64 ? 8 : 1;
+    uint64_t sum_payload_size = r->recipes[payload].kind == SOL_MIR_RECIPE_INT64 ? 8 : 4;
+    uint64_t sum_alignment = r->recipes[payload].kind == SOL_MIR_RECIPE_INT64 ? 8 : 4;
+    const SolMirTypeLayout *payload_layout = &layout->types[payload];
+    if (payload_layout->recipe != payload || payload_layout->object_kind != SOL_MIR_LAYOUT_OBJECT_NONE
+        || payload_layout->has_object || payload_layout->value_size != payload_size
+        || payload_layout->value_alignment != payload_alignment
+        || sum_layout->object_alignment != sum_alignment
+        || sum_layout->payload_offset != sum_alignment || sum_layout->payload_size != sum_payload_size
+        || sum_layout->object_size != sum_alignment + sum_payload_size
+        || sum_layout->tail_padding != 0
+        || success_recipe_field->source_field != SOL_IR_NONE || success_recipe_field->ordinal != 0
+        || failure_recipe_field->source_field != SOL_IR_NONE || failure_recipe_field->ordinal != 0
+        || success_layout->field != success_field || success_layout->owner_recipe != recipe
+        || success_layout->variant != variants[0] || !success_layout->has_storage
+        || success_layout->offset != sum_layout->payload_offset
+        || success_layout->size != payload_size || success_layout->alignment != payload_alignment
+        || !represented_layout_range(success_layout->offset, success_layout->size,
+            sum_layout->object_size)
+        || failure_layout->field != failure_field || failure_layout->owner_recipe != recipe
+        || failure_layout->variant != variants[1] || !failure_layout->has_storage
+        || failure_layout->offset != sum_layout->payload_offset || failure_layout->size != 4
+        || failure_layout->alignment != 4 || !represented_layout_range(failure_layout->offset,
+            failure_layout->size, sum_layout->object_size)
+        || success_variant_layout->variant != variants[0]
+        || success_variant_layout->owner_recipe != recipe || !success_variant_layout->inhabited
+        || !success_variant_layout->has_payload_storage
+        || success_variant_layout->tag != success->semantic_tag
+        || success_variant_layout->payload_size != payload_size
+        || success_variant_layout->payload_alignment != payload_alignment
+        || failure_variant_layout->variant != variants[1]
+        || failure_variant_layout->owner_recipe != recipe || !failure_variant_layout->inhabited
+        || !failure_variant_layout->has_payload_storage
+        || failure_variant_layout->tag != failure->semantic_tag
+        || failure_variant_layout->payload_size != 4
+        || failure_variant_layout->payload_alignment != 4) return false;
+    *result = (RepresentedQualifiedResult){recipe, payload, error, variants[0], variants[1],
+        success_field, failure_field, success_variant_layout->tag, failure_variant_layout->tag};
+    return true;
+}
+
+static void represented_qualified_index_free(RepresentedQualifiedIndex *index) {
+    if (index == NULL) return;
+    deallocate(index->images);
+    deallocate(index->plan_by_body);
+    deallocate(index->callable_flags);
+    memset(index, 0, sizeof *index);
+}
+
+static RepresentedQualifiedIndexResult represented_qualified_index_allocation_result(void) {
+    return represented_accounting != NULL
+        && represented_accounting->status == REPRESENTED_BACKEND_RESOURCE
+        ? REPRESENTED_QUALIFIED_INDEX_RESOURCE : REPRESENTED_QUALIFIED_INDEX_ALLOCATION;
+}
+
+/* Build one request-local certificate after accounting is active.  The first
+ * pass counts qualified clauses without allocating.  A zero-qualified closure
+ * consequently preserves the legacy allocation sequence exactly.  The later
+ * passes are each bounded by one authenticated owner arena and retain the
+ * already-authenticated plan/body/image joins for O(1) consumers. */
+static RepresentedQualifiedIndexResult represented_qualified_index_build(
+    const SolWasmRepresentedBuildRequest *request, RepresentedQualifiedIndex *index) {
+    const SolMirConcreteProgram *concrete = request->program->conventions->concrete;
+    const SolMirMaterialization *m = &concrete->materialization;
+    const SolMirOperations *o = &concrete->operations;
+    const SolMirLinkage *linkage = &concrete->linkage;
+    const SolMirRuntimeConventions *conventions = request->program->conventions;
+    memset(index, 0, sizeof *index);
+    for (size_t i = 0; i < o->predicate_body_count; ++i) {
+        const SolMirPredicateBody *body = &o->predicate_bodies[i];
+        if (body->owner_kind == SOL_MIR_PREDICATE_OWNER_INSTANCE
+            && body->phase == SOL_CONTRACT_ENSURES
+            && (body->outcome == SOL_CONTRACT_OUTCOME_SUCCESS
+                || body->outcome == SOL_CONTRACT_OUTCOME_FAILURE)) {
+            if (body->instance >= m->image_count || index->qualified_clause_count == SIZE_MAX)
+                return REPRESENTED_QUALIFIED_INDEX_INVALID;
+            ++index->qualified_clause_count;
+        }
+    }
+    if (index->qualified_clause_count == 0) return REPRESENTED_QUALIFIED_INDEX_VALID;
+    index->image_count = m->image_count;
+    index->body_count = o->predicate_body_count;
+    index->callable_count = linkage->callable_count;
+    index->images = m->image_count == 0 ? NULL
+        : allocate(m->image_count, sizeof *index->images);
+    index->plan_by_body = o->predicate_body_count == 0 ? NULL
+        : allocate(o->predicate_body_count, sizeof *index->plan_by_body);
+    index->callable_flags = linkage->callable_count == 0 ? NULL
+        : allocate(linkage->callable_count, sizeof *index->callable_flags);
+    if ((m->image_count != 0 && index->images == NULL)
+        || (o->predicate_body_count != 0 && index->plan_by_body == NULL)
+        || (linkage->callable_count != 0 && index->callable_flags == NULL)) {
+        RepresentedQualifiedIndexResult result = represented_qualified_index_allocation_result();
+        represented_qualified_index_free(index);
+        return result;
+    }
+    for (size_t i = 0; i < o->predicate_body_count; ++i)
+        index->plan_by_body[i] = SOL_MIR_OPERATION_NONE;
+    for (size_t i = 0; i < o->predicate_body_count; ++i) {
+        const SolMirPredicateBody *body = &o->predicate_bodies[i];
+        if (body->owner_kind == SOL_MIR_PREDICATE_OWNER_INSTANCE
+            && body->phase == SOL_CONTRACT_ENSURES
+            && (body->outcome == SOL_CONTRACT_OUTCOME_SUCCESS
+                || body->outcome == SOL_CONTRACT_OUTCOME_FAILURE)) {
+            if (body->instance >= index->image_count
+                || index->images[body->instance].clause_count == SIZE_MAX) goto invalid;
+            ++index->images[body->instance].clause_count;
+        }
+    }
+    for (size_t i = 0; i < o->predicate_count; ++i) {
+        const SolMirOperationPredicatePlan *plan = &o->predicates[i];
+        if (plan->kind != SOL_MIR_OPERATION_PREDICATE_CONTRACT
+            || plan->body >= o->predicate_body_count) continue;
+        if (index->plan_by_body[plan->body] != SOL_MIR_OPERATION_NONE) goto invalid;
+        index->plan_by_body[plan->body] = i;
+        const SolMirPredicateBody *body = &o->predicate_bodies[plan->body];
+        bool qualified = body->owner_kind == SOL_MIR_PREDICATE_OWNER_INSTANCE
+            && body->phase == SOL_CONTRACT_ENSURES
+            && (body->outcome == SOL_CONTRACT_OUTCOME_SUCCESS
+                || body->outcome == SOL_CONTRACT_OUTCOME_FAILURE);
+        if (!qualified) continue;
+        if (body->instance >= index->image_count || plan->image != body->instance
+            || plan->contract_phase != body->phase || plan->contract_outcome != body->outcome)
+            goto invalid;
+        RepresentedQualifiedImage *row = &index->images[body->instance];
+        if (!row->certified) {
+            if (!represented_qualified_result(concrete, plan->result_recipe, &row->result))
+                goto invalid;
+            row->recipe = plan->result_recipe;
+            const SolMirMaterializedImage *image = &m->images[body->instance];
+            if (image->blocks.offset > m->block_count
+                || image->blocks.count > m->block_count - image->blocks.offset) goto invalid;
+            for (size_t b = 0; b < image->blocks.count; ++b)
+                if (m->blocks[image->blocks.offset + b].terminator.kind
+                        == SOL_MIR_TERM_PROPAGATE) goto invalid;
+            row->certified = true;
+        } else if (row->recipe != plan->result_recipe) goto invalid;
+    }
+    for (size_t i = 0; i < o->predicate_body_count; ++i) {
+        const SolMirPredicateBody *body = &o->predicate_bodies[i];
+        if (body->owner_kind == SOL_MIR_PREDICATE_OWNER_INSTANCE
+            && body->phase == SOL_CONTRACT_ENSURES
+            && (body->outcome == SOL_CONTRACT_OUTCOME_SUCCESS
+                || body->outcome == SOL_CONTRACT_OUTCOME_FAILURE)
+            && index->plan_by_body[i] == SOL_MIR_OPERATION_NONE) goto invalid;
+    }
+    for (size_t i = 0; i < index->image_count; ++i)
+        if ((index->images[i].clause_count != 0) != index->images[i].certified) goto invalid;
+    for (size_t i = 0; i < conventions->entry_count; ++i) {
+        if (conventions->entries[i].callable >= index->callable_count) goto invalid;
+        index->callable_flags[conventions->entries[i].callable]
+            |= REPRESENTED_QUALIFIED_CALLABLE_ENTRY;
+    }
+    return REPRESENTED_QUALIFIED_INDEX_VALID;
+invalid:
+    represented_qualified_index_free(index);
+    return REPRESENTED_QUALIFIED_INDEX_INVALID;
+}
+
+static const RepresentedQualifiedImage *represented_qualified_image(
+    const RepresentedQualifiedIndex *index, size_t image, SolMirRecipeId recipe) {
+    if (index == NULL || index->images == NULL || image >= index->image_count) return NULL;
+    const RepresentedQualifiedImage *row = &index->images[image];
+    return row->certified && row->clause_count != 0 && row->recipe == recipe ? row : NULL;
+}
+
+static const SolMirOperationPredicatePlan *represented_qualified_plan_for_body(
+    const SolWasmRepresentedBuildRequest *request, const RepresentedQualifiedIndex *index,
+    size_t body) {
+    const SolMirOperations *o = &request->program->conventions->concrete->operations;
+    if (index == NULL || index->plan_by_body == NULL || body >= index->body_count) return NULL;
+    size_t plan = index->plan_by_body[body];
+    return plan < o->predicate_count ? &o->predicates[plan] : NULL;
+}
+
+static const SolMirOperationPredicatePlan *represented_plan_for_body(
+    const SolWasmRepresentedBuildRequest *request, const RepresentedQualifiedIndex *index,
+    size_t image, size_t body) {
+    const SolMirOperations *o = &request->program->conventions->concrete->operations;
+    if (index != NULL && index->plan_by_body != NULL) {
+        const SolMirOperationPredicatePlan *plan = represented_qualified_plan_for_body(request,
+            index, body);
+        return plan != NULL && plan->image == image ? plan : NULL;
+    }
+    const SolMirOperationPredicatePlan *found = NULL;
+    for (size_t i = 0; i < o->predicate_count; ++i) {
+        const SolMirOperationPredicatePlan *candidate = &o->predicates[i];
+        if (candidate->kind != SOL_MIR_OPERATION_PREDICATE_CONTRACT
+            || candidate->image != image || candidate->body != body) continue;
+        if (found != NULL) return NULL;
+        found = candidate;
+    }
+    return found;
 }
 
 static size_t local_index(const RepresentedFunction *function,
@@ -2270,33 +2605,38 @@ static const SolMirOperationSnapshotPlan *represented_snapshot_for_predicate_inp
     return plan;
 }
 
-/* C1/C2b1 accept owned instance callable predicates only. Requires keep their
- * entry inputs; ALWAYS ensures may additionally read the exact
- * materialized complete result named by their CHECK_CONTRACT plan.  Every
+/* C1/C2 accept owned instance callable predicates only. Requires keep their
+ * entry inputs; ALWAYS ensures may read their complete scalar result, while a
+ * certified SUCCESS Result ensure reads only its authenticated scalar payload.
+ * Every
  * emitted predicate row is joined to its P3.6 lowering row here; unsupported
  * predicate features are a closure rejection, never a best-effort omission. */
 static bool represented_predicate_body_preflight(const SolWasmRepresentedBuildRequest *request,
-    size_t image, const SolMirRuntimeSignature *signature, size_t body_id) {
+    const RepresentedQualifiedIndex *qualified_index, size_t image,
+    const SolMirRuntimeSignature *signature, size_t body_id) {
     const SolMirRuntimeLoweredProgram *owner = request->program;
     const SolMirConcreteProgram *concrete = owner->conventions->concrete;
     const SolMirOperations *o = &concrete->operations;
     if (body_id >= o->predicate_body_count || body_id >= owner->predicate_body_count) return false;
     const SolMirPredicateBody *body = &o->predicate_bodies[body_id];
     const SolMirRuntimeLoweredPredicateBody *row = &owner->predicate_bodies[body_id];
-    const SolMirOperationPredicatePlan *plan = NULL;
-    size_t plan_id = SOL_MIR_RUNTIME_NONE;
-    for (size_t i = 0; i < o->predicate_count; ++i) {
-        const SolMirOperationPredicatePlan *candidate = &o->predicates[i];
-        if (candidate->kind != SOL_MIR_OPERATION_PREDICATE_CONTRACT
-            || candidate->image != image || candidate->body != body_id) continue;
-        if (plan != NULL) return false;
-        plan = candidate; plan_id = i;
-    }
+    const SolMirOperationPredicatePlan *plan = represented_plan_for_body(request,
+        qualified_index, image, body_id);
+    size_t plan_id = plan == NULL ? SOL_MIR_RUNTIME_NONE : (size_t)(plan - o->predicates);
     bool requires = body->phase == SOL_CONTRACT_REQUIRES;
     bool ensures = body->phase == SOL_CONTRACT_ENSURES;
+    bool qualified = ensures && (body->outcome == SOL_CONTRACT_OUTCOME_SUCCESS
+        || body->outcome == SOL_CONTRACT_OUTCOME_FAILURE);
+    RepresentedQualifiedResult qualified_result = {0};
+    const RepresentedQualifiedImage *qualified_image = ensures
+        ? represented_qualified_image(qualified_index, image, signature->result) : NULL;
+    bool represented_result = qualified_image != NULL;
+    if (represented_result) qualified_result = qualified_image->result;
     if (body->owner_kind != SOL_MIR_PREDICATE_OWNER_INSTANCE || body->instance != image
         || body->import != SOL_MIR_MATERIALIZED_NONE
-        || (!requires && !ensures) || body->outcome != SOL_CONTRACT_OUTCOME_ALWAYS
+        || (!requires && !ensures)
+        || (requires && body->outcome != SOL_CONTRACT_OUTCOME_ALWAYS)
+        || (ensures && body->outcome != SOL_CONTRACT_OUTCOME_ALWAYS && !qualified)
         || !represented_predicate_recipe(concrete,
             body->output_recipe, true) || body->refinement_self_recipe != SOL_MIR_RECIPE_NONE
         || body->blocks.count == 0 || body->blocks.offset > o->predicate_block_count
@@ -2335,7 +2675,8 @@ static bool represented_predicate_body_preflight(const SolWasmRepresentedBuildRe
         || (requires && (obligation->snapshots.count != 0 || obligation->result_available
             || check->result != SOL_MIR_MATERIALIZED_NONE || plan->result != SOL_MIR_MATERIALIZED_NONE
             || plan->result_recipe != SOL_MIR_RECIPE_NONE)) || (ensures
-            && (!obligation->result_available || check->result >= m->value_count
+            && (obligation->result_available != (body->outcome != SOL_CONTRACT_OUTCOME_FAILURE)
+                || check->result >= m->value_count
                 || plan->result != check->result || plan->result_recipe != m->values[check->result].type
                 || plan->result_recipe != signature->result))) return false;
     if (ensures) {
@@ -2345,20 +2686,33 @@ static bool represented_predicate_body_preflight(const SolWasmRepresentedBuildRe
                 == SOL_MIR_RUNTIME_RESULT_UNIT)
             || (result_kind != SOL_MIR_RECIPE_UNIT && signature->result_class
                 != SOL_MIR_RUNTIME_RESULT_VALUE)
-            || (result_kind != SOL_MIR_RECIPE_INT64 && result_kind != SOL_MIR_RECIPE_BOOL
-                && result_kind != SOL_MIR_RECIPE_UNIT)) return false;
+            || (qualified && !represented_result)
+            || (represented_result
+                ? plan->result_recipe != signature->result
+                : result_kind != SOL_MIR_RECIPE_INT64 && result_kind != SOL_MIR_RECIPE_BOOL
+                    && result_kind != SOL_MIR_RECIPE_UNIT)) return false;
     }
     if (plan->block >= owner->image_terminator_count)
         return false;
     const SolMirRuntimeLoweredImageTerminator *check_row = &owner->image_terminators[plan->block];
     if (check_row->state != SOL_MIR_RUNTIME_LOWERED_PRESENT || check_row->image != image
         || check_row->block != plan->block || check_row->kind != SOL_MIR_TERM_CHECK_CONTRACT
+        || check_row->execution != SOL_MIR_RUNTIME_LOWERED_EXECUTABLE
+        || check_row->runtime_class != SOL_MIR_RUNTIME_LOWERED_CLASS_EXECUTABLE
+        || check_row->plan_family != SOL_MIR_RUNTIME_LOWERED_PLAN_PREDICATE
+        || check_row->facilities != (SOL_MIR_RUNTIME_LOWERED_FACILITY_CLEANUP
+            | SOL_MIR_RUNTIME_LOWERED_FACILITY_EVENT
+            | SOL_MIR_RUNTIME_LOWERED_FACILITY_FAILURE)
         || check_row->plan >= owner->semantic_plan_count) return false;
     const SolMirRuntimeLoweredSemanticPlan *semantic = &owner->semantic_plans[check_row->plan];
     if (semantic->state != SOL_MIR_RUNTIME_LOWERED_PRESENT
         || semantic->arena != SOL_MIR_RUNTIME_LOWERED_SEMANTIC_PREDICATE
+        || semantic->runtime_class != SOL_MIR_RUNTIME_LOWERED_CLASS_EXECUTABLE
+        || semantic->plan_family != SOL_MIR_RUNTIME_LOWERED_PLAN_PREDICATE
         || semantic->plan != plan_id || semantic->producer_kind != SOL_MIR_MATERIALIZED_PRODUCER_PREDICATE
-        || semantic->producer != body_id) return false;
+        || semantic->producer != body_id || semantic->facilities
+            != (SOL_MIR_RUNTIME_LOWERED_FACILITY_VALUE
+                | SOL_MIR_RUNTIME_LOWERED_FACILITY_CLEANUP)) return false;
     for (size_t other_id = 0; other_id < o->predicate_body_count; ++other_id) {
         if (other_id == body_id) continue;
         const SolMirPredicateBody *other = &o->predicate_bodies[other_id];
@@ -2393,10 +2747,14 @@ static bool represented_predicate_body_preflight(const SolWasmRepresentedBuildRe
                 || owner->conventions->signature_slots[signature->slots.offset + input->ordinal].recipe
                     != input->recipe || !represented_predicate_recipe(concrete, input->recipe, false)) return false;
         } else if (input->kind == SOL_MIR_PREDICATE_INPUT_COMPLETE_RESULT) {
-            if (!ensures || input->ordinal != 0 || input->access != SOL_ACCESS_OWNED
+            if (!ensures || qualified || input->ordinal != 0 || input->access != SOL_ACCESS_OWNED
                 || input->recipe != plan->result_recipe || input->recipe >= concrete->representation.recipe_count
                 || (concrete->representation.recipes[input->recipe].kind != SOL_MIR_RECIPE_INT64
                     && concrete->representation.recipes[input->recipe].kind != SOL_MIR_RECIPE_BOOL)) return false;
+        } else if (input->kind == SOL_MIR_PREDICATE_INPUT_SUCCESS_RESULT) {
+            if (!qualified || body->outcome != SOL_CONTRACT_OUTCOME_SUCCESS
+                || input->ordinal != 0 || input->access != SOL_ACCESS_OWNED
+                || input->recipe != qualified_result.payload_recipe) return false;
         } else if (input->kind == SOL_MIR_PREDICATE_INPUT_SNAPSHOT) {
             size_t snapshot_plan = SOL_MIR_OPERATION_NONE;
             if (!ensures || represented_snapshot_for_predicate_input(request, body_id,
@@ -2894,7 +3252,8 @@ static bool image_edge_preflight(const SolWasmRepresentedBuildRequest *request,
  * action is deliberately deferred rather than silently reinterpreted here. */
 static const SolMirRuntimeCleanupTransition *represented_control_transition(
     const SolWasmRepresentedBuildRequest *request, const SolMirMaterializedImage *image,
-    size_t image_id, size_t block, SolMirRuntimeCleanupEdgeRole role,
+    const RepresentedQualifiedIndex *qualified_index, size_t image_id, size_t block,
+    SolMirRuntimeCleanupEdgeRole role,
     SolMirRuntimeCleanupOutcome outcome, size_t edge, size_t expected_transitions) {
     const SolMirRuntimeLoweredProgram *owner = request->program;
     const SolMirRuntimeCleanup *cleanup = owner->cleanup;
@@ -2912,19 +3271,52 @@ static const SolMirRuntimeCleanupTransition *represented_control_transition(
         && event->inherited_failure_site < owner->conventions->failure_site_count) {
         const SolMirRuntimeFailureSite *site = &owner->conventions->failure_sites[
             event->inherited_failure_site];
-        size_t matches = 0;
-        for (size_t i = 0; i < owner->conventions->concrete->operations.predicate_count; ++i) {
-            const SolMirOperationPredicatePlan *plan = &owner->conventions->concrete->operations.predicates[i];
-            if (plan->kind == SOL_MIR_OPERATION_PREDICATE_CONTRACT
-                && plan->image == image_id && plan->block == image->contract_epilogue
-                && plan->contract_phase == SOL_CONTRACT_ENSURES
-                && plan->contract_outcome == SOL_CONTRACT_OUTCOME_ALWAYS
-                && site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT
-                && site->owner == plan->body
-                && site->allowed_codes == (UINT32_C(1)
-                    << (SOL_MIR_RUNTIME_FAILURE_ENSURE_VIOLATION - 1))) ++matches;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+        if (represented_test_control_transition_stats.indexed_lookups != SIZE_MAX)
+            ++represented_test_control_transition_stats.indexed_lookups;
+#endif
+        const SolMirOperationPredicatePlan *qualified_plan =
+            represented_qualified_plan_for_body(request, qualified_index, site->owner);
+        ensures_ingress = qualified_plan != NULL
+            && (qualified_plan->contract_outcome == SOL_CONTRACT_OUTCOME_SUCCESS
+                || qualified_plan->contract_outcome == SOL_CONTRACT_OUTCOME_FAILURE)
+            && represented_qualified_image(qualified_index, image_id,
+                    qualified_plan->result_recipe) != NULL
+            && qualified_plan->kind == SOL_MIR_OPERATION_PREDICATE_CONTRACT
+            && qualified_plan->image == image_id
+            && qualified_plan->block == image->contract_epilogue
+            && qualified_plan->contract_phase == SOL_CONTRACT_ENSURES
+            && site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT
+            && site->owner == qualified_plan->body
+            && site->allowed_codes == (UINT32_C(1)
+                << (SOL_MIR_RUNTIME_FAILURE_ENSURE_VIOLATION - 1));
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+        if (ensures_ingress
+            && represented_test_control_transition_stats.indexed_matches != SIZE_MAX)
+            ++represented_test_control_transition_stats.indexed_matches;
+#endif
+        if (!ensures_ingress) {
+            size_t matches = 0;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+            if (represented_test_control_transition_stats.legacy_fallback_scans != SIZE_MAX)
+                ++represented_test_control_transition_stats.legacy_fallback_scans;
+#endif
+            /* Preserve the pre-C2b2 ALWAYS scan and every original join. */
+            for (size_t i = 0;
+                 i < owner->conventions->concrete->operations.predicate_count; ++i) {
+                const SolMirOperationPredicatePlan *plan =
+                    &owner->conventions->concrete->operations.predicates[i];
+                if (plan->kind == SOL_MIR_OPERATION_PREDICATE_CONTRACT
+                    && plan->image == image_id && plan->block == image->contract_epilogue
+                    && plan->contract_phase == SOL_CONTRACT_ENSURES
+                    && plan->contract_outcome == SOL_CONTRACT_OUTCOME_ALWAYS
+                    && site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT
+                    && site->owner == plan->body
+                    && site->allowed_codes == (UINT32_C(1)
+                        << (SOL_MIR_RUNTIME_FAILURE_ENSURE_VIOLATION - 1))) ++matches;
+            }
+            ensures_ingress = matches == 1;
         }
-        ensures_ingress = matches == 1;
     }
     if (event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
         || event->phase != SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
@@ -4000,7 +4392,8 @@ static bool represented_contract_failure_resume(const SolMirMaterialization *m, 
 }
 
 static RepresentedCatalogResult represented_call_catalog(const SolWasmRepresentedBuildRequest *request,
-    const SolWasmRepresentedLimits *limits, RepresentedCallCatalogGraph *graph) {
+    const SolWasmRepresentedLimits *limits, RepresentedQualifiedIndex *qualified_index,
+    RepresentedCallCatalogGraph *graph) {
     const SolMirRuntimeLoweredProgram *owner = request->program;
     const SolMirRuntimeConventions *conventions = owner->conventions;
     const SolMirConcreteProgram *concrete = conventions->concrete;
@@ -4091,8 +4484,10 @@ static RepresentedCatalogResult represented_call_catalog(const SolWasmRepresente
                 signature_for(conventions, callee_id)))
             || (signature->result_class != SOL_MIR_RUNTIME_RESULT_VALUE
                 && signature->result_class != SOL_MIR_RUNTIME_RESULT_UNIT)
-            || !represented_propagation_callable_recipe(concrete, callee->instance,
-                signature->result, false)
+            || (!represented_propagation_callable_recipe(concrete, callee->instance,
+                    signature->result, false)
+                && (indirect || method || represented_qualified_image(qualified_index,
+                    callee->instance, signature->result) == NULL))
             || callee->instance >= m->image_count || symbol == NULL || symbol[0] == '\0'
             || symbol_for_image(concrete, callee->instance) == NULL
             || strcmp(symbol_for_image(concrete, callee->instance), symbol) != 0
@@ -4165,6 +4560,18 @@ static RepresentedCatalogResult represented_call_catalog(const SolWasmRepresente
             call->signature, call->operands, signature->result_class == SOL_MIR_RUNTIME_RESULT_VALUE
                 ? term->result : SOL_MIR_MATERIALIZED_NONE, signature->result_class,
             call->normal_edge, call->failure_edge, call->failure_site, 0, false};
+        if (qualified_index != NULL && qualified_index->callable_flags != NULL
+            && callee_id < qualified_index->callable_count) {
+            if (!indirect && !method)
+                qualified_index->callable_flags[callee_id]
+                    |= REPRESENTED_QUALIFIED_CALLABLE_DIRECT_TARGET;
+            if (callback_inout)
+                qualified_index->callable_flags[callee_id]
+                    |= REPRESENTED_QUALIFIED_CALLABLE_CALLBACK_INOUT_TARGET;
+            if (method)
+                qualified_index->callable_flags[callee_id]
+                    |= REPRESENTED_QUALIFIED_CALLABLE_METHOD_TARGET;
+        }
         if (indirect) {
             if (graph->callback_count >= callback_count) goto invalid;
             graph->callbacks[graph->callback_count++] = (RepresentedCallbackCatalog){id, call->table};
@@ -4925,26 +5332,54 @@ static bool represented_pattern_extraction_supported(const SolWasmRepresentedBui
 
 static bool represented_function_preflight(const SolWasmRepresentedBuildRequest *request,
     size_t callable, const SolMirRuntimeSignature *signature,
-    const RepresentedCallCatalogGraph *catalog) {
+    const RepresentedCallCatalogGraph *catalog, const RepresentedQualifiedIndex *qualified_index) {
     const SolMirConcreteProgram *concrete = request->program->conventions->concrete;
     const SolMirMaterialization *materialization = &concrete->materialization;
     const SolMirLinkageCallable *linkage = &concrete->linkage.callables[callable];
+    bool qualified_result = signature != NULL
+        && signature->result_class == SOL_MIR_RUNTIME_RESULT_VALUE
+        && represented_qualified_image(qualified_index, linkage->instance,
+            signature->result) != NULL;
+    unsigned char callable_flags = qualified_index != NULL
+            && qualified_index->callable_flags != NULL
+            && callable < qualified_index->callable_count
+        ? qualified_index->callable_flags[callable] : 0;
+    bool direct_target = (callable_flags & REPRESENTED_QUALIFIED_CALLABLE_DIRECT_TARGET) != 0;
+    bool entry = (callable_flags & REPRESENTED_QUALIFIED_CALLABLE_ENTRY) != 0;
+    if (qualified_index == NULL || qualified_index->callable_flags == NULL) {
+        if (catalog != NULL) for (size_t i = 0; i < catalog->count; ++i) {
+            const RepresentedCallCatalog *call = &catalog->calls[i];
+            direct_target = direct_target || (call->callee_callable == callable
+                && call->call < request->program->conventions->call_count
+                && request->program->conventions->calls[call->call].call_kind
+                    == SOL_IR_CALL_FUNCTION);
+        }
+        for (size_t i = 0; i < request->program->conventions->entry_count; ++i)
+            entry = entry || request->program->conventions->entries[i].callable == callable;
+    }
     if (linkage->instance >= materialization->image_count || signature == NULL
         || signature->slots.offset > request->program->conventions->signature_slot_count
         || signature->slots.count > request->program->conventions->signature_slot_count
-            - signature->slots.offset || !represented_propagation_callable_recipe(concrete,
+            - signature->slots.offset || (!represented_propagation_callable_recipe(concrete,
                 linkage->instance, signature->result,
-                 signature->result_class == SOL_MIR_RUNTIME_RESULT_NEVER)) return false;
-    bool c2b_target = false, method_target = false;
-    if (catalog != NULL) for (size_t i = 0; i < catalog->count; ++i) {
-        const RepresentedCallCatalog *call = &catalog->calls[i];
-        if (call->callee_callable != callable || call->call >= request->program->conventions->call_count)
-            continue;
-        const SolMirRuntimeCall *source = &request->program->conventions->calls[call->call];
-        if (source->call_kind == SOL_IR_CALL_CALLBACK && source->writebacks.count == 1) {
-            c2b_target = true;
+                 signature->result_class == SOL_MIR_RUNTIME_RESULT_NEVER)
+            && !(signature->result_class == SOL_MIR_RUNTIME_RESULT_VALUE
+                && represented_qualified_image(qualified_index, linkage->instance,
+                    signature->result) != NULL)) || (qualified_result && (!direct_target || entry)))
+        return false;
+    bool c2b_target = (callable_flags
+        & REPRESENTED_QUALIFIED_CALLABLE_CALLBACK_INOUT_TARGET) != 0;
+    bool method_target = (callable_flags & REPRESENTED_QUALIFIED_CALLABLE_METHOD_TARGET) != 0;
+    if (qualified_index == NULL || qualified_index->callable_flags == NULL) {
+        if (catalog != NULL) for (size_t i = 0; i < catalog->count; ++i) {
+            const RepresentedCallCatalog *call = &catalog->calls[i];
+            if (call->callee_callable != callable
+                || call->call >= request->program->conventions->call_count) continue;
+            const SolMirRuntimeCall *source = &request->program->conventions->calls[call->call];
+            if (source->call_kind == SOL_IR_CALL_CALLBACK && source->writebacks.count == 1)
+                c2b_target = true;
+            if (source->call_kind == SOL_IR_CALL_METHOD) method_target = true;
         }
-        if (source->call_kind == SOL_IR_CALL_METHOD) method_target = true;
     }
     if ((c2b_target || method_target) && (signature->slots.count != 1
             || signature->slots.offset >= request->program->conventions->signature_slot_count
@@ -4990,7 +5425,8 @@ static bool represented_function_preflight(const SolWasmRepresentedBuildRequest 
         if (concrete->operations.predicate_bodies[body].owner_kind
                 == SOL_MIR_PREDICATE_OWNER_INSTANCE
             && concrete->operations.predicate_bodies[body].instance == linkage->instance
-            && !represented_predicate_body_preflight(request, linkage->instance, signature, body)) return false;
+            && !represented_predicate_body_preflight(request, qualified_index, linkage->instance,
+                signature, body)) return false;
     for (size_t i = 0; i < image->locals.count; ++i) {
         const SolMirMaterializedLocal *local = &materialization->locals[image->locals.offset + i];
         if (local->kind == (method_target ? SOL_MIR_MATERIALIZED_LOCAL_RECEIVER
@@ -5210,7 +5646,8 @@ static bool represented_function_preflight(const SolWasmRepresentedBuildRequest 
             || represented_guard_call(concrete, term)) return false;
         switch (term->kind) {
             case SOL_MIR_TERM_GOTO: case SOL_MIR_TERM_BREAK: case SOL_MIR_TERM_CONTINUE:
-                if (represented_control_transition(request, image, linkage->instance, block_id,
+                if (represented_control_transition(request, image, qualified_index,
+                        linkage->instance, block_id,
                         SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO,
                         SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL, term->edge, 1) == NULL
                     || !image_edge_preflight(request, image, linkage->instance, block_id, term->edge))
@@ -5218,10 +5655,12 @@ static bool represented_function_preflight(const SolWasmRepresentedBuildRequest 
                 break;
             case SOL_MIR_TERM_BRANCH:
                 if (!image_value(concrete, image, term->condition)
-                    || represented_control_transition(request, image, linkage->instance, block_id,
+                    || represented_control_transition(request, image, qualified_index,
+                        linkage->instance, block_id,
                         SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_TRUE,
                         SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL, term->true_edge, 2) == NULL
-                    || represented_control_transition(request, image, linkage->instance, block_id,
+                    || represented_control_transition(request, image, qualified_index,
+                        linkage->instance, block_id,
                         SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_FALSE,
                         SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL, term->false_edge, 2) == NULL
                     || !image_edge_preflight(request, image, linkage->instance, block_id, term->true_edge)
@@ -5234,7 +5673,8 @@ static bool represented_function_preflight(const SolWasmRepresentedBuildRequest 
                     size_t snapshots = 0;
                     if (!represented_snapshot_count_for_image(concrete, linkage->instance, &snapshots)
                         || (snapshots == 0 ? represented_control_transition(request, image,
-                                linkage->instance, block_id, SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN,
+                                qualified_index, linkage->instance, block_id,
+                                SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN,
                                 SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT, SOL_MIR_RUNTIME_NONE, 1)
                             : represented_snapshot_return_transition(request, image,
                                 linkage->instance, block_id)) == NULL) return false;
@@ -5245,7 +5685,12 @@ static bool represented_function_preflight(const SolWasmRepresentedBuildRequest 
             case SOL_MIR_TERM_CHECK_CONTRACT:
                 if ((term->contract_phase != SOL_CONTRACT_REQUIRES
                         && term->contract_phase != SOL_CONTRACT_ENSURES)
-                    || term->contract_outcome != SOL_CONTRACT_OUTCOME_ALWAYS
+                    || (term->contract_outcome != SOL_CONTRACT_OUTCOME_ALWAYS
+                        && (term->contract_phase != SOL_CONTRACT_ENSURES
+                            || (term->contract_outcome != SOL_CONTRACT_OUTCOME_SUCCESS
+                                && term->contract_outcome != SOL_CONTRACT_OUTCOME_FAILURE)
+                            || represented_qualified_image(qualified_index, linkage->instance,
+                                signature->result) == NULL))
                     || !image_edge_preflight(request, image, linkage->instance, block_id,
                         term->satisfied_edge)
                     || !image_edge_preflight(request, image, linkage->instance, block_id,
@@ -6552,18 +6997,28 @@ static BinaryenExpressionRef represented_predicate_get(const RepresentedFunction
         return index == SIZE_MAX ? NULL : BinaryenLocalGet(function->module,
             (BinaryenIndex)index, BinaryenTypeInt64());
     }
-    if (input->kind != SOL_MIR_PREDICATE_INPUT_COMPLETE_RESULT) return NULL;
-    const SolMirOperationPredicatePlan *plan = NULL;
-    for (size_t i = 0; i < o->predicate_count; ++i) {
-        const SolMirOperationPredicatePlan *candidate = &o->predicates[i];
-        if (candidate->kind != SOL_MIR_OPERATION_PREDICATE_CONTRACT
-            || candidate->image != function->image_id || candidate->body != body_id) continue;
-        if (plan != NULL) return NULL;
-        plan = candidate;
-    }
-    return plan != NULL && plan->contract_phase == SOL_CONTRACT_ENSURES
-        && plan->contract_outcome == SOL_CONTRACT_OUTCOME_ALWAYS
-        && plan->result != SOL_MIR_MATERIALIZED_NONE ? get_value(function, plan->result) : NULL;
+    if (input->kind != SOL_MIR_PREDICATE_INPUT_COMPLETE_RESULT
+        && input->kind != SOL_MIR_PREDICATE_INPUT_SUCCESS_RESULT) return NULL;
+    const SolMirOperationPredicatePlan *plan = represented_plan_for_body(function->request,
+        function->qualified, function->image_id, body_id);
+    if (plan == NULL || plan->contract_phase != SOL_CONTRACT_ENSURES
+        || plan->result == SOL_MIR_MATERIALIZED_NONE) return NULL;
+    if (input->kind == SOL_MIR_PREDICATE_INPUT_COMPLETE_RESULT)
+        return plan->contract_outcome == SOL_CONTRACT_OUTCOME_ALWAYS
+            ? get_value(function, plan->result) : NULL;
+    const RepresentedQualifiedImage *qualified = represented_qualified_image(function->qualified,
+        function->image_id, plan->result_recipe);
+    const SolMirConcreteProgram *concrete = function->request->program->conventions->concrete;
+    if (plan->contract_outcome != SOL_CONTRACT_OUTCOME_SUCCESS
+        || qualified == NULL || input->recipe != qualified->result.payload_recipe) return NULL;
+    BinaryenExpressionRef object = get_value(function, plan->result);
+    const SolMirFieldLayout *field = &concrete->layout.fields[qualified->result.success_field];
+    if (object == NULL) return NULL;
+    BinaryenExpressionRef loaded = BinaryenLoad(function->module, (uint32_t)field->size, false,
+        (uint32_t)field->offset, (uint32_t)field->alignment,
+        field->size == 8 ? BinaryenTypeInt64() : BinaryenTypeInt32(),
+        wrap_i64(function->module, object), P43_MEMORY);
+    return field->size == 8 ? loaded : extend_u32(function->module, loaded);
 }
 
 static BinaryenExpressionRef represented_predicate_binary(const RepresentedFunction *function,
@@ -8131,22 +8586,34 @@ static bool represented_contract_emit(const RepresentedFunction *function, size_
     RepresentedNodes *nodes) {
     const SolMirRuntimeLoweredProgram *owner = function->request->program;
     const SolMirConcreteProgram *concrete = owner->conventions->concrete;
+    if (block >= owner->image_terminator_count) return false;
     const SolMirMaterializedTerminator *term = &concrete->materialization.blocks[block].terminator;
-    const SolMirOperationPredicatePlan *plan = NULL;
-    for (size_t i = 0; i < concrete->operations.predicate_count; ++i) {
-        const SolMirOperationPredicatePlan *candidate = &concrete->operations.predicates[i];
-        if (candidate->image == function->image_id && candidate->block == block) {
-            if (plan != NULL) return false;
-            plan = candidate;
-        }
-    }
-    if (plan == NULL || plan->kind != SOL_MIR_OPERATION_PREDICATE_CONTRACT
+    const SolMirRuntimeLoweredImageTerminator *row = &owner->image_terminators[block];
+    if (row->state != SOL_MIR_RUNTIME_LOWERED_PRESENT || row->image != function->image_id
+        || row->block != block || row->kind != SOL_MIR_TERM_CHECK_CONTRACT
+        || row->plan >= owner->semantic_plan_count) return false;
+    const SolMirRuntimeLoweredSemanticPlan *semantic = &owner->semantic_plans[row->plan];
+    if (semantic->state != SOL_MIR_RUNTIME_LOWERED_PRESENT
+        || semantic->arena != SOL_MIR_RUNTIME_LOWERED_SEMANTIC_PREDICATE
+        || semantic->plan >= concrete->operations.predicate_count) return false;
+    const SolMirOperationPredicatePlan *plan = &concrete->operations.predicates[semantic->plan];
+    if (plan->kind != SOL_MIR_OPERATION_PREDICATE_CONTRACT
+        || plan->image != function->image_id || plan->block != block
+        || semantic->producer_kind != SOL_MIR_MATERIALIZED_PRODUCER_PREDICATE
+        || semantic->producer != plan->body
         || (plan->contract_phase != SOL_CONTRACT_REQUIRES
             && plan->contract_phase != SOL_CONTRACT_ENSURES)
-        || plan->contract_outcome != SOL_CONTRACT_OUTCOME_ALWAYS
-        || plan->body >= concrete->operations.predicate_body_count
-        || block >= owner->image_terminator_count) return false;
-    const SolMirRuntimeLoweredImageTerminator *row = &owner->image_terminators[block];
+        || (plan->contract_outcome != SOL_CONTRACT_OUTCOME_ALWAYS
+            && (plan->contract_phase != SOL_CONTRACT_ENSURES
+                || (plan->contract_outcome != SOL_CONTRACT_OUTCOME_SUCCESS
+                    && plan->contract_outcome != SOL_CONTRACT_OUTCOME_FAILURE)))
+        || plan->body >= concrete->operations.predicate_body_count) return false;
+    bool qualified = plan->contract_outcome == SOL_CONTRACT_OUTCOME_SUCCESS
+        || plan->contract_outcome == SOL_CONTRACT_OUTCOME_FAILURE;
+    const RepresentedQualifiedImage *qualified_image = qualified
+        ? represented_qualified_image(function->qualified, function->image_id,
+            plan->result_recipe) : NULL;
+    if (qualified && qualified_image == NULL) return false;
     if (row->cleanup_event >= owner->cleanup->event_count) return false;
     const SolMirRuntimeCleanupEvent *event = &owner->cleanup->events[row->cleanup_event];
     const SolMirRuntimeCleanupTransition *satisfied = NULL, *violation = NULL, *failure = NULL;
@@ -8177,9 +8644,9 @@ static bool represented_contract_emit(const RepresentedFunction *function, size_
         || satisfied->contract_phase != plan->contract_phase
         || violation->contract_phase != plan->contract_phase
         || failure->contract_phase != plan->contract_phase
-        || satisfied->contract_outcome != SOL_CONTRACT_OUTCOME_ALWAYS
-        || violation->contract_outcome != SOL_CONTRACT_OUTCOME_ALWAYS
-        || failure->contract_outcome != SOL_CONTRACT_OUTCOME_ALWAYS
+        || satisfied->contract_outcome != plan->contract_outcome
+        || violation->contract_outcome != plan->contract_outcome
+        || failure->contract_outcome != plan->contract_outcome
         || violation->failure_source != SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31
         || violation->failure_site >= owner->conventions->failure_site_count
         || violation->failure_mask != violation_mask) return false;
@@ -8188,9 +8655,38 @@ static bool represented_contract_emit(const RepresentedFunction *function, size_
     if (violation_site->origin_kind != SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT
         || violation_site->owner != plan->body || violation_site->allowed_codes != violation_mask)
         return false;
-    RepresentedNodes yes = {0}, no = {0}, failed = {0}; size_t record = 0;
-    bool ok = represented_predicate_emit(function, plan->body, nodes)
-        && represented_cleanup_actions_emit_traced(function, event, satisfied, &yes)
+    if (!qualified) {
+        RepresentedNodes yes = {0}, no = {0}, failed = {0}; size_t record = 0;
+        bool ok = represented_predicate_emit(function, plan->body, nodes)
+            && represented_cleanup_actions_emit_traced(function, event, satisfied, &yes)
+            && represented_edge(function, term->satisfied_edge, &yes)
+            && represented_failure_record_index(function->provenance, violation->failure_site,
+                &record)
+            && represented_nodes_push(&no, BinaryenGlobalSet(function->module, P43_CODE,
+                BinaryenConst(function->module, BinaryenLiteralInt32((int32_t)violation_code))))
+            && represented_nodes_push(&no, BinaryenGlobalSet(function->module, P43_SITE,
+                BinaryenConst(function->module, BinaryenLiteralInt32((int32_t)record))))
+            && represented_cleanup_actions_emit_traced(function, event, violation, &no)
+            && represented_edge(function, term->violation_edge, &no)
+            && represented_cleanup_actions_emit_traced(function, event, failure, &failed)
+            && represented_edge(function, term->failure_edge, &failed);
+        BinaryenExpressionRef y = ok ? BinaryenBlock(function->module, NULL, yes.items,
+            (BinaryenIndex)yes.count, BinaryenTypeNone()) : NULL;
+        BinaryenExpressionRef n = ok ? BinaryenBlock(function->module, NULL, no.items,
+            (BinaryenIndex)no.count, BinaryenTypeNone()) : NULL;
+        BinaryenExpressionRef z = ok ? BinaryenBlock(function->module, NULL, failed.items,
+            (BinaryenIndex)failed.count, BinaryenTypeNone()) : NULL;
+        deallocate(yes.items); deallocate(no.items); deallocate(failed.items);
+        return ok && represented_nodes_push(nodes, BinaryenIf(function->module, BinaryenBinary(
+            function->module, BinaryenNeInt32(), BinaryenGlobalGet(function->module, P43_CODE,
+                BinaryenTypeInt32()), BinaryenConst(function->module, BinaryenLiteralInt32(0))), z,
+            BinaryenIf(function->module, BinaryenBinary(function->module, BinaryenNeInt64(),
+                BinaryenLocalGet(function->module, (BinaryenIndex)function->predicate_result,
+                    BinaryenTypeInt64()), i64(function, 0)), y, n)));
+    }
+    RepresentedNodes yes = {0}, no = {0}, failed = {0}, evaluated = {0}, skipped = {0};
+    size_t record = 0;
+    bool ok = represented_cleanup_actions_emit_traced(function, event, satisfied, &yes)
         && represented_edge(function, term->satisfied_edge, &yes)
         && represented_failure_record_index(function->provenance, violation->failure_site, &record)
         && represented_nodes_push(&no, BinaryenGlobalSet(function->module, P43_CODE,
@@ -8207,12 +8703,35 @@ static bool represented_contract_emit(const RepresentedFunction *function, size_
         (BinaryenIndex)no.count, BinaryenTypeNone()) : NULL;
     BinaryenExpressionRef z = ok ? BinaryenBlock(function->module, NULL, failed.items,
         (BinaryenIndex)failed.count, BinaryenTypeNone()) : NULL;
+    if (ok) ok = represented_predicate_emit(function, plan->body, &evaluated)
+        && represented_nodes_push(&evaluated, BinaryenIf(function->module, BinaryenBinary(
+            function->module, BinaryenNeInt32(), BinaryenGlobalGet(function->module, P43_CODE,
+                BinaryenTypeInt32()), BinaryenConst(function->module, BinaryenLiteralInt32(0))), z,
+            BinaryenIf(function->module, BinaryenBinary(function->module, BinaryenNeInt64(),
+                BinaryenLocalGet(function->module, (BinaryenIndex)function->predicate_result,
+                    BinaryenTypeInt64()), i64(function, 0)), y, n)));
     deallocate(yes.items); deallocate(no.items); deallocate(failed.items);
-    return ok && represented_nodes_push(nodes, BinaryenIf(function->module, BinaryenBinary(function->module,
-        BinaryenNeInt32(), BinaryenGlobalGet(function->module, P43_CODE, BinaryenTypeInt32()),
-        BinaryenConst(function->module, BinaryenLiteralInt32(0))), z, BinaryenIf(function->module,
-            BinaryenBinary(function->module, BinaryenNeInt64(), BinaryenLocalGet(function->module,
-                (BinaryenIndex)function->predicate_result, BinaryenTypeInt64()), i64(function, 0)), y, n)));
+    if (!ok) { deallocate(evaluated.items); return false; }
+    BinaryenExpressionRef evaluated_body = BinaryenBlock(function->module, NULL, evaluated.items,
+        (BinaryenIndex)evaluated.count, BinaryenTypeNone());
+    deallocate(evaluated.items);
+    if (evaluated_body == NULL) return false;
+    ok = represented_cleanup_actions_emit_traced(function, event, satisfied, &skipped)
+        && represented_edge(function, term->satisfied_edge, &skipped);
+    BinaryenExpressionRef skipped_body = ok ? BinaryenBlock(function->module, NULL, skipped.items,
+        (BinaryenIndex)skipped.count, BinaryenTypeNone()) : NULL;
+    deallocate(skipped.items);
+    BinaryenExpressionRef object = get_value(function, plan->result);
+    const SolMirTypeLayout *result_layout = &concrete->layout.types[qualified_image->result.recipe];
+    BinaryenExpressionRef tag = object == NULL ? NULL : BinaryenLoad(function->module, 4, false,
+        (uint32_t)result_layout->tag_offset, 4, BinaryenTypeInt32(),
+        wrap_i64(function->module, object), P43_MEMORY);
+    uint32_t expected = plan->contract_outcome == SOL_CONTRACT_OUTCOME_SUCCESS
+        ? qualified_image->result.success_tag : qualified_image->result.failure_tag;
+    return ok && tag != NULL && skipped_body != NULL && represented_nodes_push(nodes,
+        BinaryenIf(function->module, BinaryenBinary(function->module, BinaryenEqInt32(), tag,
+            BinaryenConst(function->module, BinaryenLiteralInt32((int32_t)expected))),
+            evaluated_body, skipped_body));
 }
 
 static bool represented_contract_violation_emit(const RepresentedFunction *function, size_t block,
@@ -8410,7 +8929,7 @@ static bool represented_terminator_emit(const RepresentedFunction *function, siz
     switch (term->kind) {
         case SOL_MIR_TERM_GOTO: case SOL_MIR_TERM_BREAK: case SOL_MIR_TERM_CONTINUE: {
             const SolMirRuntimeCleanupTransition *transition = represented_control_transition(
-                function->request, function->image, function->image_id, block,
+                function->request, function->image, function->qualified, function->image_id, block,
                 SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO, SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,
                 term->edge, 1);
             return transition != NULL && represented_edge(function, transition->continuation, nodes);
@@ -8418,11 +8937,11 @@ static bool represented_terminator_emit(const RepresentedFunction *function, siz
         case SOL_MIR_TERM_BRANCH: {
             RepresentedNodes left = {0}, right = {0};
             const SolMirRuntimeCleanupTransition *true_transition = represented_control_transition(
-                function->request, function->image, function->image_id, block,
+                function->request, function->image, function->qualified, function->image_id, block,
                 SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_TRUE, SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,
                 term->true_edge, 2);
             const SolMirRuntimeCleanupTransition *false_transition = represented_control_transition(
-                function->request, function->image, function->image_id, block,
+                function->request, function->image, function->qualified, function->image_id, block,
                 SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_FALSE, SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,
                 term->false_edge, 2);
             bool ok = true_transition != NULL && false_transition != NULL
@@ -8444,7 +8963,8 @@ static bool represented_terminator_emit(const RepresentedFunction *function, siz
                 : get_value(function, term->value);
             if (function->snapshot_count == 0) {
                 const SolMirRuntimeCleanupTransition *transition = represented_control_transition(
-                    function->request, function->image, function->image_id, block,
+                    function->request, function->image, function->qualified, function->image_id,
+                    block,
                     SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN, SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT,
                     SOL_MIR_RUNTIME_NONE, 1);
                 if (value == NULL || transition == NULL) return false;
@@ -8501,6 +9021,7 @@ static bool represented_terminator_emit(const RepresentedFunction *function, siz
 static bool represented_function_emit(const SolWasmRepresentedBuildRequest *request,
     BinaryenModuleRef module, size_t callable, const SolMirRuntimeSignature *signature,
     const char *name, const RepresentedCallCatalogGraph *catalog,
+    const RepresentedQualifiedIndex *qualified_index,
     const RepresentedLiteral *literals, size_t literal_count,
     const RepresentedProvenance *provenance) {
     const SolMirConcreteProgram *concrete = request->program->conventions->concrete;
@@ -8536,7 +9057,7 @@ static bool represented_function_emit(const SolWasmRepresentedBuildRequest *requ
     RepresentedFunction function = {
         .request = request, .module = module, .image = image,
         .signature = signature, .image_id = concrete->linkage.callables[callable].instance,
-        .catalog = catalog, .calls_enabled = catalog != NULL,
+        .catalog = catalog, .qualified = qualified_index, .calls_enabled = catalog != NULL,
         .literals = literals, .literal_count = literal_count, .provenance = provenance,
         .parameter_count = signature->slots.count,
         .value_base = signature->slots.count,
@@ -9437,6 +9958,11 @@ SolWasmRepresentedResult sol_wasm_represented_build(
      * particular, a failed build cannot poison a later retry or turn the
      * allocator hook into process-global state. */
     allocation_attempts = 0;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+    represented_test_qualified_certifications = 0;
+    memset(&represented_test_control_transition_stats, 0,
+        sizeof represented_test_control_transition_stats);
+#endif
     if (request == NULL || request->program == NULL || request->package_directory == NULL
         || (request->limits != NULL && !limits_zero(request->limits)
             && !limits_complete(request->limits))) {
@@ -9549,28 +10075,49 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     }
     RepresentedAccounting accounting = {&limits, &usage, 0, 0, REPRESENTED_BACKEND_OK};
     represented_accounting = &accounting;
+    RepresentedQualifiedIndex qualified_index = {0};
+    RepresentedQualifiedIndexResult qualified_result = represented_qualified_index_build(request,
+        &qualified_index);
+    if (qualified_result != REPRESENTED_QUALIFIED_INDEX_VALID) {
+        diagnostic(diagnostics, qualified_result == REPRESENTED_QUALIFIED_INDEX_RESOURCE
+            ? "P4.4 C2b2 qualified index resource limit exceeded"
+            : qualified_result == REPRESENTED_QUALIFIED_INDEX_ALLOCATION
+                ? "P4.4 C2b2 qualified index allocation failed"
+                : "P4.4 C2b2 rejected an unauthenticated qualified Result closure");
+        SolWasmRepresentedResult result = qualified_result == REPRESENTED_QUALIFIED_INDEX_RESOURCE
+            ? SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED
+            : qualified_result == REPRESENTED_QUALIFIED_INDEX_ALLOCATION
+                ? represented_backend_result() : SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE;
+        represented_accounting = NULL;
+        return result;
+    }
     RepresentedCallCatalogGraph catalog = {0};
     const RepresentedCallCatalogGraph *active_catalog = NULL;
     if (request->program->conventions->call_count != 0) {
-        RepresentedCatalogResult catalog_result = represented_call_catalog(request, &limits, &catalog);
+        RepresentedCatalogResult catalog_result = represented_call_catalog(request, &limits,
+            &qualified_index, &catalog);
         if (catalog_result == REPRESENTED_CATALOG_RESOURCE) {
             diagnostic(diagnostics, "P4.3 represented call catalog resource limit exceeded");
+            represented_qualified_index_free(&qualified_index);
             represented_accounting = NULL; return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
         }
         if (catalog_result == REPRESENTED_CATALOG_ALLOCATION) {
             diagnostic(diagnostics, "P4.3 represented call catalog allocation failed");
             SolWasmRepresentedResult result = represented_backend_result();
+            represented_qualified_index_free(&qualified_index);
             represented_accounting = NULL; return result;
         }
         if (catalog_result != REPRESENTED_CATALOG_VALID) {
             diagnostic(diagnostics, "P4.3 rejected an unauthenticated represented call catalog");
             SolWasmRepresentedResult result = accounting.status == REPRESENTED_BACKEND_OK
                 ? SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE : represented_backend_result();
+            represented_qualified_index_free(&qualified_index);
             represented_accounting = NULL; return result;
         }
         if (!represented_catalog_failures_supported(request, &catalog)) {
             represented_call_catalog_free(&catalog);
             diagnostic(diagnostics, "P4.3 deferred an unsupported, cyclic, or deep call closure");
+            represented_qualified_index_free(&qualified_index);
             represented_accounting = NULL; return SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE;
         }
         active_catalog = &catalog;
@@ -9583,14 +10130,17 @@ SolWasmRepresentedResult sol_wasm_represented_build(
         || (conventions->entry_count != 0 && entries == NULL)) {
         deallocate(callables); deallocate(entries); represented_call_catalog_free(&catalog);
         SolWasmRepresentedResult result = represented_backend_result();
+        represented_qualified_index_free(&qualified_index);
         represented_accounting = NULL; return result;
     }
     for (size_t i = 0; i < linkage->callable_count; ++i) {
         callables[i] = (RepresentedCallableOrder){i, linkage};
         const SolMirRuntimeSignature *signature = signature_for(conventions, i);
-        if (!represented_function_preflight(request, i, signature, active_catalog)) {
+        if (!represented_function_preflight(request, i, signature, active_catalog,
+                &qualified_index)) {
             deallocate(callables); deallocate(entries); represented_call_catalog_free(&catalog);
             diagnostic(diagnostics, "P4.3 Slice 1 rejected a non-infallible represented function");
+            represented_qualified_index_free(&qualified_index);
             represented_accounting = NULL; return SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE;
         }
     }
@@ -9598,6 +10148,7 @@ SolWasmRepresentedResult sol_wasm_represented_build(
         entries[i] = (RepresentedEntryOrder){i, conventions};
         if (conventions->entries[i].callable >= linkage->callable_count) {
             deallocate(callables); deallocate(entries); represented_call_catalog_free(&catalog);
+            represented_qualified_index_free(&qualified_index);
             represented_accounting = NULL; return SOL_WASM_REPRESENTED_INVALID_INPUT;
         }
     }
@@ -9606,11 +10157,13 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     for (size_t i = 1; i < linkage->callable_count; ++i)
         if (callable_order_compare(&callables[i - 1], &callables[i]) == 0) {
             deallocate(callables); deallocate(entries); represented_call_catalog_free(&catalog);
+            represented_qualified_index_free(&qualified_index);
             represented_accounting = NULL; return SOL_WASM_REPRESENTED_INVALID_INPUT;
         }
     for (size_t i = 1; i < conventions->entry_count; ++i)
         if (entry_order_compare(&entries[i - 1], &entries[i]) == 0) {
             deallocate(callables); deallocate(entries); represented_call_catalog_free(&catalog);
+            represented_qualified_index_free(&qualified_index);
             represented_accounting = NULL; return SOL_WASM_REPRESENTED_INVALID_INPUT;
         }
     RepresentedLiteral *literals = NULL;
@@ -9627,13 +10180,15 @@ SolWasmRepresentedResult sol_wasm_represented_build(
         represented_call_catalog_free(&catalog);
         SolWasmRepresentedResult result = accounting.status == REPRESENTED_BACKEND_OK
             ? SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED : represented_backend_result();
+        represented_qualified_index_free(&qualified_index);
         represented_accounting = NULL; return result;
     }
     if (panic_detail && (static_size > UINT32_MAX - P43_STATIC_BASE
             || (panic_detail_offset = (uint32_t)(P43_STATIC_BASE + static_size)) > UINT32_C(65536)
             || P44_PANIC_DETAIL_BYTES > UINT32_C(65536) - panic_detail_offset)) {
         deallocate(static_data); deallocate(literals); deallocate(callables); deallocate(entries);
-        represented_call_catalog_free(&catalog); represented_accounting = NULL;
+        represented_call_catalog_free(&catalog); represented_qualified_index_free(&qualified_index);
+        represented_accounting = NULL;
         return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
     }
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
@@ -9644,7 +10199,8 @@ SolWasmRepresentedResult sol_wasm_represented_build(
             || trace_offset + P44_TRACE_OFFSET_IN_SCRATCH > UINT32_C(65536)
                 - P44_TRACE_BYTES)) {
         deallocate(static_data); deallocate(literals); deallocate(callables); deallocate(entries);
-        represented_call_catalog_free(&catalog); represented_accounting = NULL;
+        represented_call_catalog_free(&catalog); represented_qualified_index_free(&qualified_index);
+        represented_accounting = NULL;
         return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
     }
     trace_offset += P44_TRACE_OFFSET_IN_SCRATCH;
@@ -9653,7 +10209,8 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     if (represented_test_heap_base != 0) {
         if (represented_test_heap_base < heap_base) {
             deallocate(static_data); deallocate(literals); deallocate(callables); deallocate(entries);
-            represented_call_catalog_free(&catalog); represented_accounting = NULL;
+            represented_call_catalog_free(&catalog); represented_qualified_index_free(&qualified_index);
+            represented_accounting = NULL;
             return SOL_WASM_REPRESENTED_INVALID_INPUT;
         }
         heap_base = represented_test_heap_base;
@@ -9662,7 +10219,8 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     if (panic_detail && (heap_base > UINT32_C(65536) || panic_detail_offset > heap_base
             || P44_PANIC_DETAIL_BYTES > heap_base - panic_detail_offset)) {
         deallocate(static_data); deallocate(literals); deallocate(callables); deallocate(entries);
-        represented_call_catalog_free(&catalog); represented_accounting = NULL;
+        represented_call_catalog_free(&catalog); represented_qualified_index_free(&qualified_index);
+        represented_accounting = NULL;
         return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
     }
     usage.static_data_bytes = static_size;
@@ -9671,15 +10229,17 @@ SolWasmRepresentedResult sol_wasm_represented_build(
         deallocate(static_data); deallocate(literals); deallocate(callables); deallocate(entries);
         represented_call_catalog_free(&catalog);
         SolWasmRepresentedResult result = represented_backend_result();
+        represented_qualified_index_free(&qualified_index);
         represented_accounting = NULL; return result;
     }
     BinaryenModuleRef module = BinaryenModuleCreate();
-    if (module == NULL) { represented_provenance_free(&provenance); deallocate(static_data); deallocate(literals); deallocate(callables); deallocate(entries); represented_call_catalog_free(&catalog); represented_accounting = NULL; return SOL_WASM_REPRESENTED_ALLOCATION_FAILED; }
+    if (module == NULL) { represented_provenance_free(&provenance); deallocate(static_data); deallocate(literals); deallocate(callables); deallocate(entries); represented_call_catalog_free(&catalog); represented_qualified_index_free(&qualified_index); represented_accounting = NULL; return SOL_WASM_REPRESENTED_ALLOCATION_FAILED; }
     BinaryenModuleSetFeatures(module, BinaryenFeatureMVP() | BinaryenFeatureMutableGlobals());
     if (function_table && BinaryenAddTable(module, P43_TABLE, (BinaryenIndex)usage.table_elements,
             (BinaryenIndex)usage.table_elements, BinaryenTypeFuncref(), NULL) == NULL) {
         BinaryenModuleDispose(module); represented_provenance_free(&provenance); deallocate(static_data); deallocate(literals);
         deallocate(callables); deallocate(entries); represented_call_catalog_free(&catalog);
+        represented_qualified_index_free(&qualified_index);
         represented_accounting = NULL; return SOL_WASM_REPRESENTED_ALLOCATION_FAILED;
     }
     const char *segment_names[] = {"sol.p43.static"};
@@ -9798,7 +10358,7 @@ SolWasmRepresentedResult sol_wasm_represented_build(
         size_t callable = callables[i].callable;
         ok = represented_function_emit(request, module, callable,
             signature_for(conventions, callable), linkage->callables[callable].symbol.bytes,
-            active_catalog, literals, literal_count, &provenance);
+            active_catalog, &qualified_index, literals, literal_count, &provenance);
     }
     for (size_t i = 0; ok && i < conventions->entry_count; ++i) {
         const SolMirRuntimeEntry *entry = &conventions->entries[entries[i].entry];
@@ -9828,7 +10388,8 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     }
     if (ok) BinaryenAddCustomSection(module, SOL_WASM_REPRESENTED_PROVENANCE_SECTION,
         (const char *)provenance.bytes, (BinaryenIndex)provenance.byte_count);
-    represented_provenance_free(&provenance); deallocate(callables); deallocate(entries); represented_call_catalog_free(&catalog);
+    represented_provenance_free(&provenance); deallocate(callables); deallocate(entries);
+    represented_call_catalog_free(&catalog); represented_qualified_index_free(&qualified_index);
     if (accounting.status != REPRESENTED_BACKEND_OK) {
         BinaryenModuleDispose(module);
         deallocate(static_data); deallocate(literals);
@@ -9895,11 +10456,30 @@ SolWasmRepresentedResult sol_wasm_represented_test_call_catalog(
     memset(summary, 0, sizeof *summary);
     if (!represented_owner(request, &ignored) || !represented_cleanup(request))
         return SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE;
+    RepresentedQualifiedIndex qualified_index;
+    RepresentedQualifiedIndexResult qualified_result = represented_qualified_index_build(request,
+        &qualified_index);
+    if (qualified_result == REPRESENTED_QUALIFIED_INDEX_RESOURCE)
+        return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
+    if (qualified_result == REPRESENTED_QUALIFIED_INDEX_ALLOCATION)
+        return SOL_WASM_REPRESENTED_ALLOCATION_FAILED;
+    if (qualified_result != REPRESENTED_QUALIFIED_INDEX_VALID)
+        return SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE;
     RepresentedCallCatalogGraph catalog;
-    RepresentedCatalogResult result = represented_call_catalog(request, &limits, &catalog);
-    if (result == REPRESENTED_CATALOG_RESOURCE) return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
-    if (result == REPRESENTED_CATALOG_ALLOCATION) return SOL_WASM_REPRESENTED_ALLOCATION_FAILED;
-    if (result != REPRESENTED_CATALOG_VALID) return SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE;
+    RepresentedCatalogResult result = represented_call_catalog(request, &limits, &qualified_index,
+        &catalog);
+    if (result == REPRESENTED_CATALOG_RESOURCE) {
+        represented_qualified_index_free(&qualified_index);
+        return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
+    }
+    if (result == REPRESENTED_CATALOG_ALLOCATION) {
+        represented_qualified_index_free(&qualified_index);
+        return SOL_WASM_REPRESENTED_ALLOCATION_FAILED;
+    }
+    if (result != REPRESENTED_CATALOG_VALID) {
+        represented_qualified_index_free(&qualified_index);
+        return SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE;
+    }
     summary->calls = catalog.count;
     summary->edges = catalog.edge_count;
     summary->work_bytes = catalog.work_bytes;
@@ -9907,10 +10487,12 @@ SolWasmRepresentedResult sol_wasm_represented_test_call_catalog(
     summary->has_cycle = catalog.has_cycle;
     if (entries == NULL && cap == 0) {
         represented_call_catalog_free(&catalog);
+        represented_qualified_index_free(&qualified_index);
         return SOL_WASM_REPRESENTED_OK;
     }
     if (cap < catalog.count) {
         represented_call_catalog_free(&catalog);
+        represented_qualified_index_free(&qualified_index);
         return SOL_WASM_REPRESENTED_INVALID_ARGUMENT;
     }
     for (size_t i = 0; i < catalog.count; ++i) {
@@ -9922,6 +10504,7 @@ SolWasmRepresentedResult sol_wasm_represented_test_call_catalog(
             call->cyclic, call->chain_depth};
     }
     represented_call_catalog_free(&catalog);
+    represented_qualified_index_free(&qualified_index);
     return SOL_WASM_REPRESENTED_OK;
 }
 
@@ -9946,6 +10529,13 @@ bool sol_wasm_represented_test_call_catalog_operand(const SolWasmRepresentedBuil
 
 void sol_wasm_represented_test_fail_allocation_after(size_t attempt) { fail_allocation_after = attempt; }
 size_t sol_wasm_represented_test_allocation_attempts(void) { return allocation_attempts; }
+size_t sol_wasm_represented_test_qualified_certifications(void) {
+    return represented_test_qualified_certifications;
+}
+SolWasmRepresentedTestControlTransitionStats
+sol_wasm_represented_test_control_transition_stats(void) {
+    return represented_test_control_transition_stats;
+}
 bool sol_wasm_represented_test_parallel_moves(void) {
     BinaryenModuleRef module = BinaryenModuleCreate();
     if (module == NULL) return false;
@@ -10089,11 +10679,15 @@ bool sol_wasm_represented_test_control_transition(const SolWasmRepresentedBuildR
             count = 1; outcome = SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT; break;
         default: return false;
     }
+    RepresentedQualifiedIndex qualified_index;
+    if (represented_qualified_index_build(request, &qualified_index)
+            != REPRESENTED_QUALIFIED_INDEX_VALID) return false;
     const SolMirRuntimeCleanupTransition *selected = represented_control_transition(request,
-        &m->images[row->image], row->image, block, role, outcome, edge, count);
-    if (selected == NULL) return false;
+        &m->images[row->image], &qualified_index, row->image, block, role, outcome, edge, count);
+    if (selected == NULL) { represented_qualified_index_free(&qualified_index); return false; }
     *transition = (size_t)(selected - owner->cleanup->transitions);
     *actions = selected->actions;
+    represented_qualified_index_free(&qualified_index);
     return true;
 }
 
