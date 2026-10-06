@@ -8696,6 +8696,619 @@ static bool p44c_ensures_resource_determinism(const char *directory) {
     sol_wasm_represented_output_free(&baseline); return ok;
 }
 
+typedef struct {
+    size_t block, body, recipe, backing, event, violation_site;
+    SolMirRuntimeCleanupTransition *satisfied, *violation, *failure;
+} C3aRefinedOwner;
+
+static bool c3a_refined_owner(PropagationPipeline *pipeline, C3aRefinedOwner *owner) {
+    if (pipeline == NULL || owner == NULL) return false;
+    const SolMirMaterialization *m = &pipeline->concrete.materialization;
+    const SolMirOperations *operations = &pipeline->concrete.operations;
+    size_t matches = 0;
+    memset(owner, 0, sizeof *owner);
+    owner->block = owner->body = owner->recipe = owner->backing = owner->event
+        = owner->violation_site = SOL_MIR_RUNTIME_NONE;
+    for (size_t block = 0; block < m->block_count; ++block) {
+        const SolMirMaterializedTerminator *term = &m->blocks[block].terminator;
+        if (term->kind != SOL_MIR_TERM_CHECK_REFINED) continue;
+        if (++matches != 1 || block >= pipeline->lowered.image_terminator_count
+            || term->result >= m->value_count || term->representation >= m->temporary_count)
+            return false;
+        owner->block = block; owner->recipe = m->values[term->result].type;
+        if (owner->recipe >= pipeline->concrete.representation.recipe_count) return false;
+        owner->backing = pipeline->concrete.representation.recipes[owner->recipe].backing;
+        const SolMirRuntimeLoweredImageTerminator *row = &pipeline->lowered.image_terminators[block];
+        if (row->cleanup_event >= pipeline->cleanup.event_count) return false;
+        owner->event = row->cleanup_event;
+        for (size_t plan = 0; plan < operations->predicate_count; ++plan) {
+            const SolMirOperationPredicatePlan *candidate = &operations->predicates[plan];
+            if (candidate->kind == SOL_MIR_OPERATION_PREDICATE_REFINEMENT
+                && candidate->block == block) {
+                if (owner->body != SOL_MIR_RUNTIME_NONE) return false;
+                owner->body = candidate->body;
+            }
+        }
+    }
+    if (matches != 1 || owner->body >= operations->predicate_body_count) return false;
+    SolMirRuntimeCleanupEvent *event = &pipeline->cleanup.events[owner->event];
+    if (event->transitions.offset > pipeline->cleanup.transition_count
+        || event->transitions.count > pipeline->cleanup.transition_count - event->transitions.offset)
+        return false;
+    size_t satisfied = 0, violation = 0, failure = 0;
+    for (size_t i = 0; i < event->transitions.count; ++i) {
+        SolMirRuntimeCleanupTransition *transition = &pipeline->cleanup.transitions[
+            event->transitions.offset + i];
+        if (transition->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_SATISFIED) {
+            owner->satisfied = transition; ++satisfied;
+        } else if (transition->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_VIOLATION) {
+            owner->violation = transition; owner->violation_site = transition->failure_site; ++violation;
+        } else if (transition->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_FAILURE) {
+            owner->failure = transition; ++failure;
+        }
+    }
+    return satisfied == 1 && violation == 1 && failure == 1;
+}
+
+static bool c3a_refined_acceptance(void) {
+    static const struct {
+        const char *leaf, *entry;
+        int64_t value;
+        int32_t code;
+        SolWasmRepresentedUsage usage;
+        uint8_t hash[32];
+    } cases[] = {
+        {"p44c_refined_leaf", "launch_true", 42, 0,
+            {7,15,10,22,79,739,0,0,0,0,9,17810,10240,13150,2910},
+            {0x43,0x67,0x47,0x86,0xbb,0x2f,0x2f,0x4e,0x70,0x44,0x8e,0x3f,0x25,0xa2,0x22,0x1b,
+             0xb3,0xd3,0x84,0xe8,0x91,0xab,0xcf,0xc6,0x73,0x42,0xc8,0x8e,0xac,0xdc,0x26,0x04}},
+        {"p44c_refined_false", "launch", 0, 15,
+            {5,9,6,14,50,574,0,0,0,0,5,14524,10240,12286,2046},
+            {0x97,0x9a,0xca,0xf4,0x0a,0x89,0xfc,0xfd,0xcc,0x16,0x79,0xb9,0xf9,0xeb,0x17,0x59,
+             0xbf,0x0f,0x4d,0x54,0x38,0x68,0x85,0x60,0x99,0x0b,0x15,0x6c,0x15,0x29,0xe3,0x84}},
+        {"p44c_refined_bool", "launch", 1, 0,
+            {5,11,8,15,55,624,0,0,0,0,6,15462,10240,12517,2277},
+            {0x8e,0x62,0x05,0xe5,0x70,0x41,0x7e,0xbf,0x21,0x29,0xea,0x2d,0x67,0x57,0x0c,0x34,
+             0xec,0x2d,0xbf,0xcc,0x3c,0xb6,0x9b,0x96,0xd6,0xc9,0x8b,0x3c,0x08,0xa2,0x29,0x39}},
+        {"p44c_refined_constant", "launch", 7, 0,
+            {5,9,6,13,49,584,0,0,0,0,6,14888,10240,12450,2210},
+            {0x06,0xc5,0xf6,0x80,0x05,0x87,0x49,0x84,0x9b,0xf6,0x8a,0xc4,0xbf,0x50,0x6a,0xbf,
+             0x93,0x03,0xbe,0x24,0xe4,0x3f,0x4c,0xb4,0x5c,0x06,0x8b,0x6b,0x65,0x6c,0xb5,0xfc}},
+        {"p44c_refined_arithmetic", "launch", 0, 3,
+            {5,12,10,23,59,659,0,0,0,0,6,15760,10240,12584,2344},
+            {0x9c,0x63,0x89,0x0e,0x84,0x2e,0x3b,0x01,0x10,0x6f,0xf0,0x65,0x09,0xeb,0x84,0x9a,
+             0x7c,0xe7,0x1a,0xc0,0x88,0xbd,0x09,0xdb,0x38,0x9e,0x29,0xfa,0xd5,0xec,0x4c,0x5a}},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
+        char directory[512], entry[256]; uint8_t hash[32]; SolWasmRepresentedOutput output;
+        sol_wasm_represented_output_init(&output);
+        (void)snprintf(directory, sizeof directory, "%s/tests/conformance/%s",
+            SOL_TEST_SOURCE_DIR, cases[i].leaf);
+        bool ok = build_named_root(directory, cases[i].entry, &output, NULL,
+                SOL_WASM_REPRESENTED_OK)
+            && sol_wasm_represented_validate(&output.bytes) == SOL_WASM_REPRESENTED_OK
+            && output.usage.allocation_requests == 0 && output.usage.allocation_bytes == 0
+            && usage_equal(&output.usage, &cases[i].usage)
+            && entry_symbol(&output.bytes, entry, sizeof entry)
+            && invoke_named(&output.bytes, entry, cases[i].value, cases[i].code,
+                cases[i].code == 0 ? 0 : -1);
+        if (output.bytes.bytes != NULL) sha256(output.bytes.bytes, output.bytes.count, hash);
+        ok = ok && output.bytes.bytes != NULL && memcmp(hash, cases[i].hash, sizeof hash) == 0;
+        sol_wasm_represented_output_free(&output);
+        if (!ok) return false;
+    }
+    return true;
+}
+
+static bool c3a_p36_backend_gate(const char *leaf) {
+    char directory[512]; PropagationPipeline pipeline; SolWasmRepresentedOutput output;
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&output);
+    (void)snprintf(directory, sizeof directory, "%s/tests/conformance/%s",
+        SOL_TEST_SOURCE_DIR, leaf);
+    bool ok = propagation_pipeline_build_named(&pipeline, directory, "launch", false)
+        && c2b1_predecessors_valid(&pipeline)
+        && sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+                directory, NULL}, &output, &pipeline.diagnostics)
+            == SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE
+        && output.bytes.bytes == NULL && output.bytes.count == 0 && usage_zero(&output.usage);
+    sol_wasm_represented_output_free(&output); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+static bool c3a_refined_gates(void) {
+    static const char *backend[] = {"p44c_refined_nested_reject", "p44c_refined_text_reject",
+        "p44c_refined_aggregate_reject", "p44c_refined_borrow_reject",
+        "p44c_refined_inout_reject", "p44c_refined_method_reject"};
+    bool ok = c2b2_source_gate("p44c_refined_entry_reject", "SOL-ENTRY-003", 5, 3, true)
+        && c2b2_source_gate("p44c_refined_cross_equality_reject", "SOL-TYPE-002", 5, 3, true);
+    for (size_t i = 0; ok && i < sizeof backend / sizeof *backend; ++i) {
+        char directory[512]; SolWasmRepresentedOutput output;
+        sol_wasm_represented_output_init(&output);
+        (void)snprintf(directory, sizeof directory, "%s/tests/conformance/%s",
+            SOL_TEST_SOURCE_DIR, backend[i]);
+        ok = build_named_root(directory, "launch", &output, NULL,
+                SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE)
+            && output.bytes.bytes == NULL && output.bytes.count == 0 && usage_zero(&output.usage);
+        sol_wasm_represented_output_free(&output);
+    }
+    /* These source-valid aggregate nests reach a complete authenticated P3.6
+     * owner. They are backend policy gates, not predecessor corruptions. */
+    static const char *nested[] = {"p44c_refined_option_reject",
+        "p44c_refined_result_reject", "p44c_refined_enum_reject"};
+    for (size_t i = 0; ok && i < sizeof nested / sizeof *nested; ++i)
+        ok = c3a_p36_backend_gate(nested[i]);
+    if (ok) {
+        char directory[512]; PropagationPipeline pipeline; propagation_pipeline_init(&pipeline);
+        (void)snprintf(directory, sizeof directory,
+            "%s/tests/conformance/p44c_refined_indirect_reject", SOL_TEST_SOURCE_DIR);
+        ok = !propagation_pipeline_build_named(&pipeline, directory, "launch", false)
+            && pipeline.diagnostics.count != 0;
+        propagation_pipeline_free(&pipeline);
+    }
+    if (ok) {
+        char directory[512]; PropagationPipeline pipeline; SolWasmRepresentedOutput output;
+        propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&output);
+        (void)snprintf(directory, sizeof directory,
+            "%s/tests/conformance/p44c_refined_import_reject", SOL_TEST_SOURCE_DIR);
+        ok = !propagation_pipeline_build_named_with_import(&pipeline, directory, "launch", false,
+                "count", SOL_MIR_PROGRAM_ROOT_ENTRY)
+            && pipeline.diagnostics.count != 0 && output.bytes.bytes == NULL
+            && output.bytes.count == 0 && usage_zero(&output.usage);
+        sol_wasm_represented_output_free(&output); propagation_pipeline_free(&pipeline);
+    }
+    return ok;
+}
+
+static bool c3a_refinement_index(void) {
+    char directory[512], entry[256]; PropagationPipeline pipeline;
+    SolWasmRepresentedOutput output; propagation_pipeline_init(&pipeline);
+    sol_wasm_represented_output_init(&output);
+    (void)snprintf(directory, sizeof directory,
+        "%s/tests/conformance/p44c_refined_many_self", SOL_TEST_SOURCE_DIR);
+    bool ok = propagation_pipeline_build_named(&pipeline, directory, "launch", false);
+    size_t plans = 0, self_inputs = 0;
+    for (size_t i = 0; ok && i < pipeline.concrete.operations.predicate_count; ++i)
+        plans += pipeline.concrete.operations.predicates[i].kind
+            == SOL_MIR_OPERATION_PREDICATE_REFINEMENT;
+    for (size_t i = 0; ok && i < pipeline.concrete.operations.predicate_input_count; ++i)
+        self_inputs += pipeline.concrete.operations.predicate_inputs[i].kind
+            == SOL_MIR_PREDICATE_INPUT_REFINEMENT_SELF;
+    SolWasmRepresentedResult index_build = ok ? sol_wasm_represented_build(
+        &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, &output,
+        &pipeline.diagnostics) : SOL_WASM_REPRESENTED_INVALID_INPUT;
+    ok = ok && plans == 2 && self_inputs >= 4
+        && index_build == SOL_WASM_REPRESENTED_OK
+        && entry_symbol(&output.bytes, entry, sizeof entry)
+        && invoke_named(&output.bytes, entry, 42, 0, 0);
+    SolWasmRepresentedTestRefinementIndexStats indexed =
+        sol_wasm_represented_test_refinement_index_stats();
+    ok = ok && indexed.body_table_allocations == 1
+        && indexed.body_table_bytes == pipeline.concrete.operations.predicate_body_count
+            * sizeof(size_t)
+        && indexed.indexed_lookups == 12 && indexed.indexed_matches == 12
+        && indexed.linear_fallback_scans == 0;
+    sol_wasm_represented_output_free(&output); propagation_pipeline_free(&pipeline);
+
+    PropagationPipeline plain; propagation_pipeline_init(&plain);
+    sol_wasm_represented_output_init(&output);
+    (void)snprintf(directory, sizeof directory,
+        "%s/tests/conformance/p43_multiroot", SOL_TEST_SOURCE_DIR);
+    ok = ok && propagation_pipeline_build_named(&plain, directory, "first", false)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&plain.lowered,
+                directory, NULL}, &output, &plain.diagnostics) == SOL_WASM_REPRESENTED_OK;
+    SolWasmRepresentedTestRefinementIndexStats empty =
+        sol_wasm_represented_test_refinement_index_stats();
+    ok = ok && empty.body_table_allocations == 0 && empty.body_table_bytes == 0
+        && empty.indexed_lookups == 0 && empty.indexed_matches == 0
+        && empty.linear_fallback_scans == 0;
+    sol_wasm_represented_output_free(&output); propagation_pipeline_free(&plain);
+    return ok;
+}
+
+static bool c3a_refined_certificate_mutations(void) {
+    char directory[512]; PropagationPipeline pipeline; C3aRefinedOwner owner;
+    SolWasmRepresentedOutput baseline; uint8_t baseline_hash[32];
+    (void)snprintf(directory, sizeof directory,
+        "%s/tests/conformance/p44c_refined_leaf", SOL_TEST_SOURCE_DIR);
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&baseline);
+    bool ok = propagation_pipeline_build_named(&pipeline, directory, "launch_true", false)
+        && c3a_refined_owner(&pipeline, &owner)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+                directory, NULL}, &baseline, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK;
+    if (ok) sha256(baseline.bytes.bytes, baseline.bytes.count, baseline_hash);
+    SolMirRecipe *recipe = ok ? &pipeline.concrete.representation.recipes[owner.recipe] : NULL;
+    SolMirTypeLayout *layout = ok ? &pipeline.concrete.layout.types[owner.recipe] : NULL;
+    SolMirMaterializedTerminator *term = ok
+        ? &pipeline.concrete.materialization.blocks[owner.block].terminator : NULL;
+    SolMirPredicateBody *body = ok ? &pipeline.concrete.operations.predicate_bodies[owner.body] : NULL;
+    SolMirPredicateInput *input = body != NULL && body->inputs.count != 0
+        ? &pipeline.concrete.operations.predicate_inputs[body->inputs.offset] : NULL;
+    SolMirOperationArithmeticPlan *equality = NULL;
+    for (size_t i = 0; ok && i < pipeline.concrete.operations.arithmetic_count; ++i) {
+        SolMirOperationArithmeticPlan *candidate = &pipeline.concrete.operations.arithmetic[i];
+        if ((candidate->opcode == SOL_MIR_OPERATION_VALUE_EQ
+                || candidate->opcode == SOL_MIR_OPERATION_VALUE_NE)
+            && candidate->operand_recipe == owner.recipe) { equality = candidate; break; }
+    }
+    if (ok) ok = recipe != NULL && layout != NULL && term != NULL && input != NULL
+        && equality != NULL && recipe->kind == SOL_MIR_RECIPE_REFINED
+        && recipe->storage == SOL_MIR_STORAGE_SCALAR && recipe->copy_kind == SOL_MIR_COPY_WRAPPER
+        && recipe->drop_kind == SOL_MIR_DROP_WRAPPER && owner.backing < pipeline.concrete.layout.type_count
+        && layout->value_size == pipeline.concrete.layout.types[owner.backing].value_size
+        && layout->value_alignment == pipeline.concrete.layout.types[owner.backing].value_alignment
+        && !layout->has_object && layout->object_kind == SOL_MIR_LAYOUT_OBJECT_NONE
+        && input->kind == SOL_MIR_PREDICATE_INPUT_REFINEMENT_SELF
+        && input->ordinal == 0 && input->access == SOL_ACCESS_OWNED
+        && input->recipe == owner.backing && owner.satisfied->failure_source
+            == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE
+        && owner.violation->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31
+        && owner.violation->failure_mask == UINT32_C(0x4000)
+        && owner.failure->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING
+        && owner.violation_site < pipeline.conventions.failure_site_count
+        && pipeline.conventions.failure_sites[owner.violation_site].allowed_codes == UINT32_C(0x4000)
+        && pipeline.conventions.failure_sites[owner.violation_site].origin_kind
+            == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT;
+    /* The mutations below are deliberately predecessor-invalid. Their named
+     * owner validator rejects before the resealed P3.6/backend checks; they do
+     * not count as represented-policy gates. */
+#define C3A_REJECT(layer, edit, restore) do { \
+    SolWasmRepresentedOutput rejected, rebuilt; sol_wasm_represented_output_init(&rejected); \
+    sol_wasm_represented_output_init(&rebuilt); edit; \
+    pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+    bool rejected_ok = !(layer) && sol_wasm_represented_build( \
+        &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, &rejected, \
+        &pipeline.diagnostics) == SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE \
+        && rejected.bytes.bytes == NULL && rejected.bytes.count == 0 && usage_zero(&rejected.usage); \
+    restore; pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(&pipeline.lowered); \
+    bool rebuilt_ok = sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL) \
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, NULL}, \
+            &rebuilt, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK \
+        && rebuilt.bytes.count == baseline.bytes.count && usage_equal(&rebuilt.usage, &baseline.usage) \
+        && memcmp(rebuilt.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0; \
+    if (rebuilt_ok) { uint8_t hash[32]; sha256(rebuilt.bytes.bytes, rebuilt.bytes.count, hash); \
+        rebuilt_ok = memcmp(hash, baseline_hash, sizeof hash) == 0; } \
+    ok = ok && rejected_ok && rebuilt_ok; sol_wasm_represented_output_free(&rebuilt); \
+    sol_wasm_represented_output_free(&rejected); \
+} while (0)
+    if (ok) {
+        SolMirCopyKind copy = recipe->copy_kind;
+        C3A_REJECT(sol_mir_representation_validate(&pipeline.concrete.representation, NULL),
+            recipe->copy_kind = SOL_MIR_COPY_TRIVIAL, recipe->copy_kind = copy);
+        size_t value_size = layout->value_size;
+        C3A_REJECT(sol_mir_layout_validate(&pipeline.concrete.layout, NULL),
+            ++layout->value_size, layout->value_size = value_size);
+        SolAccessMode access = input->access;
+        C3A_REJECT(sol_mir_operations_validate(&pipeline.concrete.operations, NULL),
+            input->access = SOL_ACCESS_SHARED, input->access = access);
+        SolObligationId obligation = term->source_obligation;
+        C3A_REJECT(sol_mir_materialization_validate(&pipeline.concrete.materialization, NULL),
+            term->source_obligation = SOL_IR_NONE, term->source_obligation = obligation);
+        SolMirPlanSlice normal_arguments = pipeline.concrete.materialization.edges[
+            term->normal_edge].arguments;
+        C3A_REJECT(sol_mir_materialization_validate(&pipeline.concrete.materialization, NULL),
+            pipeline.concrete.materialization.edges[term->normal_edge].arguments.count = 0,
+            pipeline.concrete.materialization.edges[term->normal_edge].arguments = normal_arguments);
+        SolMirRuntimeCleanupEdgeRole role = owner.violation->edge_role;
+        C3A_REJECT(sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL),
+            owner.violation->edge_role = SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_FAILURE,
+            owner.violation->edge_role = role);
+        SolMirRuntimeCleanupFailureSource source = owner.failure->failure_source;
+        C3A_REJECT(sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL),
+            owner.failure->failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE,
+            owner.failure->failure_source = source);
+        uint32_t mask = owner.violation->failure_mask;
+        C3A_REJECT(sol_mir_runtime_cleanup_validate(&pipeline.cleanup, NULL),
+            owner.violation->failure_mask = 0, owner.violation->failure_mask = mask);
+        SolMirPlanSlice equality_slice = equality->equality;
+        C3A_REJECT(sol_mir_operations_validate(&pipeline.concrete.operations, NULL),
+            equality->equality.count = 0, equality->equality = equality_slice);
+        SolMirOperationEqualityNode *root = &pipeline.concrete.operations.equality_nodes[
+            equality->equality.offset];
+        SolMirRecipeId equality_recipe = root->recipe;
+        C3A_REJECT(sol_mir_operations_validate(&pipeline.concrete.operations, NULL),
+            root->recipe = owner.backing, root->recipe = equality_recipe);
+    }
+#undef C3A_REJECT
+    sol_wasm_represented_output_free(&baseline); propagation_pipeline_free(&pipeline); return ok;
+}
+
+static bool c3a_refined_trace_case(const char *leaf, const char *entry_name, int64_t value,
+    int32_t code, SolMirRuntimeFailureOriginKind origin, const P44TraceSlot *expected,
+    size_t expected_count) {
+    char directory[512], entry[256]; PropagationPipeline pipeline; SolWasmRepresentedOutput output;
+    WasmInstance instance = {0}; P44TraceSlot actual[64]; size_t count = 0; bool overflow = false;
+    (void)snprintf(directory, sizeof directory, "%s/tests/conformance/%s", SOL_TEST_SOURCE_DIR, leaf);
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&output);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(true);
+    bool ok = propagation_pipeline_build_named(&pipeline, directory, entry_name, false)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+                directory, NULL}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && entry_symbol(&output.bytes, entry, sizeof entry)
+        && wasm_instance_open(&output.bytes, entry, &instance)
+        && wasm_instance_call(&instance, value, code, code == 0 ? 0 : -1)
+        && wasm_instance_trace(&instance, actual, sizeof actual / sizeof *actual, &count, &overflow)
+        && !overflow && count == expected_count
+        && memcmp(actual, expected, expected_count * sizeof *expected) == 0;
+    if (ok && code != 0) {
+        wasm_val_t observed; wasm_global_get(instance.site, &observed);
+        ProvenanceRecord record;
+        ok = observed.kind == WASM_I32 && observed.of.i32 > 0
+            && provenance_record(&output.bytes, (uint32_t)observed.of.i32, &record)
+            && record.tag == 3 && record.kind == origin
+            && bytes_equal(record.path, record.path_count, "main.sol");
+    }
+    wasm_instance_close(&instance); sol_wasm_represented_output_free(&output);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+static bool c3a_refined_exact_traces(void) {
+    static const P44TraceSlot success[] = {{0,1,0},{5,1,0},{6,1,0},{7,1,0},{8,1,0},
+        {9,1,0},{10,1,0},{11,1,0},{12,1,0},{13,1,0},{14,1,0},{27,1,0},{28,1,0},
+        {29,1,0},{30,1,0},{31,1,0}};
+    static const P44TraceSlot violation[] = {
+        {1,1,0},{2,1,0},{3,1,0},{4,533,4},{8,1,0},{9,1,0},{10,533,4}};
+    static const P44TraceSlot arithmetic[] = {
+        {1,1,0},{2,1,0},{3,1,0},{4,533,5},{8,1,0},{9,1,0},{10,533,5}};
+    static const P44TraceSlot overflow[] = {
+        {1,1,0},{2,1,0},{3,1,0},{4,533,4},{8,1,0},{9,1,0},{10,533,4}};
+    return c3a_refined_trace_case("p44c_refined_leaf", "launch_true", 42, 0,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT, success,
+            sizeof success / sizeof *success)
+        && c3a_refined_trace_case("p44c_refined_false", "launch", 0, 15,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT, violation,
+            sizeof violation / sizeof *violation)
+        && c3a_refined_trace_case("p44c_refined_arithmetic", "launch", 0, 3,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, arithmetic,
+            sizeof arithmetic / sizeof *arithmetic)
+        && c3a_refined_trace_case("p44c_refined_overflow", "launch", 0, 2,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, overflow,
+            sizeof overflow / sizeof *overflow);
+}
+
+static bool c3a_refined_route_case(const char *leaf, const char *entry_name, int64_t value,
+    int32_t code, SolMirRuntimeCleanupEdgeRole expected_role) {
+    char directory[512], entry[256]; PropagationPipeline pipeline; C3aRefinedOwner owner;
+    SolWasmRepresentedOutput output; WasmInstance instance = {0}; P44TraceSlot actual[64];
+    size_t count = 0;
+    bool overflow = false;
+    (void)snprintf(directory, sizeof directory, "%s/tests/conformance/%s", SOL_TEST_SOURCE_DIR, leaf);
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&output);
+    sol_wasm_represented_test_p44_refinement_trace_probe(true);
+    bool ok = propagation_pipeline_build_named(&pipeline, directory, entry_name, false)
+        && c3a_refined_owner(&pipeline, &owner)
+        && owner.event <= UINT16_MAX
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+                directory, NULL}, &output, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && entry_symbol(&output.bytes, entry, sizeof entry)
+        && wasm_instance_open(&output.bytes, entry, &instance)
+        && wasm_instance_call(&instance, value, code, code == 0 ? 0 : -1)
+        && wasm_instance_trace(&instance, actual, sizeof actual / sizeof *actual, &count, &overflow)
+        && !overflow && count == 1
+        && actual[0].action == SOL_WASM_REPRESENTED_TEST_P44_REFINEMENT_ROUTE
+        && SOL_WASM_REPRESENTED_TEST_P44_REFINEMENT_EVENT(actual[0].disposition)
+            == owner.event
+        && SOL_WASM_REPRESENTED_TEST_P44_REFINEMENT_ROLE(actual[0].disposition)
+            == (uint32_t)expected_role;
+    if (ok) {
+        wasm_val_t observed; wasm_global_get(instance.site, &observed);
+        ok = observed.kind == WASM_I32
+            && actual[0].record == (code == 0 ? 0 : (uint32_t)observed.of.i32);
+    }
+    wasm_instance_close(&instance); sol_wasm_represented_output_free(&output);
+    sol_wasm_represented_test_p44_refinement_trace_probe(false);
+    propagation_pipeline_free(&pipeline); return ok;
+}
+
+static bool c3a_refined_route_markers(void) {
+    return c3a_refined_route_case("p44c_refined_leaf", "launch_true", 42, 0,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_SATISFIED)
+        && c3a_refined_route_case("p44c_refined_false", "launch", 0, 15,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_VIOLATION)
+        && c3a_refined_route_case("p44c_refined_arithmetic", "launch", 0, 3,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_FAILURE)
+        && c3a_refined_route_case("p44c_refined_overflow", "launch", 0, 2,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_FAILURE);
+}
+
+static bool c3a_refined_resources(void) {
+    static const SolWasmRepresentedUsage expected =
+        {7,15,10,22,79,739,0,0,0,0,9,17810,10240,13150,2910};
+    static const uint8_t expected_hash[32] = {
+        0x43,0x67,0x47,0x86,0xbb,0x2f,0x2f,0x4e,0x70,0x44,0x8e,0x3f,0x25,0xa2,0x22,0x1b,
+        0xb3,0xd3,0x84,0xe8,0x91,0xab,0xcf,0xc6,0x73,0x42,0xc8,0x8e,0xac,0xdc,0x26,0x04};
+    char directory[512]; SolWasmRepresentedOutput baseline, output;
+    sol_wasm_represented_output_init(&baseline); sol_wasm_represented_output_init(&output);
+    (void)snprintf(directory, sizeof directory,
+        "%s/tests/conformance/p44c_refined_leaf", SOL_TEST_SOURCE_DIR);
+    bool ok = build_named_root(directory, "launch_true", &baseline, NULL, SOL_WASM_REPRESENTED_OK);
+    uint8_t hash[32]; if (ok) sha256(baseline.bytes.bytes, baseline.bytes.count, hash);
+    size_t attempts = sol_wasm_represented_test_allocation_attempts();
+    ok = ok && attempts == 69 && usage_equal(&baseline.usage, &expected)
+        && memcmp(hash, expected_hash, sizeof hash) == 0;
+    SolWasmRepresentedLimits exact = sol_wasm_represented_default_limits();
+    exact.max_functions=expected.functions; exact.max_blocks=expected.blocks; exact.max_edges=expected.edges;
+    exact.max_values=expected.values; exact.max_locals=expected.locals;
+    exact.max_generated_nodes=expected.generated_nodes;
+    exact.max_provenance_records=expected.provenance_records; exact.max_work_bytes=expected.work_bytes;
+    exact.max_scratch_bytes=expected.scratch_bytes; exact.max_owned_bytes=expected.owned_bytes;
+    exact.max_output_bytes=expected.output_bytes;
+    if (ok) ok = build_named_root(directory, "launch_true", &output, &exact,
+            SOL_WASM_REPRESENTED_OK) && usage_equal(&output.usage, &expected)
+        && output.bytes.count == baseline.bytes.count
+        && memcmp(output.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0;
+    sol_wasm_represented_output_free(&output);
+#define C3A_CAP(field, exact_value) do { \
+    SolWasmRepresentedLimits cap = sol_wasm_represented_default_limits(); cap.field=(exact_value)-1; \
+    sol_wasm_represented_output_init(&output); ok = ok && build_named_root(directory, "launch_true", \
+        &output, &cap, SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED) && output.bytes.bytes == NULL \
+        && output.bytes.count == 0 && usage_zero(&output.usage); sol_wasm_represented_output_free(&output); \
+} while (0)
+    C3A_CAP(max_functions, expected.functions); C3A_CAP(max_blocks, expected.blocks);
+    C3A_CAP(max_edges, expected.edges); C3A_CAP(max_values, expected.values);
+    C3A_CAP(max_locals, expected.locals); C3A_CAP(max_generated_nodes, expected.generated_nodes);
+    C3A_CAP(max_provenance_records, expected.provenance_records);
+    C3A_CAP(max_work_bytes, expected.work_bytes); C3A_CAP(max_scratch_bytes, expected.scratch_bytes);
+    C3A_CAP(max_owned_bytes, expected.owned_bytes); C3A_CAP(max_output_bytes, expected.output_bytes);
+#undef C3A_CAP
+    for (size_t ordinal = 1; ok && ordinal <= attempts; ++ordinal) {
+        sol_wasm_represented_test_fail_allocation_after(ordinal);
+        sol_wasm_represented_output_init(&output);
+        ok = build_named_root(directory, "launch_true", &output, NULL,
+                SOL_WASM_REPRESENTED_ALLOCATION_FAILED)
+            && output.bytes.bytes == NULL && output.bytes.count == 0 && usage_zero(&output.usage);
+        sol_wasm_represented_output_free(&output);
+        sol_wasm_represented_test_fail_allocation_after(0);
+    }
+    sol_wasm_represented_output_init(&output);
+    if (ok) ok = build_named_root(directory, "launch_true", &output, NULL,
+            SOL_WASM_REPRESENTED_OK) && sol_wasm_represented_test_allocation_attempts() == attempts
+        && usage_equal(&output.usage, &expected) && output.bytes.count == baseline.bytes.count
+        && memcmp(output.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0;
+    sol_wasm_represented_output_free(&output); sol_wasm_represented_output_free(&baseline);
+    sol_wasm_represented_test_fail_allocation_after(0); return ok;
+}
+
+static bool c3a_refined_root_order_relocation(void) {
+    static const SolWasmRepresentedUsage expected =
+        {6,14,10,22,64,678,0,0,0,0,7,16673,10240,12753,2513};
+    static const uint8_t expected_hash[32] = {
+        0x9a,0x97,0xe6,0x46,0xc4,0xc2,0xa3,0x40,0x8b,0x7c,0x56,0xb7,0x19,0xa3,0x31,0xbd,
+        0x84,0xc2,0x46,0xba,0xa4,0x89,0x29,0x0c,0x0e,0x03,0xcc,0xcd,0x2c,0xad,0x1f,0x93};
+    char directory[512], relocation[512], source[512], destination[512], entry[256];
+    size_t ids[2], reverse_ids[2], relocated_ids[2]; uint8_t hash[32];
+    SolWasmRepresentedOutput baseline, reverse, relocated;
+    sol_wasm_represented_output_init(&baseline); sol_wasm_represented_output_init(&reverse);
+    sol_wasm_represented_output_init(&relocated);
+    (void)snprintf(directory, sizeof directory,
+        "%s/tests/conformance/p44c_refined_roots", SOL_TEST_SOURCE_DIR);
+    bool ok = build_multiroot(directory, false, &baseline, ids, NULL, SOL_WASM_REPRESENTED_OK);
+    if (ok) sha256(baseline.bytes.bytes, baseline.bytes.count, hash);
+    ok = ok && ids[0] != ids[1] && usage_equal(&baseline.usage, &expected)
+        && memcmp(hash, expected_hash, sizeof hash) == 0
+        && build_multiroot(directory, true, &reverse, reverse_ids, NULL, SOL_WASM_REPRESENTED_OK)
+        && reverse_ids[0] == ids[0] && reverse_ids[1] == ids[1]
+        && usage_equal(&reverse.usage, &expected) && reverse.bytes.count == baseline.bytes.count
+        && memcmp(reverse.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0;
+    (void)mkdir(SOL_TEST_BINARY_DIR, 0700);
+    (void)snprintf(relocation, sizeof relocation, "%s/p44c_refined_roots_relocated",
+        SOL_TEST_BINARY_DIR); (void)mkdir(relocation, 0700);
+    (void)snprintf(source, sizeof source, "%s/main.sol", directory);
+    (void)snprintf(destination, sizeof destination, "%s/main.sol", relocation);
+    FILE *input = fopen(source, "rb"), *copy = fopen(destination, "wb");
+    if (input == NULL || copy == NULL) ok = false;
+    if (input != NULL && copy != NULL) {
+        uint8_t buffer[256]; size_t count;
+        while ((count = fread(buffer, 1, sizeof buffer, input)) != 0)
+            if (fwrite(buffer, 1, count, copy) != count) ok = false;
+    }
+    if (input != NULL) fclose(input); if (copy != NULL) fclose(copy);
+    if (ok) ok = build_multiroot(relocation, false, &relocated, relocated_ids, NULL,
+            SOL_WASM_REPRESENTED_OK) && relocated_ids[0] == ids[0] && relocated_ids[1] == ids[1]
+        && usage_equal(&relocated.usage, &expected) && relocated.bytes.count == baseline.bytes.count
+        && memcmp(relocated.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+        && entry_symbol(&relocated.bytes, entry, sizeof entry)
+        && invoke_named(&relocated.bytes, entry, 42, 0, 0);
+    sol_wasm_represented_output_free(&relocated); sol_wasm_represented_output_free(&reverse);
+    sol_wasm_represented_output_free(&baseline); return ok;
+}
+
+static bool c3a_write_seal_source(const char *source, const char *destination, char comparison) {
+    uint8_t bytes[2048]; FILE *input = fopen(source, "rb");
+    if (input == NULL || (comparison != '>' && comparison != '<')) {
+        if (input != NULL) fclose(input);
+        return false;
+    }
+    size_t count = fread(bytes, 1, sizeof bytes, input);
+    bool ok = !ferror(input) && feof(input) && count < sizeof bytes;
+    fclose(input);
+    static const char predicate[] = "self > 0";
+    size_t matches = 0;
+    for (size_t i = 0; ok && i + sizeof predicate - 1 <= count; ++i)
+        if (memcmp(bytes + i, predicate, sizeof predicate - 1) == 0
+            || (memcmp(bytes + i, "self < 0", sizeof predicate - 1) == 0)) {
+            bytes[i + 5] = (uint8_t)comparison; ++matches;
+        }
+    FILE *output = ok && matches == 1 ? fopen(destination, "wb") : NULL;
+    if (output == NULL) return false;
+    bool written = fwrite(bytes, 1, count, output) == count;
+    bool closed = fclose(output) == 0;
+    return written && closed;
+}
+
+static bool c3a_refined_source_rebuild_seal(void) {
+    char source[512], directory[512], destination[512], entry[256];
+    (void)snprintf(source, sizeof source,
+        "%s/tests/conformance/p44c_refined_seal/main.sol", SOL_TEST_SOURCE_DIR);
+    (void)mkdir(SOL_TEST_BINARY_DIR, 0700);
+    (void)snprintf(directory, sizeof directory, "%s/p44c_refined_seal_rebuild",
+        SOL_TEST_BINARY_DIR);
+    (void)mkdir(directory, 0700);
+    (void)snprintf(destination, sizeof destination, "%s/main.sol", directory);
+    bool ok = c3a_write_seal_source(source, destination, '>');
+
+    PropagationPipeline baseline_pipeline; propagation_pipeline_init(&baseline_pipeline);
+    SolWasmRepresentedOutput baseline; sol_wasm_represented_output_init(&baseline);
+    ok = ok && propagation_pipeline_build_named(&baseline_pipeline, directory, "launch", false)
+        && c2b1_predecessors_valid(&baseline_pipeline)
+        && sol_mir_runtime_lowered_program_validate(&baseline_pipeline.lowered, NULL)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){
+                &baseline_pipeline.lowered, directory, NULL}, &baseline,
+            &baseline_pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && entry_symbol(&baseline.bytes, entry, sizeof entry)
+        && invoke_named(&baseline.bytes, entry, 42, 0, 0);
+    uint64_t old_seal = baseline_pipeline.lowered.authentication;
+    uint8_t baseline_hash[32] = {0};
+    if (ok) sha256(baseline.bytes.bytes, baseline.bytes.count, baseline_hash);
+    propagation_pipeline_free(&baseline_pipeline);
+
+    PropagationPipeline rebuilt; propagation_pipeline_init(&rebuilt);
+    SolWasmRepresentedOutput stale, changed; sol_wasm_represented_output_init(&stale);
+    sol_wasm_represented_output_init(&changed);
+    ok = ok && c3a_write_seal_source(source, destination, '<')
+        && propagation_pipeline_build_named(&rebuilt, directory, "launch", false)
+        && c2b1_predecessors_valid(&rebuilt)
+        && sol_mir_runtime_lowered_program_validate(&rebuilt.lowered, NULL);
+    uint64_t new_seal = rebuilt.lowered.authentication;
+    rebuilt.lowered.authentication = old_seal;
+    bool stale_rejected = ok && old_seal != new_seal
+        && !sol_mir_runtime_lowered_program_validate(&rebuilt.lowered, NULL)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&rebuilt.lowered,
+                directory, NULL}, &stale, &rebuilt.diagnostics)
+            == SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE
+        && stale.bytes.bytes == NULL && stale.bytes.count == 0 && usage_zero(&stale.usage);
+    rebuilt.lowered.authentication = new_seal;
+    bool changed_accepted = stale_rejected && c2b1_predecessors_valid(&rebuilt)
+        && sol_mir_runtime_lowered_program_validate(&rebuilt.lowered, NULL)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&rebuilt.lowered,
+                directory, NULL}, &changed, &rebuilt.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && entry_symbol(&changed.bytes, entry, sizeof entry)
+        && invoke_named(&changed.bytes, entry, 0, 15, -1);
+    sol_wasm_represented_output_free(&changed); sol_wasm_represented_output_free(&stale);
+    propagation_pipeline_free(&rebuilt);
+
+    PropagationPipeline restored_pipeline; propagation_pipeline_init(&restored_pipeline);
+    SolWasmRepresentedOutput restored; sol_wasm_represented_output_init(&restored);
+    bool restored_ok = changed_accepted && c3a_write_seal_source(source, destination, '>')
+        && propagation_pipeline_build_named(&restored_pipeline, directory, "launch", false)
+        && c2b1_predecessors_valid(&restored_pipeline)
+        && sol_mir_runtime_lowered_program_validate(&restored_pipeline.lowered, NULL)
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){
+                &restored_pipeline.lowered, directory, NULL}, &restored,
+            &restored_pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+        && usage_equal(&restored.usage, &baseline.usage)
+        && restored.bytes.count == baseline.bytes.count
+        && memcmp(restored.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0;
+    if (restored_ok) { uint8_t hash[32]; sha256(restored.bytes.bytes, restored.bytes.count, hash);
+        restored_ok = memcmp(hash, baseline_hash, sizeof hash) == 0; }
+    ok = restored_ok;
+    sol_wasm_represented_output_free(&restored);
+    propagation_pipeline_free(&restored_pipeline);
+    sol_wasm_represented_output_free(&baseline);
+    return ok;
+}
+
 int main(void) {
     enum {
         P43_LITERAL_SITE = 4,
@@ -8723,6 +9336,15 @@ int main(void) {
     CHECK(!sol_wasm_represented_test_sum_helper_items(125));
     CHECK(!sol_wasm_represented_test_rejects_capture_snapshot());
     sol_wasm_represented_output_free(&output);
+    CHECK(c3a_refined_acceptance());
+    CHECK(c3a_refined_gates());
+    CHECK(c3a_refinement_index());
+    CHECK(c3a_refined_certificate_mutations());
+    CHECK(c3a_refined_exact_traces());
+    CHECK(c3a_refined_route_markers());
+    CHECK(c3a_refined_resources());
+    CHECK(c3a_refined_root_order_relocation());
+    CHECK(c3a_refined_source_rebuild_seal());
     CHECK(p44c_acceptance_matrix());
     CHECK(p44c_qualified_source_gates());
     CHECK(p44c_ensures_acceptance_matrix());

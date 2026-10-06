@@ -103,6 +103,11 @@ enum {
     SOL_WASM_REPRESENTED_TEST_P44_TRACE_ACTION_FAILURE = 512u,
     SOL_WASM_REPRESENTED_TEST_P44_TRACE_GUARDED = 1024u,
 };
+/* Hook-only refinement route slots reuse the cleanup ledger wire shape.  The
+ * first word is outside the action arena; the second packs event<<16 | role. */
+#define SOL_WASM_REPRESENTED_TEST_P44_REFINEMENT_ROUTE UINT32_MAX
+#define SOL_WASM_REPRESENTED_TEST_P44_REFINEMENT_EVENT(value) ((uint32_t)(value) >> 16)
+#define SOL_WASM_REPRESENTED_TEST_P44_REFINEMENT_ROLE(value) ((uint32_t)(value) & UINT32_C(0xffff))
 #define SOL_WASM_REPRESENTED_PROVENANCE_SECTION "sol.p43.provenance.v1"
 
 /* Private `sol.p43.provenance.v1` payload: `P43P`, u32 version (=1), u32
@@ -149,6 +154,14 @@ typedef struct {
     size_t legacy_fallback_scans;
 } SolWasmRepresentedTestControlTransitionStats;
 
+typedef struct {
+    size_t body_table_allocations;
+    size_t body_table_bytes;
+    size_t indexed_lookups;
+    size_t indexed_matches;
+    size_t linear_fallback_scans;
+} SolWasmRepresentedTestRefinementIndexStats;
+
 typedef enum {
     SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_INVALID,
     SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_EVENTLESS,
@@ -172,6 +185,9 @@ size_t sol_wasm_represented_test_qualified_certifications(void);
  * counters; standalone selector hooks contribute until the next reset. */
 SolWasmRepresentedTestControlTransitionStats
 sol_wasm_represented_test_control_transition_stats(void);
+/* Full builds reset these saturating request-local refinement-index counters. */
+SolWasmRepresentedTestRefinementIndexStats
+sol_wasm_represented_test_refinement_index_stats(void);
 /* Test-only Binaryen/Wasmtime proof of the backend's parallel-copy sequence. */
 bool sol_wasm_represented_test_parallel_moves(void);
 /* Classifier-only hooks; these do not authenticate or expose raw MIR. */
@@ -201,6 +217,9 @@ void sol_wasm_represented_test_p44_packet_reset_probe(bool enabled);
 /* Emits the hook-only 64-slot cleanup-action ledger in the already reserved
  * scratch interval. Disabled by default and absent from production bytes. */
 void sol_wasm_represented_test_p44_cleanup_trace_probe(bool enabled);
+/* Adds one route slot for an authenticated CHECK_REFINED transition.  This is
+ * independent of cleanup-action tracing and absent from production builds. */
+void sol_wasm_represented_test_p44_refinement_trace_probe(bool enabled);
 /* Runs B1's selector without the outer whole-owner validation, so hostile
  * owner mutations can exercise the selector itself. `transition` and `actions`
  * name borrowed P3.3 records on success. */
