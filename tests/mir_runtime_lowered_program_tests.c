@@ -451,6 +451,52 @@ static void test_vocabulary(void) {
 
 static void test_e6_census_and_missing(Pipeline*p) {
     const SolMirMaterialization*m=&p->concrete.materialization;const SolMirOperations*o=&p->concrete.operations;const SolMirRuntimeCleanup*c=&p->cleanup;
+    size_t refined_events = 0;
+    for (size_t event_id = 0; event_id < c->event_count; ++event_id) {
+        const SolMirRuntimeCleanupEvent *event = &c->events[event_id];
+        if (event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+            || event->block >= m->block_count
+            || m->blocks[event->block].terminator.kind != SOL_MIR_TERM_CHECK_REFINED)
+            continue;
+        ++refined_events;
+        CHECK(event->transitions.count == 3);
+        for (size_t ordinal = 0; ordinal < event->transitions.count; ++ordinal) {
+            size_t transition = event->transitions.offset + ordinal;
+            size_t matches = 0, row_id = SOL_MIR_RUNTIME_LOWERED_NONE;
+            for (size_t i = 0; i < p->lowered.cleanup_failure_count; ++i) {
+                const SolMirRuntimeLoweredCleanupFailure *candidate
+                    = &p->lowered.cleanup_failures[i];
+                if (candidate->kind == SOL_MIR_RUNTIME_LOWERED_CLEANUP_TRANSITION
+                    && candidate->record == transition) {
+                    row_id = i; ++matches;
+                }
+            }
+            CHECK(matches == 1 && row_id != SOL_MIR_RUNTIME_LOWERED_NONE);
+            if (matches != 1) continue;
+            SolMirRuntimeLoweredCleanupFailure *row
+                = &p->lowered.cleanup_failures[row_id];
+            const SolMirRuntimeCleanupTransition *source = &c->transitions[transition];
+            CHECK(row->event == event_id && row->transition == transition
+                && row->edge_role == source->edge_role && row->outcome == source->outcome
+                && row->continuation == source->continuation
+                && row->source_edge == source->source_edge
+                && row->destination == source->destination
+                && row->failure_source == source->failure_source
+                && row->failure_site == source->failure_site
+                && row->failure_mask == source->failure_mask
+                && row->actions.offset == source->actions.offset
+                && row->actions.count == source->actions.count);
+            if (ordinal == 1) {
+                SolMirRuntimeCleanupEdgeRole saved = row->edge_role;
+                row->edge_role = SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_FAILURE;
+                reseal(&p->lowered);
+                CHECK(!sol_mir_runtime_lowered_program_validate(&p->lowered, NULL));
+                row->edge_role = saved; reseal(&p->lowered);
+                CHECK(sol_mir_runtime_lowered_program_validate(&p->lowered, NULL));
+            }
+        }
+    }
+    CHECK(refined_events != 0);
     CHECK(o->callable_count == 5 && o->provenance_count == 42);
     size_t bound_imports = 0, bound_calls = 0, bound_recipes[21] = {0};
     for (size_t i = 0; i < o->callable_count; ++i)
@@ -1001,9 +1047,9 @@ static void test_slice_d_e6_usage(const Pipeline *p) {
             == SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_PROPAGATE_RESIDUAL;
     }
     CHECK(pre_invoke == 5 && pre_residual == 0);
-    static const size_t expected[] = {471,65,64,64,64,65,4,6,4,0,0,0,4,80,12,12,52,20,20,295,1524,5,4,5,0,0,0};
-    expect_slice_d_usage(p, expected, 534648, 535226, 1287633, 5680, 902246,
-        11633664, 11655360);
+    static const size_t expected[] = {471,65,64,64,64,65,4,6,4,0,0,0,4,80,12,12,52,20,20,295,1525,5,4,5,0,0,0};
+    expect_slice_d_usage(p, expected, 534944, 535522, 1288227, 5682, 902546,
+        11637760, 11659464);
 }
 static size_t distinct_render_row_keys(const char *text, const char *prefix,
     char keys[][65], size_t capacity) {

@@ -77,6 +77,231 @@ static bool build_affine_pair_fixture(Compilation *c, SolMirConcreteProgram *p) 
     return sol_mir_concrete_program_build(&request, p, &c->diagnostics)
         == SOL_MIR_CONCRETE_BUILD_SUCCEEDED;
 }
+static bool build_refined_route_fixture(Compilation *c, SolMirConcreteProgram *p) {
+    static const char *const names[] = {"direct_true", "direct_false",
+        "post_branch_true", "post_branch_false", "arithmetic_after_branch"};
+    SolMirProgramRoot roots[sizeof(names) / sizeof(*names)];
+    for (size_t i = 0; i < sizeof(names) / sizeof(*names); ++i) {
+        SolIrCallableId id = callable(&c->ir, names[i], SOL_IR_CALLABLE_FUNCTION);
+        if (id == SOL_IR_NONE) return false;
+        roots[i] = (SolMirProgramRoot){id, SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
+    }
+    SolMirTargetDescriptor target = sol_mir_target_wasm32();
+    return sol_mir_concrete_program_build(&(SolMirConcreteBuildRequest){&c->ir, roots,
+        sizeof(roots) / sizeof(*roots), NULL, 0, &target, NULL}, p, &c->diagnostics)
+        == SOL_MIR_CONCRETE_BUILD_SUCCEEDED;
+}
+
+static void check_refined_route_fixture(void) {
+    Compilation compilation; SolMirConcreteProgram program;
+    SolMirRuntimeConventions conventions; SolMirRuntimeValues values;
+    SolMirRuntimeCleanup cleanup;
+    sol_mir_concrete_program_init(&program);
+    sol_mir_runtime_conventions_init(&conventions);
+    sol_mir_runtime_values_init(&values);
+    sol_mir_runtime_cleanup_init(&cleanup);
+    bool compiled = compile_directory(&compilation,
+        SOL_TEST_SOURCE_DIR "/tests/conformance/p33_refined_routes");
+    bool built = compiled && build_refined_route_fixture(&compilation, &program)
+        && sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){
+            &program, NULL}, &conventions, &compilation.diagnostics)
+            == SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED
+        && sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){&conventions,
+            NULL}, &values, &compilation.diagnostics) == SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED
+        && sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){&conventions,
+            &values, NULL}, &cleanup, &compilation.diagnostics)
+            == SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED;
+    if (!built) sol_diagnostics_render_human(stderr, &compilation.package.source,
+        &compilation.diagnostics);
+    CHECK(built);
+    if (!built) goto done;
+    const SolMirMaterialization *m = &program.materialization;
+    const SolMirOperations *operations = &program.operations;
+    size_t checks = 0, unequal_blocks = 0;
+    size_t hostile_event = SOL_MIR_RUNTIME_NONE, hostile_plan = SOL_MIR_RUNTIME_NONE;
+    size_t hostile_site = SOL_MIR_RUNTIME_NONE;
+    SolMirRuntimeCleanupFailureOccurrence pending_code3 = {0};
+    bool have_code3 = false;
+    for (size_t i = 0; i < conventions.failure_site_count; ++i) {
+        const SolMirRuntimeFailureSite *site = &conventions.failure_sites[i];
+        if (site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC
+            && (site->allowed_codes & (UINT32_C(1)
+                << (SOL_MIR_RUNTIME_FAILURE_DIVISION_BY_ZERO - 1))) != 0) {
+            pending_code3 = (SolMirRuntimeCleanupFailureOccurrence){
+                SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31, i,
+                SOL_MIR_RUNTIME_FAILURE_DIVISION_BY_ZERO,
+                SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE, 0, {0}, site->source};
+            have_code3 = true;
+            break;
+        }
+    }
+    for (size_t e = 0; e < cleanup.event_count; ++e) {
+        const SolMirRuntimeCleanupEvent *event = &cleanup.events[e];
+        if (event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+            || event->block >= m->block_count
+            || m->blocks[event->block].terminator.kind != SOL_MIR_TERM_CHECK_REFINED)
+            continue;
+        const SolMirMaterializedTerminator *term = &m->blocks[event->block].terminator;
+        size_t plan_id = SOL_MIR_RUNTIME_NONE, plan_matches = 0;
+        for (size_t i = 0; i < operations->predicate_count; ++i)
+            if (operations->predicates[i].image == event->owner
+                && operations->predicates[i].block == event->block) {
+                plan_id = i; ++plan_matches;
+            }
+        CHECK(plan_matches == 1 && plan_id < operations->predicate_count);
+        if (plan_matches != 1 || plan_id >= operations->predicate_count) continue;
+        const SolMirOperationPredicatePlan *plan = &operations->predicates[plan_id];
+        CHECK(plan->kind == SOL_MIR_OPERATION_PREDICATE_REFINEMENT
+            && plan->context < m->context_count && plan->body < operations->predicate_body_count
+            && plan->representation == term->representation && plan->result == term->result
+            && m->contexts[plan->context].kind == SOL_MIR_PLAN_CONTEXT_REFINEMENT
+            && m->contexts[plan->context].instance == event->owner
+            && m->contexts[plan->context].obligation == term->source_obligation
+            && m->contexts[plan->context].source_block == m->blocks[event->block].source_block
+            && m->contexts[plan->context].definition == term->source_definition);
+        const SolMirPredicateBody *body = &operations->predicate_bodies[plan->body];
+        size_t return_block = SOL_MIR_RUNTIME_NONE, returns = 0;
+        for (size_t i = 0; i < body->blocks.count; ++i) {
+            size_t block = body->blocks.offset + i;
+            if (operations->predicate_blocks[block].terminator.kind
+                    == SOL_MIR_PREDICATE_TERM_RETURN) {
+                return_block = block; ++returns;
+            }
+        }
+        CHECK(returns == 1 && event->inherited_failure_site < conventions.failure_site_count);
+        if (returns != 1 || event->inherited_failure_site >= conventions.failure_site_count)
+            continue;
+        const SolMirRuntimeFailureSite *site
+            = &conventions.failure_sites[event->inherited_failure_site];
+        CHECK(site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT
+            && site->owner == plan->body && site->block == return_block
+            && site->instruction == SOL_MIR_RUNTIME_NONE
+            && site->allowed_codes == (UINT32_C(1)
+                << (SOL_MIR_RUNTIME_FAILURE_REFINEMENT_VIOLATION - 1)));
+        unequal_blocks += event->block != return_block;
+        CHECK(event->transitions.count == 3);
+        if (event->transitions.count != 3) continue;
+        const SolMirRuntimeCleanupTransition *satisfied
+            = &cleanup.transitions[event->transitions.offset];
+        const SolMirRuntimeCleanupTransition *violation = satisfied + 1;
+        const SolMirRuntimeCleanupTransition *failure = satisfied + 2;
+        CHECK(satisfied->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_SATISFIED
+            && satisfied->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL
+            && satisfied->continuation == term->normal_edge
+            && satisfied->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE
+            && satisfied->failure_site == SOL_MIR_RUNTIME_NONE && satisfied->failure_mask == 0);
+        CHECK(violation->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_VIOLATION
+            && violation->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE
+            && violation->continuation == term->failure_edge
+            && violation->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31
+            && violation->failure_site == event->inherited_failure_site
+            && violation->failure_mask == (UINT32_C(1)
+                << (SOL_MIR_RUNTIME_FAILURE_REFINEMENT_VIOLATION - 1)));
+        CHECK(failure->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_FAILURE
+            && failure->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE
+            && failure->continuation == term->failure_edge
+            && failure->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING
+            && failure->failure_site == SOL_MIR_RUNTIME_NONE && failure->failure_mask == 0
+            && failure->source_edge == violation->source_edge
+            && failure->destination == violation->destination
+            && failure->actions.offset == violation->actions.offset
+            && failure->actions.count == violation->actions.count);
+        if (violation->actions.count != 0)
+            CHECK(memcmp(&cleanup.actions[violation->actions.offset],
+                &cleanup.actions[failure->actions.offset],
+                violation->actions.count * sizeof(*cleanup.actions)) == 0);
+        SolMirRuntimeCleanupFailureOccurrence false_code15 = {
+            SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31,
+            event->inherited_failure_site, SOL_MIR_RUNTIME_FAILURE_REFINEMENT_VIOLATION,
+            SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE, 0, {0}, site->source};
+        SolMirRuntimeCleanupTrace trace;
+        CHECK(sol_mir_runtime_cleanup_test_select(&cleanup,
+            &(SolMirRuntimeCleanupTraceRequest){e,
+                SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_VIOLATION, &false_code15, NULL,
+                SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE}, NULL, 0, &trace)
+            && trace.primary.code == SOL_MIR_RUNTIME_FAILURE_REFINEMENT_VIOLATION);
+        if (have_code3) {
+            CHECK(sol_mir_runtime_cleanup_test_select(&cleanup,
+                &(SolMirRuntimeCleanupTraceRequest){e,
+                    SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_FAILURE, NULL, &pending_code3,
+                    SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE}, NULL, 0, &trace)
+                && trace.primary.code == SOL_MIR_RUNTIME_FAILURE_DIVISION_BY_ZERO
+                && trace.primary.site == pending_code3.site);
+            CHECK(!sol_mir_runtime_cleanup_test_select(&cleanup,
+                &(SolMirRuntimeCleanupTraceRequest){e,
+                    SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_VIOLATION, &pending_code3, NULL,
+                    SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE}, NULL, 0, &trace));
+        }
+        if (hostile_event == SOL_MIR_RUNTIME_NONE) {
+            hostile_event = e; hostile_plan = plan_id;
+            hostile_site = event->inherited_failure_site;
+        }
+        ++checks;
+    }
+    CHECK(checks == 5 && unequal_blocks != 0 && have_code3);
+    CHECK(sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+    if (hostile_event != SOL_MIR_RUNTIME_NONE) {
+        SolMirRuntimeCleanupEvent *event = &cleanup.events[hostile_event];
+        SolMirRuntimeCleanupTransition *satisfied
+            = &cleanup.transitions[event->transitions.offset];
+        SolMirRuntimeCleanupTransition *violation = satisfied + 1;
+        SolMirRuntimeCleanupTransition *failure = satisfied + 2;
+#define REJECT_MUTATION(type, object, field, replacement) do { \
+        type saved_ = *(object); \
+        (object)->field = (replacement); \
+        CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL)); \
+        *(object) = saved_; \
+        CHECK(sol_mir_runtime_cleanup_validate(&cleanup, NULL)); \
+    } while (0)
+        REJECT_MUTATION(SolMirRuntimeCleanupEvent, event, inherited_failure_site,
+            SOL_MIR_RUNTIME_NONE);
+        REJECT_MUTATION(SolMirRuntimeCleanupTransition, violation, edge_role,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_FAILURE);
+        REJECT_MUTATION(SolMirRuntimeCleanupTransition, violation, failure_source,
+            SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING);
+        REJECT_MUTATION(SolMirRuntimeCleanupTransition, violation, failure_site,
+            SOL_MIR_RUNTIME_NONE);
+        REJECT_MUTATION(SolMirRuntimeCleanupTransition, violation, failure_mask, 0);
+        REJECT_MUTATION(SolMirRuntimeCleanupTransition, violation, source_edge,
+            satisfied->source_edge);
+        REJECT_MUTATION(SolMirRuntimeCleanupTransition, violation, destination,
+            satisfied->destination);
+        REJECT_MUTATION(SolMirRuntimeCleanupTransition, violation, actions,
+            satisfied->actions);
+        REJECT_MUTATION(SolMirRuntimeCleanupTransition, failure, failure_source,
+            SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31);
+        REJECT_MUTATION(SolMirRuntimeCleanupTransition, failure, failure_site,
+            hostile_site);
+        REJECT_MUTATION(SolMirRuntimeCleanupTransition, failure, failure_mask, UINT32_C(1)
+            << (SOL_MIR_RUNTIME_FAILURE_REFINEMENT_VIOLATION - 1));
+        SolMirRuntimeCleanupTransition saved_violation = *violation;
+        SolMirRuntimeCleanupTransition saved_failure = *failure;
+        *violation = saved_failure; *failure = saved_violation;
+        CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+        *violation = saved_violation; *failure = saved_failure;
+        CHECK(sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+        SolMirRuntimeFailureSite *site = &conventions.failure_sites[hostile_site];
+        REJECT_MUTATION(SolMirRuntimeFailureSite, site, origin_kind,
+            SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_CALL);
+        REJECT_MUTATION(SolMirRuntimeFailureSite, site, owner, site->owner + 1);
+        REJECT_MUTATION(SolMirRuntimeFailureSite, site, block, site->block + 1);
+        REJECT_MUTATION(SolMirRuntimeFailureSite, site, source.start,
+            site->source.start + 1);
+        REJECT_MUTATION(SolMirRuntimeFailureSite, site, allowed_codes,
+            site->allowed_codes | (UINT32_C(1) << (SOL_MIR_RUNTIME_FAILURE_DIVISION_BY_ZERO - 1)));
+        SolMirOperationPredicatePlan *plan
+            = &program.operations.predicates[hostile_plan];
+        REJECT_MUTATION(SolMirOperationPredicatePlan, plan, image, plan->image + 1);
+        REJECT_MUTATION(SolMirOperationPredicatePlan, plan, block, plan->block + 1);
+        REJECT_MUTATION(SolMirOperationPredicatePlan, plan, context, plan->context + 1);
+        REJECT_MUTATION(SolMirOperationPredicatePlan, plan, body, plan->body + 1);
+#undef REJECT_MUTATION
+    }
+done:
+    sol_mir_runtime_cleanup_free(&cleanup); sol_mir_runtime_values_free(&values);
+    sol_mir_runtime_conventions_free(&conventions); sol_mir_concrete_program_free(&program);
+    compilation_free(&compilation);
+}
 static bool build_snapshot_fixture(Compilation *c, SolMirConcreteProgram *p, bool reverse) {
     SolMirProgramRoot roots[32]; size_t count = 0;
     if (reverse) {
@@ -1219,6 +1444,7 @@ static void check_authenticated_contract_suppression(const SolMirRuntimeCleanup 
 }
 
 int main(void) {
+    check_refined_route_fixture();
     check_predicate_propagate_schema();
     check_zero_supplemental_alias_preflight();
     check_snapshot_prerequisite();
@@ -1290,14 +1516,14 @@ int main(void) {
         && values.usage.validation_work == 96028179);
     /* Final P3.3 E6 all-roots cleanup-policy census and exact metering. */
     CHECK(cleanup.event_count == 375 && cleanup.action_count == 684
-        && cleanup.transition_count == 466 && cleanup.supplemental_site_count == 51
+        && cleanup.transition_count == 467 && cleanup.supplemental_site_count == 51
         && cleanup.drop_path_count == 290);
     CHECK(cleanup.usage.events == 375 && cleanup.usage.actions == 684
-        && cleanup.usage.transitions == 466 && cleanup.usage.supplemental_sites == 51
-        && cleanup.usage.drop_paths == 290 && cleanup.usage.owned_bytes == 133584
-        && cleanup.usage.build_scratch_bytes == 246744 && cleanup.usage.build_work == 76668
+        && cleanup.usage.transitions == 467 && cleanup.usage.supplemental_sites == 51
+        && cleanup.usage.drop_paths == 290 && cleanup.usage.owned_bytes == 133680
+        && cleanup.usage.build_scratch_bytes == 246744 && cleanup.usage.build_work == 76773
         && cleanup.usage.validation_scratch_bytes == 246744
-        && cleanup.usage.validation_work == 57607);
+        && cleanup.usage.validation_work == 57677);
     CHECK(sol_mir_runtime_cleanup_validate(&cleanup,NULL));
     size_t event_kinds[4] = {0}, phases[3] = {0}, producers[13] = {0};
     size_t action_kinds[10] = {0}, outcomes[3] = {0}, roles[16] = {0};
@@ -1324,10 +1550,10 @@ int main(void) {
         4, 44, 5, 2};
     const size_t expected_action_kinds[] = {1, 7, 40, 137, 240, 2, 0, 21,
         153, 83};
-    const size_t expected_outcomes[] = {341, 108, 17};
-    const size_t expected_roles[] = {284, 12, 12, 18, 18, 1, 0, 1, 2, 2,
+    const size_t expected_outcomes[] = {341, 109, 17};
+    const size_t expected_roles[] = {284, 12, 12, 18, 18, 1, 1, 1, 2, 2,
         3, 3, 3, 17, 83, 7};
-    const size_t expected_failure_sources[] = {365, 16, 51, 22, 12};
+    const size_t expected_failure_sources[] = {364, 17, 51, 23, 12};
     const size_t expected_drop_liveness[] = {290, 0};
     CHECK(memcmp(event_kinds, expected_event_kinds, sizeof(event_kinds)) == 0
         && memcmp(phases, expected_phases, sizeof(phases)) == 0
