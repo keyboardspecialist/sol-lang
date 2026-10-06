@@ -698,7 +698,7 @@ static bool represented_instruction_kind_supported(SolMirInstructionKind kind) {
         case SOL_MIR_INST_TEMPORARY_INIT: case SOL_MIR_INST_EXPRESSION_RESULT:
         case SOL_MIR_INST_CONSTRUCT: case SOL_MIR_INST_PATTERN_TEST:
         case SOL_MIR_INST_PATTERN_VALUE: case SOL_MIR_INST_MATCH_ARM:
-        case SOL_MIR_INST_FUNCTION_VALUE:
+        case SOL_MIR_INST_FUNCTION_VALUE: case SOL_MIR_INST_CAPTURE_SNAPSHOT:
             return true;
         default: return false;
     }
@@ -755,6 +755,8 @@ static bool represented_instruction(const SolMirConcreteProgram *concrete,
             return instruction->type < concrete->layout.type_count
                 && represented_unbound_function_recipe(concrete,
                     concrete->layout.types[instruction->type].recipe);
+        case SOL_MIR_INST_CAPTURE_SNAPSHOT:
+            return true; /* The exact P2/P3.6 snapshot join is checked per image. */
         default:
             return false;
     }
@@ -813,8 +815,7 @@ static bool represented_owner(const SolWasmRepresentedBuildRequest *request,
         if (!package_relative(request->package_directory, ir->files[i].path, &relative))
             return false;
     }
-    if (owner->host_requirement_count != 0 || owner->handler_frame_count != 0
-        || (owner->predicate_body_count != 0 && owner->import_count != 0))
+    if (owner->host_requirement_count != 0 || owner->handler_frame_count != 0)
         return false;
     for (size_t i = 0; i < owner->import_count; ++i) {
         const SolMirRuntimeLoweredImport *lowered = &owner->imports[i];
@@ -1256,8 +1257,9 @@ typedef struct {
     bool calls_enabled;
     size_t image_id, parameter_count;
     size_t value_base, temporary_base, local_base, predicate_value_base, predicate_result;
-    size_t predicate_value_count, temporary_init_base;
-    size_t local_init_base, local_hole_base, local_hole_count, scratch_base, predicate_pc, pc;
+    size_t predicate_value_count, snapshot_value_base, snapshot_count, staged_return;
+    size_t temporary_init_base, local_init_base, local_hole_base, local_hole_count;
+    size_t snapshot_init_base, scratch_base, predicate_pc, pc;
     const struct RepresentedLiteral *literals;
     size_t literal_count;
     const RepresentedProvenance *provenance;
@@ -1539,6 +1541,14 @@ static size_t local_init_index(const RepresentedFunction *function,
     SolMirMaterializedLocalId local) {
     size_t index = local_index(function, local);
     return index == SIZE_MAX ? SIZE_MAX : function->local_init_base + index - function->local_base;
+}
+
+static size_t snapshot_value_index(const RepresentedFunction *function, size_t slot) {
+    return slot < function->snapshot_count ? function->snapshot_value_base + slot : SIZE_MAX;
+}
+
+static size_t snapshot_init_index(const RepresentedFunction *function, size_t slot) {
+    return slot < function->snapshot_count ? function->snapshot_init_base + slot : SIZE_MAX;
 }
 
 static bool represented_callable_product_local(const RepresentedFunction *function,
@@ -1865,6 +1875,19 @@ static bool represented_predicate_values_for_image(const SolMirConcreteProgram *
     return true;
 }
 
+static bool represented_snapshot_count_for_image(const SolMirConcreteProgram *concrete,
+    size_t image, size_t *count) {
+    size_t total = 0;
+    for (size_t i = 0; i < concrete->operations.snapshot_count; ++i) {
+        const SolMirOperationSnapshotPlan *plan = &concrete->operations.snapshots[i];
+        if (plan->image != image) continue;
+        if (total == SIZE_MAX || plan->slot != total) return false;
+        ++total;
+    }
+    *count = total;
+    return true;
+}
+
 /* Keep the resource census and the emitter on one physical-local layout:
  * params, values, temporaries, P2 locals, their init flags, edge/call scratch,
  * and the dispatch PC.  Entry wrappers have no locals but are counted as
@@ -1975,6 +1998,9 @@ static bool represented_function_local_count(const SolWasmRepresentedBuildReques
             concrete->linkage.callables[callable].instance, &scratch)) return false;
     size_t holes = 0;
     if (!represented_function_callable_hole_count(request, image, &holes)) return false;
+    size_t snapshots = 0;
+    if (!represented_snapshot_count_for_image(concrete,
+            concrete->linkage.callables[callable].instance, &snapshots)) return false;
     size_t total = signature->slots.count;
     return represented_add(total, image->values.count, &total)
         && represented_add(total, image->temporaries.count, &total)
@@ -1984,6 +2010,9 @@ static bool represented_function_local_count(const SolWasmRepresentedBuildReques
         && represented_add(total, image->temporaries.count, &total)
         && represented_add(total, image->locals.count, &total)
         && represented_add(total, holes, &total)
+        && represented_add(total, snapshots, &total)
+        && represented_add(total, snapshots, &total)
+        && represented_add(total, snapshots != 0 ? 1 : 0, &total)
         && represented_add(total, scratch, &total)
         && represented_add(total, predicate_values != 0 ? 2 : 1, &total) && total <= UINT32_MAX
         && ((*count = total), true);
@@ -2050,8 +2079,199 @@ static bool represented_predicate_recipe(const SolMirConcreteProgram *concrete,
     }
 }
 
-/* C1 accepts owned instance callable predicates only.  Requires keep their
- * entry inputs; snapshot-free ALWAYS ensures may additionally read the exact
+/* C2b1 authenticates snapshot identity from source provenance all the way to
+ * the P3.6 instruction row.  In particular, `plan->access == NONE` is the
+ * expected whole-local shape; it is never reinterpreted as a place index. */
+static const SolMirOperationSnapshotPlan *represented_snapshot_for_instruction(
+    const SolWasmRepresentedBuildRequest *request, size_t instruction, size_t *plan_id) {
+    const SolMirRuntimeLoweredProgram *owner = request->program;
+    const SolMirConcreteProgram *concrete = owner->conventions->concrete;
+    const SolMirMaterialization *m = &concrete->materialization;
+    const SolMirOperations *o = &concrete->operations;
+    const SolMirRepresentation *r = &concrete->representation;
+    const SolIr *ir = concrete->program.ir;
+    if (instruction >= m->instruction_count || instruction >= owner->image_instruction_count
+        || m->instructions[instruction].kind != SOL_MIR_INST_CAPTURE_SNAPSHOT) return NULL;
+    const SolMirMaterializedInstruction *item = &m->instructions[instruction];
+    size_t found = SOL_MIR_OPERATION_NONE, matches = 0;
+    for (size_t i = 0; i < o->snapshot_count; ++i)
+        if (o->snapshots[i].instruction == instruction) { found = i; ++matches; }
+    if (matches != 1 || found >= o->snapshot_count || item->source_snapshot >= ir->snapshot_count)
+        return NULL;
+    const SolMirOperationSnapshotPlan *plan = &o->snapshots[found];
+    if (plan->image >= m->image_count || plan->context >= m->context_count
+        || plan->local >= m->local_count || plan->provenance >= o->provenance_count
+        || plan->path.count != 0 || plan->path.offset > o->path_step_count
+        || plan->access != SOL_MIR_OPERATION_NONE || plan->copy_kind != SOL_MIR_COPY_TRIVIAL
+        || plan->recipe >= r->recipe_count || plan->root_recipe != plan->recipe
+        || item->type >= concrete->layout.type_count
+        || concrete->layout.types[item->type].recipe != plan->recipe
+        || item->block >= m->block_count) return NULL;
+    const SolMirRecipe *recipe = &r->recipes[plan->recipe];
+    if ((recipe->kind != SOL_MIR_RECIPE_INT64 && recipe->kind != SOL_MIR_RECIPE_BOOL)
+        || recipe->storage != SOL_MIR_STORAGE_SCALAR || !recipe->is_copy) return NULL;
+    const SolMirMaterializedImage *image = &m->images[plan->image];
+    const SolMirMaterializedLocal *local = &m->locals[plan->local];
+    if (image->instance != plan->image || item->block < image->blocks.offset
+        || item->block - image->blocks.offset >= image->blocks.count
+        || plan->local < image->locals.offset
+        || plan->local - image->locals.offset >= image->locals.count
+        || local->kind != SOL_MIR_MATERIALIZED_LOCAL_PARAMETER
+        || local->source_local >= ir->local_count || ir->locals[local->source_local].kind
+            != SOL_IR_LOCAL_PARAMETER || local->access != ir->locals[local->source_local].access
+        || local->type >= concrete->layout.type_count
+        || concrete->layout.types[local->type].recipe != plan->root_recipe) return NULL;
+    const SolIrSnapshot *snapshot = &ir->snapshots[item->source_snapshot];
+    if (snapshot->id != item->source_snapshot || snapshot->obligation >= ir->obligation_count
+        || snapshot->read >= ir->expression_count || item->source_expression != snapshot->read
+        || snapshot->operand >= ir->expression_count || snapshot->type != ir->locals[
+            local->source_local].type || ir->expressions[snapshot->operand].kind != SOL_IR_EXPR_PLACE
+        || ir->expressions[snapshot->operand].as.place >= ir->place_count) return NULL;
+    const SolIrPlace *place = &ir->places[ir->expressions[snapshot->operand].as.place];
+    const SolIrObligation *obligation = &ir->obligations[snapshot->obligation];
+    if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL || place->local != local->source_local
+        || place->projections.count != 0 || obligation->id != snapshot->obligation
+        || item->source_snapshot < obligation->snapshots.offset
+        || item->source_snapshot - obligation->snapshots.offset >= obligation->snapshots.count)
+        return NULL;
+    const SolMirPlanContext *context = &m->contexts[plan->context];
+    if (context->kind != SOL_MIR_PLAN_CONTEXT_CONTRACT || context->target_kind
+            != SOL_MIR_PLAN_TARGET_INSTANCE || context->instance != plan->image
+        || context->obligation != snapshot->obligation) return NULL;
+    const SolMirOperationProvenance *provenance = &o->provenance[plan->provenance];
+    if (provenance->kind != SOL_MIR_OPERATION_PROVENANCE_SNAPSHOT
+        || provenance->executable != found || provenance->source_expression != snapshot->operand
+        || provenance->source_obligation != snapshot->obligation
+        || provenance->source_snapshot != item->source_snapshot) return NULL;
+
+    size_t typed = 0, overlays = 0;
+    if (plan->image >= m->plan->instance_count) return NULL;
+    const SolMirPlanInstance *instance = &m->plan->instances[plan->image];
+    if (instance->typed_uses.offset > m->plan->typed_use_count
+        || instance->typed_uses.count > m->plan->typed_use_count - instance->typed_uses.offset
+        || image->overlays.offset > m->overlay_count
+        || image->overlays.count > m->overlay_count - image->overlays.offset) return NULL;
+    for (size_t i = 0; i < instance->typed_uses.count; ++i) {
+        const SolMirPlanTypedUse *use = &m->plan->typed_uses[instance->typed_uses.offset + i];
+        if (use->kind == SOL_MIR_PLAN_USE_SNAPSHOT && use->source == item->source_snapshot) {
+            if (use->ordinal != 0 || use->context != plan->context
+                || use->access != SOL_ACCESS_OWNED) return NULL;
+            ++typed;
+        }
+    }
+    for (size_t i = 0; i < image->overlays.count; ++i) {
+        const SolMirMaterializedTypeOverlay *overlay = &m->overlays[image->overlays.offset + i];
+        if (overlay->kind == SOL_MIR_PLAN_USE_SNAPSHOT
+            && overlay->source == item->source_snapshot) {
+            if (overlay->ordinal != 0 || overlay->context != plan->context
+                || overlay->type >= concrete->layout.type_count
+                || concrete->layout.types[overlay->type].recipe != plan->recipe
+                || overlay->access != SOL_ACCESS_OWNED) return NULL;
+            ++overlays;
+        }
+    }
+    if (typed != 1 || overlays != 1) return NULL;
+
+    const SolMirRuntimeLoweredImageInstruction *row = &owner->image_instructions[instruction];
+    if (row->state != SOL_MIR_RUNTIME_LOWERED_PRESENT
+        || row->execution != SOL_MIR_RUNTIME_LOWERED_EXECUTABLE || row->image != plan->image
+        || row->instruction != instruction || row->block != item->block
+        || row->kind != SOL_MIR_INST_CAPTURE_SNAPSHOT
+        || row->runtime_class != SOL_MIR_RUNTIME_LOWERED_CLASS_EXECUTABLE
+        || row->plan_family != SOL_MIR_RUNTIME_LOWERED_PLAN_SNAPSHOT
+        || row->facilities != SOL_MIR_RUNTIME_LOWERED_FACILITY_VALUE
+        || row->plan >= owner->semantic_plan_count
+        || row->cleanup_event != SOL_MIR_RUNTIME_LOWERED_NONE
+        || row->failure_site != SOL_MIR_RUNTIME_NONE) return NULL;
+    const SolMirRuntimeLoweredSemanticPlan *semantic = &owner->semantic_plans[row->plan];
+    if (semantic->state != SOL_MIR_RUNTIME_LOWERED_PRESENT
+        || semantic->arena != SOL_MIR_RUNTIME_LOWERED_SEMANTIC_SNAPSHOT
+        || semantic->runtime_class != SOL_MIR_RUNTIME_LOWERED_CLASS_EXECUTABLE
+        || semantic->plan_family != SOL_MIR_RUNTIME_LOWERED_PLAN_SNAPSHOT
+        || semantic->plan != found || semantic->facilities
+            != (SOL_MIR_RUNTIME_LOWERED_FACILITY_COPY | SOL_MIR_RUNTIME_LOWERED_FACILITY_VALUE)
+        || semantic->producer_kind != SOL_MIR_MATERIALIZED_PRODUCER_INSTRUCTION
+        || semantic->producer != instruction) return NULL;
+    if (plan_id != NULL) *plan_id = found;
+    return plan;
+}
+
+static bool represented_snapshots_preflight(const SolWasmRepresentedBuildRequest *request) {
+    const SolMirConcreteProgram *concrete = request->program->conventions->concrete;
+    const SolMirMaterialization *m = &concrete->materialization;
+    const SolMirOperations *o = &concrete->operations;
+    size_t captures = 0;
+    for (size_t instruction = 0; instruction < m->instruction_count; ++instruction) {
+        if (m->instructions[instruction].kind != SOL_MIR_INST_CAPTURE_SNAPSHOT) continue;
+        size_t plan = SOL_MIR_OPERATION_NONE;
+        if (represented_snapshot_for_instruction(request, instruction, &plan) == NULL) return false;
+        ++captures;
+    }
+    if (captures != o->snapshot_count) return false;
+    for (size_t i = 0; i < o->snapshot_count; ++i) {
+        const SolMirOperationSnapshotPlan *plan = &o->snapshots[i];
+        size_t expected = 0;
+        for (size_t q = 0; q < i; ++q) expected += o->snapshots[q].image == plan->image;
+        if (plan->slot != expected) return false;
+    }
+    return true;
+}
+
+static const SolMirOperationSnapshotPlan *represented_snapshot_for_predicate_input(
+    const SolWasmRepresentedBuildRequest *request, size_t body_id,
+    const SolMirPredicateInput *input, size_t *plan_id) {
+    const SolMirConcreteProgram *concrete = request->program->conventions->concrete;
+    const SolMirMaterialization *m = &concrete->materialization;
+    const SolMirOperations *o = &concrete->operations;
+    const SolIr *ir = concrete->program.ir;
+    if (body_id >= o->predicate_body_count || input == NULL
+        || input->kind != SOL_MIR_PREDICATE_INPUT_SNAPSHOT
+        || input->access != SOL_ACCESS_OWNED) return NULL;
+    const SolMirPredicateBody *body = &o->predicate_bodies[body_id];
+    if (body->owner_kind != SOL_MIR_PREDICATE_OWNER_INSTANCE || body->instance >= m->image_count
+        || body->context >= m->context_count) return NULL;
+    const SolMirPlanContext *context = &m->contexts[body->context];
+    if (context->kind != SOL_MIR_PLAN_CONTEXT_CONTRACT || context->target_kind
+            != SOL_MIR_PLAN_TARGET_INSTANCE || context->instance != body->instance
+        || context->obligation >= ir->obligation_count) return NULL;
+    const SolMirMaterializedImage *image = &m->images[body->instance];
+    size_t base = 0; bool reached = false;
+    for (size_t i = 0; i < image->contexts.count; ++i) {
+        size_t id = image->contexts.offset + i;
+        if (id >= m->context_count) return NULL;
+        if (id == body->context) { reached = true; break; }
+        if (m->contexts[id].kind != SOL_MIR_PLAN_CONTEXT_CONTRACT) continue;
+        size_t prior = m->contexts[id].obligation;
+        if (prior >= ir->obligation_count
+            || ir->obligations[prior].snapshots.count > SIZE_MAX - base) return NULL;
+        base += ir->obligations[prior].snapshots.count;
+    }
+    const SolIrObligation *obligation = &ir->obligations[context->obligation];
+    if (!reached || input->ordinal < base || input->ordinal - base >= obligation->snapshots.count)
+        return NULL;
+    size_t source_snapshot = obligation->snapshots.offset + input->ordinal - base;
+    if (source_snapshot >= ir->snapshot_count || ir->snapshots[source_snapshot].obligation
+            != context->obligation) return NULL;
+    size_t found = SOL_MIR_OPERATION_NONE, matches = 0;
+    for (size_t i = 0; i < o->snapshot_count; ++i) {
+        const SolMirOperationSnapshotPlan *plan = &o->snapshots[i];
+        if (plan->image != body->instance || plan->context != body->context
+            || plan->provenance >= o->provenance_count
+            || o->provenance[plan->provenance].source_snapshot != source_snapshot) continue;
+        found = i; ++matches;
+    }
+    if (matches != 1 || found >= o->snapshot_count) return NULL;
+    const SolMirOperationSnapshotPlan *plan = &o->snapshots[found];
+    size_t authenticated = SOL_MIR_OPERATION_NONE;
+    if (input->recipe != plan->recipe
+        || represented_snapshot_for_instruction(request, plan->instruction, &authenticated) != plan
+        || authenticated != found) return NULL;
+    if (plan_id != NULL) *plan_id = found;
+    return plan;
+}
+
+/* C1/C2b1 accept owned instance callable predicates only. Requires keep their
+ * entry inputs; ALWAYS ensures may additionally read the exact
  * materialized complete result named by their CHECK_CONTRACT plan.  Every
  * emitted predicate row is joined to its P3.6 lowering row here; unsupported
  * predicate features are a closure rejection, never a best-effort omission. */
@@ -2112,7 +2332,7 @@ static bool represented_predicate_body_preflight(const SolWasmRepresentedBuildRe
         || context->obligation >= concrete->program.ir->obligation_count) return false;
     const SolIrObligation *obligation = &concrete->program.ir->obligations[context->obligation];
     if (obligation->kind != body->phase || obligation->outcome != body->outcome
-        || obligation->snapshots.count != 0 || (requires && (obligation->result_available
+        || (requires && (obligation->snapshots.count != 0 || obligation->result_available
             || check->result != SOL_MIR_MATERIALIZED_NONE || plan->result != SOL_MIR_MATERIALIZED_NONE
             || plan->result_recipe != SOL_MIR_RECIPE_NONE)) || (ensures
             && (!obligation->result_available || check->result >= m->value_count
@@ -2163,6 +2383,7 @@ static bool represented_predicate_body_preflight(const SolWasmRepresentedBuildRe
                 || o->predicate_instructions[item->definition].result != value) return false;
         } else return false;
     }
+    size_t snapshot_inputs = 0;
     for (size_t i = 0; i < body->inputs.count; ++i) {
         const SolMirPredicateInput *input = &o->predicate_inputs[body->inputs.offset + i];
         if (input->kind == SOL_MIR_PREDICATE_INPUT_PARAMETER) {
@@ -2176,8 +2397,22 @@ static bool represented_predicate_body_preflight(const SolWasmRepresentedBuildRe
                 || input->recipe != plan->result_recipe || input->recipe >= concrete->representation.recipe_count
                 || (concrete->representation.recipes[input->recipe].kind != SOL_MIR_RECIPE_INT64
                     && concrete->representation.recipes[input->recipe].kind != SOL_MIR_RECIPE_BOOL)) return false;
+        } else if (input->kind == SOL_MIR_PREDICATE_INPUT_SNAPSHOT) {
+            size_t snapshot_plan = SOL_MIR_OPERATION_NONE;
+            if (!ensures || represented_snapshot_for_predicate_input(request, body_id,
+                    input, &snapshot_plan) == NULL || snapshot_plan >= o->snapshot_count)
+                return false;
+            for (size_t q = body->inputs.offset; q < body->inputs.offset + i; ++q) {
+                const SolMirPredicateInput *prior = &o->predicate_inputs[q];
+                size_t prior_plan = SOL_MIR_OPERATION_NONE;
+                if (prior->kind == SOL_MIR_PREDICATE_INPUT_SNAPSHOT
+                    && represented_snapshot_for_predicate_input(request, body_id, prior,
+                        &prior_plan) != NULL && prior_plan == snapshot_plan) return false;
+            }
+            ++snapshot_inputs;
         } else return false;
     }
+    if (snapshot_inputs != obligation->snapshots.count) return false;
     for (size_t b = body->blocks.offset; b < body->blocks.offset + body->blocks.count; ++b) {
         const SolMirPredicateBlock *block = &o->predicate_blocks[b];
         if (block->body != body_id || b >= owner->predicate_block_count || b >= owner->predicate_terminator_count
@@ -2358,6 +2593,96 @@ static bool represented_callable_product_drop_path(const SolWasmRepresentedBuild
         && map->object_offset == concrete->layout.fields[map->field_layout].offset;
 }
 
+static const SolMirRuntimeLoweredCleanupFailure *represented_cleanup_row(
+    const SolMirRuntimeLoweredProgram *owner, SolMirRuntimeLoweredCleanupKind kind,
+    size_t record) {
+    size_t index = record;
+    if (kind == SOL_MIR_RUNTIME_LOWERED_CLEANUP_ACTION) {
+        if (record > SIZE_MAX - owner->cleanup->event_count) return NULL;
+        index = owner->cleanup->event_count + record;
+    } else if (kind == SOL_MIR_RUNTIME_LOWERED_CLEANUP_TRANSITION) {
+        if (owner->cleanup->event_count > SIZE_MAX - owner->cleanup->action_count
+            || record > SIZE_MAX - owner->cleanup->event_count - owner->cleanup->action_count)
+            return NULL;
+        index = owner->cleanup->event_count + owner->cleanup->action_count + record;
+    } else if (kind != SOL_MIR_RUNTIME_LOWERED_CLEANUP_EVENT) return NULL;
+    if (index >= owner->cleanup_failure_count) return NULL;
+    const SolMirRuntimeLoweredCleanupFailure *row = &owner->cleanup_failures[index];
+    return row->state == SOL_MIR_RUNTIME_LOWERED_PRESENT && row->kind == kind
+        && row->record == record ? row : NULL;
+}
+
+static bool represented_cleanup_event_image(const SolWasmRepresentedBuildRequest *request,
+    const SolMirRuntimeCleanupEvent *event, size_t *image) {
+    const SolMirOperations *o = &request->program->conventions->concrete->operations;
+    if (event->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION
+        || event->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR) {
+        *image = event->owner; return true;
+    }
+    if ((event->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION
+            || event->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR)
+        && event->owner < o->predicate_body_count
+        && o->predicate_bodies[event->owner].owner_kind == SOL_MIR_PREDICATE_OWNER_INSTANCE) {
+        *image = o->predicate_bodies[event->owner].instance; return true;
+    }
+    return false;
+}
+
+static bool represented_snapshot_cleanup_action(const SolWasmRepresentedBuildRequest *request,
+    const SolMirRuntimeCleanupAction *action) {
+    const SolMirRuntimeLoweredProgram *owner = request->program;
+    const SolMirRuntimeCleanup *cleanup = owner->cleanup;
+    const SolMirOperations *o = &owner->conventions->concrete->operations;
+    if (action < cleanup->actions || action >= cleanup->actions + cleanup->action_count)
+        return false;
+    size_t action_id = (size_t)(action - cleanup->actions);
+    if (action->flags != 0 || action->drop_path != SOL_MIR_RUNTIME_NONE
+        || action->target >= o->snapshot_count) return false;
+    const SolMirOperationSnapshotPlan *plan = &o->snapshots[action->target];
+    size_t authenticated = SOL_MIR_OPERATION_NONE;
+    if (action->recipe != plan->recipe
+        || represented_snapshot_for_instruction(request, plan->instruction, &authenticated) != plan
+        || authenticated != action->target) return false;
+    const SolMirRuntimeLoweredCleanupFailure *action_row = represented_cleanup_row(owner,
+        SOL_MIR_RUNTIME_LOWERED_CLEANUP_ACTION, action_id);
+    if (action_row == NULL || action_row->action != action_id
+        || action_row->action_kind != SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT
+        || action_row->action_flags != 0 || action_row->target != action->target
+        || action_row->recipe != action->recipe
+        || action_row->drop_path != SOL_MIR_RUNTIME_NONE) return false;
+    size_t matches = 0;
+    for (size_t i = 0; i < cleanup->transition_count; ++i) {
+        const SolMirRuntimeCleanupTransition *transition = &cleanup->transitions[i];
+        if (transition->actions.offset > cleanup->action_count
+            || transition->actions.count > cleanup->action_count - transition->actions.offset
+            || action_id < transition->actions.offset
+            || action_id - transition->actions.offset >= transition->actions.count) continue;
+        if (transition->event >= cleanup->event_count) return false;
+        const SolMirRuntimeCleanupEvent *event = &cleanup->events[transition->event];
+        size_t image = SOL_MIR_RUNTIME_NONE;
+        if (!represented_cleanup_event_image(request, event, &image) || image != plan->image
+            || event->actions.offset > cleanup->action_count
+            || event->actions.count > cleanup->action_count - event->actions.offset
+            || action_id < event->actions.offset
+            || action_id - event->actions.offset >= event->actions.count) return false;
+        const SolMirRuntimeLoweredCleanupFailure *event_row = represented_cleanup_row(owner,
+            SOL_MIR_RUNTIME_LOWERED_CLEANUP_EVENT, transition->event);
+        const SolMirRuntimeLoweredCleanupFailure *transition_row = represented_cleanup_row(owner,
+            SOL_MIR_RUNTIME_LOWERED_CLEANUP_TRANSITION, i);
+        if (event_row == NULL || event_row->event != transition->event
+            || event_row->actions.offset != event->actions.offset
+            || event_row->actions.count != event->actions.count
+            || event_row->transitions.offset != event->transitions.offset
+            || event_row->transitions.count != event->transitions.count
+            || transition_row == NULL || transition_row->transition != i
+            || transition_row->event != transition->event
+            || transition_row->actions.offset != transition->actions.offset
+            || transition_row->actions.count != transition->actions.count) return false;
+        ++matches;
+    }
+    return matches == 1;
+}
+
 static bool represented_cleanup_action(const SolWasmRepresentedBuildRequest *request,
     const SolMirRuntimeCleanupAction *action) {
     const SolMirConcreteProgram *concrete = request->program->conventions->concrete;
@@ -2387,6 +2712,8 @@ static bool represented_cleanup_action(const SolWasmRepresentedBuildRequest *req
             return action->target < concrete->materialization.local_count
                 && represented_recipe(concrete,
                     concrete->materialization.locals[action->target].type, false);
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT:
+            return represented_snapshot_cleanup_action(request, action);
         case SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_SCOPE:
         case SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_REGION:
         case SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE:
@@ -2633,6 +2960,81 @@ static const SolMirRuntimeCleanupTransition *represented_control_transition(
         selected = candidate;
     }
     return action_at == event->actions.offset ? selected : NULL;
+}
+
+/* Snapshot-owning returns are the sole normal image-control form with actions
+ * in C2b1.  Select that EXIT/RETURN transition directly and require the exact
+ * reverse owner-plan sequence; the generic zero-action selector stays intact. */
+static const SolMirRuntimeCleanupTransition *represented_snapshot_return_transition(
+    const SolWasmRepresentedBuildRequest *request, const SolMirMaterializedImage *image,
+    size_t image_id, size_t block) {
+    const SolMirRuntimeLoweredProgram *owner = request->program;
+    const SolMirRuntimeCleanup *cleanup = owner->cleanup;
+    const SolMirConcreteProgram *concrete = owner->conventions->concrete;
+    const SolMirMaterialization *m = &concrete->materialization;
+    const SolMirOperations *operations = &concrete->operations;
+    size_t snapshots = 0;
+    if (image == NULL || block >= m->block_count || block >= owner->image_terminator_count
+        || m->blocks[block].terminator.kind != SOL_MIR_TERM_RETURN
+        || !represented_snapshot_count_for_image(concrete, image_id, &snapshots)
+        || snapshots == 0) return NULL;
+    const SolMirRuntimeLoweredImageTerminator *row = &owner->image_terminators[block];
+    if (row->state != SOL_MIR_RUNTIME_LOWERED_PRESENT || row->image != image_id
+        || row->block != block || row->kind != SOL_MIR_TERM_RETURN
+        || row->cleanup_event >= cleanup->event_count) return NULL;
+    const SolMirRuntimeCleanupEvent *event = &cleanup->events[row->cleanup_event];
+    if (event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+        || event->phase != SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+        || event->origin != SOL_MIR_RUNTIME_CLEANUP_ORIGIN_EXPLICIT
+        || event->owner != image_id || event->block != block
+        || event->operation != SOL_MIR_RUNTIME_NONE || event->semantic_site != SOL_MIR_RUNTIME_NONE
+        || event->inherited_failure_site != SOL_MIR_RUNTIME_NONE
+        || event->supplemental_site != SOL_MIR_RUNTIME_NONE
+        || event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL
+        || event->captures_failure_detail
+        || event->capture_detail_kind != SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE
+        || event->transitions.count != 1 || event->transitions.offset >= cleanup->transition_count
+        || event->actions.offset > cleanup->action_count
+        || event->actions.count != snapshots
+        || event->actions.count > cleanup->action_count - event->actions.offset) return NULL;
+    const SolMirRuntimeCleanupTransition *transition = &cleanup->transitions[
+        event->transitions.offset];
+    if (transition->event != row->cleanup_event
+        || transition->outcome != SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT
+        || transition->edge_role != SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN
+        || transition->continuation != SOL_MIR_RUNTIME_NONE
+        || transition->source_edge != SOL_MIR_RUNTIME_NONE
+        || transition->destination != SOL_MIR_RUNTIME_NONE || !transition->primary_failure_wins
+        || transition->failure_source != SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE
+        || transition->failure_site != SOL_MIR_RUNTIME_NONE || transition->failure_mask != 0
+        || transition->actions.offset != event->actions.offset
+        || transition->actions.count != event->actions.count) return NULL;
+    size_t ordinal = snapshots;
+    for (size_t i = operations->snapshot_count; i; --i) {
+        size_t plan_id = i - 1;
+        if (operations->snapshots[plan_id].image != image_id) continue;
+        if (ordinal == 0) return NULL;
+        const SolMirRuntimeCleanupAction *action = &cleanup->actions[
+            transition->actions.offset + snapshots - ordinal];
+        if (action->kind != SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT
+            || action->target != plan_id || action->recipe != operations->snapshots[plan_id].recipe
+            || !represented_snapshot_cleanup_action(request, action)) return NULL;
+        --ordinal;
+    }
+    if (ordinal != 0) return NULL;
+    const SolMirRuntimeLoweredCleanupFailure *event_row = represented_cleanup_row(owner,
+        SOL_MIR_RUNTIME_LOWERED_CLEANUP_EVENT, row->cleanup_event);
+    const SolMirRuntimeLoweredCleanupFailure *transition_row = represented_cleanup_row(owner,
+        SOL_MIR_RUNTIME_LOWERED_CLEANUP_TRANSITION, event->transitions.offset);
+    return event_row != NULL && event_row->event == row->cleanup_event
+        && event_row->actions.offset == event->actions.offset
+        && event_row->actions.count == event->actions.count
+        && transition_row != NULL && transition_row->transition == event->transitions.offset
+        && transition_row->event == row->cleanup_event
+        && transition_row->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN
+        && transition_row->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT
+        && transition_row->actions.offset == transition->actions.offset
+        && transition_row->actions.count == transition->actions.count ? transition : NULL;
 }
 
 static bool represented_same_projection(const SolMirMaterialization *m, size_t left,
@@ -2945,9 +3347,29 @@ static bool represented_callable_product_whole_transfer(const SolWasmRepresented
 
 static bool represented_cleanup(const SolWasmRepresentedBuildRequest *request) {
     const SolMirRuntimeCleanup *cleanup = request->program->cleanup;
+    const SolMirOperations *operations = &request->program->conventions->concrete->operations;
     for (size_t i = 0; i < cleanup->action_count; ++i) {
         const SolMirRuntimeCleanupAction *action = &cleanup->actions[i];
         if (!represented_cleanup_action(request, action)) return false;
+    }
+    for (size_t i = 0; i < cleanup->transition_count; ++i) {
+        const SolMirRuntimeCleanupTransition *transition = &cleanup->transitions[i];
+        if (transition->event >= cleanup->event_count
+            || transition->actions.offset > cleanup->action_count
+            || transition->actions.count > cleanup->action_count - transition->actions.offset)
+            return false;
+        size_t image = SOL_MIR_RUNTIME_NONE, prior_slot = SIZE_MAX;
+        if (!represented_cleanup_event_image(request, &cleanup->events[transition->event], &image))
+            continue;
+        for (size_t q = 0; q < transition->actions.count; ++q) {
+            const SolMirRuntimeCleanupAction *action = &cleanup->actions[
+                transition->actions.offset + q];
+            if (action->kind != SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT) continue;
+            if (action->target >= operations->snapshot_count
+                || operations->snapshots[action->target].image != image
+                || operations->snapshots[action->target].slot >= prior_slot) return false;
+            prior_slot = operations->snapshots[action->target].slot;
+        }
     }
     return true;
 }
@@ -4647,6 +5069,15 @@ static bool represented_function_preflight(const SolWasmRepresentedBuildRequest 
                     if (!represented_function_value_route(request, instruction, NULL, NULL, NULL))
                         return false;
                     break;
+                case SOL_MIR_INST_CAPTURE_SNAPSHOT: {
+                    const SolMirOperationSnapshotPlan *snapshot = represented_snapshot_for_instruction(
+                        request, instruction, NULL);
+                    if (snapshot == NULL || snapshot->image != linkage->instance
+                        || snapshot->local < image->locals.offset
+                        || snapshot->local - image->locals.offset >= image->locals.count)
+                        return false;
+                    break;
+                }
                 case SOL_MIR_INST_LOAD_COPY: case SOL_MIR_INST_LOAD_MOVE:
                 case SOL_MIR_INST_LOAD_UPDATE: case SOL_MIR_INST_STORE:
                 case SOL_MIR_INST_COMPOUND_UPDATE:
@@ -4799,10 +5230,15 @@ static bool represented_function_preflight(const SolWasmRepresentedBuildRequest 
             case SOL_MIR_TERM_RETURN:
                 if (signature->result_class != SOL_MIR_RUNTIME_RESULT_UNIT
                     && !image_value(concrete, image, term->value)) return false;
-                if (represented_control_transition(request, image, linkage->instance, block_id,
-                        SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN,
-                        SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT, SOL_MIR_RUNTIME_NONE, 1) == NULL)
-                    return false;
+                {
+                    size_t snapshots = 0;
+                    if (!represented_snapshot_count_for_image(concrete, linkage->instance, &snapshots)
+                        || (snapshots == 0 ? represented_control_transition(request, image,
+                                linkage->instance, block_id, SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN,
+                                SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT, SOL_MIR_RUNTIME_NONE, 1)
+                            : represented_snapshot_return_transition(request, image,
+                                linkage->instance, block_id)) == NULL) return false;
+                }
                 break;
             case SOL_MIR_TERM_INVOKE:
                 break;
@@ -6108,6 +6544,14 @@ static BinaryenExpressionRef represented_predicate_get(const RepresentedFunction
     const SolMirPredicateInput *input = &o->predicate_inputs[item->definition];
     if (input->kind == SOL_MIR_PREDICATE_INPUT_PARAMETER && input->ordinal < function->parameter_count)
         return BinaryenLocalGet(function->module, (BinaryenIndex)input->ordinal, BinaryenTypeInt64());
+    if (input->kind == SOL_MIR_PREDICATE_INPUT_SNAPSHOT) {
+        const SolMirOperationSnapshotPlan *snapshot = represented_snapshot_for_predicate_input(
+            function->request, body_id, input, NULL);
+        size_t index = snapshot == NULL ? SIZE_MAX
+            : snapshot_value_index(function, snapshot->slot);
+        return index == SIZE_MAX ? NULL : BinaryenLocalGet(function->module,
+            (BinaryenIndex)index, BinaryenTypeInt64());
+    }
     if (input->kind != SOL_MIR_PREDICATE_INPUT_COMPLETE_RESULT) return NULL;
     const SolMirOperationPredicatePlan *plan = NULL;
     for (size_t i = 0; i < o->predicate_count; ++i) {
@@ -6529,6 +6973,21 @@ static bool represented_cleanup_emit(const RepresentedFunction *function,
             break;
         case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PARAMETER:
             init = local_init_index(function, action->target); break;
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT: {
+            const SolMirOperations *operations = &concrete->operations;
+            if (action->target >= operations->snapshot_count
+                || !represented_snapshot_cleanup_action(function->request, action)) return false;
+            const SolMirOperationSnapshotPlan *snapshot = &operations->snapshots[action->target];
+            init = snapshot->image == function->image_id
+                ? snapshot_init_index(function, snapshot->slot) : SIZE_MAX;
+            if (init == SIZE_MAX) return false;
+            BinaryenExpressionRef clear = BinaryenLocalSet(function->module,
+                (BinaryenIndex)init, BinaryenConst(function->module, BinaryenLiteralInt32(0)));
+            BinaryenExpressionRef missing = BinaryenReturn(function->module, i64(function, 0));
+            return clear != NULL && missing != NULL && represented_nodes_push(nodes,
+                BinaryenIf(function->module, BinaryenLocalGet(function->module,
+                    (BinaryenIndex)init, BinaryenTypeInt32()), clear, missing));
+        }
         case SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_SCOPE:
         case SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_REGION:
         case SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE:
@@ -6563,6 +7022,14 @@ static size_t represented_cleanup_action_init_index(const RepresentedFunction *f
             return temporary_init_index(function, action->target);
         case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PARAMETER:
             return local_init_index(function, action->target);
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT: {
+            const SolMirOperations *operations = &function->request->program->conventions
+                ->concrete->operations;
+            return action->target < operations->snapshot_count
+                && operations->snapshots[action->target].image == function->image_id
+                ? snapshot_init_index(function, operations->snapshots[action->target].slot)
+                : SIZE_MAX;
+        }
         case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE:
             return action->target < m->place_count
                 ? local_init_index(function, m->places[action->target].local) : SIZE_MAX;
@@ -7464,8 +7931,22 @@ static bool represented_instruction_emit(const RepresentedFunction *function, si
         }
         case SOL_MIR_INST_REGION_ENTER:
         case SOL_MIR_INST_SCOPE_ENTER:
-        case SOL_MIR_INST_CAPTURE_SNAPSHOT:
             return true;
+        case SOL_MIR_INST_CAPTURE_SNAPSHOT: {
+            const SolMirOperationSnapshotPlan *snapshot = represented_snapshot_for_instruction(
+                function->request, instruction, NULL);
+            local = snapshot == NULL ? SIZE_MAX : local_index(function, snapshot->local);
+            size_t slot = snapshot == NULL ? SIZE_MAX
+                : snapshot_value_index(function, snapshot->slot);
+            init = snapshot == NULL ? SIZE_MAX : snapshot_init_index(function, snapshot->slot);
+            return local != SIZE_MAX && slot != SIZE_MAX && init != SIZE_MAX
+                && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
+                    (BinaryenIndex)slot, BinaryenLocalGet(function->module,
+                        (BinaryenIndex)local, BinaryenTypeInt64())))
+                && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
+                    (BinaryenIndex)init, BinaryenConst(function->module,
+                        BinaryenLiteralInt32(1))));
+        }
         default:
             return false;
     }
@@ -7961,12 +8442,26 @@ static bool represented_terminator_emit(const RepresentedFunction *function, siz
             BinaryenExpressionRef value = function->signature->result_class == SOL_MIR_RUNTIME_RESULT_UNIT
                 ? represented_return_value(function)
                 : get_value(function, term->value);
-            const SolMirRuntimeCleanupTransition *transition = represented_control_transition(
-                function->request, function->image, function->image_id, block,
-                SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN, SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT,
-                SOL_MIR_RUNTIME_NONE, 1);
-            if (value == NULL || transition == NULL) return false;
-            return represented_nodes_push(nodes, BinaryenReturn(function->module, value));
+            if (function->snapshot_count == 0) {
+                const SolMirRuntimeCleanupTransition *transition = represented_control_transition(
+                    function->request, function->image, function->image_id, block,
+                    SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN, SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT,
+                    SOL_MIR_RUNTIME_NONE, 1);
+                if (value == NULL || transition == NULL) return false;
+                return represented_nodes_push(nodes, BinaryenReturn(function->module, value));
+            }
+            const SolMirRuntimeCleanupTransition *transition =
+                represented_snapshot_return_transition(function->request, function->image,
+                    function->image_id, block);
+            if (value == NULL || transition == NULL || function->staged_return == SIZE_MAX
+                || !represented_nodes_push(nodes, BinaryenLocalSet(function->module,
+                    (BinaryenIndex)function->staged_return, value))) return false;
+            const SolMirRuntimeCleanupEvent *event = &function->request->program->cleanup->events[
+                transition->event];
+            return represented_cleanup_actions_emit_traced(function, event, transition, nodes)
+                && represented_nodes_push(nodes, BinaryenReturn(function->module,
+                    BinaryenLocalGet(function->module, (BinaryenIndex)function->staged_return,
+                        BinaryenTypeInt64())));
         }
         case SOL_MIR_TERM_INVOKE:
             return function->calls_enabled && represented_call_emit(function, block, nodes);
@@ -8018,6 +8513,9 @@ static bool represented_function_emit(const SolWasmRepresentedBuildRequest *requ
     size_t scratch_count = 0;
     if (!represented_function_scratch_count(request, image,
             concrete->linkage.callables[callable].instance, &scratch_count)) return false;
+    size_t snapshot_count = 0;
+    if (!represented_snapshot_count_for_image(concrete,
+            concrete->linkage.callables[callable].instance, &snapshot_count)) return false;
     size_t physical = 0;
     if (!represented_function_local_count(request, callable, signature, &physical)
         || physical < signature->slots.count) return false;
@@ -8030,7 +8528,8 @@ static bool represented_function_emit(const SolWasmRepresentedBuildRequest *requ
     }
     size_t n = 0;
     for (; n < image->values.count + image->temporaries.count + image->locals.count
-        + predicate_values + (predicate_values != 0 ? 1 : 0) + scratch_count; ++n)
+        + predicate_values + (predicate_values != 0 ? 1 : 0) + scratch_count
+        + snapshot_count + (snapshot_count != 0 ? 1 : 0); ++n)
         types[n] = BinaryenTypeInt64();
     for (; n < variables; ++n) types[n] = BinaryenTypeInt32();
     for (size_t i = 0; i < signature->slots.count; ++i) parameters[i] = BinaryenTypeInt64();
@@ -8048,15 +8547,21 @@ static bool represented_function_emit(const SolWasmRepresentedBuildRequest *requ
         .predicate_result = signature->slots.count + image->values.count + image->temporaries.count
             + image->locals.count + predicate_values,
         .predicate_value_count = predicate_values,
+        .snapshot_count = snapshot_count,
+        .staged_return = SIZE_MAX,
     };
     if (!represented_function_callable_hole_count(request, image, &function.local_hole_count)) {
         deallocate(types); deallocate(parameters); return false;
     }
     function.scratch_base = function.predicate_result + (predicate_values != 0 ? 1 : 0);
-    function.temporary_init_base = function.scratch_base + scratch_count;
+    function.snapshot_value_base = function.scratch_base + scratch_count;
+    if (snapshot_count != 0) function.staged_return = function.snapshot_value_base + snapshot_count;
+    function.temporary_init_base = snapshot_count == 0 ? function.scratch_base + scratch_count
+        : function.staged_return + 1;
     function.local_init_base = function.temporary_init_base + image->temporaries.count;
     function.local_hole_base = function.local_init_base + image->locals.count;
-    function.predicate_pc = function.local_hole_base + function.local_hole_count;
+    function.snapshot_init_base = function.local_hole_base + function.local_hole_count;
+    function.predicate_pc = function.snapshot_init_base + snapshot_count;
     function.pc = function.predicate_pc + (predicate_values != 0 ? 1 : 0);
     RepresentedNodes body = {0}, dispatch = {0};
     bool ok = image->entry >= image->blocks.offset
@@ -8954,6 +9459,10 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     if (!represented_usage_census(request, &usage)) {
         diagnostic(diagnostics, "P4.3 represented resource census overflowed or was inconsistent");
         return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
+    }
+    if (!represented_snapshots_preflight(request)) {
+        diagnostic(diagnostics, "P4.4 C2b1 rejected an unauthenticated snapshot closure");
+        return SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE;
     }
     if (!represented_cleanup(request)) {
         diagnostic(diagnostics, "P4.3 Slice 1 rejected non-represented cleanup");

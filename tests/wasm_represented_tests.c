@@ -5455,7 +5455,12 @@ static bool p44c_ensures_acceptance_matrix(void) {
             .start=96, .end=124,
             .symbol="sol.i1.9d28b8780423ec731e45f1c21a8c9ca6.1530f3a1a9b6d0b17818a66bd4bf73dc82705fce59494c2bb753832f6242d036"},
         {.leaf="p44c_ensures_constant_unit", .build_result=SOL_WASM_REPRESENTED_OK},
-        {.leaf="p44c_ensures_old_reject", .build_result=SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE},
+        {.leaf="p44c_ensures_old_reject", .value=43, .build_result=SOL_WASM_REPRESENTED_OK},
+        {.leaf="p44c_ensures_old_bool", .value=1, .build_result=SOL_WASM_REPRESENTED_OK},
+        {.leaf="p44c_ensures_old_two", .value=42, .build_result=SOL_WASM_REPRESENTED_OK},
+        {.leaf="p44c_ensures_old_repeat", .value=42, .build_result=SOL_WASM_REPRESENTED_OK},
+        {.leaf="p44c_ensures_old_requires", .value=42, .build_result=SOL_WASM_REPRESENTED_OK},
+        {.leaf="p44c_ensures_old_many", .value=42, .build_result=SOL_WASM_REPRESENTED_OK},
         {.leaf="p44c_ensures_result_reject", .build_result=SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE},
         {.leaf="p44c_ensures_text_reject", .build_result=SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE},
         {.leaf="p44c_ensures_import_reject", .build_result=SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE,
@@ -5504,6 +5509,48 @@ static bool c2a_run_trace_case(const C2aTraceCase *test) {
         && wasm_instance_trace(&instance, actual, sizeof actual / sizeof *actual, &count, &overflow)
         && c1_trace_matches(&pipeline, test->slots, test->slot_count, (uint32_t)test->record,
             actual, count, overflow);
+    bool check_origin = strcmp(test->leaf, "p44c_ensures_old_false") == 0
+        || strcmp(test->leaf, "p44c_ensures_old_predicate_failure") == 0
+        || strcmp(test->leaf, "p44c_ensures_old_body_failure") == 0
+        || strcmp(test->leaf, "p44c_ensures_old_panic") == 0;
+    SolMirRuntimeFailureOriginKind origin = strcmp(test->leaf,
+            "p44c_ensures_old_false") == 0 ? SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT
+        : strcmp(test->leaf, "p44c_ensures_old_predicate_failure") == 0
+        ? SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC
+        : strcmp(test->leaf, "p44c_ensures_old_panic") == 0
+        ? SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_PANIC
+        : SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_ARITHMETIC;
+    if (ok && check_origin) {
+        ProvenanceRecord record; size_t matches = 0, matched_site = SOL_MIR_RUNTIME_NONE;
+        ok = test->code > 0 && test->record > 0
+            && provenance_record(&output.bytes, (uint32_t)test->record, &record)
+            && record.tag == 3 && record.kind == (uint8_t)origin
+            && bytes_equal(record.path, record.path_count, "main.sol");
+        for (size_t i = 0; ok && i < pipeline.conventions.failure_site_count; ++i) {
+            const SolMirRuntimeFailureSite *candidate = &pipeline.conventions.failure_sites[i];
+            if (candidate->origin_kind == origin && candidate->source.file == 0
+                && candidate->source.start == record.start && candidate->source.end == record.end
+                && (candidate->allowed_codes & (UINT32_C(1) << ((unsigned)test->code - 1u))) != 0)
+                { ++matches; matched_site = i; }
+        }
+        ok = ok && matches == 1;
+        if (ok && origin == SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_PANIC) {
+            size_t events = 0, drops = 0;
+            for (size_t i = 0; i < pipeline.cleanup.event_count; ++i) {
+                const SolMirRuntimeCleanupEvent *event = &pipeline.cleanup.events[i];
+                if (event->inherited_failure_site == matched_site
+                    && event->producer == SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_PANIC
+                    && event->captures_failure_detail
+                    && event->capture_detail_kind == SOL_MIR_RUNTIME_FAILURE_DETAIL_PANIC_TEXT)
+                    ++events;
+            }
+            for (size_t i = 0; i < test->slot_count; ++i)
+                if (test->slots[i].action < pipeline.cleanup.action_count
+                    && pipeline.cleanup.actions[test->slots[i].action].kind
+                        == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT) ++drops;
+            ok = events == 1 && drops == 1;
+        }
+    }
     wasm_instance_close(&instance); sol_wasm_represented_output_free(&output);
     sol_wasm_represented_test_p44_cleanup_trace_probe(false); propagation_pipeline_free(&pipeline);
     return ok;
@@ -5550,6 +5597,562 @@ static bool p44c_exact_ensures_traces(void) {
         ok = c2a_run_trace_case(&cases[i]);
     return ok && c1_trace_excludes(success, sizeof success / sizeof *success,
         violation + 1, 1) && c1_trace_excludes(ordered_violation, 2, predicate_failure + 1, 1);
+}
+
+static bool p44c_old_exact_traces(void) {
+    static const P44TraceSlot unlike[] = {
+        {5,1,0}, {6,257,0}, {8,1,0}, {9,1,0}, {10,1,0}, {22,1,0}, {23,1,0},
+    };
+    static const P44TraceSlot bool_old[] = {
+        {0,1,0}, {1,257,0}, {3,1,0}, {4,1,0}, {5,1,0}, {17,1,0}, {18,1,0}, {19,1,0},
+    };
+    static const P44TraceSlot two[] = {
+        {7,1,0}, {8,257,0}, {10,1,0}, {11,1,0}, {12,1,0}, {13,1,0}, {14,1,0},
+        {30,1,0}, {31,1,0},
+    };
+    static const P44TraceSlot repeated[] = {
+        {0,1,0}, {1,257,0}, {3,1,0}, {4,1,0}, {5,1,0}, {6,1,0}, {7,1,0},
+        {23,1,0}, {24,1,0},
+    };
+    static const P44TraceSlot requires[] = {
+        {0,257,0}, {9,1,0}, {2,257,0}, {16,1,0}, {17,1,0}, {18,1,0}, {30,1,0}, {31,1,0},
+    };
+    static const P44TraceSlot violation[] = {
+        {5,1,0}, {7,5,4}, {11,1,0}, {12,1,0}, {13,5,4}, {14,517,4},
+        {19,1,0}, {20,1,0}, {21,533,4},
+    };
+    static const P44TraceSlot predicate_failure[] = {
+        {0,1,0}, {10,1,0}, {11,1,0}, {12,21,5}, {13,533,5}, {14,1,0}, {15,1,0}, {16,533,5},
+    };
+    static const P44TraceSlot body_failure[] = {
+        {0,13,5}, {1,13,5}, {2,13,5}, {3,13,5}, {4,525,5}, {19,1,0}, {20,1,0}, {21,533,5},
+    };
+    static const P44TraceSlot panic_failure[] = {
+        {3,1,0}, {4,1,0}, {5,517,5}, {8,1,0}, {9,1,0}, {10,21,5}, {11,533,5},
+        {21,1,0}, {22,1,0}, {23,533,5},
+    };
+    static const C2aTraceCase cases[] = {
+        {"p44c_ensures_old_reject", 43, 0, 0, unlike, sizeof unlike / sizeof *unlike},
+        {"p44c_ensures_old_bool", 1, 0, 0, bool_old, sizeof bool_old / sizeof *bool_old},
+        {"p44c_ensures_old_two", 42, 0, 0, two, sizeof two / sizeof *two},
+        {"p44c_ensures_old_repeat", 42, 0, 0, repeated, sizeof repeated / sizeof *repeated},
+        {"p44c_ensures_old_requires", 42, 0, 0, requires, sizeof requires / sizeof *requires},
+        {"p44c_ensures_old_false", 0, 14, 4, violation, sizeof violation / sizeof *violation},
+        {"p44c_ensures_old_predicate_failure", 0, 3, 5, predicate_failure,
+            sizeof predicate_failure / sizeof *predicate_failure},
+        {"p44c_ensures_old_body_failure", 0, 3, 5, body_failure,
+            sizeof body_failure / sizeof *body_failure},
+        {"p44c_ensures_old_panic", 0, 1, 5, panic_failure,
+            sizeof panic_failure / sizeof *panic_failure},
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i)
+        if (!c2a_run_trace_case(&cases[i])) return false;
+    return true;
+}
+
+static bool c2a_rebuilt_identity(const char *directory,
+    const SolWasmRepresentedOutput *baseline, const uint8_t expected_hash[32]);
+
+typedef struct {
+    size_t source_snapshot[2], snapshot_expression[2];
+} C2b1SnapshotIdentityPair;
+
+/* Locate the equal-recipe source pair. The mutation itself is confined to the
+ * owning IR; public builders reconstruct every downstream authoritative row. */
+static bool c2b1_equal_snapshot_pair(PropagationPipeline *pipeline,
+    C2b1SnapshotIdentityPair *pair) {
+    SolMirMaterialization *m = &pipeline->concrete.materialization;
+    SolMirOperations *operations = &pipeline->concrete.operations;
+    if (pair == NULL || operations->snapshot_count != 2
+        || operations->snapshots[0].image != operations->snapshots[1].image
+        || operations->snapshots[0].context != operations->snapshots[1].context
+        || operations->snapshots[0].recipe != operations->snapshots[1].recipe
+        || operations->snapshots[0].slot != 0 || operations->snapshots[1].slot != 1)
+        return false;
+    size_t instruction[2] = {operations->snapshots[0].instruction,
+        operations->snapshots[1].instruction};
+    *pair = (C2b1SnapshotIdentityPair){
+        .source_snapshot = {SOL_MIR_RUNTIME_NONE, SOL_MIR_RUNTIME_NONE},
+        .snapshot_expression = {SOL_MIR_RUNTIME_NONE, SOL_MIR_RUNTIME_NONE},
+    };
+    if (instruction[0] >= m->instruction_count || instruction[1] >= m->instruction_count) return false;
+    for (size_t side = 0; side < 2; ++side) {
+        size_t source = m->instructions[instruction[side]].source_snapshot;
+        size_t expression_matches = 0;
+        pair->source_snapshot[side] = source;
+        for (size_t i = 0; i < pipeline->ir.expression_count; ++i)
+            if (pipeline->ir.expressions[i].kind == SOL_IR_EXPR_SNAPSHOT_READ
+                && pipeline->ir.expressions[i].as.snapshot == source) {
+                pair->snapshot_expression[side] = i; ++expression_matches;
+            }
+        if (source >= pipeline->ir.snapshot_count || expression_matches != 1) return false;
+    }
+    return true;
+}
+
+#define C2B1_SWAP(type, left, right) do { type temporary = (left); (left) = (right); \
+    (right) = temporary; } while (0)
+
+/* Involution: exchange the operands and read expressions of two same-type
+ * snapshots, and exchange the predicate references so source semantics remain
+ * unchanged. A rebuild then maps the logical identities to opposite slots. */
+static void c2b1_swap_equal_snapshot_identities(PropagationPipeline *pipeline,
+    const C2b1SnapshotIdentityPair *pair) {
+    SolIr *ir = &pipeline->ir;
+    SolIrSnapshot *left_snapshot = &ir->snapshots[pair->source_snapshot[0]];
+    SolIrSnapshot *right_snapshot = &ir->snapshots[pair->source_snapshot[1]];
+    C2B1_SWAP(SolIrExpressionId, left_snapshot->read, right_snapshot->read);
+    C2B1_SWAP(SolIrExpressionId, left_snapshot->operand, right_snapshot->operand);
+    C2B1_SWAP(SolIrSnapshotId,
+        ir->expressions[pair->snapshot_expression[0]].as.snapshot,
+        ir->expressions[pair->snapshot_expression[1]].as.snapshot);
+}
+
+#undef C2B1_SWAP
+
+static bool c2b1_predecessors_valid(const PropagationPipeline *pipeline) {
+    return sol_ir_validate(&pipeline->ir, NULL)
+        && sol_mir_concrete_program_validate(&pipeline->concrete, NULL)
+        && sol_mir_runtime_conventions_validate(&pipeline->conventions, NULL)
+        && sol_mir_runtime_values_validate(&pipeline->values, NULL)
+        && sol_mir_runtime_cleanup_validate(&pipeline->cleanup, NULL)
+        && sol_mir_runtime_host_abi_validate(&pipeline->host, NULL)
+        && sol_mir_runtime_handler_abi_validate(&pipeline->handler, NULL);
+}
+
+/* Rebuild P1b through P3.6 from the currently owned IR. This is deliberately
+ * the public builder path, not hand-sealing malformed predecessor rows. */
+static bool c2b1_rebuild_snapshot_downstream(PropagationPipeline *pipeline) {
+    sol_mir_runtime_lowered_program_free(&pipeline->lowered);
+    sol_mir_runtime_handler_abi_free(&pipeline->handler);
+    sol_mir_runtime_host_abi_free(&pipeline->host);
+    sol_mir_runtime_cleanup_free(&pipeline->cleanup);
+    sol_mir_runtime_values_free(&pipeline->values);
+    sol_mir_runtime_conventions_free(&pipeline->conventions);
+    sol_mir_concrete_program_free(&pipeline->concrete);
+    sol_mir_concrete_program_init(&pipeline->concrete);
+    sol_mir_runtime_conventions_init(&pipeline->conventions);
+    sol_mir_runtime_values_init(&pipeline->values);
+    sol_mir_runtime_cleanup_init(&pipeline->cleanup);
+    sol_mir_runtime_host_abi_init(&pipeline->host);
+    sol_mir_runtime_handler_abi_init(&pipeline->handler);
+    sol_mir_runtime_lowered_program_init(&pipeline->lowered);
+    SolIrCallableId callable = SOL_IR_NONE;
+    for (size_t i = 0; i < pipeline->ir.callable_count; ++i)
+        if (pipeline->ir.callables[i].kind == SOL_IR_CALLABLE_FUNCTION
+            && strcmp(pipeline->ir.callables[i].name, "launch") == 0) callable = i;
+    SolMirProgramRoot root = {callable, SOL_MIR_PROGRAM_ROOT_ENTRY};
+    SolMirTargetDescriptor target = sol_mir_target_wasm32();
+    return callable != SOL_IR_NONE && sol_ir_validate(&pipeline->ir, NULL)
+        && sol_mir_concrete_program_build(&(SolMirConcreteBuildRequest){&pipeline->ir,
+                &root, 1, NULL, 0, &target, NULL}, &pipeline->concrete, &pipeline->diagnostics)
+            == SOL_MIR_CONCRETE_BUILD_SUCCEEDED
+        && sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){
+                &pipeline->concrete, NULL}, &pipeline->conventions, &pipeline->diagnostics)
+            == SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED
+        && sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){&pipeline->conventions,
+                NULL}, &pipeline->values, &pipeline->diagnostics)
+            == SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED
+        && sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){&pipeline->conventions,
+                &pipeline->values, NULL}, &pipeline->cleanup, &pipeline->diagnostics)
+            == SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED
+        && sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){
+                &pipeline->conventions, &pipeline->values, &pipeline->cleanup, NULL},
+                &pipeline->host, &pipeline->diagnostics) == SOL_MIR_RUNTIME_HOST_ABI_BUILD_SUCCEEDED
+        && sol_mir_runtime_handler_abi_build(&(SolMirRuntimeHandlerAbiBuildRequest){
+                &pipeline->conventions, &pipeline->values, &pipeline->cleanup, &pipeline->host,
+                NULL}, &pipeline->handler, &pipeline->diagnostics)
+            == SOL_MIR_RUNTIME_HANDLER_ABI_BUILD_SUCCEEDED
+        && sol_mir_runtime_lowered_program_build(&(SolMirRuntimeLoweredProgramBuildRequest){
+                &pipeline->conventions, &pipeline->values, &pipeline->cleanup, &pipeline->host,
+                &pipeline->handler, NULL}, &pipeline->lowered, &pipeline->diagnostics)
+            == SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_SUCCEEDED;
+}
+
+static bool p44c_old_predecessor_mutations(const char *directory) {
+    PropagationPipeline pipeline; SolWasmRepresentedOutput baseline;
+    propagation_pipeline_init(&pipeline); sol_wasm_represented_output_init(&baseline);
+    bool ok = propagation_pipeline_build_named(&pipeline, directory, "launch", false);
+    if (ok) ok = sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+            directory, NULL}, &baseline, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK;
+    uint8_t baseline_hash[32] = {0};
+    if (ok) sha256(baseline.bytes.bytes, baseline.bytes.count, baseline_hash);
+    C2b1SnapshotIdentityPair pair;
+    if (ok) ok = c2b1_equal_snapshot_pair(&pipeline, &pair);
+    uint64_t baseline_authentication = pipeline.lowered.authentication;
+    SolMirMaterializedLocalId baseline_local[2] = {SOL_MIR_MATERIALIZED_NONE,
+        SOL_MIR_MATERIALIZED_NONE};
+    SolIrExpressionId baseline_provenance_expression[2] = {SOL_IR_NONE, SOL_IR_NONE};
+    if (ok) for (size_t side = 0; side < 2; ++side) {
+        const SolMirOperationSnapshotPlan *snapshot = &pipeline.concrete.operations.snapshots[side];
+        if (snapshot->provenance >= pipeline.concrete.operations.provenance_count) { ok = false; break; }
+        baseline_local[side] = snapshot->local;
+        baseline_provenance_expression[side] = pipeline.concrete.operations.provenance[
+            snapshot->provenance].source_expression;
+    }
+
+    /* A/B paired authentication case:
+     *
+     * mutation                     predecessor   stale P3.6   resealed P3.6   backend
+     * equal-recipe identity/slot   VALID         reject       VALID           accept
+     *
+     * Public builders reconstruct P1b through P3.6 from the valid mutated IR.
+     * The old authentication is then installed to test A. `test_seal` only
+     * refreshes that otherwise-valid owner for B; it repairs no row. */
+    if (ok) {
+        SolWasmRepresentedOutput stale, resealed, restored;
+        sol_wasm_represented_output_init(&stale); sol_wasm_represented_output_init(&resealed);
+        sol_wasm_represented_output_init(&restored);
+        c2b1_swap_equal_snapshot_identities(&pipeline, &pair);
+        bool rebuilt = sol_ir_validate(&pipeline.ir, NULL)
+            && c2b1_rebuild_snapshot_downstream(&pipeline);
+        SolMirOperations *mutated = &pipeline.concrete.operations;
+        uint64_t mutated_authentication = pipeline.lowered.authentication;
+        bool reassociated = rebuilt && mutated->snapshot_count == 2
+            && mutated->snapshots[0].slot == 0 && mutated->snapshots[1].slot == 1
+            && mutated->snapshots[0].local == baseline_local[1]
+            && mutated->snapshots[1].local == baseline_local[0]
+            && mutated->snapshots[0].provenance < mutated->provenance_count
+            && mutated->snapshots[1].provenance < mutated->provenance_count
+            && mutated->provenance[mutated->snapshots[0].provenance].source_expression
+                == baseline_provenance_expression[1]
+            && mutated->provenance[mutated->snapshots[1].provenance].source_expression
+                == baseline_provenance_expression[0];
+        pipeline.lowered.authentication = baseline_authentication;
+        bool predecessor_valid = reassociated && c2b1_predecessors_valid(&pipeline);
+        bool stale_rejected = predecessor_valid && baseline_authentication != mutated_authentication
+            && !sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL)
+            && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+                    directory, NULL}, &stale, &pipeline.diagnostics)
+                == SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE
+            && stale.bytes.bytes == NULL && stale.bytes.count == 0 && usage_zero(&stale.usage);
+        pipeline.lowered.authentication = sol_mir_runtime_lowered_program_test_seal(
+            &pipeline.lowered);
+        char entry[256];
+        bool resealed_accepted = c2b1_predecessors_valid(&pipeline)
+            && pipeline.lowered.authentication == mutated_authentication
+            && sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL)
+            && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+                    directory, NULL}, &resealed, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+            && usage_equal(&resealed.usage, &baseline.usage)
+            && entry_symbol(&resealed.bytes, entry, sizeof entry)
+            && invoke_named(&resealed.bytes, entry, 42, 0, 0);
+        c2b1_swap_equal_snapshot_identities(&pipeline, &pair);
+        bool restored_identical = sol_ir_validate(&pipeline.ir, NULL)
+            && c2b1_rebuild_snapshot_downstream(&pipeline)
+            && c2b1_predecessors_valid(&pipeline)
+            && sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL)
+            && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered,
+                    directory, NULL}, &restored, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK
+            && restored.bytes.count == baseline.bytes.count
+            && memcmp(restored.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+            && usage_equal(&restored.usage, &baseline.usage);
+        if (restored_identical) { uint8_t hash[32];
+            sha256(restored.bytes.bytes, restored.bytes.count, hash);
+            restored_identical = memcmp(hash, baseline_hash, sizeof hash) == 0
+                && c2a_rebuilt_identity(directory, &baseline, baseline_hash); }
+        ok = stale_rejected && resealed_accepted && restored_identical;
+        sol_wasm_represented_output_free(&restored); sol_wasm_represented_output_free(&resealed);
+        sol_wasm_represented_output_free(&stale);
+    }
+
+    /* No policy-reject B case is fabricated here.  The current public P1a
+     * builders reject projected, exclusive, and non-scalar `old` sources before
+     * an owner exists, while cross-context/image and nontrivial access/path/copy
+     * edits fail the independent plan/operation validators.  Those forms can
+     * therefore appear only in C below, not as backend-preflight evidence. */
+
+    SolMirPlan *plan_owner = &pipeline.concrete.plan;
+    SolMirMaterialization *materialization = &pipeline.concrete.materialization;
+    SolMirOperations *operations = &pipeline.concrete.operations;
+    SolMirRuntimeCleanup *cleanup = &pipeline.cleanup;
+    SolMirRuntimeLoweredProgram *lowered = &pipeline.lowered;
+    size_t snapshot = 0, instruction = SOL_MIR_RUNTIME_NONE, typed_use = SOL_MIR_RUNTIME_NONE;
+    size_t input = SOL_MIR_RUNTIME_NONE, action0 = SOL_MIR_RUNTIME_NONE;
+    size_t action1 = SOL_MIR_RUNTIME_NONE, transition_id = SOL_MIR_RUNTIME_NONE;
+    if (ok) ok = operations->snapshot_count == 2;
+    if (ok) instruction = operations->snapshots[snapshot].instruction;
+    size_t source_snapshot = instruction < materialization->instruction_count
+        ? materialization->instructions[instruction].source_snapshot : SOL_MIR_RUNTIME_NONE;
+    for (size_t i = 0; ok && i < plan_owner->typed_use_count; ++i)
+        if (plan_owner->typed_uses[i].kind == SOL_MIR_PLAN_USE_SNAPSHOT
+            && plan_owner->typed_uses[i].source == source_snapshot) {
+            if (typed_use != SOL_MIR_RUNTIME_NONE) ok = false;
+            typed_use = i;
+        }
+    for (size_t i = 0; ok && i < operations->predicate_input_count; ++i)
+        if (operations->predicate_inputs[i].kind == SOL_MIR_PREDICATE_INPUT_SNAPSHOT
+            && operations->predicate_inputs[i].ordinal == 0) {
+            if (input != SOL_MIR_RUNTIME_NONE) ok = false;
+            input = i;
+        }
+    for (size_t i = 0; ok && i < cleanup->transition_count; ++i) {
+        SolMirRuntimeCleanupTransition *candidate = &cleanup->transitions[i];
+        if (candidate->edge_role != SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN
+            || candidate->outcome != SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT
+            || candidate->actions.count != 2) continue;
+        if (transition_id != SOL_MIR_RUNTIME_NONE) { ok = false; break; }
+        transition_id = i; action0 = candidate->actions.offset; action1 = action0 + 1;
+    }
+    ok = ok && instruction < materialization->instruction_count
+        && typed_use < plan_owner->typed_use_count && input < operations->predicate_input_count
+        && action1 < cleanup->action_count && transition_id < cleanup->transition_count
+        && cleanup->actions[action0].kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT
+        && cleanup->actions[action1].kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT
+        && cleanup->actions[action0].target == 1 && cleanup->actions[action1].target == 0
+        && lowered->image_instructions[instruction].plan < lowered->semantic_plan_count;
+    size_t semantic_id = ok ? lowered->image_instructions[instruction].plan : SOL_MIR_RUNTIME_NONE;
+
+    /* C cases below are deliberately predecessor-invalid corruption tests.
+     * Their own named validator must fail even after the outer owner is
+     * resealed.  They are not counted as represented-backend policy coverage:
+     *
+     * layer                 corruptions
+     * P2/operations         access, copy kind, slot, context, provenance, input
+     * materialization       source snapshot; plan typed-use context
+     * P3.6                  instruction/semantic facilities
+     * P3.3 cleanup          target, recipe, flags, action slice, RETURN role */
+#define C2B1_CORRUPTION_REJECT(predecessor, edit, restore) do { \
+    SolWasmRepresentedOutput rejected, restored; sol_wasm_represented_output_init(&rejected); \
+    sol_wasm_represented_output_init(&restored); edit; \
+    lowered->authentication = sol_mir_runtime_lowered_program_test_seal(lowered); \
+    bool rejected_ok = !(predecessor) && !sol_mir_runtime_lowered_program_validate(lowered, NULL) \
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){lowered, directory, NULL}, \
+            &rejected, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE \
+        && rejected.bytes.bytes == NULL && rejected.bytes.count == 0 && usage_zero(&rejected.usage); \
+    restore; lowered->authentication = sol_mir_runtime_lowered_program_test_seal(lowered); \
+    bool restored_ok = sol_mir_plan_validate(plan_owner, NULL) \
+        && sol_mir_materialization_validate(materialization, NULL) \
+        && sol_mir_operations_validate(operations, NULL) \
+        && sol_mir_runtime_cleanup_validate(cleanup, NULL) \
+        && sol_mir_runtime_lowered_program_validate(lowered, NULL) \
+        && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){lowered, directory, NULL}, \
+            &restored, &pipeline.diagnostics) == SOL_WASM_REPRESENTED_OK \
+        && restored.bytes.count == baseline.bytes.count \
+        && memcmp(restored.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0 \
+        && usage_equal(&restored.usage, &baseline.usage); \
+    if (restored_ok) { uint8_t hash[32]; sha256(restored.bytes.bytes, restored.bytes.count, hash); \
+        restored_ok = memcmp(hash, baseline_hash, sizeof hash) == 0; } \
+    ok = ok && rejected_ok && restored_ok; sol_wasm_represented_output_free(&restored); \
+    sol_wasm_represented_output_free(&rejected); \
+} while (0)
+    if (ok) {
+        SolMirOperationSnapshotPlan *item = &operations->snapshots[snapshot];
+        SolMirOperationAccessId access = item->access;
+        C2B1_CORRUPTION_REJECT(sol_mir_operations_validate(operations, NULL),
+            item->access = 0, item->access = access);
+        SolMirCopyKind copy = item->copy_kind;
+        C2B1_CORRUPTION_REJECT(sol_mir_operations_validate(operations, NULL),
+            item->copy_kind = SOL_MIR_COPY_TEXT, item->copy_kind = copy);
+        size_t slot = item->slot;
+        C2B1_CORRUPTION_REJECT(sol_mir_operations_validate(operations, NULL),
+            item->slot = 1, item->slot = slot);
+        SolMirPlanContextId context = item->context;
+        C2B1_CORRUPTION_REJECT(sol_mir_operations_validate(operations, NULL),
+            item->context = 0, item->context = context);
+        size_t provenance = item->provenance;
+        C2B1_CORRUPTION_REJECT(sol_mir_operations_validate(operations, NULL),
+            item->provenance = operations->provenance_count, item->provenance = provenance);
+        SolIrSnapshotId source = materialization->instructions[instruction].source_snapshot;
+        C2B1_CORRUPTION_REJECT(sol_mir_materialization_validate(materialization, NULL),
+            materialization->instructions[instruction].source_snapshot = 1,
+            materialization->instructions[instruction].source_snapshot = source);
+        SolMirPlanContextId use_context = plan_owner->typed_uses[typed_use].context;
+        C2B1_CORRUPTION_REJECT(sol_mir_plan_validate(plan_owner, NULL),
+            plan_owner->typed_uses[typed_use].context = 0,
+            plan_owner->typed_uses[typed_use].context = use_context);
+        size_t ordinal = operations->predicate_inputs[input].ordinal;
+        C2B1_CORRUPTION_REJECT(sol_mir_operations_validate(operations, NULL),
+            operations->predicate_inputs[input].ordinal = ordinal + 2,
+            operations->predicate_inputs[input].ordinal = ordinal);
+        uint32_t facilities = lowered->image_instructions[instruction].facilities;
+        C2B1_CORRUPTION_REJECT(sol_mir_runtime_lowered_program_validate(lowered, NULL),
+            lowered->image_instructions[instruction].facilities = 0,
+            lowered->image_instructions[instruction].facilities = facilities);
+        facilities = lowered->semantic_plans[semantic_id].facilities;
+        C2B1_CORRUPTION_REJECT(sol_mir_runtime_lowered_program_validate(lowered, NULL),
+            lowered->semantic_plans[semantic_id].facilities = SOL_MIR_RUNTIME_LOWERED_FACILITY_VALUE,
+            lowered->semantic_plans[semantic_id].facilities = facilities);
+        size_t target = cleanup->actions[action0].target;
+        C2B1_CORRUPTION_REJECT(sol_mir_runtime_cleanup_validate(cleanup, NULL),
+            cleanup->actions[action0].target = cleanup->actions[action1].target,
+            cleanup->actions[action0].target = target);
+        SolMirRecipeId action_recipe = cleanup->actions[action0].recipe;
+        C2B1_CORRUPTION_REJECT(sol_mir_runtime_cleanup_validate(cleanup, NULL),
+            cleanup->actions[action0].recipe = SOL_MIR_RECIPE_NONE,
+            cleanup->actions[action0].recipe = action_recipe);
+        unsigned action_flags = cleanup->actions[action0].flags;
+        C2B1_CORRUPTION_REJECT(sol_mir_runtime_cleanup_validate(cleanup, NULL),
+            cleanup->actions[action0].flags = SOL_MIR_RUNTIME_CLEANUP_ACTION_GUARDED,
+            cleanup->actions[action0].flags = action_flags);
+        size_t action_count = cleanup->transitions[transition_id].actions.count;
+        C2B1_CORRUPTION_REJECT(sol_mir_runtime_cleanup_validate(cleanup, NULL),
+            cleanup->transitions[transition_id].actions.count = action_count - 1,
+            cleanup->transitions[transition_id].actions.count = action_count);
+        SolMirRuntimeCleanupEdgeRole role = cleanup->transitions[transition_id].edge_role;
+        C2B1_CORRUPTION_REJECT(sol_mir_runtime_cleanup_validate(cleanup, NULL),
+            cleanup->transitions[transition_id].edge_role = SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO,
+            cleanup->transitions[transition_id].edge_role = role);
+    }
+#undef C2B1_CORRUPTION_REJECT
+    sol_wasm_represented_output_free(&baseline); propagation_pipeline_free(&pipeline);
+    return ok;
+}
+
+static bool p44c_old_many_shape(const char *directory) {
+    PropagationPipeline pipeline; propagation_pipeline_init(&pipeline);
+    bool ok = propagation_pipeline_build_named(&pipeline, directory, "launch", false);
+    const SolMirOperations *operations = &pipeline.concrete.operations;
+    unsigned char images[10] = {0};
+    if (ok) ok = operations->snapshot_count == 10;
+    for (size_t i = 0; ok && i < operations->snapshot_count; ++i) {
+        const SolMirOperationSnapshotPlan *plan = &operations->snapshots[i];
+        if (plan->image >= sizeof images || plan->slot != 0 || plan->access != SOL_MIR_OPERATION_NONE
+            || plan->path.count != 0 || plan->copy_kind != SOL_MIR_COPY_TRIVIAL
+            || images[plan->image] != 0) ok = false;
+        else images[plan->image] = 1;
+    }
+    for (size_t i = 0; ok && i < sizeof images; ++i) ok = images[i] == 1;
+    propagation_pipeline_free(&pipeline); return ok;
+}
+
+/* Snapshot-owning images reserve one i64 value and one i32 initialized flag
+ * per plan plus one shared staged-return i64.  Paired source shapes isolate
+ * that exact 2n+1 delta for one, two, and three captures. */
+static bool p44c_old_local_delta(const char *old_directory, const char *current_directory,
+    size_t expected_delta, int64_t value) {
+    SolWasmRepresentedOutput old, current; char entry[256];
+    sol_wasm_represented_output_init(&old); sol_wasm_represented_output_init(&current);
+    bool ok = build_named_root(old_directory, "launch", &old, NULL, SOL_WASM_REPRESENTED_OK)
+        && build_named_root(current_directory, "launch", &current, NULL, SOL_WASM_REPRESENTED_OK)
+        && old.usage.locals == current.usage.locals + expected_delta
+        && entry_symbol(&old.bytes, entry, sizeof entry)
+        && invoke_named(&old.bytes, entry, value, 0, 0);
+    sol_wasm_represented_output_free(&current); sol_wasm_represented_output_free(&old); return ok;
+}
+
+static bool p44c_old_resource_determinism(const char *directory, const char *current_directory) {
+    static const SolWasmRepresentedUsage expected = {5,9,6,13,48,625,0,0,
+        0,0,7,15000,10240,12698,2458};
+    static const uint8_t expected_hash[32] = {
+        0xf4,0x54,0xdc,0x1d,0xf7,0x08,0x55,0xb2,0xf3,0x27,0x88,0x83,0xaa,0xba,0x4d,0x87,
+        0xfe,0x9d,0x57,0x21,0x77,0xe6,0x72,0x64,0x89,0x06,0x55,0xd0,0x54,0x79,0xe8,0x83,
+    };
+    SolWasmRepresentedOutput baseline, repeat, output, current, relocated;
+    sol_wasm_represented_output_init(&baseline); sol_wasm_represented_output_init(&repeat);
+    sol_wasm_represented_output_init(&output); sol_wasm_represented_output_init(&current);
+    sol_wasm_represented_output_init(&relocated);
+    sol_wasm_represented_test_fail_allocation_after(0);
+    bool ok = build_named_root(directory, "launch", &baseline, NULL, SOL_WASM_REPRESENTED_OK);
+    size_t attempts = sol_wasm_represented_test_allocation_attempts(); uint8_t hash[32]; char entry[256];
+    if (ok) { sha256(baseline.bytes.bytes, baseline.bytes.count, hash);
+        ok = usage_equal(&baseline.usage, &expected) && attempts == 46
+            && memcmp(hash, expected_hash, sizeof hash) == 0
+            && sol_wasm_represented_validate(&baseline.bytes) == SOL_WASM_REPRESENTED_OK
+            && entry_symbol(&baseline.bytes, entry, sizeof entry)
+            && invoke_named(&baseline.bytes, entry, 43, 0, 0); }
+    if (ok) ok = build_named_root(directory, "launch", &repeat, NULL, SOL_WASM_REPRESENTED_OK)
+        && repeat.bytes.count == baseline.bytes.count
+        && memcmp(repeat.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+        && usage_equal(&repeat.usage, &expected);
+    if (ok) ok = build_named_root(current_directory, "launch", &current, NULL,
+            SOL_WASM_REPRESENTED_OK) && baseline.usage.locals == current.usage.locals + 3;
+    SolWasmRepresentedLimits exact = sol_wasm_represented_default_limits();
+    exact.max_functions = expected.functions; exact.max_blocks = expected.blocks;
+    exact.max_edges = expected.edges; exact.max_values = expected.values;
+    exact.max_locals = expected.locals; exact.max_generated_nodes = expected.generated_nodes;
+    exact.max_provenance_records = expected.provenance_records;
+    exact.max_work_bytes = expected.work_bytes; exact.max_scratch_bytes = expected.scratch_bytes;
+    exact.max_owned_bytes = expected.owned_bytes; exact.max_output_bytes = expected.output_bytes;
+    if (ok) ok = build_named_root(directory, "launch", &output, &exact, SOL_WASM_REPRESENTED_OK)
+        && output.bytes.count == baseline.bytes.count
+        && memcmp(output.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+        && usage_equal(&output.usage, &expected);
+    sol_wasm_represented_output_free(&output);
+#define CHECK_C2B1_RESOURCE_CAP(field, value) do { \
+    SolWasmRepresentedLimits cap = sol_wasm_represented_default_limits(); cap.field = (value) - 1; \
+    sol_wasm_represented_output_init(&output); \
+    ok = ok && build_named_root(directory, "launch", &output, &cap, \
+        SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED) && output.bytes.bytes == NULL \
+        && output.bytes.count == 0 && usage_zero(&output.usage); \
+    sol_wasm_represented_output_free(&output); \
+} while (0)
+    CHECK_C2B1_RESOURCE_CAP(max_functions, expected.functions);
+    CHECK_C2B1_RESOURCE_CAP(max_blocks, expected.blocks);
+    CHECK_C2B1_RESOURCE_CAP(max_edges, expected.edges);
+    CHECK_C2B1_RESOURCE_CAP(max_values, expected.values);
+    CHECK_C2B1_RESOURCE_CAP(max_locals, expected.locals);
+    CHECK_C2B1_RESOURCE_CAP(max_generated_nodes, expected.generated_nodes);
+    CHECK_C2B1_RESOURCE_CAP(max_provenance_records, expected.provenance_records);
+    CHECK_C2B1_RESOURCE_CAP(max_work_bytes, expected.work_bytes);
+    CHECK_C2B1_RESOURCE_CAP(max_scratch_bytes, expected.scratch_bytes);
+    CHECK_C2B1_RESOURCE_CAP(max_owned_bytes, expected.owned_bytes);
+    CHECK_C2B1_RESOURCE_CAP(max_output_bytes, expected.output_bytes);
+#undef CHECK_C2B1_RESOURCE_CAP
+    for (size_t ordinal = 1; ok && ordinal <= attempts; ++ordinal) {
+        sol_wasm_represented_test_fail_allocation_after(ordinal);
+        sol_wasm_represented_output_init(&output);
+        ok = build_named_root(directory, "launch", &output, NULL,
+                SOL_WASM_REPRESENTED_ALLOCATION_FAILED)
+            && output.bytes.bytes == NULL && output.bytes.count == 0 && usage_zero(&output.usage);
+        sol_wasm_represented_output_free(&output);
+        sol_wasm_represented_test_fail_allocation_after(0);
+        sol_wasm_represented_output_init(&output);
+        if (ok) ok = build_named_root(directory, "launch", &output, NULL,
+                SOL_WASM_REPRESENTED_OK) && output.bytes.count == baseline.bytes.count
+            && memcmp(output.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+            && usage_equal(&output.usage, &expected)
+            && sol_wasm_represented_test_allocation_attempts() == attempts;
+        sol_wasm_represented_output_free(&output);
+    }
+    sol_wasm_represented_test_fail_allocation_after(0);
+    sol_wasm_represented_output_init(&output);
+    if (ok) ok = build_named_root(directory, "launch", &output, NULL, SOL_WASM_REPRESENTED_OK)
+        && output.bytes.count == baseline.bytes.count
+        && memcmp(output.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+        && usage_equal(&output.usage, &expected)
+        && sol_wasm_represented_test_allocation_attempts() == attempts;
+    sol_wasm_represented_output_free(&output);
+    char relocation[512], source[768], destination[768];
+    (void)mkdir(SOL_TEST_BINARY_DIR, 0700);
+    (void)snprintf(relocation, sizeof relocation, "%s/p44c_ensures_old_relocated", SOL_TEST_BINARY_DIR);
+    (void)mkdir(relocation, 0700);
+    (void)snprintf(source, sizeof source, "%s/main.sol", directory);
+    (void)snprintf(destination, sizeof destination, "%s/main.sol", relocation);
+    FILE *input_file = fopen(source, "rb"), *copy = fopen(destination, "wb");
+    if (input_file == NULL || copy == NULL) ok = false;
+    if (input_file != NULL && copy != NULL) {
+        uint8_t buffer[256]; size_t count = 0;
+        while ((count = fread(buffer, 1, sizeof buffer, input_file)) != 0)
+            if (fwrite(buffer, 1, count, copy) != count) ok = false;
+    }
+    if (input_file != NULL) fclose(input_file); if (copy != NULL) fclose(copy);
+    if (ok) ok = build_named_root(relocation, "launch", &relocated, NULL, SOL_WASM_REPRESENTED_OK)
+        && relocated.bytes.count == baseline.bytes.count
+        && memcmp(relocated.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0
+        && usage_equal(&relocated.usage, &expected) && invoke_named(&relocated.bytes, entry, 43, 0, 0);
+    sol_wasm_represented_output_free(&relocated); sol_wasm_represented_output_free(&current);
+    sol_wasm_represented_output_free(&output); sol_wasm_represented_output_free(&repeat);
+    sol_wasm_represented_output_free(&baseline); return ok;
+}
+
+static bool p44c_old_root_order_determinism(const char *directory) {
+    SolWasmRepresentedOutput forward, reverse, repeat; size_t a[2], b[2], c[2];
+    sol_wasm_represented_output_init(&forward); sol_wasm_represented_output_init(&reverse);
+    sol_wasm_represented_output_init(&repeat);
+    bool ok = build_multiroot(directory, false, &forward, a, NULL, SOL_WASM_REPRESENTED_OK)
+        && build_multiroot(directory, true, &reverse, b, NULL, SOL_WASM_REPRESENTED_OK)
+        && build_multiroot(directory, false, &repeat, c, NULL, SOL_WASM_REPRESENTED_OK)
+        && a[0] == b[0] && a[1] == b[1] && a[0] == c[0] && a[1] == c[1]
+        && forward.bytes.count == reverse.bytes.count && forward.bytes.count == repeat.bytes.count
+        && memcmp(forward.bytes.bytes, reverse.bytes.bytes, forward.bytes.count) == 0
+        && memcmp(forward.bytes.bytes, repeat.bytes.bytes, forward.bytes.count) == 0
+        && usage_equal(&forward.usage, &reverse.usage) && usage_equal(&forward.usage, &repeat.usage);
+    char entry[256];
+    if (ok) ok = entry_symbol(&forward.bytes, entry, sizeof entry)
+        && invoke_named(&forward.bytes, entry, 42, 0, 0);
+    sol_wasm_represented_output_free(&repeat); sol_wasm_represented_output_free(&reverse);
+    sol_wasm_represented_output_free(&forward); return ok;
 }
 
 static bool c2a_rebuilt_identity(const char *directory,
@@ -5869,10 +6472,54 @@ int main(void) {
      * helper array; the next arm is rejected before a Binaryen node is built. */
     CHECK(sol_wasm_represented_test_sum_helper_items(124));
     CHECK(!sol_wasm_represented_test_sum_helper_items(125));
+    CHECK(!sol_wasm_represented_test_rejects_capture_snapshot());
     sol_wasm_represented_output_free(&output);
     CHECK(p44c_acceptance_matrix());
     CHECK(p44c_ensures_acceptance_matrix());
     CHECK(p44c_exact_ensures_traces());
+    CHECK(p44c_old_exact_traces());
+    {
+        char directory[512];
+        (void)snprintf(directory, sizeof directory,
+            "%s/tests/conformance/p44c_ensures_old_two", SOL_TEST_SOURCE_DIR);
+        CHECK(p44c_old_predecessor_mutations(directory));
+    }
+    {
+        char directory[512];
+        (void)snprintf(directory, sizeof directory,
+            "%s/tests/conformance/p44c_ensures_old_many", SOL_TEST_SOURCE_DIR);
+        CHECK(p44c_old_many_shape(directory));
+    }
+    {
+        char directory[512], current[512];
+        (void)snprintf(directory, sizeof directory,
+            "%s/tests/conformance/p44c_ensures_old_reject", SOL_TEST_SOURCE_DIR);
+        (void)snprintf(current, sizeof current,
+            "%s/tests/conformance/p44c_ensures_current", SOL_TEST_SOURCE_DIR);
+        CHECK(p44c_old_resource_determinism(directory, current));
+    }
+    {
+        char directory[512], current[512];
+        (void)snprintf(directory, sizeof directory,
+            "%s/tests/conformance/p44c_ensures_old_two", SOL_TEST_SOURCE_DIR);
+        (void)snprintf(current, sizeof current,
+            "%s/tests/conformance/p44c_ensures_current_two", SOL_TEST_SOURCE_DIR);
+        CHECK(p44c_old_local_delta(directory, current, 5, 42));
+    }
+    {
+        char directory[512], current[512];
+        (void)snprintf(directory, sizeof directory,
+            "%s/tests/conformance/p44c_ensures_old_repeat", SOL_TEST_SOURCE_DIR);
+        (void)snprintf(current, sizeof current,
+            "%s/tests/conformance/p44c_ensures_current_repeat", SOL_TEST_SOURCE_DIR);
+        CHECK(p44c_old_local_delta(directory, current, 7, 42));
+    }
+    {
+        char directory[512];
+        (void)snprintf(directory, sizeof directory,
+            "%s/tests/conformance/p44c_ensures_old_roots", SOL_TEST_SOURCE_DIR);
+        CHECK(p44c_old_root_order_determinism(directory));
+    }
     {
         char directory[512];
         (void)snprintf(directory, sizeof directory,
