@@ -2,7 +2,7 @@
 
 This list is the sole live authority for work status and execution order. The
 foundation was audited September 9, 2026 against baseline `6ec4ba9`; live status
-and the cursor were revised October 3, 2026 for the current worktree. The
+and the cursor were revised October 7, 2026 for the current worktree. The
 broader language and toolchain phases remain documented in the [README](README.md#roadmap).
 [Project analysis](docs/project-analysis.md) is an analysis snapshot;
 [Compiler status](docs/compiler-status.md) is the detailed implementation snapshot
@@ -359,6 +359,40 @@ allocation/resource producers. P3.W1 remains unperformed historical/optional pro
 | [ ] | P4.4 | Emit runtime checks, cleanup, and handlers | Realize general runtime checks, match failure for non-total/guarded patterns, panic/arithmetic/allocation errors, require/unreachable, contracts/refinements/snapshots, complete cleanup/unwind, handler scopes/provider dispatch, and runtime depth/step codes 6/7; validate modules and compare instrumented cleanup/failure identity with the P3 contract |
 | [ ] | P4.5 | Integrate the trusted host adapter and E6 execution | Map only the E3 profiles to approved imports, preserve distinct roots and authority preflight, marshal bounded data-only values, retain exact console/host failures, and execute E6 success and panic paths from emitted Wasm; every P1 vocabulary category executes or has an explicit unreachable-by-profile rule; complete tasks 47W and 48C |
 
+P4.4 implementation audit (October 7, 2026; evidence, not new acceptance):
+
+| Slice | Evidenced status and remaining boundary |
+| --- | --- |
+| P4.4a-P4.4c | Committed code covers terminal failures (`4922213`), cleanup routing/tracing (`ccc6246` and predecessors), scalar requires/ensures, scalar entry snapshots, qualified Result predicates, and leaf scalar refinements (through `f616297`). These bounded implementations do not close the broad P4.4 row. |
+| P4.4d | Active uncommitted work adds step-route failure/cleanup metadata across runtime conventions, cleanup, and lowered-program owners, with emitter authentication and shared tests. Route authentication is not evidence of executed runtime metering or P4.4 completion. |
+| Residual P4.4 | Richer predicates and guard calls/guarded-control closure, exact handler execution, runtime depth/step execution, and full cleanup closure remain open. Each needs bounded implementation and independent acceptance evidence. |
+
+#### Parallel development within the P4.4 cursor
+
+The following immediate lanes support the single P4.4 checkpoint:
+
+| Lane / owner | Ready work and exclusive scope | Acceptance handoff |
+| --- | --- | --- |
+| Runtime prerequisites / existing Terra High owner | Complete active P4.4d step/failure prerequisites. Retain exclusive edits to the currently modified `mir_runtime_{conventions,cleanup,lowered_program}` headers, builders and validators, `src/wasm_scalar.c`, `src/wasm_represented.c`, and affected shared runtime/Wasm tests. | Sol review of failure/cleanup/provenance invariants and the brief's focused validation; report route authentication separately from executed limits. |
+| Independent fixtures / Terra High | Reserve new `tests/conformance/p44_parallel_guard_*/` and `tests/conformance/p44_parallel_predicate_*/` directories for demonstrated missing guard/predicate forms. Establish interpreter expectations first; coordinator integrates shared test drivers and CMake. | Reviewed source fixtures and expected results/failure identities, with interpreter validation commands; Wasm acceptance follows implementation. |
+| Interface design / Sol High | Design-only briefs for remaining predicates, exact handlers, and P4.5 trusted-host physical interfaces, in coordinator-reserved brief files. | Reviewed failure/cleanup/provenance contracts, dependencies, and module boundaries before implementation dispatch. |
+| Documentation/status / Terra | Update assigned status documents from reviewed evidence; submit cursor changes to the coordinator. | Diff/consistency review; distinguish implemented, active, residual, and independently accepted scope. |
+
+Use isolated worktrees from a reviewed baseline; the active runtime owner retains
+its in-flight work until reviewed. Each dispatch records dependencies/readiness,
+owner, exclusive files, shared interfaces, and acceptance/validation commands.
+Follow Sol High brief -> Terra High implementation -> separate Sol review.
+One coordinator owns the cursor and integration of shared headers, CMake, shared
+censuses/goldens, and test drivers; delegated exclusive editing stays with its owner.
+
+Additional production lanes for rich predicates/guarded control, exact handlers
+(P4.4), and the host adapter (P4.5/48C) require a reviewed failure/cleanup/provenance
+checkpoint, approved interface briefs, and disjoint source/test module ownership.
+Until those conditions hold, emitter implementation is sequential. P5 artifact-writer
+and differential-harness work can be dispatched independently only after their
+artifact/execution interfaces are approved. These opportunities preserve P4.5/P5
+milestone dependencies, the frozen E6 scope, and all deferred-language and M-track gates.
+
 ### P5 - Build, Differential Execution, and Reproducibility
 
 | Done | Order | Checkpoint | Exit criteria |
@@ -489,7 +523,7 @@ or renumber stable capability IDs.
 | [ ] | 44 | Define lexical unsafe blocks, assumptions/establishments, raw pointer primitives, audit records, and unsafe effects | 5 | 5 | Places, lifetimes, resources, and obligations |
 | [x] | 45 | Introduce target-neutral ownership-explicit callable-scoped CFG MIR for the frozen E6 core, including blocks/SSA, moves, call-scoped borrows/writeback, abstract cleanup/storage lifetimes, regions, panic/failure control flow, generic/effect/evidence metadata, independent validation, canonical rendering, and bounded evaluator/trace semantics without selecting representation or ABI | 5 | 5 | E6 and completed executable-core semantics |
 | [ ] | 46 | Define C ABI layouts and FFI declarations with ownership, nullability, threading, blocking, error, and effect metadata | 5 | 5 | Unsafe boundaries (44), package policy (40), and P2 representation/target layout |
-| [~] | 47 | 47A selects WebAssembly as the first production target; P4.1 pins the probe toolchain and P4.2 completes the scalar direct-call subset; 47W remains open for the remaining frozen executable-core backend integration; native/additional backends remain deferred | 5 | 5 | 47A, P4.1, and the P4.2 scalar slice complete; P2 representation/layout and P3 runtime ABI for 47W |
+| [~] | 47 | 47A selects WebAssembly as the first production target; P4.1 pins the probe toolchain, P4.2 completes the scalar direct-call subset, and P4.3 completes the bounded represented-value/place/indirect-call slice; 47W remains open for the remaining frozen executable-core backend integration; native/additional backends remain deferred | 5 | 5 | 47A and P4.1-P4.3 complete; P2 representation/layout and P3 runtime ABI for 47W |
 | [~] | 48 | Complete compiled-runtime support after 48A/E3: 48B is complete with target-independent executable-core allocation, cleanup, panic, capability, handler ABI policy, and the complete runtime-lowered program; 48C supplies the WebAssembly adapter; user resource/allocation and FFI extensions remain deferred with tasks 36-37 and 46 | 5 | 5 | E3, P2, and P3 complete for 48B; P4 and task 47W for 48C |
 | [~] | 49 | Complete application tooling after 49A/E2 and 49B/E4: 49C adds WebAssembly `sol build`, artifact execution, target/profile selection, linkage metadata, reproducibility, and interpreter/Wasm differential tests over the bounded existing package model | 5 | 4 | P4 and existing package resolution; task 40 only if separately activated |
 | [~] | 50 | Complete verification beyond 50A/E5 and P1 runtime-preserving lowering: normalized obligations and call-site substitution; refinement projection, destructuring, and exhaustiveness; cost/resource obligations only when tasks 36-37 activate them | 5 | 5 | E5 and P1; tasks 36-37 only for cost/resource checks |

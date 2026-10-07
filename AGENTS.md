@@ -5,9 +5,9 @@ best suited for it, and preserve a written handoff between agents.
 
 ## Agent Roles
 
-### Luna: Search and Discovery
+### Luna 6 Fast: Search and Discovery
 
-Spawn Luna for simple, read-only searches when the target and scope are known:
+Spawn Luna 6 Fast for simple, read-only searches when the target and scope are known:
 
 - Locating files, symbols, tests, fixtures, or configuration
 - Finding references, call sites, definitions, and naming patterns
@@ -15,16 +15,16 @@ Spawn Luna for simple, read-only searches when the target and scope are known:
 - Reporting existing commands, conventions, or implementations with file and
   line references
 
-Give Luna the exact search target, repository scope, desired thoroughness, and
-expected result format. Luna must not edit files, make design decisions, or
+Give Luna 6 Fast the exact search target, repository scope, desired thoroughness, and
+expected result format. Luna 6 Fast must not edit files, make design decisions, or
 infer behavior beyond the evidence it finds. It should return concise findings
 with paths and line references, note searches that produced no results, and
-escalate to Sol High when the question requires architectural interpretation,
+escalate to Sol 6.1 High when the question requires architectural interpretation,
 root-cause analysis, or an expanded investigation.
 
-### Sol High: Planning
+### Sol 6.1 High: Planning
 
-Spawn Sol High to investigate, make design decisions, and define coding tasks:
+Spawn Sol 6.1 High to investigate, make design decisions, and define coding tasks:
 
 - Project structure, architecture, and public API design
 - Requirements analysis and resolution of ambiguous behavior
@@ -34,7 +34,7 @@ Spawn Sol High to investigate, make design decisions, and define coding tasks:
 - Security, correctness, compatibility, and performance-sensitive decisions
 - Decomposition of work into independently implementable tasks
 
-Before implementation begins, Sol High must produce a written task brief that
+Before implementation begins, Sol 6.1 High must produce a written task brief that
 defines:
 
 - The objective and expected behavior
@@ -45,12 +45,12 @@ defines:
 - Validation commands
 - Known risks, dependencies, and open questions
 
-Sol High owns design decisions and task boundaries. It should not perform the
+Sol 6.1 High owns design decisions and task boundaries. It should not perform the
 implementation unless integration or an unresolved architectural blocker requires it.
 
-### Terra High: Implementation
+### Luna 6 xhigh: Implementation
 
-Spawn Terra High to implement coding tasks defined by Sol High:
+Spawn Luna 6 xhigh to implement coding tasks defined by Sol 6.1 High:
 
 - Production code and localized refactors
 - Unit, integration, regression, and conformance tests
@@ -58,24 +58,24 @@ Spawn Terra High to implement coding tasks defined by Sol High:
 - Mechanical edits required by the approved design
 - Focused debugging when the suspected component and expected behavior are known
 
-Terra High must follow the task brief, avoid unrelated scope, and preserve
+Luna 6 xhigh must follow the task brief, avoid unrelated scope, and preserve
 behavior outside the stated task. It must run the specified validation and
 return a concise implementation report containing files changed, tests run,
 deviations, and remaining risks.
 
 If requirements are unclear, the scope expands, or an architectural decision is
-needed, Terra High must stop and return the task to Sol High rather than inventing
+needed, Luna 6 xhigh must stop and return the task to Sol 6.1 High rather than inventing
 a new design.
 
-### Sol: Review
+### Sol 6.1: Review
 
-After implementation, spawn a separate Sol agent to review the result. Use Sol
-High for architecture, public behavior, security, compatibility, or
-multi-subsystem changes. Use a lower Sol tier for bounded, localized changes.
+After implementation, spawn a separate Sol 6.1 agent to review the result. Use
+Sol 6.1 High for architecture, public behavior, security, compatibility, or
+multi-subsystem changes. Use a lower Sol 6.1 tier for bounded, localized changes.
 
 The reviewer must:
 
-- Compare the implementation with the Sol High task brief
+- Compare the implementation with the Sol 6.1 High task brief
 - Inspect the diff for correctness, regressions, and unintended scope
 - Check tests against the acceptance criteria and identify missing coverage
 - Verify that validation results support the implementation report
@@ -83,11 +83,11 @@ The reviewer must:
 - Approve only when no blocking findings remain
 
 The reviewer should not implement fixes unless explicitly reassigned. Return
-findings to Terra High, then repeat implementation and review until accepted.
+findings to Luna 6 xhigh, then repeat implementation and review until accepted.
 
-### Terra: Documentation
+### Luna 6 xhigh: Documentation
 
-Spawn Terra for documentation and document-production work:
+Spawn Luna 6 xhigh for documentation and document-production work:
 
 - README, guide, reference, and release-note updates
 - Specification prose and terminology consistency
@@ -96,20 +96,20 @@ Spawn Terra for documentation and document-production work:
 - Diagrams, tables, examples, and documentation organization
 - Checking documentation against implemented behavior
 
-Give Terra the authoritative source files, approved design or implementation,
-required output format, and rendering or validation command. Use Sol High first
+Give Luna 6 xhigh the authoritative source files, approved design or implementation,
+required output format, and rendering or validation command. Use Sol 6.1 High first
 when documentation requires unresolved architectural or product decisions.
 
 ## Routing Rules
 
-1. Use Luna for bounded search and discovery when no design judgment or code
+1. Use Luna 6 Fast for bounded search and discovery when no design judgment or code
    modification is required.
-2. Use Sol High to analyze and document every non-trivial coding task before
+2. Use Sol 6.1 High to analyze and document every non-trivial coding task before
    implementation.
-3. Give the completed task brief to Terra High for implementation.
-4. Use a separate Sol agent to review every Terra High implementation.
-5. Return review findings to Terra High for correction, then review again.
-6. Route documentation and PDF work to Terra after the underlying design or
+3. Give the completed task brief to Luna 6 xhigh for implementation.
+4. Use a separate Sol 6.1 agent to review every Luna 6 xhigh implementation.
+5. Return review findings to Luna 6 xhigh for correction, then review again.
+6. Route documentation and PDF work to Luna 6 xhigh after the underlying design or
    behavior is approved.
 7. Keep dependent work sequential. Parallelize only tasks with independent file
    scopes and no unresolved shared decisions.
@@ -135,11 +135,11 @@ running final verification.
 
 ## Default Workflow
 
-1. Luna performs bounded discovery when it can reduce the planning search space.
-2. Sol High investigates and writes the task brief.
-3. Terra High implements the brief and runs focused validation.
-4. Sol reviews the diff, tests, and validation results.
-5. Terra High resolves findings and requests another review.
-6. Terra updates documentation and generated PDFs when required.
+1. Luna 6 Fast performs bounded discovery when it can reduce the planning search space.
+2. Sol 6.1 High investigates and writes the task brief.
+3. Luna 6 xhigh implements the brief and runs focused validation.
+4. Sol 6.1 reviews the diff, tests, and validation results.
+5. Luna 6 xhigh resolves findings and requests another review.
+6. Luna 6 xhigh updates documentation and generated PDFs when required.
 7. The coordinating agent runs final relevant verification and reports the
    outcome.
