@@ -5,6 +5,34 @@ best suited for it, and preserve a written handoff between agents.
 
 ## Agent Roles
 
+### Astra 6: Project Audit and Steering
+
+Spawn Astra 6 at milestone boundaries, before opening parallel workstreams, or
+when scope, priorities, or progress appear to drift:
+
+- Compare active work and delivered behavior with user goals, approved briefs,
+  and the authoritative `TODO.md` execution cursor
+- Track milestone exit criteria against implementation, review, and validation
+  evidence; distinguish completed, active, blocked, and deferred work
+- Detect scope creep, conflicting interfaces or ownership, dependency violations,
+  duplicated effort, and discrepancies between code and status documents
+- Assess whether parallel lanes advance the current goal and identify blockers,
+  sequencing changes, or bounded corrective tasks
+- Check that previous audit actions have owners and evidence of resolution
+
+Give Astra 6 the current goals, TODO, relevant briefs, implementation/review
+reports, validation results, and active workstream ownership. It returns a concise
+steering report with goal-by-goal status, evidence-linked drift findings ordered
+by impact, and recommended next actions with owners and dependencies. Missing
+evidence must remain explicit rather than being treated as completion.
+
+Astra 6 owns project-level alignment assessment. Sol 6.1 High retains technical
+design and task boundaries; the coordinator maintains the single execution cursor
+and integrates approved steering actions. Goal changes go back to the user,
+technical corrections go to Sol 6.1 High for a bounded brief, and status-document
+corrections go to Luna 6 xhigh. Audits are read-only unless an edit scope is
+explicitly assigned, and complement the separate implementation review.
+
 ### Luna 6 Fast: Search and Discovery
 
 Spawn Luna 6 Fast for simple, read-only searches when the target and scope are known:
@@ -113,7 +141,9 @@ when documentation requires unresolved architectural or product decisions.
    behavior is approved.
 7. Keep dependent work sequential. Parallelize only tasks with independent file
    scopes and no unresolved shared decisions.
-8. Do not spawn an agent for trivial work when coordination would cost more than
+8. Use Astra 6 for milestone alignment audits, parallel-workstream readiness, and
+   drift correction; route its actions through the coordinator and assigned owners.
+9. Do not spawn an agent for trivial work when coordination would cost more than
    completing it directly.
 
 ## Delegation Contract
@@ -121,7 +151,8 @@ when documentation requires unresolved architectural or product decisions.
 Every spawned agent must receive:
 
 - A single, explicit objective
-- Its assigned role: discovery, planning, implementation, review, or documentation
+- Its assigned role: discovery, planning, implementation, review, documentation,
+  or project audit/steering
 - The exact scope and relevant file paths
 - Known constraints and behavior that must remain unchanged
 - The expected deliverable
@@ -140,6 +171,9 @@ running final verification.
 3. Luna 6 xhigh implements the brief and runs focused validation.
 4. Sol 6.1 reviews the diff, tests, and validation results.
 5. Luna 6 xhigh resolves findings and requests another review.
-6. Luna 6 xhigh updates documentation and generated PDFs when required.
-7. The coordinating agent runs final relevant verification and reports the
+6. At milestone or parallel-dispatch boundaries, Astra 6 audits goal alignment,
+   progress evidence, dependencies, and outstanding drift; the coordinator routes
+   corrective actions before advancing the cursor or opening affected lanes.
+7. Luna 6 xhigh updates documentation and generated PDFs when required.
+8. The coordinating agent runs final relevant verification and reports the
    outcome.

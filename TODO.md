@@ -418,26 +418,42 @@ public IR (54), SMT (52), a production backend, or patch syntax (56). The M1 rep
 records projection gaps without adding those systems as prerequisites. The
 Execution Cursor governs order.
 
+These proposals are informed by the [September 25, 2026 workflow
+notes](sol_ai_native_workflow_notes.pdf): protected change contracts (pp. 3-5);
+context packets and reproducible evidence (p. 5); evidence states and optional
+proof (pp. 3, 6-7); controlled review (p. 7); and architecture/runtime evidence
+(pp. 5-6, workload-gated). The notes are guidance, not implemented behavior; the
+Execution Cursor and activation gates above remain authoritative.
+
 | Done | Order | Experiment | Bounded exit criteria |
 | --- | --- | --- | --- |
 | [x] | M1 | First-user workload and experiment charter (completed as infeasible) | The [infeasibility report](experiments/m1/README.md) evaluates an unvalidated expense-policy candidate and records the governance hard stop: no actual user or policy owner, protected held-out material, externally controlled verifier, or independent adjudicator exists. Repository visibility and hashes do not provide authority separation. P2.8 has since completed; this closure implements no experiment feature. |
-| [ ] | M2 | Declaration-centered context packets (58 slice) | Only after M1 is reopened and completed feasibly, and after P2.8, produce bounded deterministic packets of source, signatures, effects, contracts, known available callers/callees, and checked lexical authority roots. Include source snapshot hash, compiler/schema/options, selection metadata, provenance, inclusion reasons, heuristic candidate test associations, omissions, and explicit unknowns. Unavailable is not empty; use existing IDs only within their supported scope. Do not claim complete reachability, global minimality, authoritative test relevance, or business authorization. Inspection bytes are not a guaranteed semantic cache key. |
+| [ ] | M2 | Declaration-centered context packets (58 slice) | Only after M1 is reopened and completed feasibly, and after P2.8, produce bounded deterministic packets of source, relevant types, signatures, effects, contracts, known available callers/callees, and checked lexical authority roots. Include source snapshot hash, compiler/schema/options, selection metadata, provenance, inclusion reasons, heuristic candidate test associations, omissions, and explicit unknowns. Unavailable is not empty; use existing IDs only within their supported scope. Do not claim complete reachability, global minimality, authoritative test relevance, or business authorization. Inspection bytes are not a guaranteed semantic cache key. |
 | [ ] | M3 | Conservative checked-snapshot deltas (57 slice) | After M2, report declaration, signature, effect, contract, known call-edge, and checked lexical-authority edits between checked snapshots; validate stable IDs and reject stale, ambiguous, or unsupported comparisons. Report contract direction only for a precisely defined and tested structural subset; otherwise report changed or unknown. Keep body edits and unknowns visible: a changed predicate is not established weakening, and an unchanged interface does not establish preserved behavior. |
-| [ ] | M4 | Ordinary-edit validation and approval loop (56 and bounded 62 slices) | After M2/M3, exercise ordinary edit/check/test/delta/independent human adjudication against the protected change intent, base snapshot, tests, policy, and verifier. The builder cannot modify those inputs. An independently controlled verifier evaluates checked base/candidate snapshots and emits the bounded unsigned local task-62 evidence record defined below. Authority or contract changes require explicit adjudication. This is not patch syntax, architectural auto-repair, or proof of correctness. |
+| [ ] | M4 | Ordinary-edit validation and approval loop (56 and bounded 62 slices) | After M2/M3, exercise ordinary edit/check/test/delta/independent human adjudication against a protected external change contract stating intent, target scope, invariants, required evidence, and forbidden weakening, plus the protected base snapshot, tests, policy, and verifier. The builder cannot modify those inputs. An independently controlled verifier evaluates checked base/candidate snapshots and emits the bounded unsigned local task-62 evidence record defined below. The independent review summary relates the contract to the semantic, authority, and contract deltas, evaluation evidence, and explicit unknowns. Authority or contract changes require explicit adjudication. This is not patch syntax, architectural auto-repair, or proof of correctness. |
 | [ ] | M4E | Optional basic editor slice (55 slice) | Only after a feasibly reopened M1 and M2 establish projection feasibility, timebox diagnostics, navigation, and packet presentation. Not full LSP and not a prerequisite for M5. |
-| [ ] | M5 | Held-out workflow comparison | After M4, compare against source-only on protected held-out tasks with the same compiler/test access and, where relevant, model and budget. The independent adjudicator emits `approve`, `reject`, or `escalate`; on escalation, the adjudicator may inspect precisely scoped additional source and records its reason and scope rather than silently granting the builder broader context. Measure decision quality, false accepts/rejects, implementation-view request rate, decision time, correctness, regressions, context size, iterations, and diagnostic usefulness. Protected tests are evidence, not complete ground truth. Report negative/inconclusive results and decide continue, narrow, or stop. |
+| [ ] | M5 | Held-out workflow comparison | After M4, compare against source-only on independently held-out tasks with the same compiler/test access and, where relevant, model and budget. The independent adjudicator records `approve`, `reject`, or `escalate`. The primary outcome is correct `approve`/`reject` decisions without implementation access, reported jointly with implementation-view rate. Preregister scoring, false-confidence criteria, and stop/go thresholds. Report unassisted decisions separately from decisions after precisely scoped implementation access on escalation; count escalations separately and record their reason/scope. Report agent and reviewer context size/use separately, plus false accepts/rejects, decision time, regressions, iterations, and diagnostic usefulness. Protected tests are evidence, not complete ground truth. Report negative/inconclusive results and decide continue, narrow, or stop. |
 
 M2 maps to 58, M3 to 57, M4 to the validation/approval slice of 56 and a bounded
 unsigned local evidence-record slice of 62, and M4E to 55. For M4, the independently
-controlled verifier records base and candidate source identities and
-compiler/schema/options, protected change-intent/baseline/test/policy/verifier identities, the M3
-semantic delta, evaluations and results, failures or incomplete states, omissions,
-and explicit unknowns. The deterministic record is content-addressed but unsigned:
-hashing supplies integrity and addressing, not producer authentication or deployment
-provenance. These proposals do not earn `[~]` status; full scopes of 54-58 and 62
-remain in the numbered backlog. M1's completed-as-infeasible status records a
-governance blocker, not a charter or tool feature. A protected external change
-contract would be an experiment artifact if M1 were reopened, not the future Sol
+controlled verifier records base and candidate source identities; compiler/schema/options;
+protected change-contract, baseline, test, policy, and verifier identities; evaluation
+commands and resource limits; and identities or controlled references for replay inputs
+and configuration. Protected material remains outside the builder's view. It records the
+M3 semantic delta, evaluations and results, failures or incomplete states, omissions, and
+explicit unknowns. Each claim is classified as declared, statically checked/compared
+within scope, runtime-checked/tested for recorded executions, proved under recorded
+assumptions, or unknown, with supporting method/evidence, scope, and limitations. These
+are descriptive evidence states, not a frozen schema or exclusive enum. Static
+acceptance and tests do not establish general behavioral preservation; proof is optional,
+not an M prerequisite or a new proof implementation. Reuse or reference producer outputs
+and record their execution rather than implementing a second semantic graph, delta engine,
+context packet, patch format, or reproducible-build system. The deterministic record is
+content-addressed but unsigned: hashing supplies integrity and addressing, not producer
+authentication or deployment provenance. These proposals do not earn `[~]` status; full
+scopes of 54-58 and 62 remain in the numbered backlog. M1's completed-as-infeasible
+status records a governance blocker, not a charter or tool feature. A protected external
+change contract would be an experiment artifact if M1 were reopened, not the future Sol
 intent or semantic-patch syntax proposed by tasks 54/56.
 
 ## Workload-Gated Decisions
@@ -455,9 +471,9 @@ task; otherwise retain the existing behavior and deferrals.
 | Evaluation and contract semantics | Preserve current formal-parameter evaluation order for named arguments. Pure does not mean total, and an accepted typed contract is not a proof. Any alternatives require a separate decision and tests. |
 | Formatter policy (53) | Reconsider whether broader mandatory sorting is warranted; this refresh neither enacts a new sorting policy nor permits semantic reordering. |
 | Fine-grained semantic anchors | Consider member/local/expression persistent IDs only if M2/M3 show that supported top-level identities and checked provenance cannot identify required context or deltas. First define stability, stale-target rejection, and migration costs; otherwise defer fine-grained persistent IDs. |
-| Executable architecture policy | Consider a machine-executable policy only after M4/M5 identify repeated decisions that cannot be represented by the protected external policy and independent adjudication. First define policy ownership, versioning, conflict handling, and failure behavior; otherwise defer an architecture DSL. |
+| Executable architecture policy | Consider a machine-executable policy only after M4/M5 identify repeated decisions that cannot be represented by the protected external policy and independent adjudication. If activated, bound rules to available facts and state dependency direction, allowed effects, and authority direction; unsupported facts remain unknown. Define policy ownership, versioning, conflict handling, and failure behavior; otherwise defer an architecture DSL. |
 | Automated risk lanes and signing | Consider calibrated automatic lanes only after M5 provides enough adjudicated approve/reject/escalate outcomes to measure false accepts/rejects by class. Consider signatures or deployment attestations only after task 62 has a stable envelope plus an explicit identity, key, trust, and deployment-provenance model; otherwise retain unsigned local records and human adjudication. |
-| Runtime effect/outcome evidence | Consider execution evidence only after P5 provides reproducible artifacts, stable runtime event identities, and interpreter/Wasm comparison, followed by explicit privacy, retention, sampling, and budget policy. Otherwise defer production telemetry and do not infer runtime outcomes from static effects. |
+| Runtime effect/outcome evidence | Consider execution evidence only after P5 provides reproducible artifacts, stable runtime event identities, and interpreter/Wasm comparison, followed by explicit privacy, retention, sampling/coverage, and budget policy. If activated, bind trusted host/capability observations to artifact identity, operation, capability root, and outcome, and report recording/sampling/coverage. Keep permitted effects distinct from observed operations: absence of an observation does not establish impossibility. No example event schema is implied. Otherwise defer production telemetry and do not infer runtime outcomes from static effects. |
 
 General handlers, additional backends or a VM, workflows/transactions, broad
 numerics and units, real-time features, and reflection remain deferred until
