@@ -421,7 +421,7 @@ static void test_valid_owner_work_deltas(void) {
                 &owners[side]));
         }
         if (built[0] && built[1]) {
-            static const size_t expected_deltas[] = {3883, 747, 26901};
+            static const size_t expected_deltas[] = {3887, 753, 26915};
             CHECK(owners[1].usage.validation_work
                     - owners[0].usage.validation_work == expected_deltas[pair]);
             if (pair == 0) {
@@ -624,10 +624,10 @@ static void test_e6(const SolMirConcreteProgram *program,
     const SolMirRuntimeConventionsUsage expected_usage = {
         .signatures = 18, .signature_slots = 19, .calls = 18,
         .operands = 24, .writebacks = 1, .entries = 1, .imports = 56,
-        .failure_sites = 29, .owned_bytes = 17000,
-        .build_scratch_bytes = 21, .build_work = 10111,
+        .failure_sites = 713, .owned_bytes = 66480,
+        .build_scratch_bytes = 21, .build_work = 12847,
         .validation_scratch_bytes = 763171604,
-        .validation_work = 96022977,
+        .validation_work = 96025722,
     };
     CHECK(memcmp(origins, expected_origins, sizeof(origins)) == 0);
     CHECK(memcmp(targets, expected_targets, sizeof(targets)) == 0);
@@ -637,6 +637,30 @@ static void test_e6(const SolMirConcreteProgram *program,
     CHECK(memcmp(accesses, expected_accesses, sizeof(accesses)) == 0);
     CHECK(memcmp(import_kinds, expected_import_kinds,
         sizeof(import_kinds)) == 0);
+    size_t executable_sites = program->materialization.instruction_count
+        + program->materialization.block_count
+        + program->operations.predicate_instruction_count
+        + program->operations.predicate_block_count;
+    size_t step_sites = 0, shared_span_steps = 0;
+    CHECK(owner.failure_site_count >= executable_sites
+        && owner.failure_site_count - executable_sites == 29);
+    for (size_t i = owner.failure_site_count - executable_sites;
+            i < owner.failure_site_count; ++i) {
+        const SolMirRuntimeFailureSite *site = &owner.failure_sites[i];
+        CHECK((site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP
+                || site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP)
+            && site->occurrence == i
+            && site->allowed_codes == (UINT32_C(1)
+                << (SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT - 1)));
+        if (i != owner.failure_site_count - executable_sites) {
+            const SolMirRuntimeFailureSite *prior = &owner.failure_sites[i - 1];
+            shared_span_steps += prior->source.file == site->source.file
+                && prior->source.start == site->source.start
+                && prior->source.end == site->source.end;
+        }
+        ++step_sites;
+    }
+    CHECK(step_sites == executable_sites && shared_span_steps != 0);
     CHECK(method_receiver);
     CHECK(direct_callee_rejected);
     CHECK(method_callee_rejected);
@@ -823,6 +847,11 @@ static void test_e6(const SolMirConcreteProgram *program,
         = (SolMirRuntimeFailureOriginKind)99;
     CHECK(!sol_mir_runtime_conventions_validate(&owner, NULL));
     owner.failure_sites[0] = saved_site;
+    size_t step_site = owner.failure_site_count - executable_sites;
+    SolMirRuntimeFailureSite saved_step_site = owner.failure_sites[step_site];
+    ++owner.failure_sites[step_site].occurrence;
+    CHECK(!sol_mir_runtime_conventions_validate(&owner, NULL));
+    owner.failure_sites[step_site] = saved_step_site;
     owner.failure_sites[0].allowed_codes ^= UINT32_C(1);
     CHECK(!sol_mir_runtime_conventions_validate(&owner, NULL));
     owner.failure_sites[0] = saved_site;
@@ -1289,8 +1318,6 @@ static void test_indirect_predicate_and_bound_environment(void) {
         | UINT32_C(1) << (SOL_MIR_RUNTIME_FAILURE_HOST_ERROR - 1);
     const uint32_t call_depth
         = UINT32_C(1) << (SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT - 1);
-    const uint32_t step_limit
-        = UINT32_C(1) << (SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT - 1);
     bool indirect_internal = false, indirect_host = false;
     for (size_t i = 0; i < program.linkage.table_entry_count; ++i) {
         SolMirRuntimeCall call = {
@@ -1309,7 +1336,7 @@ static void test_indirect_predicate_and_bound_environment(void) {
                 &call, &program.linkage, &build_mask)
             && sol_mir_runtime_conventions_test_validate_call_failure_mask(
                 &call, &program.linkage, &validate_mask));
-        uint32_t expected = targets_host ? call_depth | host_codes : step_limit;
+        uint32_t expected = targets_host ? call_depth | host_codes : call_depth;
         CHECK(build_mask == expected && validate_mask == expected);
     }
     CHECK(indirect_internal && indirect_host);
@@ -1488,7 +1515,7 @@ static void test_bodyful_bound_capability_predicate_conventions(void) {
             && owner.failure_sites[call->failure_site].instruction
                 == SOL_MIR_RUNTIME_NONE
             && owner.failure_sites[call->failure_site].allowed_codes
-                == (UINT32_C(1) << (SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT - 1))
+                == (UINT32_C(1) << (SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT - 1))
             && binding != NULL
             && expression_source(&c.ir, binding->source.callable,
                 binding->source.expression, &expected_source)

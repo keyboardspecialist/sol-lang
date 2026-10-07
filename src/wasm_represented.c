@@ -1042,10 +1042,6 @@ typedef struct {
 } ProvenanceRecord;
 
 typedef struct {
-    size_t source_id, owner, file, start, end;
-} RepresentedFailureOrder;
-
-typedef struct {
     ProvenanceRecord *records;
     uint8_t *bytes;
     uint32_t *failure_record_indices;
@@ -1056,7 +1052,15 @@ typedef struct {
 
 static int provenance_order(const void *left, const void *right) {
     const ProvenanceRecord *a = left, *b = right;
-    int order = (int)a->tag - (int)b->tag;
+    unsigned a_rank = a->tag == 3
+            && (a->kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP
+                || a->kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP)
+        ? 5u : a->tag;
+    unsigned b_rank = b->tag == 3
+            && (b->kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP
+                || b->kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP)
+        ? 5u : b->tag;
+    int order = a_rank == b_rank ? 0 : a_rank < b_rank ? -1 : 1;
     if (order != 0) return order;
     order = strcmp(a->path, b->path); if (order != 0) return order;
     if (a->start != b->start) return a->start < b->start ? -1 : 1;
@@ -1064,18 +1068,6 @@ static int provenance_order(const void *left, const void *right) {
     order = strcmp(a->symbol, b->symbol); if (order != 0) return order;
     if (a->ordinal != b->ordinal) return a->ordinal < b->ordinal ? -1 : 1;
     return (int)a->kind - (int)b->kind;
-}
-
-static int represented_failure_order(const void *left, const void *right) {
-    const RepresentedFailureOrder *a = left, *b = right;
-    if (a->owner != b->owner) return a->owner < b->owner ? -1 : 1;
-    if (a->file != b->file) return a->file < b->file ? -1 : 1;
-    if (a->start != b->start) return a->start < b->start ? -1 : 1;
-    if (a->end != b->end) return a->end < b->end ? -1 : 1;
-    /* This final tie makes qsort's ordering total without changing the old
-     * coordinate-based ordinal: equal coordinates retain a shared ordinal. */
-    if (a->source_id != b->source_id) return a->source_id < b->source_id ? -1 : 1;
-    return 0;
 }
 
 static bool provenance_source(const SolIr *ir, const char *root,
@@ -1152,7 +1144,11 @@ static const char *symbol_for_image(const SolMirConcreteProgram *concrete,
 
 static const char *symbol_for_failure_site(const SolMirConcreteProgram *concrete,
     const SolMirRuntimeFailureSite *site) {
-    if (site->origin_kind >= SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC) {
+    if (site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC
+        || site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_CALL
+        || site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_NO_MATCH
+        || site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT
+        || site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP) {
         if (site->owner >= concrete->operations.predicate_body_count) return NULL;
         const SolMirPredicateBody *body = &concrete->operations.predicate_bodies[site->owner];
         if (body->owner_kind != SOL_MIR_PREDICATE_OWNER_INSTANCE) return NULL;
@@ -1171,8 +1167,8 @@ static void represented_provenance_free(RepresentedProvenance *provenance) {
 }
 
 /* Build the canonical schema once, retaining both the serialized section and
- * dense source-site maps for emission.  The failure auxiliary sort preserves
- * the v1 coordinate ordinal without the former nested scans. */
+ * dense source-site maps for emission.  P3.1's authenticated occurrence keeps
+ * distinct sites distinct even when their canonical source spans coincide. */
 static bool represented_provenance_build(const SolWasmRepresentedBuildRequest *request,
     RepresentedProvenance *provenance) {
     const SolIr *ir = request->program->conventions->concrete->program.ir;
@@ -1195,31 +1191,10 @@ static bool represented_provenance_build(const SolWasmRepresentedBuildRequest *r
         : allocate(conventions->failure_site_count, sizeof *provenance->failure_record_indices);
     provenance->supplemental_record_indices = cleanup->supplemental_site_count == 0 ? NULL
         : allocate(cleanup->supplemental_site_count, sizeof *provenance->supplemental_record_indices);
-    RepresentedFailureOrder *failure_order = conventions->failure_site_count == 0 ? NULL
-        : allocate(conventions->failure_site_count, sizeof *failure_order);
     if ((count != 0 && provenance->records == NULL)
-        || (conventions->failure_site_count != 0 && (provenance->failure_record_indices == NULL
-            || failure_order == NULL)) || (cleanup->supplemental_site_count != 0
+        || (conventions->failure_site_count != 0 && provenance->failure_record_indices == NULL)
+        || (cleanup->supplemental_site_count != 0
             && provenance->supplemental_record_indices == NULL)) goto failed;
-    for (size_t i = 0; i < conventions->failure_site_count; ++i) {
-        const SolMirRuntimeFailureSite *site = &conventions->failure_sites[i];
-        failure_order[i] = (RepresentedFailureOrder){i, site->owner, site->source.file,
-            site->source.start, site->source.end};
-    }
-    if (conventions->failure_site_count != 0)
-        qsort(failure_order, conventions->failure_site_count, sizeof *failure_order,
-            represented_failure_order);
-    size_t owner_begin = 0;
-    for (size_t i = 0; i < conventions->failure_site_count; ++i) {
-        const RepresentedFailureOrder *current = &failure_order[i];
-        if (i == 0 || current->owner != failure_order[i - 1].owner) owner_begin = i;
-        bool same_coordinate = i != owner_begin && current->file == failure_order[i - 1].file
-            && current->start == failure_order[i - 1].start && current->end == failure_order[i - 1].end;
-        provenance->failure_record_indices[current->source_id] = same_coordinate
-            ? provenance->failure_record_indices[failure_order[i - 1].source_id]
-            : (uint32_t)(i - owner_begin);
-    }
-    deallocate(failure_order); failure_order = NULL;
 
     size_t at = 0, bytes = 12;
     for (size_t i = 0; i < conventions->entry_count; ++i) {
@@ -1246,7 +1221,7 @@ static bool represented_provenance_build(const SolWasmRepresentedBuildRequest *r
         const char *symbol = symbol_for_failure_site(concrete, site);
         if (symbol == NULL) goto failed;
         provenance->records[at++] = (ProvenanceRecord){3, (uint8_t)site->origin_kind, relative,
-            symbol, site->source.start, site->source.end, provenance->failure_record_indices[i],
+            symbol, site->source.start, site->source.end, site->occurrence,
             REPRESENTED_PROVENANCE_SOURCE_FAILURE, i};
     }
     for (size_t i = 0; i < cleanup->supplemental_site_count; ++i) {
@@ -1283,6 +1258,7 @@ static bool represented_provenance_build(const SolWasmRepresentedBuildRequest *r
         size_t path_length = strlen(record->path), symbol_length = strlen(record->symbol);
         size_t record_bytes = 24;
         if (path_length > UINT32_MAX || symbol_length > UINT32_MAX
+            || record->ordinal > UINT32_MAX
             || path_length > SIZE_MAX - record_bytes) goto failed;
         record_bytes += path_length;
         if (symbol_length > SIZE_MAX - record_bytes) goto failed;
@@ -1316,7 +1292,6 @@ static bool represented_provenance_build(const SolWasmRepresentedBuildRequest *r
     provenance->byte_count = bytes;
     return true;
 failed:
-    deallocate(failure_order);
     represented_provenance_free(provenance);
     return false;
 }
@@ -1411,6 +1386,8 @@ static bool represented_cleanup_emit(const RepresentedFunction *,
     const SolMirRuntimeCleanupAction *, RepresentedNodes *);
 static bool represented_cleanup_action(const SolWasmRepresentedBuildRequest *,
     const SolMirRuntimeCleanupAction *);
+static bool represented_step_route(const SolWasmRepresentedBuildRequest *,
+    SolMirRuntimeCleanupEventKind, size_t, size_t, size_t, size_t, size_t);
 
 /* Static Text objects are real P2 text headers.  The handle names the header,
  * never its payload; byte zero is consequently reserved as the null handle.
@@ -3023,6 +3000,9 @@ static bool represented_predicate_body_preflight(const SolWasmRepresentedBuildRe
         for (size_t i = 0; i < block->instructions.count; ++i) {
             size_t id = block->instructions.offset + i;
             const SolMirPredicateInstruction *in = &o->predicate_instructions[id];
+            const SolMirRuntimeLoweredPredicateInstruction *lowered_instruction
+                = id < owner->predicate_instruction_count
+                    ? &owner->predicate_instructions[id] : NULL;
             if (id >= owner->predicate_instruction_count || in->block != b
                 || in->result < body->values.offset || in->result - body->values.offset >= body->values.count
                 || !represented_predicate_recipe(concrete, in->recipe, false)
@@ -3032,7 +3012,11 @@ static bool represented_predicate_body_preflight(const SolWasmRepresentedBuildRe
                 || owner->predicate_instructions[id].kind != in->kind
                 || (in->kind != SOL_MIR_PREDICATE_INST_I64 && in->kind != SOL_MIR_PREDICATE_INST_BOOL
                     && in->kind != SOL_MIR_PREDICATE_INST_UNARY && in->kind != SOL_MIR_PREDICATE_INST_BINARY)
-                || in->failures != represented_opcode_failures(in->opcode)) return false;
+                || in->failures != represented_opcode_failures(in->opcode)
+                || !represented_step_route(request,
+                    SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION, body_id, b, id,
+                    lowered_instruction->step_cleanup_event,
+                    lowered_instruction->step_failure_site)) return false;
             const SolMirPredicateValue *result = &o->predicate_values[in->result];
             if ((in->kind == SOL_MIR_PREDICATE_INST_I64
                     && concrete->representation.recipes[in->recipe].kind != SOL_MIR_RECIPE_INT64)
@@ -3097,6 +3081,12 @@ static bool represented_predicate_body_preflight(const SolWasmRepresentedBuildRe
             }
         }
         const SolMirPredicateTerminator *term = &block->terminator;
+        const SolMirRuntimeLoweredPredicateTerminator *lowered_terminator
+            = &owner->predicate_terminators[b];
+        if (!represented_step_route(request,
+                SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR, body_id, b,
+                SOL_MIR_RUNTIME_NONE, lowered_terminator->step_cleanup_event,
+                lowered_terminator->step_failure_site)) return false;
         if (term->kind == SOL_MIR_PREDICATE_TERM_RETURN) {
             if (term->value < body->values.offset || term->value - body->values.offset >= body->values.count
                 || o->predicate_values[term->value].recipe != body->output_recipe) return false;
@@ -3485,11 +3475,146 @@ static bool represented_cleanup_action(const SolWasmRepresentedBuildRequest *req
             return represented_snapshot_cleanup_action(request, action);
         case SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_SCOPE:
         case SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_REGION:
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_HANDLER:
         case SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE:
         case SOL_MIR_RUNTIME_CLEANUP_ACTION_CHECK_CONTRACT:
             return true;
         default: return false;
     }
+}
+
+static bool represented_step_route(const SolWasmRepresentedBuildRequest *request,
+    SolMirRuntimeCleanupEventKind kind, size_t owner_id, size_t block, size_t operation,
+    size_t event_id, size_t site_id) {
+    const SolMirRuntimeLoweredProgram *owner = request->program;
+    const SolMirRuntimeConventions *conventions = owner->conventions;
+    const SolMirRuntimeCleanup *cleanup = owner->cleanup;
+    const SolMirConcreteProgram *concrete = conventions->concrete;
+    const SolMirMaterialization *m = &concrete->materialization;
+    const SolMirOperations *operations = &concrete->operations;
+    bool predicate = kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION
+        || kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR;
+    SolMirRuntimeFailureOriginKind origin = predicate
+        ? SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP
+        : SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP;
+    SolSpan span;
+    if (kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION) {
+        if (operation >= m->instruction_count || m->instructions[operation].block != block)
+            return false;
+        span = m->instructions[operation].span;
+    } else if (kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR) {
+        if (operation != SOL_MIR_RUNTIME_NONE || block >= m->block_count) return false;
+        span = m->blocks[block].terminator.span;
+    } else {
+        if (owner_id >= operations->predicate_body_count
+            || block >= operations->predicate_block_count
+            || operations->predicate_blocks[block].body != owner_id) return false;
+        const SolMirPredicateBody *body = &operations->predicate_bodies[owner_id];
+        if (body->context >= m->context_count) return false;
+        size_t obligation = m->contexts[body->context].obligation;
+        if (obligation >= concrete->program.ir->obligation_count
+            || concrete->program.ir->obligations[obligation].predicate
+                >= concrete->program.ir->expression_count) return false;
+        span = concrete->program.ir->expressions[
+            concrete->program.ir->obligations[obligation].predicate].span;
+        if (kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION) {
+            if (operation >= operations->predicate_instruction_count
+                || operations->predicate_instructions[operation].block != block) return false;
+        } else if (kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR
+            || operation != SOL_MIR_RUNTIME_NONE) return false;
+    }
+    SolMirRuntimeSource source;
+    uint32_t mask = UINT32_C(1) << (SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT - 1);
+    if (event_id >= cleanup->event_count || site_id >= conventions->failure_site_count
+        || !represented_runtime_source(concrete->program.ir, span, &source)) return false;
+    const SolMirRuntimeCleanupEvent *event = &cleanup->events[event_id];
+    const SolMirRuntimeFailureSite *site = &conventions->failure_sites[site_id];
+    if (event->kind != kind || event->phase != SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP
+        || event->origin != SOL_MIR_RUNTIME_CLEANUP_ORIGIN_IMPLICIT
+        || event->owner != owner_id || event->block != block || event->operation != operation
+        || event->semantic_site != SOL_MIR_RUNTIME_NONE
+        || event->inherited_failure_site != site_id
+        || event->supplemental_site != SOL_MIR_RUNTIME_NONE
+        || event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_STEP_METER
+        || !event->captures_failure_detail
+        || event->capture_detail_kind != SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE
+        || event->source.file != source.file || event->source.start != source.start
+        || event->source.end != source.end || site->origin_kind != origin
+        || site->owner != owner_id || site->block != block || site->instruction != operation
+        || site->source.file != source.file || site->source.start != source.start
+        || site->source.end != source.end || site->occurrence != site_id
+        || site->allowed_codes != mask || event->transitions.count != 2
+        || event->transitions.offset > cleanup->transition_count
+        || event->transitions.count > cleanup->transition_count - event->transitions.offset
+        || event->actions.offset > cleanup->action_count
+        || event->actions.count > cleanup->action_count - event->actions.offset) return false;
+    const SolMirRuntimeCleanupTransition *ready = &cleanup->transitions[event->transitions.offset];
+    const SolMirRuntimeCleanupTransition *failure = &cleanup->transitions[event->transitions.offset + 1];
+    SolContractClauseKind phase = SOL_CONTRACT_REQUIRES;
+    SolContractOutcomeKind outcome = SOL_CONTRACT_OUTCOME_SUCCESS;
+    if (kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR) {
+        phase = m->blocks[block].terminator.contract_phase;
+        outcome = m->blocks[block].terminator.contract_outcome;
+    } else if (predicate) {
+        phase = operations->predicate_bodies[owner_id].phase;
+        outcome = operations->predicate_bodies[owner_id].outcome;
+    }
+#define STEP_TRANSITION_COMMON(t) \
+    ((t)->event == event_id && (t)->continuation == SOL_MIR_RUNTIME_NONE \
+        && (t)->source_edge == SOL_MIR_RUNTIME_NONE \
+        && (t)->destination == SOL_MIR_RUNTIME_NONE && (t)->primary_failure_wins \
+        && (t)->contract_phase == phase && (t)->contract_outcome == outcome)
+    if (!STEP_TRANSITION_COMMON(ready)
+        || ready->outcome != SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL
+        || ready->edge_role != SOL_MIR_RUNTIME_CLEANUP_EDGE_PRE_OPERATION_READY
+        || ready->failure_source != SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE
+        || ready->failure_site != SOL_MIR_RUNTIME_NONE || ready->failure_mask != 0
+        || ready->actions.offset != event->actions.offset || ready->actions.count != 0
+        || !STEP_TRANSITION_COMMON(failure)
+        || failure->outcome != SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE
+        || failure->edge_role != SOL_MIR_RUNTIME_CLEANUP_EDGE_STEP_FAILURE
+        || failure->failure_source != SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31
+        || failure->failure_site != site_id || failure->failure_mask != mask
+        || failure->actions.offset != event->actions.offset
+        || failure->actions.count != event->actions.count
+        || (predicate ? failure->actions.count != 0 : failure->actions.count == 0)) return false;
+#undef STEP_TRANSITION_COMMON
+    const SolMirRuntimeLoweredCleanupFailure *event_row = represented_cleanup_row(owner,
+        SOL_MIR_RUNTIME_LOWERED_CLEANUP_EVENT, event_id);
+    const SolMirRuntimeLoweredCleanupFailure *ready_row = represented_cleanup_row(owner,
+        SOL_MIR_RUNTIME_LOWERED_CLEANUP_TRANSITION, event->transitions.offset);
+    const SolMirRuntimeLoweredCleanupFailure *failure_row = represented_cleanup_row(owner,
+        SOL_MIR_RUNTIME_LOWERED_CLEANUP_TRANSITION, event->transitions.offset + 1);
+    if (event_row == NULL || event_row->event != event_id || event_row->event_kind != kind
+        || event_row->phase != event->phase || event_row->producer != event->producer
+        || event_row->inherited_failure_site != site_id
+        || event_row->actions.offset != event->actions.offset
+        || event_row->actions.count != event->actions.count
+        || event_row->transitions.offset != event->transitions.offset
+        || event_row->transitions.count != event->transitions.count
+        || ready_row == NULL || ready_row->event != event_id
+        || ready_row->edge_role != ready->edge_role || ready_row->outcome != ready->outcome
+        || failure_row == NULL || failure_row->event != event_id
+        || failure_row->edge_role != failure->edge_role
+        || failure_row->failure_site != site_id || failure_row->failure_mask != mask)
+        return false;
+    for (size_t i = 0; i < failure->actions.count; ++i) {
+        size_t action_id = failure->actions.offset + i;
+        const SolMirRuntimeCleanupAction *action = &cleanup->actions[action_id];
+        const SolMirRuntimeLoweredCleanupFailure *action_row = represented_cleanup_row(owner,
+            SOL_MIR_RUNTIME_LOWERED_CLEANUP_ACTION, action_id);
+        if (!represented_cleanup_action(request, action) || action_row == NULL
+            || action_row->action != action_id
+            || action_row->action_kind != action->kind || action_row->action_flags != action->flags
+            || action_row->target != action->target || action_row->recipe != action->recipe
+            || action_row->drop_path != action->drop_path) return false;
+        bool propagate = action->kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE;
+        if (propagate != (i + 1 == failure->actions.count)
+            || (propagate && (action->flags != SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY
+                || action->target != site_id || action->recipe != SOL_MIR_RECIPE_NONE
+                || action->drop_path != SOL_MIR_RUNTIME_NONE))) return false;
+    }
+    return true;
 }
 
 static bool represented_failure_route(const SolWasmRepresentedBuildRequest *request,
@@ -4727,8 +4852,8 @@ static bool represented_call_cleanup(const SolWasmRepresentedBuildRequest *reque
     const SolMirRuntimeCleanup *cleanup = request->program->cleanup;
     const SolMirMaterialization *m = &request->program->conventions->concrete->materialization;
     const SolMirRuntimeConventions *conventions = request->program->conventions;
-    uint32_t call_limit = UINT32_C(1) << ((call->call_kind == SOL_IR_CALL_CALLBACK
-        ? SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT : SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT) - 1);
+    uint32_t call_limit = UINT32_C(1)
+        << (SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT - 1);
     if (caller_block >= request->program->image_terminator_count
         || call->failure_site >= conventions->failure_site_count) return false;
     const SolMirRuntimeLoweredImageTerminator *row = &request->program->image_terminators[caller_block];
@@ -4762,9 +4887,8 @@ static bool represented_call_cleanup(const SolWasmRepresentedBuildRequest *reque
                 || transition->source_edge != term->failure_edge
                 || term->failure_edge >= m->edge_count
                 || transition->destination != m->edges[term->failure_edge].block
-                || transition->failure_source != (call->call_kind == SOL_IR_CALL_METHOD
-                    ? SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31
-                    : SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING)
+                || transition->failure_source
+                    != SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING
                 || transition->failure_site != call->failure_site
             || transition->failure_mask != call_limit) return false;
             failure = transition;
@@ -4778,6 +4902,7 @@ static bool represented_call_cleanup(const SolWasmRepresentedBuildRequest *reque
     for (size_t i = 0; i < cleanup->event_count; ++i) {
         const SolMirRuntimeCleanupEvent *candidate = &cleanup->events[i];
         if (candidate->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+            && candidate->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
             && candidate->owner == caller_image && candidate->block == successor) {
             if (resume != NULL) return false;
             resume = candidate;
@@ -4988,8 +5113,8 @@ static RepresentedCatalogResult represented_call_catalog(const SolWasmRepresente
         if (site->origin_kind != SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_CALL
             || site->owner != call->image || site->block != call->block
             || site->instruction != SOL_MIR_RUNTIME_NONE
-            || site->allowed_codes != (UINT32_C(1) << ((call->call_kind == SOL_IR_CALL_CALLBACK
-                ? SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT : SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT) - 1))
+            || site->allowed_codes != (UINT32_C(1)
+                << (SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT - 1))
             || !represented_call_cleanup(request, call, term, call->image, call->block,
                 graph->resume_blocks)) goto invalid;
         graph->calls[id] = (RepresentedCallCatalog){call->image, call->block, caller_callable, id, callee_id,
@@ -5188,6 +5313,7 @@ static bool represented_catalog_failures_supported(const SolWasmRepresentedBuild
             && event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PREDICATE_RESULT
             && event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_SUPPLEMENTAL_ALLOCATION
             && event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PROPAGATION_RESIDUAL
+            && event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_STEP_METER
             && !represented_catalog_terminal_event_supported(request, event))
             return false;
         if (event->transitions.offset > cleanup->transition_count
@@ -5903,7 +6029,13 @@ static bool represented_function_preflight(const SolWasmRepresentedBuildRequest 
                 || request->program->image_instructions[instruction].image != linkage->instance)
                 return false;
             const SolMirMaterializedInstruction *item = &materialization->instructions[instruction];
-            if (!represented_instruction(concrete, item)) return false;
+            const SolMirRuntimeLoweredImageInstruction *lowered_instruction
+                = &request->program->image_instructions[instruction];
+            if (!represented_instruction(concrete, item)
+                || !represented_step_route(request,
+                    SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION, linkage->instance,
+                    block_id, instruction, lowered_instruction->step_cleanup_event,
+                    lowered_instruction->step_failure_site)) return false;
             if ((item->kind == SOL_MIR_INST_CONST_TEXT
                     || (item->kind == SOL_MIR_INST_LOAD_COPY && item->place < materialization->place_count
                         && materialization->places[item->place].final_type < concrete->layout.type_count
@@ -6084,6 +6216,12 @@ static bool represented_function_preflight(const SolWasmRepresentedBuildRequest 
             }
         }
         const SolMirMaterializedTerminator *term = &block->terminator;
+        const SolMirRuntimeLoweredImageTerminator *lowered_terminator
+            = &request->program->image_terminators[block_id];
+        if (!represented_step_route(request,
+                SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR, linkage->instance, block_id,
+                SOL_MIR_RUNTIME_NONE, lowered_terminator->step_cleanup_event,
+                lowered_terminator->step_failure_site)) return false;
         const RepresentedCallCatalog *call = represented_catalog_for(catalog, linkage->instance, block_id);
         if ((!represented_terminator(term) && term->kind != SOL_MIR_TERM_RESUME_FAILURE)
             || (term->kind == SOL_MIR_TERM_INVOKE && call == NULL)
@@ -9940,7 +10078,15 @@ static bool represented_relative_path(const uint8_t *path, uint32_t count) {
 
 static int represented_wire_provenance_order(const RepresentedWireProvenance *a,
     const RepresentedWireProvenance *b) {
-    if (a->tag != b->tag) return a->tag < b->tag ? -1 : 1;
+    unsigned a_rank = a->tag == 3
+            && (a->kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP
+                || a->kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP)
+        ? 5u : a->tag;
+    unsigned b_rank = b->tag == 3
+            && (b->kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP
+                || b->kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP)
+        ? 5u : b->tag;
+    if (a_rank != b_rank) return a_rank < b_rank ? -1 : 1;
     uint32_t shared = a->path_count < b->path_count ? a->path_count : b->path_count;
     int order = shared == 0 ? 0 : memcmp(a->path, b->path, shared);
     if (order != 0) return order;
@@ -10078,7 +10224,7 @@ static RepresentedWireValidation represented_provenance_validate(const uint8_t *
         reserved = (uint32_t)cursor[0] | (uint32_t)cursor[1] << 8; cursor += 2;
         if (reserved != 0 || record.tag < 1 || record.tag > 4
             || (record.tag != 3 && record.tag != 4 && record.kind != 0)
-            || (record.tag == 3 && record.kind > SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT)
+            || (record.tag == 3 && record.kind > SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP)
             || (record.tag == 4 && record.kind > 1)
             || !represented_read_u32le(&cursor, end, &record.path_count)
             || record.path_count > (size_t)(end - cursor)) goto invalid;

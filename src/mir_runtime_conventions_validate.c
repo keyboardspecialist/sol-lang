@@ -923,10 +923,7 @@ static bool validate_call_failure_mask(const SolMirRuntimeCall *call,
             && target != SOL_MIR_LINKAGE_TARGET_HOST) return false;
         targets_host = target == SOL_MIR_LINKAGE_TARGET_HOST;
     } else return false;
-    *mask = call->target_kind == SOL_MIR_RUNTIME_TARGET_INDIRECT_TABLE
-            && !targets_host
-        ? failure_code_bit(SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT)
-        : failure_code_bit(SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT);
+    *mask = failure_code_bit(SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT);
     if (targets_host) {
         *mask |= failure_code_bit(SOL_MIR_RUNTIME_FAILURE_HOST_CALL_LIMIT);
         *mask |= failure_code_bit(SOL_MIR_RUNTIME_FAILURE_HOST_ERROR);
@@ -980,10 +977,11 @@ static bool validate_expected_site(const SolMirRuntimeConventions *owner,
     if (!runtime_source_from_span(owner->concrete->program.ir, span, &source))
         return false;
     const SolMirRuntimeFailureSite *site = &owner->failure_sites[*site_at];
+    size_t occurrence = *site_at;
     if (site->origin_kind != origin || site->owner != owner_id
         || site->block != block || site->instruction != instruction
         || site->source.file != source.file || site->source.start != source.start
-        || site->source.end != source.end
+        || site->source.end != source.end || site->occurrence != occurrence
         || site->allowed_codes != allowed_codes) return false;
     ++*site_at;
     return true;
@@ -1471,6 +1469,46 @@ static bool validate_failure_sites(const SolMirRuntimeConventions *owner) {
                 body_id, replay.block, SOL_MIR_RUNTIME_NONE,
                 ir->expressions[predicate].span, failure_code_bit(code)))
             return false;
+    }
+    uint32_t step = failure_code_bit(SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT);
+    for (size_t image = 0; image < m->image_count; ++image) {
+        const SolMirMaterializedImage *image_owner = &m->images[image];
+        for (size_t q = 0; q < image_owner->instructions.count; ++q) {
+            size_t instruction = image_owner->instructions.offset + q;
+            const SolMirMaterializedInstruction *item = &m->instructions[instruction];
+            if (!validate_expected_site(owner, &site_at,
+                    SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP, image, item->block,
+                    instruction, item->span, step)) return false;
+        }
+        for (size_t q = 0; q < image_owner->blocks.count; ++q) {
+            size_t block = image_owner->blocks.offset + q;
+            if (!validate_expected_site(owner, &site_at,
+                    SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP, image, block,
+                    SOL_MIR_RUNTIME_NONE, m->blocks[block].terminator.span, step))
+                return false;
+        }
+    }
+    for (size_t body = 0; body < o->predicate_body_count; ++body) {
+        const SolMirPredicateBody *predicate = &o->predicate_bodies[body];
+        const SolMirPlanContext *context = &m->contexts[predicate->context];
+        if (context->obligation >= ir->obligation_count
+            || ir->obligations[context->obligation].predicate >= ir->expression_count)
+            return false;
+        SolSpan span = ir->expressions[
+            ir->obligations[context->obligation].predicate].span;
+        for (size_t q = 0; q < predicate->blocks.count; ++q) {
+            size_t block = predicate->blocks.offset + q;
+            const SolMirPredicateBlock *source = &o->predicate_blocks[block];
+            for (size_t n = 0; n < source->instructions.count; ++n) {
+                size_t instruction = source->instructions.offset + n;
+                if (!validate_expected_site(owner, &site_at,
+                        SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP, body, block,
+                        instruction, span, step)) return false;
+            }
+            if (!validate_expected_site(owner, &site_at,
+                    SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP, body, block,
+                    SOL_MIR_RUNTIME_NONE, span, step)) return false;
+        }
     }
     return site_at == owner->failure_site_count;
 }
@@ -2762,6 +2800,10 @@ static bool reconstruct_build(const SolMirConcreteProgram *concrete,
     for (size_t i = 0; ok && i < o->predicate_body_count; ++i)
         ok = build_work_add(&work, 1)
             && count_add(&counts.failure_sites, 1);
+    ok = ok && count_add(&counts.failure_sites, m->instruction_count)
+        && count_add(&counts.failure_sites, m->block_count)
+        && count_add(&counts.failure_sites, o->predicate_instruction_count)
+        && count_add(&counts.failure_sites, o->predicate_block_count);
     for (size_t i = 0; ok && i < r->recipe_count; ++i) {
         ok = build_work_add(&work, 1);
         bool indirect = false;
@@ -2906,6 +2948,14 @@ static bool reconstruct_build(const SolMirConcreteProgram *concrete,
         }
         if (ok) ok = build_work_add(&work, site_record_work);
     }
+    size_t step_sites = 0;
+    size_t step_site_work = 0;
+    if (ok) ok = count_add(&step_sites, m->instruction_count)
+        && count_add(&step_sites, m->block_count)
+        && count_add(&step_sites, o->predicate_instruction_count)
+        && count_add(&step_sites, o->predicate_block_count)
+        && mul_size(step_sites, site_record_work, &step_site_work)
+        && build_work_add(&work, step_site_work);
     for (size_t i = 0; ok && i < l->entry_export_count; ++i) {
         ok = build_work_add(&work, 1);
         const SolMirMaterializedImage *image = NULL;

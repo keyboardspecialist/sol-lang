@@ -528,6 +528,20 @@ static size_t cleanup_failure_for_event(const SolMirRuntimeCleanup *cleanup, siz
     return event == SOL_MIR_RUNTIME_LOWERED_NONE ? SOL_MIR_RUNTIME_LOWERED_NONE
         : cleanup->events[event].inherited_failure_site;
 }
+static size_t cleanup_step_event_for(const SolMirRuntimeCleanup *cleanup,
+    SolMirRuntimeCleanupEventKind kind,size_t owner,size_t block,size_t operation){
+    size_t result=SOL_MIR_RUNTIME_LOWERED_NONE;
+    for(size_t i=0;i<cleanup->event_count&&validation_tick();++i){
+        const SolMirRuntimeCleanupEvent*event=&cleanup->events[i];
+        if(event->kind!=kind||event->phase!=SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP
+            ||event->owner!=owner||event->block!=block||event->operation!=operation
+            ||event->semantic_site!=SOL_MIR_RUNTIME_NONE
+            ||event->producer!=SOL_MIR_RUNTIME_CLEANUP_PRODUCER_STEP_METER)continue;
+        if(result!=SOL_MIR_RUNTIME_LOWERED_NONE)return SOL_MIR_RUNTIME_LOWERED_NONE;
+        result=i;
+    }
+    return result;
+}
 static size_t handler_frame_for_cleanup_action(const SolMirRuntimeHandlerAbi *handlers,
     SolMirRuntimeCleanupActionId action) {
     size_t result = SOL_MIR_RUNTIME_LOWERED_NONE;
@@ -1049,13 +1063,20 @@ SolMirRuntimeLoweredProgramBuildOutcome sol_mir_runtime_lowered_program_internal
                 SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION,
                 image_for_instruction(materialization, i), input->block, i, true, producer)
             : SOL_MIR_RUNTIME_LOWERED_NONE;
-        if (!present(row->state) || row->execution != execution_for(expected.runtime_class)
+        size_t step_event = cleanup_step_event_for(owner->cleanup,
+            SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION,
+            image_for_instruction(materialization, i), input->block, i);
+        size_t step_site = cleanup_failure_for_event(owner->cleanup, step_event);
+        if (step_event == SOL_MIR_RUNTIME_LOWERED_NONE
+            || step_site == SOL_MIR_RUNTIME_LOWERED_NONE
+            || !present(row->state) || row->execution != execution_for(expected.runtime_class)
             || row->image != image_for_instruction(materialization, i) || row->instruction != i
             || row->block != input->block || row->kind != input->kind
             || row->runtime_class != expected.runtime_class || row->plan_family != expected.plan_family
             || row->facilities != image_instruction_facilities(operations, owner->values, i,
                 input->kind, expected.facilities) || row->plan != image_instruction_semantic(materialization, operations, i)
-            || row->cleanup_event != event || row->failure_site != cleanup_failure_for_event(owner->cleanup, event)) goto malformed;
+            || row->cleanup_event != event || row->failure_site != cleanup_failure_for_event(owner->cleanup, event)
+            || row->step_cleanup_event != step_event || row->step_failure_site != step_site) goto malformed;
     }
     for (size_t i = 0; i < materialization->block_count && validation_tick(); ++i) {
         SolMirRuntimeLoweredDemandDescriptor expected;
@@ -1074,6 +1095,10 @@ SolMirRuntimeLoweredProgramBuildOutcome sol_mir_runtime_lowered_program_internal
             SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR, block->image, i,
             SOL_MIR_RUNTIME_LOWERED_NONE, true, image_terminator_event_producer(input->kind));
         size_t failure = cleanup_failure_for_event(owner->cleanup, event);
+        size_t step_event = cleanup_step_event_for(owner->cleanup,
+            SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR, block->image, i,
+            SOL_MIR_RUNTIME_NONE);
+        size_t step_site = cleanup_failure_for_event(owner->cleanup, step_event);
         size_t pre = SOL_MIR_RUNTIME_LOWERED_NONE;
         if (input->kind == SOL_MIR_TERM_INVOKE
             && input->callable_site != SOL_MIR_MATERIALIZED_NONE) {
@@ -1108,11 +1133,14 @@ SolMirRuntimeLoweredProgramBuildOutcome sol_mir_runtime_lowered_program_internal
         }
         size_t pre_site = pre == SOL_MIR_RUNTIME_LOWERED_NONE ? SOL_MIR_RUNTIME_LOWERED_NONE
             : owner->cleanup->events[pre].supplemental_site;
-        if (!present(row->state) || row->execution != execution_for(expected.runtime_class)
+        if (step_event == SOL_MIR_RUNTIME_LOWERED_NONE
+            || step_site == SOL_MIR_RUNTIME_LOWERED_NONE
+            || !present(row->state) || row->execution != execution_for(expected.runtime_class)
             || row->image != block->image || row->block != i || row->kind != input->kind
             || row->runtime_class != expected.runtime_class || row->plan_family != expected.plan_family
             || row->facilities != expected.facilities || row->plan != image_terminator_semantic(materialization, operations, i)
             || row->call != call || row->cleanup_event != event || row->failure_site != failure
+            || row->step_cleanup_event != step_event || row->step_failure_site != step_site
             || row->pre_operation_cleanup_event != pre
             || row->pre_operation_supplemental_site != pre_site
             || (call != SOL_MIR_RUNTIME_LOWERED_NONE && (event == SOL_MIR_RUNTIME_LOWERED_NONE
@@ -1128,7 +1156,13 @@ SolMirRuntimeLoweredProgramBuildOutcome sol_mir_runtime_lowered_program_internal
             SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION,
             operations->predicate_blocks[input->block].body, input->block, i, true,
             predicate_instruction_event_producer(input, owner->values));
-        if (!present(row->state) || row->body != operations->predicate_blocks[input->block].body
+        size_t step_event = cleanup_step_event_for(owner->cleanup,
+            SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION,
+            operations->predicate_blocks[input->block].body, input->block, i);
+        size_t step_site = cleanup_failure_for_event(owner->cleanup, step_event);
+        if (step_event == SOL_MIR_RUNTIME_LOWERED_NONE
+            || step_site == SOL_MIR_RUNTIME_LOWERED_NONE
+            || !present(row->state) || row->body != operations->predicate_blocks[input->block].body
             || row->instruction != i || row->block != input->block || row->kind != input->kind
             || row->runtime_class != expected.runtime_class || row->plan_family != expected.plan_family
             || row->facilities != (expected.facilities
@@ -1136,7 +1170,8 @@ SolMirRuntimeLoweredProgramBuildOutcome sol_mir_runtime_lowered_program_internal
                 | (input->kind == SOL_MIR_PREDICATE_INST_CONSTRUCT && input->recipe < owner->values->allocation_plan_count && owner->values->allocation_plans[input->recipe].kind != SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE ? SOL_MIR_RUNTIME_LOWERED_FACILITY_ALLOCATION : 0)
                 | (input->kind == SOL_MIR_PREDICATE_INST_PATTERN_EXTRACT && copy_requires_runtime(operations->layout->representation->recipes[input->recipe].copy_kind) ? SOL_MIR_RUNTIME_LOWERED_FACILITY_COPY : 0))
             || row->plan != predicate_instruction_semantic(materialization, operations, i)
-            || row->cleanup_event != event || row->failure_site != cleanup_failure_for_event(owner->cleanup, event)) goto malformed;
+            || row->cleanup_event != event || row->failure_site != cleanup_failure_for_event(owner->cleanup, event)
+            || row->step_cleanup_event != step_event || row->step_failure_site != step_site) goto malformed;
     }
     for (size_t i = 0; i < operations->predicate_block_count && validation_tick(); ++i) {
         const SolMirPredicateBlock *input = &operations->predicate_blocks[i];
@@ -1156,11 +1191,18 @@ SolMirRuntimeLoweredProgramBuildOutcome sol_mir_runtime_lowered_program_internal
             SOL_MIR_RUNTIME_LOWERED_NONE, true,
             predicate_terminator_event_producer(&input->terminator));
         size_t failure = cleanup_failure_for_event(owner->cleanup, event);
-        if (!present(row->state) || row->body != input->body || row->block != i
+        size_t step_event = cleanup_step_event_for(owner->cleanup,
+            SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR, input->body, i,
+            SOL_MIR_RUNTIME_NONE);
+        size_t step_site = cleanup_failure_for_event(owner->cleanup, step_event);
+        if (step_event == SOL_MIR_RUNTIME_LOWERED_NONE
+            || step_site == SOL_MIR_RUNTIME_LOWERED_NONE
+            || !present(row->state) || row->body != input->body || row->block != i
             || row->kind != input->terminator.kind || row->runtime_class != expected.runtime_class
             || row->plan_family != expected.plan_family || row->facilities != expected.facilities
             || row->plan != predicate_terminator_semantic(materialization, operations, i)
             || row->call != call || row->cleanup_event != event || row->failure_site != failure
+            || row->step_cleanup_event != step_event || row->step_failure_site != step_site
             || (call != SOL_MIR_RUNTIME_LOWERED_NONE && (event == SOL_MIR_RUNTIME_LOWERED_NONE
                 || failure != owner->conventions->calls[call].failure_site))) goto malformed;
     }

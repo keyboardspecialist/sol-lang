@@ -438,7 +438,7 @@ int main(void){Fixture f;CHECK(setup(&f));SolMirConcreteProgram p;sol_mir_concre
         &&a.usage.arguments==3&&a.usage.formals==3&&a.usage.shapes==3
         &&a.usage.shape_cases==0&&a.usage.requirements==5&&a.usage.grants==4
         &&a.usage.owned_bytes==1816&&a.usage.build_scratch_bytes==185
-           &&a.usage.build_work==27963&&a.usage.validation_scratch_bytes==77
+           &&a.usage.build_work==36153&&a.usage.validation_scratch_bytes==77
              &&a.usage.validation_work==16074);SolMirRuntimeHostAbiWorkCensus meter=sol_mir_runtime_host_abi_test_work_census();CHECK(meter.dry_work==meter.actual_work&&meter.census_work+meter.dry_work+meter.actual_work==a.usage.build_work&&meter.validation_audit_work+meter.validation_replay_work==meter.validation_work&&meter.validation_work==a.usage.validation_work);
     /* A one-below total reaches the final persistent replay tick.  It has made
      * persistent allocation attempts, but cannot publish any partial owner. */

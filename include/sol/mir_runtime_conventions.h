@@ -39,6 +39,8 @@ typedef enum {
     SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_CALL,
     SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_NO_MATCH,
     SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT,
+    SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP,
+    SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP,
 } SolMirRuntimeFailureOriginKind;
 
 typedef struct {
@@ -47,6 +49,8 @@ typedef struct {
     size_t block;
     size_t instruction;
     SolMirRuntimeSource source;
+    /* Stable source-order discriminator for distinct sites sharing a span. */
+    size_t occurrence;
     uint32_t allowed_codes;
 } SolMirRuntimeFailureSite;
 

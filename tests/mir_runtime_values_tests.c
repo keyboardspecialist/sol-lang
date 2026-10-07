@@ -802,7 +802,7 @@ static void test_inventory(SolMirConcreteProgram *program,
         /* The values validator borrows the concrete/conventions scratch peak;
          * callback provenance grows that authenticated predecessor peak. */
         && values->usage.validation_scratch_bytes == 763171604
-        && values->usage.validation_work == 96028179);
+        && values->usage.validation_work == 96030924);
     test_allocation_plans(values);
     test_host_result_transfer_model(values);
     check_ownership_plans(values);

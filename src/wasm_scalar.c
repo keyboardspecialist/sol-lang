@@ -398,6 +398,15 @@ static bool scalar_owner_terminator(const SolMirMaterializedTerminator *terminat
         || (call_count != 0 && terminator->kind == SOL_MIR_TERM_RESUME_FAILURE);
 }
 
+/* P4.4d step prerequisites belong to the represented backend's authenticated
+ * closure.  The legacy scalar backend neither executes nor publishes them, so
+ * keep its v1 provenance envelope byte-for-byte scoped to the original P3.1
+ * failure origins. */
+static bool scalar_provenance_failure_site(const SolMirRuntimeFailureSite *site) {
+    return site->origin_kind != SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP
+        && site->origin_kind != SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP;
+}
+
 /* Owner validation is deliberately the first dereference after request shape
  * checks.  It authenticates the exact P3.6 chain; the backend never accepts a
  * materialization or any predecessor as a substitute input. */
@@ -447,9 +456,13 @@ static bool scalar_owner(const SolWasmScalarBuildRequest *request,
     usage->blocks = materialization->block_count;
     usage->edges = materialization->edge_count;
     usage->values = materialization->value_count;
+    size_t failure_site_count = 0;
+    for (size_t i = 0; i < owner->conventions->failure_site_count; ++i)
+        failure_site_count += scalar_provenance_failure_site(
+            &owner->conventions->failure_sites[i]);
     if (!scalar_add(owner->conventions->entry_count, concrete->linkage.callable_count,
             &usage->provenance_records)
-        || !scalar_add(usage->provenance_records, owner->conventions->failure_site_count,
+        || !scalar_add(usage->provenance_records, failure_site_count,
             &usage->provenance_records)
         || usage->provenance_records > UINT32_MAX) return false;
     return usage->blocks <= UINT32_MAX && usage->edges <= UINT32_MAX
@@ -548,9 +561,12 @@ static uint8_t *provenance(const SolWasmScalarBuildRequest *request,
     const SolIr *ir = request->program->conventions->concrete->program.ir;
     const SolMirRuntimeConventions *conventions = request->program->conventions;
     const SolMirConcreteProgram *concrete = conventions->concrete;
+    size_t failure_site_count = 0;
+    for (size_t i = 0; i < conventions->failure_site_count; ++i)
+        failure_site_count += scalar_provenance_failure_site(&conventions->failure_sites[i]);
     size_t count = 0;
     if (!scalar_add(conventions->entry_count, concrete->linkage.callable_count, &count)
-        || !scalar_add(count, conventions->failure_site_count, &count)
+        || !scalar_add(count, failure_site_count, &count)
         || count > UINT32_MAX) {
         if (scalar_accounting != NULL) scalar_accounting->status = SCALAR_BACKEND_RESOURCE;
         return NULL;
@@ -576,6 +592,7 @@ static uint8_t *provenance(const SolWasmScalarBuildRequest *request,
     }
     for (size_t i = 0; i < conventions->failure_site_count; ++i) {
         const SolMirRuntimeFailureSite *site = &conventions->failure_sites[i];
+        if (!scalar_provenance_failure_site(site)) continue;
         const char *relative = NULL;
         if (!provenance_source(ir, request->package_directory, site->source, &relative)
             || site->owner >= concrete->materialization.image_count) goto failed;
@@ -584,6 +601,7 @@ static uint8_t *provenance(const SolWasmScalarBuildRequest *request,
         size_t ordinal = 0;
         for (size_t earlier = 0; earlier < conventions->failure_site_count; ++earlier) {
             const SolMirRuntimeFailureSite *other = &conventions->failure_sites[earlier];
+            if (!scalar_provenance_failure_site(other)) continue;
             if (other->owner != site->owner) continue;
             if (other->source.file < site->source.file
                 || (other->source.file == site->source.file
@@ -1000,9 +1018,45 @@ static bool image_edge_preflight(const SolWasmScalarBuildRequest *request,
 
 static bool scalar_cleanup(const SolWasmScalarBuildRequest *request) {
     const SolMirRuntimeCleanup *cleanup = request->program->cleanup;
-    for (size_t i = 0; i < cleanup->action_count; ++i) {
-        const SolMirRuntimeCleanupAction *action = &cleanup->actions[i];
-        if (!scalar_cleanup_action(request, action)) return false;
+    for (size_t event_id = 0; event_id < cleanup->event_count; ++event_id) {
+        const SolMirRuntimeCleanupEvent *event = &cleanup->events[event_id];
+        if (event->actions.offset > cleanup->action_count
+            || event->actions.count > cleanup->action_count - event->actions.offset) return false;
+        if (event->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP) {
+            if (event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_STEP_METER)
+                return false;
+            continue;
+        }
+        if (event->transitions.offset > cleanup->transition_count
+            || event->transitions.count > cleanup->transition_count
+                - event->transitions.offset) return false;
+        for (size_t i = 0; i < event->transitions.count; ++i) {
+            const SolMirRuntimeCleanupTransition *transition = &cleanup->transitions[
+                event->transitions.offset + i];
+            if (transition->actions.offset > cleanup->action_count
+                || transition->actions.count > cleanup->action_count
+                    - transition->actions.offset) return false;
+            for (size_t action = 0; action < transition->actions.count; ++action)
+                if (!scalar_cleanup_action(request, &cleanup->actions[
+                        transition->actions.offset + action])) return false;
+        }
+    }
+    /* Preserve the legacy whole-arena rejection rule.  Only actions owned
+     * exclusively by an authenticated pre-step event are represented-only;
+     * orphaned, shared, and ordinary actions remain scalar-admitted here. */
+    for (size_t action = 0; action < cleanup->action_count; ++action) {
+        bool step = false, ordinary = false;
+        for (size_t event_id = 0; event_id < cleanup->event_count; ++event_id) {
+            const SolMirRuntimeCleanupEvent *event = &cleanup->events[event_id];
+            if (action < event->actions.offset
+                || action - event->actions.offset >= event->actions.count) continue;
+            if (event->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP)
+                step = true;
+            else
+                ordinary = true;
+        }
+        if ((!step || ordinary)
+            && !scalar_cleanup_action(request, &cleanup->actions[action])) return false;
     }
     return true;
 }
@@ -1131,7 +1185,8 @@ static bool scalar_call_cleanup(const SolWasmScalarBuildRequest *request,
     const SolMirRuntimeCleanupEvent *resume = NULL;
     for (size_t i = 0; i < cleanup->event_count; ++i) {
         const SolMirRuntimeCleanupEvent *candidate = &cleanup->events[i];
-        if (candidate->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+        if (candidate->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+            && candidate->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
             && candidate->owner == caller_image && candidate->block == successor) {
             if (resume != NULL) return false;
             resume = candidate;
@@ -1393,6 +1448,11 @@ static bool scalar_catalog_failures_supported(const SolWasmScalarBuildRequest *r
     if (graph->has_cycle || graph->longest_chain > 64) return false;
     for (size_t i = 0; i < cleanup->event_count; ++i) {
         const SolMirRuntimeCleanupEvent *event = &cleanup->events[i];
+        if (event->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP) {
+            if (event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_STEP_METER)
+                return false;
+            continue;
+        }
         if (event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL
             && event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_INVOKE
             && event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_ARITHMETIC)
@@ -1776,12 +1836,14 @@ static bool scalar_failure_record_index(const SolWasmScalarBuildRequest *request
     const SolIr *ir = concrete->program.ir;
     if (site_id >= conventions->failure_site_count) return false;
     const SolMirRuntimeFailureSite *site = &conventions->failure_sites[site_id];
+    if (!scalar_provenance_failure_site(site)) return false;
     const char *path = NULL, *symbol = symbol_for_image(concrete, site->owner);
     if (symbol == NULL || !provenance_source(ir, request->package_directory, site->source, &path))
         return false;
     size_t rank = 0;
     for (size_t i = 0; i < conventions->failure_site_count; ++i) {
         const SolMirRuntimeFailureSite *other = &conventions->failure_sites[i];
+        if (!scalar_provenance_failure_site(other)) continue;
         const char *other_path = NULL, *other_symbol = symbol_for_image(concrete, other->owner);
         if (other_symbol == NULL || !provenance_source(ir, request->package_directory,
                 other->source, &other_path)) return false;
@@ -1791,6 +1853,7 @@ static bool scalar_failure_record_index(const SolWasmScalarBuildRequest *request
             site->source.start, site->source.end, 0};
         for (size_t q = 0; q < conventions->failure_site_count; ++q) {
             const SolMirRuntimeFailureSite *before = &conventions->failure_sites[q];
+            if (!scalar_provenance_failure_site(before)) continue;
             if (before->owner == other->owner && (before->source.file < other->source.file
                 || (before->source.file == other->source.file
                     && (before->source.start < other->source.start

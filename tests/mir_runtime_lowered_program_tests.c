@@ -86,6 +86,11 @@ static void check_build_work(const Pipeline *p) {
         && work.build_scratch_bytes == p->lowered.usage.build_scratch_bytes);
 }
 static void reseal(SolMirRuntimeLoweredProgram *);
+static size_t render_key_collision_pairs(const char (*keys)[65],size_t count){size_t collisions=0;for(size_t i=0;i<count;++i)for(size_t q=i+1;q<count;++q)collisions+=!memcmp(keys[i],keys[q],65);return collisions;}
+static bool lowered_render_rejected(const SolMirRuntimeLoweredProgram*lowered){FILE*stream=tmpfile();if(!stream)return false;bool rejected=!sol_mir_runtime_lowered_program_render(stream,lowered)&&fflush(stream)==0&&fseek(stream,0,SEEK_END)==0&&ftell(stream)==0;fclose(stream);return rejected;}
+static void check_step_render_identity(Pipeline*p){size_t capacity=p->lowered.image_instruction_count+p->lowered.image_terminator_count+p->lowered.predicate_instruction_count+p->lowered.predicate_terminator_count;char(*events)[65]=calloc(capacity,sizeof *events),(*ready)[65]=calloc(capacity,sizeof *ready),(*failure)[65]=calloc(capacity,sizeof *failure);unsigned char*ready_seen=calloc(capacity,1),*failure_seen=calloc(capacity,1);char*text=rendered(&p->lowered,NULL);CHECK(events&&ready&&failure&&ready_seen&&failure_seen&&text);if(!events||!ready||!failure||!ready_seen||!failure_seen||!text)goto done;size_t count=0,ready_count=0,failure_count=0,classes[4]={0};for(const char*line=text;*line;){const char*end=strchr(line,'\n');size_t length=end?(size_t)(end-line):strlen(line);const char*key,*event,*transition,*role;size_t key_length,event_length,transition_length,role_length;size_t class_id=SOL_MIR_RUNTIME_NONE;if(length>19&&!memcmp(line,"image_instructions ",19))class_id=0;else if(length>18&&!memcmp(line,"image_terminators ",18))class_id=1;else if(length>23&&!memcmp(line,"predicate_instructions ",23))class_id=2;else if(length>22&&!memcmp(line,"predicate_terminators ",22))class_id=3;if(class_id!=SOL_MIR_RUNTIME_NONE){CHECK(render_line_field(line,length,"step-cleanup-event",&key,&key_length)&&lowercase_hex_key(key,key_length)&&count<capacity);if(count<capacity&&key_length==64){memcpy(events[count],key,64);events[count][64]='\0';++count;++classes[class_id];}}else if(length>17&&!memcmp(line,"cleanup_failures ",17)&&render_line_field(line,length,"transition",&transition,&transition_length)&&render_line_field(line,length,"event",&event,&event_length)&&render_line_field(line,length,"role",&role,&role_length)){size_t owner=SOL_MIR_RUNTIME_NONE;for(size_t i=0;i<count;++i)if(event_length==64&&!memcmp(events[i],event,64)){CHECK(owner==SOL_MIR_RUNTIME_NONE);owner=i;}if(owner!=SOL_MIR_RUNTIME_NONE){CHECK(transition_length==64&&lowercase_hex_key(transition,transition_length));if(role_length==2&&!memcmp(role,"15",2)){CHECK(!ready_seen[owner]&&ready_count<capacity);ready_seen[owner]=1;memcpy(ready[ready_count],transition,64);ready[ready_count++][64]='\0';}else if(role_length==2&&!memcmp(role,"16",2)){CHECK(!failure_seen[owner]&&failure_count<capacity);failure_seen[owner]=1;memcpy(failure[failure_count],transition,64);failure[failure_count++][64]='\0';}}}line=end?end+1:line+length;}CHECK(count==capacity&&classes[0]==p->lowered.image_instruction_count&&classes[1]==p->lowered.image_terminator_count&&classes[2]==p->lowered.predicate_instruction_count&&classes[3]==p->lowered.predicate_terminator_count&&ready_count==count&&failure_count==count&&render_key_collision_pairs(events,count)==0&&render_key_collision_pairs(ready,ready_count)==0&&render_key_collision_pairs(failure,failure_count)==0);for(size_t i=0;i<count;++i)CHECK(ready_seen[i]&&failure_seen[i]);
+    size_t pair[2]={SOL_MIR_RUNTIME_NONE,SOL_MIR_RUNTIME_NONE};for(size_t i=0;i<p->cleanup.event_count&&pair[0]==SOL_MIR_RUNTIME_NONE;++i){const SolMirRuntimeCleanupEvent*left=&p->cleanup.events[i];if(left->phase!=SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP)continue;for(size_t q=i+1;q<p->cleanup.event_count;++q){const SolMirRuntimeCleanupEvent*right=&p->cleanup.events[q];if(right->phase==SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP&&right->kind==left->kind&&right->source.file==left->source.file&&right->source.start==left->source.start&&right->source.end==left->source.end){pair[0]=i;pair[1]=q;break;}}}CHECK(pair[0]!=SOL_MIR_RUNTIME_NONE&&pair[1]!=SOL_MIR_RUNTIME_NONE);if(pair[0]!=SOL_MIR_RUNTIME_NONE&&pair[1]!=SOL_MIR_RUNTIME_NONE){SolMirRuntimeCleanupEvent*left=&p->cleanup.events[pair[0]],*right=&p->cleanup.events[pair[1]];SolMirRuntimeFailureSite*site=&p->conventions.failure_sites[left->inherited_failure_site];size_t occurrence=site->occurrence;site->occurrence=p->conventions.failure_sites[right->inherited_failure_site].occurrence;reseal(&p->lowered);CHECK(!sol_mir_runtime_lowered_program_validate(&p->lowered,NULL)&&lowered_render_rejected(&p->lowered));site->occurrence=occurrence;reseal(&p->lowered);CHECK(sol_mir_runtime_lowered_program_validate(&p->lowered,NULL));size_t inherited=left->inherited_failure_site;left->inherited_failure_site=right->inherited_failure_site;reseal(&p->lowered);CHECK(!sol_mir_runtime_lowered_program_validate(&p->lowered,NULL)&&lowered_render_rejected(&p->lowered));left->inherited_failure_site=inherited;reseal(&p->lowered);CHECK(sol_mir_runtime_lowered_program_validate(&p->lowered,NULL));}
+done:free(events);free(ready);free(failure);free(ready_seen);free(failure_seen);free(text);}
 static bool build_pre_operations(Fixture *, Pipeline *, bool);
 static void check_pre_operation_joins(Pipeline *p) {
     size_t rows[7], count = 0, invoke_count = 0, residual_count = 0;
@@ -168,6 +173,7 @@ static void check_pre_operation_render_stability(Fixture *fixture) {
         && build_pre_operations(fixture, &second, true);
     CHECK(built);
     if (built) {
+        check_step_render_identity(&first); check_step_render_identity(&second);
         check_pre_operation_joins(&first); check_pre_operation_joins(&second);
         size_t first_length = 0, second_length = 0;
         char *first_render = rendered(&first.lowered, &first_length);
@@ -454,7 +460,8 @@ static void test_e6_census_and_missing(Pipeline*p) {
     size_t refined_events = 0;
     for (size_t event_id = 0; event_id < c->event_count; ++event_id) {
         const SolMirRuntimeCleanupEvent *event = &c->events[event_id];
-        if (event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+        if (event->phase != SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+            || event->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
             || event->block >= m->block_count
             || m->blocks[event->block].terminator.kind != SOL_MIR_TERM_CHECK_REFINED)
             continue;
@@ -1047,9 +1054,9 @@ static void test_slice_d_e6_usage(const Pipeline *p) {
             == SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_PROPAGATE_RESIDUAL;
     }
     CHECK(pre_invoke == 5 && pre_residual == 0);
-    static const size_t expected[] = {471,65,64,64,64,65,4,6,4,0,0,0,4,80,12,12,52,20,20,295,1525,5,4,5,0,0,0};
-    expect_slice_d_usage(p, expected, 534944, 535522, 1288227, 5682, 902546,
-        11637760, 11659464);
+    static const size_t expected[] = {471,65,64,64,64,65,4,6,4,0,0,0,4,80,12,12,52,20,20,295,7668,5,4,5,0,0,0};
+    expect_slice_d_usage(p, expected, 2362008, 2362586, 5763131, 17968, 3562274,
+        36799488, 36870336);
 }
 static size_t distinct_render_row_keys(const char *text, const char *prefix,
     char keys[][65], size_t capacity) {
@@ -1251,9 +1258,9 @@ static void test_long_virtual_path_validation_work(void) {
     done(&base); done(&longer); finish(&base_fixture); finish(&long_fixture);
 }
 static void test_slice_d_p35_usage(const Pipeline *p, size_t validation_work) {
-    static const size_t expected[] = {198,16,10,10,10,16,0,0,0,0,0,0,0,33,5,7,11,7,7,54,490,0,0,0,7,14,15};
-    expect_slice_d_usage(p, expected, 174472, 174686, 375846, 1820, validation_work + 6706,
-        3728384, 3734640);
+    static const size_t expected[] = {198,16,10,10,10,16,0,0,0,0,0,0,0,33,5,7,11,7,7,54,2742,0,0,0,7,14,128};
+    expect_slice_d_usage(p, expected, 849008, 849222, 2017530, 6550, validation_work,
+        13415424, 13440600);
 }
 static void test_slice_d_allocation_faults(const Pipeline *p) {
     SolMirRuntimeLoweredProgram candidate; sol_mir_runtime_lowered_program_init(&candidate);
@@ -1349,9 +1356,11 @@ static void test_slice_c_cleanup_and_host(Pipeline *p) {
         CHECK(caller != NULL && caller->state == SOL_MIR_RUNTIME_LOWERED_PRESENT
             && caller->call == local->failure_site
             && caller->failure_site == local->failure_site
-            && caller->owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_IMAGE
-            && caller->target_kind == SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL
-            && caller->call_kind == SOL_IR_CALL_FUNCTION);
+            && (caller->target_kind == SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL
+                || (caller->target_kind == SOL_MIR_RUNTIME_TARGET_INDIRECT_TABLE
+                    && caller->table < p->concrete.linkage.table_entry_count
+                    && p->concrete.linkage.table_entries[caller->table].target_kind
+                        == SOL_MIR_LINKAGE_TARGET_INTERNAL)));
         size_t expected_cleanup_rows = 0, expected_call_rows = 0;
         for (size_t i = 0; i < p->lowered.cleanup_failure_count; ++i) {
             const SolMirRuntimeLoweredCleanupFailure *row = &p->lowered.cleanup_failures[i];
@@ -1366,9 +1375,13 @@ static void test_slice_c_cleanup_and_host(Pipeline *p) {
                     CHECK(related->state == SOL_MIR_RUNTIME_LOWERED_PRESENT
                         && related->call == row->failure_site
                         && related->failure_site == row->failure_site
-                        && related->owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_IMAGE
-                        && related->target_kind == SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL
-                        && related->call_kind == SOL_IR_CALL_FUNCTION);
+                        && (related->target_kind == SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL
+                            || (related->target_kind
+                                    == SOL_MIR_RUNTIME_TARGET_INDIRECT_TABLE
+                                && related->table
+                                    < p->concrete.linkage.table_entry_count
+                                && p->concrete.linkage.table_entries[related->table].target_kind
+                                    == SOL_MIR_LINKAGE_TARGET_INTERNAL)));
                 }
                 ++expected_cleanup_rows;
             }
@@ -1377,9 +1390,15 @@ static void test_slice_c_cleanup_and_host(Pipeline *p) {
             if (p->lowered.calls[i].state == SOL_MIR_RUNTIME_LOWERED_PRESENT
                 && p->lowered.calls[i].call == i
                 && p->lowered.calls[i].failure_site == i
-                && p->lowered.calls[i].owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_IMAGE
-                && p->lowered.calls[i].target_kind == SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL
-                && p->lowered.calls[i].call_kind == SOL_IR_CALL_FUNCTION) ++expected_call_rows;
+                && (p->lowered.calls[i].target_kind
+                        == SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL
+                    || (p->lowered.calls[i].target_kind
+                            == SOL_MIR_RUNTIME_TARGET_INDIRECT_TABLE
+                        && p->lowered.calls[i].table
+                            < p->concrete.linkage.table_entry_count
+                        && p->concrete.linkage.table_entries[
+                            p->lowered.calls[i].table].target_kind
+                            == SOL_MIR_LINKAGE_TARGET_INTERNAL))) ++expected_call_rows;
         CHECK(expected_cleanup_rows > 0 && expected_cleanup_rows == expected_call_rows);
         size_t left_length = 0, right_length = 0;
         char *left = rendered(&p->lowered, &left_length);
@@ -1493,20 +1512,20 @@ static void test_slice_c_handlers(void) {
     if (!built) { sol_diagnostics_render_human(stderr, &first.p.source, &first.d); sol_diagnostics_render_human(stderr, &reordered.p.source, &reordered.d); }
     CHECK(built); if (built) check_build_work(&right);
     if (built) {
-        CHECK(left.lowered.handler_frame_count == 7 && left.lowered.handler_marker_count == 14 && left.lowered.handler_exit_count == 15);
-        CHECK(right.lowered.handler_frame_count == 7 && right.lowered.handler_marker_count == 14 && right.lowered.handler_exit_count == 15);
-        test_slice_d_p35_usage(&left, 282188);
-        test_slice_d_p35_usage(&right, 284468);
+        CHECK(left.lowered.handler_frame_count == 7 && left.lowered.handler_marker_count == 14 && left.lowered.handler_exit_count == 128);
+        CHECK(right.lowered.handler_frame_count == 7 && right.lowered.handler_marker_count == 14 && right.lowered.handler_exit_count == 128);
+        test_slice_d_p35_usage(&left, 1276307);
+        test_slice_d_p35_usage(&right, 1278587);
         size_t left_length=0,right_length=0;
         char *left_bytes=rendered(&left.lowered,&left_length);
         char *right_bytes=rendered(&right.lowered,&right_length);
         CHECK(left_bytes && right_bytes && left_length==right_length
             && !memcmp(left_bytes,right_bytes,left_length));
         if (left_bytes) {
-            char frames[8][65], markers[16][65], exits[16][65];
+            char frames[8][65], markers[16][65], exits[128][65];
             CHECK(distinct_render_row_keys(left_bytes, "handler_frames state=", frames, 8) == 7
                 && distinct_render_row_keys(left_bytes, "handler_markers state=", markers, 16) == 14
-                && distinct_render_row_keys(left_bytes, "handler_exits state=", exits, 16) == 15
+                && distinct_render_row_keys(left_bytes, "handler_exits state=", exits, 128) == 128
                 && strstr(left_bytes, " parent=") != NULL
                 && strstr(left_bytes, " frame=") != NULL
                 && strstr(left_bytes, "cleanup-action=") != NULL
@@ -1565,7 +1584,7 @@ static void test_bound_environment_indirect_graph(void) {
                 const SolMirRuntimeCall *input = &pipeline.conventions.calls[i];
                 const SolMirPredicateTerminator *term = &pipeline.concrete.operations.predicate_blocks[row->block].terminator;
                 CHECK(row->owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE && row->body < pipeline.lowered.predicate_body_count && row->block < pipeline.lowered.predicate_block_count && term->kind == SOL_MIR_PREDICATE_TERM_INVOKE && row->signature == input->signature && row->table == input->table && row->callee.kind == input->callee.kind && row->callee.id == input->callee.id && row->callee.id == term->callee && row->table < pipeline.concrete.linkage.table_entry_count && table->target_kind == SOL_MIR_LINKAGE_TARGET_INTERNAL && table->internal != SOL_MIR_LINKAGE_NONE && row->callee.kind == SOL_MIR_RUNTIME_VALUE_PREDICATE_VALUE && row->callee.id < pipeline.concrete.operations.predicate_value_count && pipeline.conventions.signatures[row->signature].origin == SOL_MIR_RUNTIME_SIGNATURE_FUNCTION_RECIPE && row->import_id == SOL_MIR_RUNTIME_LOWERED_NONE && row->bound_environment_import < pipeline.lowered.import_count && import->kind == SOL_MIR_RUNTIME_IMPORT_RECIPE_BOUND_ENVIRONMENT && import->recipe == pipeline.conventions.signatures[row->signature].function_recipe && pipeline.lowered.imports[row->bound_environment_import].state == SOL_MIR_RUNTIME_LOWERED_PRESENT);
-                const SolMirRuntimeCleanupEvent *event=&pipeline.cleanup.events[pipeline.lowered.predicate_terminators[row->block].cleanup_event];for(size_t q=0;q<event->transitions.count;q++){const SolMirRuntimeCleanupTransition *transition=&pipeline.cleanup.transitions[event->transitions.offset+q];if(transition->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_FAILURE)CHECK(transition->failure_source==SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31&&transition->failure_site==row->failure_site&&transition->failure_mask==(UINT32_C(1)<<(SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT-1)));}
+                const SolMirRuntimeCleanupEvent *event=&pipeline.cleanup.events[pipeline.lowered.predicate_terminators[row->block].cleanup_event];for(size_t q=0;q<event->transitions.count;q++){const SolMirRuntimeCleanupTransition *transition=&pipeline.cleanup.transitions[event->transitions.offset+q];if(transition->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_FAILURE)CHECK(transition->failure_source==SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING&&transition->failure_site==row->failure_site&&transition->failure_mask==(UINT32_C(1)<<(SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT-1)));}
                 SolMirLinkageTableId table_id = row->table; row->table = SOL_MIR_RUNTIME_LOWERED_NONE; CHECK(!sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL)); row->table = table_id; CHECK(sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL));
                 SolMirRuntimeSignatureId signature = row->signature; row->signature = 0; CHECK(!sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL)); row->signature = signature; CHECK(sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL));
                 SolMirRuntimeImportId bound_import = row->bound_environment_import; row->bound_environment_import = SOL_MIR_RUNTIME_LOWERED_NONE; CHECK(!sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL)); row->bound_environment_import = bound_import; CHECK(sol_mir_runtime_lowered_program_validate(&pipeline.lowered, NULL));
@@ -1830,13 +1849,15 @@ static void test_callback_prerequisite(void) {
                 && call->signature < p.conventions.signature_count
                 && p.conventions.signatures[call->signature].origin == SOL_MIR_RUNTIME_SIGNATURE_FUNCTION_RECIPE
                 && p.conventions.failure_sites[call->failure_site].allowed_codes
-                    == (UINT32_C(1) << (SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT - 1)));
+                    == (UINT32_C(1) << (SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT - 1)));
             size_t allocation = SOL_MIR_RUNTIME_LOWERED_NONE, callback = SOL_MIR_RUNTIME_LOWERED_NONE;
             for (size_t i = 0; i < p.cleanup.event_count; ++i) {
                 const SolMirRuntimeCleanupEvent *event = &p.cleanup.events[i];
-                if (event->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION
+                if (event->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+                    && event->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION
                     && event->operation == instruction) allocation = i;
-                if (event->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
+                if (event->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+                    && event->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
                     && event->block == block) callback = i;
             }
             CHECK(allocation != SOL_MIR_RUNTIME_LOWERED_NONE && callback != SOL_MIR_RUNTIME_LOWERED_NONE);
@@ -1951,12 +1972,13 @@ static void test_callable_hole_prerequisite(void) {
                 if (p.conventions.calls[i].block == callback) call = &p.conventions.calls[i];
             CHECK(call != NULL && call->failure_site == 0 && call->table == 0
                 && call->signature < p.conventions.signature_count
-                && p.conventions.failure_sites[call->failure_site].allowed_codes == UINT32_C(32));
+                && p.conventions.failure_sites[call->failure_site].allowed_codes == UINT32_C(64));
             size_t event_id = SOL_MIR_RUNTIME_LOWERED_NONE, resume_event = SOL_MIR_RUNTIME_LOWERED_NONE;
             const SolMirRuntimeCleanupTransition *failure = NULL;
             for (size_t i = 0; i < p.cleanup.event_count; ++i) {
                 const SolMirRuntimeCleanupEvent *event = &p.cleanup.events[i];
-                if (event->block == callback
+                if (event->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+                    && event->block == callback
                     && event->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR) {
                     event_id = i;
                     for (size_t j = 0; j < event->transitions.count; ++j) {
@@ -1974,13 +1996,13 @@ static void test_callable_hole_prerequisite(void) {
             }
             CHECK(event_id != SOL_MIR_RUNTIME_LOWERED_NONE && failure != NULL
                 && failure->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING
-                && failure->failure_mask == UINT32_C(32)
+                && failure->failure_mask == UINT32_C(64)
                 && failure->failure_site == call->failure_site
                 && resume_event != SOL_MIR_RUNTIME_LOWERED_NONE);
             if (failure != NULL && resume_event != SOL_MIR_RUNTIME_LOWERED_NONE) {
                 SolMirRuntimeCleanupFailureOccurrence occurrence = {
                     SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31,
-                    call->failure_site, SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT,
+                    call->failure_site, SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT,
                     SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE, 0, {0},
                     p.conventions.failure_sites[call->failure_site].source,
                 };
@@ -2227,14 +2249,26 @@ static void check_exact_pair_case(Pipeline *p, Fixture *f, const char *image_nam
             ? &p->lowered.image_instructions[old_marker] : NULL;
         CHECK(old_row != NULL && old_row->state == SOL_MIR_RUNTIME_LOWERED_PRESENT
             && old_row->instruction == old_marker && old_row->cleanup_event == SOL_MIR_RUNTIME_LOWERED_NONE);
-        bool old_targeted = false;
-        for (size_t i = 0; i < p->cleanup.action_count; ++i)
-            old_targeted |= p->cleanup.actions[i].kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE
-                && p->cleanup.actions[i].target == old;
-        bool old_event = false;
-        for (size_t i = 0; i < p->cleanup.event_count; ++i)
-            old_event |= p->cleanup.events[i].operation == old_marker;
-        CHECK(!old_targeted && !old_event);
+        bool old_targeted = false, old_event = false;
+        size_t step_events = 0;
+        for (size_t i = 0; i < p->cleanup.event_count; ++i) {
+            const SolMirRuntimeCleanupEvent *event = &p->cleanup.events[i];
+            if (event->operation != old_marker) continue;
+            if (event->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION)
+                old_event = true;
+            if (event->phase != SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP) continue;
+            ++step_events;
+            for (size_t a = 0; a < event->actions.count; ++a) {
+                const SolMirRuntimeCleanupAction *action
+                    = &p->cleanup.actions[event->actions.offset + a];
+                old_targeted |= action->kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE
+                    && action->target == old;
+            }
+        }
+        CHECK(!old_targeted && !old_event && step_events == 1
+            && old_row != NULL
+            && old_row->step_cleanup_event < p->cleanup.event_count
+            && old_row->step_failure_site < p->conventions.failure_site_count);
         if (old_row != NULL && old_row->cleanup_event == SOL_MIR_RUNTIME_LOWERED_NONE
             && p->cleanup.event_count != 0) {
             SolMirRuntimeLoweredImageInstruction *mutable_row = &p->lowered.image_instructions[old_marker];
@@ -2647,4 +2681,4 @@ static void test_require_never_fallback_pipeline(void) {
     finish_text(&f);
 }
 
-int main(void) { test_vocabulary();Fixture f;Pipeline p;init(&p);CHECK(setup(&f));bool built=!failures&&build(&f,&p,NULL);if(!built)sol_diagnostics_render_human(stderr,&f.p.source,&f.d);CHECK(built);if(built)check_build_work(&p);CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));test_e6_census_and_missing(&p);test_slice_b_graph_joins(&p);test_executable_plan_event_value_joins(&p);test_slice_c_cleanup_and_host(&p);test_slice_d_raw_owner_preflight(&p);test_slice_d_e6_usage(&p);test_slice_e_render(&p);test_slice_d_resource_limits(&p);test_slice_d_allocation_faults(&p);{ Fixture pre_fixture; CHECK(setup(&pre_fixture)); if(!failures) check_pre_operation_render_stability(&pre_fixture); finish(&pre_fixture); }test_erased_loop_census();test_propagation_value_demand();test_pattern_copy_pipeline();test_nontrivial_copy_demand();test_callback_prerequisite();test_callable_hole_prerequisite();test_callable_hole_exact();test_immediate_method_prerequisite();test_require_never_fallback_pipeline();test_bound_environment_indirect_graph();test_source_backed_p36_graph_keys();test_generic_type_place_keys();test_slice_c_handlers();test_long_virtual_path_validation_work();test_snapshot_cleanup_mirror();FILE*s=tmpfile();CHECK(s&&sol_mir_runtime_lowered_program_render(s,&p.lowered));if(s)fclose(s);uint64_t seal=p.lowered.authentication;p.lowered.authentication^=1;CHECK(!sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));p.lowered.authentication=seal;CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));SolMirRuntimeLoweredProgramLimits exact=p.lowered.limits;exact.max_owned_bytes=p.lowered.usage.owned_bytes? p.lowered.usage.owned_bytes-1:1;Pipeline bad;init(&bad);CHECK(!build(&f,&bad,&exact)&&!bad.lowered.image_instructions);done(&bad);done(&p);finish(&f);return failures?1:0; }
+int main(void) { test_vocabulary();Fixture f;Pipeline p;init(&p);CHECK(setup(&f));bool built=!failures&&build(&f,&p,NULL);if(!built)sol_diagnostics_render_human(stderr,&f.p.source,&f.d);CHECK(built);if(built)check_build_work(&p);CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));check_step_render_identity(&p);test_e6_census_and_missing(&p);test_slice_b_graph_joins(&p);test_executable_plan_event_value_joins(&p);test_slice_c_cleanup_and_host(&p);test_slice_d_raw_owner_preflight(&p);test_slice_d_e6_usage(&p);test_slice_e_render(&p);test_slice_d_resource_limits(&p);test_slice_d_allocation_faults(&p);{ Fixture pre_fixture; CHECK(setup(&pre_fixture)); if(!failures) check_pre_operation_render_stability(&pre_fixture); finish(&pre_fixture); }test_erased_loop_census();test_propagation_value_demand();test_pattern_copy_pipeline();test_nontrivial_copy_demand();test_callback_prerequisite();test_callable_hole_prerequisite();test_callable_hole_exact();test_immediate_method_prerequisite();test_require_never_fallback_pipeline();test_bound_environment_indirect_graph();test_source_backed_p36_graph_keys();test_generic_type_place_keys();test_slice_c_handlers();test_long_virtual_path_validation_work();test_snapshot_cleanup_mirror();FILE*s=tmpfile();CHECK(s&&sol_mir_runtime_lowered_program_render(s,&p.lowered));if(s)fclose(s);uint64_t seal=p.lowered.authentication;p.lowered.authentication^=1;CHECK(!sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));p.lowered.authentication=seal;CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));SolMirRuntimeLoweredProgramLimits exact=p.lowered.limits;exact.max_owned_bytes=p.lowered.usage.owned_bytes? p.lowered.usage.owned_bytes-1:1;Pipeline bad;init(&bad);CHECK(!build(&f,&bad,&exact)&&!bad.lowered.image_instructions);done(&bad);done(&p);finish(&f);return failures?1:0; }

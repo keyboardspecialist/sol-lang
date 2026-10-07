@@ -326,10 +326,7 @@ static bool build_call_failure_mask(const SolMirRuntimeCall *call,
             && target != SOL_MIR_LINKAGE_TARGET_HOST) return false;
         targets_host = target == SOL_MIR_LINKAGE_TARGET_HOST;
     } else return false;
-    *mask = call->target_kind == SOL_MIR_RUNTIME_TARGET_INDIRECT_TABLE
-            && !targets_host
-        ? failure_code_bit(SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT)
-        : failure_code_bit(SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT);
+    *mask = failure_code_bit(SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT);
     if (targets_host) {
         *mask |= failure_code_bit(SOL_MIR_RUNTIME_FAILURE_HOST_CALL_LIMIT);
         *mask |= failure_code_bit(SOL_MIR_RUNTIME_FAILURE_HOST_ERROR);
@@ -508,6 +505,11 @@ unsupported_entry:
         if (!build_event(1)
             || !add_resource_size(&counts->failure_sites, 1)) return false;
     }
+    if (!add_resource_size(&counts->failure_sites, m->instruction_count)
+        || !add_resource_size(&counts->failure_sites, m->block_count)
+        || !add_resource_size(&counts->failure_sites, o->predicate_instruction_count)
+        || !add_resource_size(&counts->failure_sites, o->predicate_block_count))
+        return false;
     for (size_t i = 0; i < r->recipe_count; ++i) {
         if (!build_event(1)) return false;
         if (!indirect[i]) continue;
@@ -918,8 +920,13 @@ static bool append_failure_site(SolMirRuntimeConventions *out,
     SolMirRuntimeSource source;
     if (!runtime_source_from_span(out->concrete->program.ir, span, &source))
         return false;
+    /* Failure sites are emitted in canonical replay order.  Retaining that
+     * ordinal makes equal-span operations distinct without a merge or scan. */
+    size_t occurrence = out->failure_site_count;
     out->failure_sites[out->failure_site_count++] = (SolMirRuntimeFailureSite){
-        origin_kind, owner, block, instruction, source, allowed_codes};
+        .origin_kind = origin_kind, .owner = owner, .block = block,
+        .instruction = instruction, .source = source, .occurrence = occurrence,
+        .allowed_codes = allowed_codes};
     return true;
 }
 
@@ -1400,6 +1407,43 @@ static bool populate_failure_sites(SolMirRuntimeConventions *out) {
                 body_id, replay.block, SOL_MIR_RUNTIME_NONE,
                 ir->expressions[predicate].span, failure_code_bit(code)))
             return false;
+    }
+    uint32_t step = failure_code_bit(SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT);
+    for (size_t image = 0; image < m->image_count; ++image) {
+        const SolMirMaterializedImage *owner = &m->images[image];
+        for (size_t q = 0; q < owner->instructions.count; ++q) {
+            size_t instruction = owner->instructions.offset + q;
+            const SolMirMaterializedInstruction *item = &m->instructions[instruction];
+            if (!append_failure_site(out, SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP,
+                    image, item->block, instruction, item->span, step)) return false;
+        }
+        for (size_t q = 0; q < owner->blocks.count; ++q) {
+            size_t block = owner->blocks.offset + q;
+            if (!append_failure_site(out, SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP,
+                    image, block, SOL_MIR_RUNTIME_NONE,
+                    m->blocks[block].terminator.span, step)) return false;
+        }
+    }
+    for (size_t body = 0; body < o->predicate_body_count; ++body) {
+        SolSpan span;
+        const SolMirPredicateBody *predicate = &o->predicate_bodies[body];
+        const SolMirPlanContext *context = &m->contexts[predicate->context];
+        if (context->obligation >= ir->obligation_count
+            || ir->obligations[context->obligation].predicate >= ir->expression_count)
+            return false;
+        span = ir->expressions[ir->obligations[context->obligation].predicate].span;
+        for (size_t q = 0; q < predicate->blocks.count; ++q) {
+            size_t block = predicate->blocks.offset + q;
+            const SolMirPredicateBlock *source = &o->predicate_blocks[block];
+            for (size_t n = 0; n < source->instructions.count; ++n) {
+                size_t instruction = source->instructions.offset + n;
+                if (!append_failure_site(out,
+                        SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP, body, block,
+                        instruction, span, step)) return false;
+            }
+            if (!append_failure_site(out, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP,
+                    body, block, SOL_MIR_RUNTIME_NONE, span, step)) return false;
+        }
     }
     return true;
 }
@@ -1996,7 +2040,7 @@ static const char *runtime_failure_origin_name(
     static const char *const names[] = {"image-arithmetic", "image-call",
         "image-panic", "image-no-match", "image-unreachable",
         "predicate-arithmetic", "predicate-call", "predicate-no-match",
-        "predicate-result"};
+        "predicate-result", "image-step", "predicate-step"};
     return (size_t)kind < sizeof(names) / sizeof(names[0])
         ? names[kind] : "invalid";
 }
@@ -2092,7 +2136,8 @@ static void render_call_owner(Buffer *out,
 static void render_failure_site_owner(Buffer *out,
     const SolMirRuntimeConventions *owner,
     const SolMirRuntimeFailureSite *site) {
-    if (site->origin_kind <= SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_UNREACHABLE) {
+    if (site->origin_kind <= SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_UNREACHABLE
+        || site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP) {
         const SolMirLinkageCallable *item
             = linkage_callable_for_image(owner, site->owner);
         if (item == NULL) { out->failed = true; return; }
@@ -2229,7 +2274,7 @@ bool sol_mir_runtime_conventions_render(FILE *stream,
         format(line, "failure-site origin=%s owner=",
             runtime_failure_origin_name(site->origin_kind));
         render_failure_site_owner(line, owner, site);
-        format(line, " codes=");
+        format(line, " occurrence=%zu codes=", site->occurrence);
         bool first = true;
         for (size_t code = 1; code <= SOL_MIR_RUNTIME_FAILURE_HOST_ERROR;
             ++code) {
