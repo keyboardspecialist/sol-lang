@@ -364,24 +364,26 @@ P4.4 implementation audit (October 7, 2026; evidence, not new acceptance):
 | Slice | Evidenced status and remaining boundary |
 | --- | --- |
 | P4.4a-P4.4c | Committed code covers terminal failures (`4922213`), cleanup routing/tracing (`ccc6246` and predecessors), scalar requires/ensures, scalar entry snapshots, qualified Result predicates, and leaf scalar refinements (through `f616297`). These bounded implementations do not close the broad P4.4 row. |
-| P4.4d | Active uncommitted work adds step-route failure/cleanup metadata across runtime conventions, cleanup, and lowered-program owners, with emitter authentication and shared tests. Route authentication is not evidence of executed runtime metering or P4.4 completion. |
-| Residual P4.4 | Richer predicates and guard calls/guarded-control closure, exact handler execution, runtime depth/step execution, and full cleanup closure remain open. Each needs bounded implementation and independent acceptance evidence. |
+| P4.4d | Committed and pushed as `43a287a`; independent review approved after the canonical identity uniqueness fix. Authenticated step-route failure/cleanup metadata across runtime conventions, cleanup, lowered-program owners, and emitters is a prerequisite only, not executed runtime depth/step limits. Fresh coordinator focused validation passed ON 5/5 and OFF 3/3; implementation reported full ON 58/58 and OFF 54/54. Sanitizer owner/scalar tests passed; full represented sanitizer validation timed out and remains incomplete. |
+| P4.4e | P4.4e1 accepted after independent technical and test-sharding review plus final acceptance; scoped commit pending. Executes `max_steps` for four base rows, Text, and panic bytes with exact code 6 cleanup in the bounded represented subset. Matching final-source full ON 58/58 and OFF 54/54 passed, as did all 47 native and 47 ASan/UBSan shards covering exactly 3504 fault IDs and 63 controls. The initial native 1500-second timeout was corrected to an explicit 7200-second budget and full ON passed. The historical monolithic ASan 7200-second timeout is superseded for the sanitizer gate by the approved exhaustive shard union; no monolithic ASan, full-project sanitizer, or leak-check pass is claimed. P4.4e2 depth brief is prepared read-only; implementation remains blocked until E1 commit and Sol 6.1 High recheck, with no combined step/depth authorization. |
+| Residual P4.4 | Richer predicates and guard calls/guarded-control closure, exact handler execution, runtime depth execution, step execution beyond the accepted E1 bounded represented subset, and full cleanup closure remain open. Each needs bounded implementation and independent acceptance evidence. |
 
 #### Parallel development within the P4.4 cursor
 
-The following immediate lanes support the single P4.4 checkpoint:
+No parallel lanes are active. P4.4e1 is accepted after final-source validation; scoped commit pending. P4.4e2 depth brief is prepared read-only, with implementation blocked until E1 commit and Sol 6.1 High recheck. The following current/future lanes
+support the single, still-unchecked P4.4 checkpoint only after readiness approval:
 
 | Lane / owner | Ready work and exclusive scope | Acceptance handoff |
 | --- | --- | --- |
-| Runtime prerequisites / existing Terra High owner | Complete active P4.4d step/failure prerequisites. Retain exclusive edits to the currently modified `mir_runtime_{conventions,cleanup,lowered_program}` headers, builders and validators, `src/wasm_scalar.c`, `src/wasm_represented.c`, and affected shared runtime/Wasm tests. | Sol review of failure/cleanup/provenance invariants and the brief's focused validation; report route authentication separately from executed limits. |
-| Independent fixtures / Terra High | Reserve new `tests/conformance/p44_parallel_guard_*/` and `tests/conformance/p44_parallel_predicate_*/` directories for demonstrated missing guard/predicate forms. Establish interpreter expectations first; coordinator integrates shared test drivers and CMake. | Reviewed source fixtures and expected results/failure identities, with interpreter validation commands; Wasm acceptance follows implementation. |
-| Interface design / Sol High | Design-only briefs for remaining predicates, exact handlers, and P4.5 trusted-host physical interfaces, in coordinator-reserved brief files. | Reviewed failure/cleanup/provenance contracts, dependencies, and module boundaries before implementation dispatch. |
-| Documentation/status / Terra | Update assigned status documents from reviewed evidence; submit cursor changes to the coordinator. | Diff/consistency review; distinguish implemented, active, residual, and independently accepted scope. |
+| Runtime execution / Sol 6.1 High planning, Luna 6 xhigh implementation | P4.4e1 bounded step execution is accepted after independent technical/test-sharding review and final-source native and exhaustive shard-union sanitizer validation; scoped commit pending. P4.4e2 depth brief is prepared read-only and is not authorized by the E1 brief. | Commit accepted E1, then obtain Sol 6.1 High recheck before E2 implementation dispatch; preserve the accepted bounded step scope and distinguish shard-union sanitizer evidence from unclaimed monolithic/full-project sanitizer or leak-check results. |
+| Independent fixtures / Luna 6 xhigh | After an approved Sol 6.1 High brief, reserve new `tests/conformance/p44_parallel_guard_*/` and `tests/conformance/p44_parallel_predicate_*/` directories for demonstrated missing forms. Establish interpreter expectations first; coordinator integrates shared test drivers and CMake. | Separate Sol 6.1 review of source fixtures and expected results/failure identities, with interpreter validation commands; Wasm acceptance follows implementation. |
+| Interface design / Sol 6.1 High | Design-only briefs for remaining predicates and exact handlers, in coordinator-reserved brief files; P4.5 trusted-host interfaces remain dependency-deferred. | Reviewed failure/cleanup/provenance contracts, dependencies, and module boundaries before implementation dispatch. |
+| Documentation/status / Luna 6 xhigh; steering / Astra 6 | Update only assigned status documents from reviewed evidence; Astra 6 audits alignment and parallel readiness, and the coordinator owns cursor changes. | Diff/consistency review; distinguish implemented, active, residual, and independently accepted scope. |
 
-Use isolated worktrees from a reviewed baseline; the active runtime owner retains
-its in-flight work until reviewed. Each dispatch records dependencies/readiness,
+Use isolated worktrees from a reviewed baseline; require Astra 6 readiness audit
+before opening parallel lanes. Each dispatch records dependencies/readiness,
 owner, exclusive files, shared interfaces, and acceptance/validation commands.
-Follow Sol High brief -> Terra High implementation -> separate Sol review.
+Follow Sol 6.1 High brief -> Luna 6 xhigh implementation -> separate Sol 6.1 review.
 One coordinator owns the cursor and integration of shared headers, CMake, shared
 censuses/goldens, and test drivers; delegated exclusive editing stays with its owner.
 

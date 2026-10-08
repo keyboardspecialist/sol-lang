@@ -20,6 +20,9 @@
 #define P43_BYTES "sol.p43.bytes"
 #define P43_MAX_REQUESTS "sol.p43.max-requests"
 #define P43_MAX_BYTES "sol.p43.max-bytes"
+#define P44_MAX_STEPS "sol.p44.max-steps"
+#define P44_STEPS "sol.p44.steps"
+#define P44_STEP "sol.p44.step"
 #define P43_WRITEBACKS "sol.p43.test.writebacks"
 #define P43_CLEANUP_OLD_CALLABLE "sol.p43.test.cleanup.old-callable"
 #define P43_CLEANUP_MOVED_CALLABLE "sol.p43.test.cleanup.moved-callable"
@@ -335,6 +338,7 @@ SolWasmRepresentedLimits sol_wasm_represented_default_limits(void) {
         .max_static_data_bytes = 60u * 1024u,
         .max_allocation_requests = UINT64_C(1048576),
         .max_allocation_bytes = UINT64_C(16) * 1024u * 1024u,
+        .max_steps = UINT64_C(100000),
         .max_provenance_records = REPRESENTED_WIRE_MAX_PROVENANCE_RECORDS,
         .max_work_bytes = 16u * 1024u * 1024u,
         .max_scratch_bytes = 16u * 1024u * 1024u,
@@ -348,7 +352,7 @@ static bool limits_complete(const SolWasmRepresentedLimits *limits) {
         && limits->max_edges != 0 && limits->max_values != 0 && limits->max_locals != 0
         && limits->max_generated_nodes != 0 && limits->max_table_elements != 0
         && limits->max_static_data_bytes != 0 && limits->max_allocation_requests != 0
-        && limits->max_allocation_bytes != 0 && limits->max_provenance_records != 0
+        && limits->max_allocation_bytes != 0 && limits->max_steps != 0 && limits->max_provenance_records != 0
         && limits->max_work_bytes != 0 && limits->max_scratch_bytes != 0
         && limits->max_owned_bytes != 0 && limits->max_output_bytes != 0
         && limits->max_functions <= REPRESENTED_WIRE_MAX_FUNCTIONS
@@ -361,7 +365,7 @@ static bool limits_zero(const SolWasmRepresentedLimits *limits) {
         && limits->max_edges == 0 && limits->max_values == 0 && limits->max_locals == 0
         && limits->max_generated_nodes == 0 && limits->max_table_elements == 0
         && limits->max_static_data_bytes == 0 && limits->max_allocation_requests == 0
-        && limits->max_allocation_bytes == 0 && limits->max_provenance_records == 0
+        && limits->max_allocation_bytes == 0 && limits->max_steps == 0 && limits->max_provenance_records == 0
         && limits->max_work_bytes == 0 && limits->max_scratch_bytes == 0
         && limits->max_owned_bytes == 0 && limits->max_output_bytes == 0;
 }
@@ -1402,10 +1406,11 @@ typedef struct RepresentedLiteral {
 } RepresentedLiteral;
 
 enum { P43_STATIC_BASE = 8, P43_FIXED_SCRATCH = 1024, P44_PANIC_DETAIL_BYTES = 192,
+    P44_COPY_STEP_FAILURE = -1,
     P44_PANIC_DETAIL_MAX = P44_PANIC_DETAIL_BYTES - 1, P44_TRACE_OFFSET_IN_SCRATCH = 192,
     P44_TRACE_SLOT_BYTES = 12, P44_TRACE_CAPACITY = 64,
     P44_TRACE_BYTES = P44_TRACE_SLOT_BYTES * P44_TRACE_CAPACITY,
-    P44_ENTRY_RESET_MAX_ITEMS = 5 + 2 + 2,
+    P44_ENTRY_RESET_MAX_ITEMS = 6 + 2 + 2,
     P44_ENTRY_WRAPPER_MAX_ITEMS = P44_ENTRY_RESET_MAX_ITEMS + 1 + 4 + 1,
     P44_PACKET_RESET_PROBE_MAX_ITEMS = P44_ENTRY_RESET_MAX_ITEMS + 2 + 1 };
 
@@ -2447,7 +2452,8 @@ static bool represented_function_scratch_count(const SolWasmRepresentedBuildRequ
             return false;
         if (item->arguments.count > scratch) scratch = item->arguments.count;
     }
-    *count = scratch;
+    /* Byte equality stages its result before publishing the destination. */
+    *count = scratch == 0 ? 1 : scratch;
     return true;
 }
 
@@ -6503,7 +6509,11 @@ static bool represented_product_equal_needed(const SolWasmRepresentedBuildReques
 }
 
 static BinaryenExpressionRef represented_binary(const RepresentedFunction *function,
-    const SolMirOperationArithmeticPlan *plan) {
+    size_t instruction, const SolMirOperationArithmeticPlan *plan) {
+    size_t record = 0;
+    if (!represented_failure_record_index(function->provenance,
+            function->request->program->image_instructions[instruction].step_failure_site,
+            &record)) return NULL;
     BinaryenExpressionRef left = get_value(function, plan->left);
     BinaryenExpressionRef right = plan->opcode == SOL_MIR_OPERATION_BOOL_NOT ? NULL
         : get_value(function, plan->right);
@@ -6516,8 +6526,9 @@ static BinaryenExpressionRef represented_binary(const RepresentedFunction *funct
             || plan->opcode == SOL_MIR_OPERATION_VALUE_NE) && has_physical
         && concrete->representation.recipes[physical].kind == SOL_MIR_RECIPE_TEXT;
     if (text_equality) {
-        BinaryenExpressionRef arguments[] = {left, right};
-        BinaryenExpressionRef equal = BinaryenCall(function->module, P43_TEXT_EQUAL, arguments, 2,
+        BinaryenExpressionRef arguments[] = {left, right, BinaryenConst(function->module,
+            BinaryenLiteralInt64((int64_t)record))};
+        BinaryenExpressionRef equal = BinaryenCall(function->module, P43_TEXT_EQUAL, arguments, 3,
             BinaryenTypeInt64());
         return plan->opcode == SOL_MIR_OPERATION_VALUE_EQ ? equal : i64_bool(function->module,
             BinaryenUnary(function->module, BinaryenEqZInt64(), equal));
@@ -6526,8 +6537,9 @@ static BinaryenExpressionRef represented_binary(const RepresentedFunction *funct
         && has_physical && represented_scalar_product_recipe(concrete, physical)) {
         char name[64];
         if (!represented_product_helper_name(name, "equal", physical)) return NULL;
-        BinaryenExpressionRef arguments[] = {left, right};
-        BinaryenExpressionRef equal = BinaryenCall(function->module, name, arguments, 2,
+        BinaryenExpressionRef arguments[] = {left, right, BinaryenConst(function->module,
+            BinaryenLiteralInt64((int64_t)record))};
+        BinaryenExpressionRef equal = BinaryenCall(function->module, name, arguments, 3,
             BinaryenTypeInt64());
         return plan->opcode == SOL_MIR_OPERATION_VALUE_EQ ? equal : i64_bool(function->module,
             BinaryenUnary(function->module, BinaryenEqZInt64(), equal));
@@ -6536,8 +6548,9 @@ static BinaryenExpressionRef represented_binary(const RepresentedFunction *funct
         && has_physical && represented_sum_recipe_depth(concrete, physical, 0)) {
         char name[64];
         if (!represented_sum_helper_name(name, "equal", physical)) return NULL;
-        BinaryenExpressionRef arguments[] = {left, right};
-        BinaryenExpressionRef equal = BinaryenCall(function->module, name, arguments, 2,
+        BinaryenExpressionRef arguments[] = {left, right, BinaryenConst(function->module,
+            BinaryenLiteralInt64((int64_t)record))};
+        BinaryenExpressionRef equal = BinaryenCall(function->module, name, arguments, 3,
             BinaryenTypeInt64());
         return plan->opcode == SOL_MIR_OPERATION_VALUE_EQ ? equal : i64_bool(function->module,
             BinaryenUnary(function->module, BinaryenEqZInt64(), equal));
@@ -6578,6 +6591,46 @@ static BinaryenExpressionRef extend_u32(BinaryenModuleRef module, BinaryenExpres
     return BinaryenUnary(module, BinaryenExtendUInt32(), value);
 }
 
+/* An existing packet is authoritative: cleanup and failure predicates neither
+ * consume steps nor replace its code/site. Unsigned comparison also admits the
+ * full UINT64_MAX limit without overflowing the counter. */
+static bool represented_step_function(BinaryenModuleRef module) {
+    BinaryenType parameter = BinaryenTypeInt64();
+    BinaryenExpressionRef failed[] = {
+        BinaryenGlobalSet(module, P43_CODE, BinaryenConst(module,
+            BinaryenLiteralInt32(SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT))),
+        BinaryenGlobalSet(module, P43_SITE, wrap_i64(module,
+            BinaryenLocalGet(module, 0, BinaryenTypeInt64()))),
+        BinaryenReturn(module, BinaryenConst(module, BinaryenLiteralInt32(0))),
+    };
+    BinaryenExpressionRef items[] = {
+        BinaryenIf(module, BinaryenGlobalGet(module, P43_CODE, BinaryenTypeInt32()),
+            BinaryenReturn(module, BinaryenConst(module, BinaryenLiteralInt32(1))), NULL),
+        BinaryenIf(module, BinaryenBinary(module, BinaryenGeUInt64(),
+            BinaryenGlobalGet(module, P44_STEPS, BinaryenTypeInt64()),
+            BinaryenGlobalGet(module, P44_MAX_STEPS, BinaryenTypeInt64())),
+            BinaryenBlock(module, NULL, failed, 3, BinaryenTypeNone()), NULL),
+        BinaryenGlobalSet(module, P44_STEPS, BinaryenBinary(module, BinaryenAddInt64(),
+            BinaryenGlobalGet(module, P44_STEPS, BinaryenTypeInt64()),
+            BinaryenConst(module, BinaryenLiteralInt64(1)))),
+        BinaryenConst(module, BinaryenLiteralInt32(1)),
+    };
+    return BinaryenAddFunction(module, P44_STEP, parameter, BinaryenTypeInt32(), NULL, 0,
+        BinaryenBlock(module, NULL, items, 4, BinaryenTypeInt32())) != NULL;
+}
+
+static BinaryenExpressionRef represented_step_call(BinaryenModuleRef module,
+    BinaryenExpressionRef record) {
+    return BinaryenCall(module, P44_STEP, &record, 1, BinaryenTypeInt32());
+}
+
+static BinaryenExpressionRef represented_byte_step(BinaryenModuleRef module,
+    BinaryenIndex record, int64_t failure_result) {
+    return BinaryenIf(module, BinaryenUnary(module, BinaryenEqZInt32(),
+        represented_step_call(module, BinaryenLocalGet(module, record, BinaryenTypeInt64()))),
+        BinaryenReturn(module, BinaryenConst(module, BinaryenLiteralInt64(failure_result))), NULL);
+}
+
 /* A failed allocation is a normal, packet-carrying result, never a Wasm trap.
  * The site is supplied by the authenticated caller as its canonical one-based
  * supplemental provenance record. */
@@ -6597,11 +6650,11 @@ static BinaryenExpressionRef represented_text_copy_fail(BinaryenModuleRef module
  * handle.  The slot is reserved between active data and the heap, so capture
  * neither allocates nor changes the represented allocator's quotas. */
 static bool represented_panic_capture_function(BinaryenModuleRef module) {
-    BinaryenType parameters[] = {BinaryenTypeInt64()};
+    BinaryenType parameters[] = {BinaryenTypeInt64(), BinaryenTypeInt64()};
     BinaryenType locals[] = {BinaryenTypeInt32(), BinaryenTypeInt32(), BinaryenTypeInt32(),
         BinaryenTypeInt32(), BinaryenTypeInt32(), BinaryenTypeInt32()};
-    enum { SOURCE = 1, DATA, LENGTH, COUNT, CURSOR, MEMORY_BYTES };
-    BinaryenExpressionRef items[13]; size_t item_count = 0;
+    enum { SOURCE = 2, DATA, LENGTH, COUNT, CURSOR, MEMORY_BYTES };
+    BinaryenExpressionRef items[15]; size_t item_count = 0;
     BinaryenExpressionRef base = BinaryenGlobalGet(module, P44_PANIC_DETAIL_OFFSET,
         BinaryenTypeInt32());
     items[item_count++] = BinaryenGlobalSet(module, P44_PANIC_DETAIL_LENGTH,
@@ -6610,7 +6663,8 @@ static bool represented_panic_capture_function(BinaryenModuleRef module) {
         BinaryenConst(module, BinaryenLiteralInt32(0)), BinaryenTypeInt32(), P43_MEMORY);
     items[item_count++] = BinaryenIf(module, BinaryenBinary(module, BinaryenGtUInt64(),
         BinaryenLocalGet(module, 0, BinaryenTypeInt64()), BinaryenConst(module,
-            BinaryenLiteralInt64((int64_t)UINT32_MAX))), BinaryenReturn(module, NULL), NULL);
+            BinaryenLiteralInt64((int64_t)UINT32_MAX))), BinaryenReturn(module,
+                BinaryenConst(module, BinaryenLiteralInt32(1))), NULL);
     items[item_count++] = BinaryenLocalSet(module, SOURCE, wrap_i64(module,
         BinaryenLocalGet(module, 0, BinaryenTypeInt64())));
     items[item_count++] = BinaryenLocalSet(module, MEMORY_BYTES, BinaryenBinary(module,
@@ -6622,7 +6676,7 @@ static bool represented_panic_capture_function(BinaryenModuleRef module) {
         BinaryenBinary(module, BinaryenGtUInt32(), BinaryenLocalGet(module, SOURCE,
             BinaryenTypeInt32()), BinaryenBinary(module, BinaryenSubInt32(), BinaryenLocalGet(module,
                 MEMORY_BYTES, BinaryenTypeInt32()), BinaryenConst(module, BinaryenLiteralInt32(8))))),
-        BinaryenReturn(module, NULL), NULL);
+        BinaryenReturn(module, BinaryenConst(module, BinaryenLiteralInt32(1))), NULL);
     items[item_count++] = BinaryenLocalSet(module, DATA, BinaryenLoad(module, 4, false, 0, 4,
         BinaryenTypeInt32(), BinaryenLocalGet(module, SOURCE, BinaryenTypeInt32()), P43_MEMORY));
     items[item_count++] = BinaryenLocalSet(module, LENGTH, BinaryenLoad(module, 4, false, 4, 4,
@@ -6645,18 +6699,19 @@ static bool represented_panic_capture_function(BinaryenModuleRef module) {
                     BinaryenTypeInt32()), BinaryenBinary(module, BinaryenSubInt32(),
                         BinaryenLocalGet(module, MEMORY_BYTES, BinaryenTypeInt32()),
                         BinaryenLocalGet(module, DATA, BinaryenTypeInt32()))))))),
-        BinaryenReturn(module, NULL), NULL);
+        BinaryenReturn(module, BinaryenConst(module, BinaryenLiteralInt32(1))), NULL);
     items[item_count++] = BinaryenLocalSet(module, COUNT, BinaryenIf(module,
         BinaryenBinary(module, BinaryenGtUInt32(), BinaryenLocalGet(module, LENGTH,
             BinaryenTypeInt32()), BinaryenConst(module, BinaryenLiteralInt32(P44_PANIC_DETAIL_MAX))),
         BinaryenConst(module, BinaryenLiteralInt32(P44_PANIC_DETAIL_MAX)),
         BinaryenLocalGet(module, LENGTH, BinaryenTypeInt32())));
-    items[item_count++] = BinaryenGlobalSet(module, P44_PANIC_DETAIL_LENGTH,
-        BinaryenLocalGet(module, COUNT, BinaryenTypeInt32()));
     BinaryenExpressionRef loop[] = {
         BinaryenIf(module, BinaryenBinary(module, BinaryenEqInt32(), BinaryenLocalGet(module, CURSOR,
             BinaryenTypeInt32()), BinaryenLocalGet(module, COUNT, BinaryenTypeInt32())),
             BinaryenBreak(module, "p44.panic.capture.done", NULL, NULL), NULL),
+        BinaryenIf(module, BinaryenUnary(module, BinaryenEqZInt32(), represented_step_call(module,
+            BinaryenLocalGet(module, 1, BinaryenTypeInt64()))), BinaryenReturn(module,
+                BinaryenConst(module, BinaryenLiteralInt32(0))), NULL),
         BinaryenStore(module, 1, 0, 1, BinaryenBinary(module, BinaryenAddInt32(),
             BinaryenGlobalGet(module, P44_PANIC_DETAIL_OFFSET, BinaryenTypeInt32()),
             BinaryenLocalGet(module, CURSOR, BinaryenTypeInt32())), BinaryenLoad(module, 1, false, 0, 1,
@@ -6671,15 +6726,18 @@ static bool represented_panic_capture_function(BinaryenModuleRef module) {
     BinaryenExpressionRef captured = BinaryenBlock(module, "p44.panic.capture.done",
         (BinaryenExpressionRef[]){BinaryenLocalSet(module, CURSOR, BinaryenConst(module,
             BinaryenLiteralInt32(0))), BinaryenLoop(module, "p44.panic.capture.loop",
-            BinaryenBlock(module, NULL, loop, 4, BinaryenTypeNone()))}, 2, BinaryenTypeNone());
+            BinaryenBlock(module, NULL, loop, 5, BinaryenTypeNone()))}, 2, BinaryenTypeNone());
     items[item_count++] = captured;
     items[item_count++] = BinaryenStore(module, 1, 0, 1, BinaryenBinary(module, BinaryenAddInt32(),
         BinaryenGlobalGet(module, P44_PANIC_DETAIL_OFFSET, BinaryenTypeInt32()),
         BinaryenLocalGet(module, COUNT, BinaryenTypeInt32())), BinaryenConst(module,
             BinaryenLiteralInt32(0)), BinaryenTypeInt32(), P43_MEMORY);
-    return BinaryenAddFunction(module, P44_PANIC_CAPTURE, BinaryenTypeCreate(parameters, 1),
-        BinaryenTypeNone(), locals, 6, BinaryenBlock(module, NULL, items,
-            (BinaryenIndex)item_count, BinaryenTypeNone())) != NULL;
+    items[item_count++] = BinaryenGlobalSet(module, P44_PANIC_DETAIL_LENGTH,
+        BinaryenLocalGet(module, COUNT, BinaryenTypeInt32()));
+    items[item_count++] = BinaryenConst(module, BinaryenLiteralInt32(1));
+    return BinaryenAddFunction(module, P44_PANIC_CAPTURE, BinaryenTypeCreate(parameters, 2),
+        BinaryenTypeInt32(), locals, 6, BinaryenBlock(module, NULL, items,
+            (BinaryenIndex)item_count, BinaryenTypeInt32())) != NULL;
 }
 
 /* Fixed P2 product allocation.  The helper validates quota before attempting
@@ -6769,14 +6827,14 @@ static bool represented_fixed_alloc_function(BinaryenModuleRef module) {
  * previously published runtime Text header.  CONST_TEXT is its only static
  * consumer: static objects are sources, never values exposed to the program. */
 static bool represented_text_copy_function(BinaryenModuleRef module) {
-    BinaryenType parameters[] = {BinaryenTypeInt64(), BinaryenTypeInt64()};
+    BinaryenType parameters[] = {BinaryenTypeInt64(), BinaryenTypeInt64(), BinaryenTypeInt64()};
     /* source, data, length, header, payload, end, aligned, memory bytes,
      * grow pages, next requests, next bytes, and byte-copy cursor. */
     BinaryenType locals[] = {BinaryenTypeInt32(), BinaryenTypeInt32(), BinaryenTypeInt32(),
         BinaryenTypeInt32(), BinaryenTypeInt32(), BinaryenTypeInt32(), BinaryenTypeInt32(),
         BinaryenTypeInt32(), BinaryenTypeInt32(), BinaryenTypeInt64(), BinaryenTypeInt64(),
         BinaryenTypeInt32()};
-    enum { SOURCE = 2, DATA, LENGTH, HEADER, PAYLOAD, END, ALIGNED, MEMORY_BYTES,
+    enum { SOURCE = 3, DATA, LENGTH, HEADER, PAYLOAD, END, ALIGNED, MEMORY_BYTES,
         GROW_PAGES, NEXT_REQUESTS, NEXT_BYTES, CURSOR };
     BinaryenExpressionRef items[32]; size_t count = 0;
 
@@ -6924,6 +6982,7 @@ static bool represented_text_copy_function(BinaryenModuleRef module) {
         BinaryenIf(module, BinaryenBinary(module, BinaryenEqInt32(), BinaryenLocalGet(module,
             CURSOR, BinaryenTypeInt32()), BinaryenLocalGet(module, LENGTH, BinaryenTypeInt32())),
             BinaryenBreak(module, "p43.copy.done", NULL, NULL), NULL),
+        represented_byte_step(module, 2, P44_COPY_STEP_FAILURE),
         BinaryenStore(module, 1, 0, 1, BinaryenBinary(module, BinaryenAddInt32(),
             BinaryenLocalGet(module, PAYLOAD, BinaryenTypeInt32()), BinaryenLocalGet(module, CURSOR,
                 BinaryenTypeInt32())), BinaryenLoad(module, 1, false, 0, 1, BinaryenTypeInt32(),
@@ -6936,7 +6995,7 @@ static bool represented_text_copy_function(BinaryenModuleRef module) {
         BinaryenBreak(module, "p43.copy.loop", NULL, NULL),
     };
     items[count++] = BinaryenBlock(module, "p43.copy.done", (BinaryenExpressionRef[]){
-        BinaryenLoop(module, "p43.copy.loop", BinaryenBlock(module, NULL, copy_body, 4,
+        BinaryenLoop(module, "p43.copy.loop", BinaryenBlock(module, NULL, copy_body, 5,
             BinaryenTypeNone()))}, 1, BinaryenTypeNone());
     items[count++] = BinaryenStore(module, 4, 0, 4, BinaryenLocalGet(module, HEADER,
         BinaryenTypeInt32()), BinaryenLocalGet(module, PAYLOAD, BinaryenTypeInt32()), BinaryenTypeInt32(),
@@ -6951,13 +7010,13 @@ static bool represented_text_copy_function(BinaryenModuleRef module) {
     items[count++] = BinaryenGlobalSet(module, P43_BYTES, BinaryenLocalGet(module, NEXT_BYTES,
         BinaryenTypeInt64()));
     items[count++] = extend_u32(module, BinaryenLocalGet(module, HEADER, BinaryenTypeInt32()));
-    return BinaryenAddFunction(module, P43_TEXT_COPY, BinaryenTypeCreate(parameters, 2),
+    return BinaryenAddFunction(module, P43_TEXT_COPY, BinaryenTypeCreate(parameters, 3),
         BinaryenTypeInt64(), locals, 12, BinaryenBlock(module, NULL, items,
             (BinaryenIndex)count, BinaryenTypeInt64())) != NULL;
 }
 
 static bool represented_text_equal_function(BinaryenModuleRef module) {
-    BinaryenType parameters[] = {BinaryenTypeInt64(), BinaryenTypeInt64()};
+    BinaryenType parameters[] = {BinaryenTypeInt64(), BinaryenTypeInt64(), BinaryenTypeInt64()};
     BinaryenType locals[] = {BinaryenTypeInt32(), BinaryenTypeInt32(), BinaryenTypeInt32(),
         BinaryenTypeInt32(), BinaryenTypeInt32()};
     BinaryenExpressionRef left = wrap_i64(module, BinaryenLocalGet(module, 0, BinaryenTypeInt64()));
@@ -6967,41 +7026,42 @@ static bool represented_text_equal_function(BinaryenModuleRef module) {
         BinaryenLocalGet(module, 0, BinaryenTypeInt64()), BinaryenLocalGet(module, 1,
             BinaryenTypeInt64())), BinaryenReturn(module, BinaryenConst(module,
                 BinaryenLiteralInt64(1))), NULL);
-    items[count++] = BinaryenLocalSet(module, 2, BinaryenLoad(module, 4, false, 4, 4,
-        BinaryenTypeInt32(), left, P43_MEMORY));
     items[count++] = BinaryenLocalSet(module, 3, BinaryenLoad(module, 4, false, 4, 4,
+        BinaryenTypeInt32(), left, P43_MEMORY));
+    items[count++] = BinaryenLocalSet(module, 4, BinaryenLoad(module, 4, false, 4, 4,
         BinaryenTypeInt32(), right, P43_MEMORY));
     items[count++] = BinaryenIf(module, BinaryenBinary(module, BinaryenNeInt32(),
-        BinaryenLocalGet(module, 2, BinaryenTypeInt32()), BinaryenLocalGet(module, 3,
+        BinaryenLocalGet(module, 3, BinaryenTypeInt32()), BinaryenLocalGet(module, 4,
             BinaryenTypeInt32())), BinaryenReturn(module, BinaryenConst(module,
                 BinaryenLiteralInt64(0))), NULL);
-    items[count++] = BinaryenLocalSet(module, 4, BinaryenLoad(module, 4, false, 0, 4,
+    items[count++] = BinaryenLocalSet(module, 5, BinaryenLoad(module, 4, false, 0, 4,
         BinaryenTypeInt32(), wrap_i64(module, BinaryenLocalGet(module, 0, BinaryenTypeInt64())),
         P43_MEMORY));
-    items[count++] = BinaryenLocalSet(module, 5, BinaryenLoad(module, 4, false, 0, 4,
+    items[count++] = BinaryenLocalSet(module, 6, BinaryenLoad(module, 4, false, 0, 4,
         BinaryenTypeInt32(), wrap_i64(module, BinaryenLocalGet(module, 1, BinaryenTypeInt64())),
         P43_MEMORY));
-    items[count++] = BinaryenLocalSet(module, 6, BinaryenConst(module, BinaryenLiteralInt32(0)));
+    items[count++] = BinaryenLocalSet(module, 7, BinaryenConst(module, BinaryenLiteralInt32(0)));
     BinaryenExpressionRef loop_items[] = {
-        BinaryenIf(module, BinaryenBinary(module, BinaryenEqInt32(), BinaryenLocalGet(module, 6,
-            BinaryenTypeInt32()), BinaryenLocalGet(module, 2, BinaryenTypeInt32())),
+        BinaryenIf(module, BinaryenBinary(module, BinaryenEqInt32(), BinaryenLocalGet(module, 7,
+            BinaryenTypeInt32()), BinaryenLocalGet(module, 3, BinaryenTypeInt32())),
             BinaryenBreak(module, "p43.equal.done", NULL, NULL), NULL),
+        represented_byte_step(module, 2, 0),
         BinaryenIf(module, BinaryenBinary(module, BinaryenNeInt32(), BinaryenLoad(module, 1, false,
             0, 1, BinaryenTypeInt32(), BinaryenBinary(module, BinaryenAddInt32(),
-                BinaryenLocalGet(module, 4, BinaryenTypeInt32()), BinaryenLocalGet(module, 6,
+                BinaryenLocalGet(module, 5, BinaryenTypeInt32()), BinaryenLocalGet(module, 7,
                     BinaryenTypeInt32())), P43_MEMORY), BinaryenLoad(module, 1, false, 0, 1,
                 BinaryenTypeInt32(), BinaryenBinary(module, BinaryenAddInt32(), BinaryenLocalGet(module,
-                    5, BinaryenTypeInt32()), BinaryenLocalGet(module, 6, BinaryenTypeInt32())),
+                    6, BinaryenTypeInt32()), BinaryenLocalGet(module, 7, BinaryenTypeInt32())),
                 P43_MEMORY)), BinaryenReturn(module, BinaryenConst(module, BinaryenLiteralInt64(0))), NULL),
-        BinaryenLocalSet(module, 6, BinaryenBinary(module, BinaryenAddInt32(), BinaryenLocalGet(module,
-            6, BinaryenTypeInt32()), BinaryenConst(module, BinaryenLiteralInt32(1)))),
+        BinaryenLocalSet(module, 7, BinaryenBinary(module, BinaryenAddInt32(), BinaryenLocalGet(module,
+            7, BinaryenTypeInt32()), BinaryenConst(module, BinaryenLiteralInt32(1)))),
         BinaryenBreak(module, "p43.equal.loop", NULL, NULL),
     };
     items[count++] = BinaryenBlock(module, "p43.equal.done", (BinaryenExpressionRef[]){
-        BinaryenLoop(module, "p43.equal.loop", BinaryenBlock(module, NULL, loop_items, 4,
+        BinaryenLoop(module, "p43.equal.loop", BinaryenBlock(module, NULL, loop_items, 5,
             BinaryenTypeNone()))}, 1, BinaryenTypeNone());
     items[count++] = BinaryenReturn(module, BinaryenConst(module, BinaryenLiteralInt64(1)));
-    return BinaryenAddFunction(module, P43_TEXT_EQUAL, BinaryenTypeCreate(parameters, 2),
+    return BinaryenAddFunction(module, P43_TEXT_EQUAL, BinaryenTypeCreate(parameters, 3),
         BinaryenTypeInt64(), locals, 5, BinaryenBlock(module, NULL, items,
             (BinaryenIndex)count, BinaryenTypeNone())) != NULL;
 }
@@ -7023,9 +7083,9 @@ static bool represented_product_copy_function(BinaryenModuleRef module,
     char name[64];
     if (!represented_scalar_product_recipe(concrete, recipe)
         || !represented_product_helper_name(name, "copy", recipe)) return false;
-    BinaryenType parameters[] = {BinaryenTypeInt64(), BinaryenTypeInt64()};
+    BinaryenType parameters[] = {BinaryenTypeInt64(), BinaryenTypeInt64(), BinaryenTypeInt64()};
     BinaryenType locals[] = {BinaryenTypeInt64(), BinaryenTypeInt64()};
-    enum { HANDLE = 2, CHILD };
+    enum { HANDLE = 3, CHILD };
     BinaryenExpressionRef items[128]; size_t count = 0;
     BinaryenExpressionRef allocation_args[] = {BinaryenConst(module,
         BinaryenLiteralInt64((int64_t)layout->types[recipe].object_size)),
@@ -7055,26 +7115,28 @@ static bool represented_product_copy_function(BinaryenModuleRef module,
                 BinaryenTypeInt64())), P43_MEMORY);
         if (r->recipes[child_recipe].kind == SOL_MIR_RECIPE_TEXT) {
             BinaryenExpressionRef args[] = {field->size == 8 ? source
-                : BinaryenUnary(module, BinaryenExtendUInt32(), source), BinaryenLocalGet(module, 1, BinaryenTypeInt64())};
+                : BinaryenUnary(module, BinaryenExtendUInt32(), source), BinaryenLocalGet(module, 1, BinaryenTypeInt64()),
+                BinaryenLocalGet(module, 2, BinaryenTypeInt64())};
             items[count++] = BinaryenLocalSet(module, CHILD, BinaryenCall(module, P43_TEXT_COPY,
-                args, 2, BinaryenTypeInt64()));
+                args, 3, BinaryenTypeInt64()));
         } else if (represented_scalar_product_recipe(concrete, child_recipe)) {
             char child_name[64];
             if (!represented_product_helper_name(child_name, "copy", child_recipe)) return false;
             BinaryenExpressionRef args[] = {field->size == 8 ? source
-                : BinaryenUnary(module, BinaryenExtendUInt32(), source), BinaryenLocalGet(module, 1, BinaryenTypeInt64())};
+                : BinaryenUnary(module, BinaryenExtendUInt32(), source), BinaryenLocalGet(module, 1, BinaryenTypeInt64()),
+                BinaryenLocalGet(module, 2, BinaryenTypeInt64())};
             items[count++] = BinaryenLocalSet(module, CHILD, BinaryenCall(module, child_name,
-                args, 2, BinaryenTypeInt64()));
+                args, 3, BinaryenTypeInt64()));
         } else {
             items[count++] = BinaryenLocalSet(module, CHILD, field->size != 8
                 ? BinaryenUnary(module, BinaryenExtendUInt32(), source) : source);
         }
         if (r->recipes[child_recipe].kind == SOL_MIR_RECIPE_TEXT
             || represented_scalar_product_recipe(concrete, child_recipe))
-            items[count++] = BinaryenIf(module, BinaryenBinary(module, BinaryenEqInt64(),
+            items[count++] = BinaryenIf(module, BinaryenBinary(module, BinaryenLeSInt64(),
                 BinaryenLocalGet(module, CHILD, BinaryenTypeInt64()), BinaryenConst(module,
-                    BinaryenLiteralInt64(0))), BinaryenReturn(module, BinaryenConst(module,
-                        BinaryenLiteralInt64(0))), NULL);
+                    BinaryenLiteralInt64(0))), BinaryenReturn(module, BinaryenLocalGet(module,
+                        CHILD, BinaryenTypeInt64())), NULL);
         BinaryenExpressionRef value = field->size != 8 ? BinaryenUnary(module, BinaryenWrapInt64(),
             BinaryenLocalGet(module, CHILD, BinaryenTypeInt64())) : BinaryenLocalGet(module, CHILD,
                 BinaryenTypeInt64());
@@ -7084,7 +7146,7 @@ static bool represented_product_copy_function(BinaryenModuleRef module,
             field->size == 8 ? BinaryenTypeInt64() : BinaryenTypeInt32(), P43_MEMORY);
     }
     items[count++] = BinaryenReturn(module, BinaryenLocalGet(module, HANDLE, BinaryenTypeInt64()));
-    return BinaryenAddFunction(module, name, BinaryenTypeCreate(parameters, 2), BinaryenTypeInt64(),
+    return BinaryenAddFunction(module, name, BinaryenTypeCreate(parameters, 3), BinaryenTypeInt64(),
         locals, 2, BinaryenBlock(module, NULL, items, (BinaryenIndex)count, BinaryenTypeNone())) != NULL;
 }
 
@@ -7095,9 +7157,9 @@ static bool represented_product_equal_function(BinaryenModuleRef module,
     char name[64];
     if (!represented_scalar_product_recipe(concrete, recipe)
         || !represented_product_helper_name(name, "equal", recipe)) return false;
-    BinaryenType parameters[] = {BinaryenTypeInt64(), BinaryenTypeInt64()};
+    BinaryenType parameters[] = {BinaryenTypeInt64(), BinaryenTypeInt64(), BinaryenTypeInt64()};
     BinaryenType locals[] = {BinaryenTypeInt64()};
-    enum { RESULT = 2 };
+    enum { RESULT = 3 };
     BinaryenExpressionRef items[128]; size_t count = 0;
     items[count++] = BinaryenIf(module, BinaryenBinary(module, BinaryenEqInt64(),
         BinaryenLocalGet(module, 0, BinaryenTypeInt64()), BinaryenLocalGet(module, 1,
@@ -7126,17 +7188,19 @@ static bool represented_product_equal_function(BinaryenModuleRef module,
         if (r->recipes[child_recipe].kind == SOL_MIR_RECIPE_TEXT) {
             BinaryenExpressionRef args[] = {field->size == 8 ? left
                 : BinaryenUnary(module, BinaryenExtendUInt32(), left), field->size == 8 ? right
-                : BinaryenUnary(module, BinaryenExtendUInt32(), right)};
+                : BinaryenUnary(module, BinaryenExtendUInt32(), right),
+                BinaryenLocalGet(module, 2, BinaryenTypeInt64())};
             items[count++] = BinaryenLocalSet(module, RESULT, BinaryenCall(module, P43_TEXT_EQUAL,
-                args, 2, BinaryenTypeInt64()));
+                args, 3, BinaryenTypeInt64()));
         } else if (represented_scalar_product_recipe(concrete, child_recipe)) {
             char child_name[64];
             if (!represented_product_helper_name(child_name, "equal", child_recipe)) return false;
             BinaryenExpressionRef args[] = {field->size == 8 ? left
                 : BinaryenUnary(module, BinaryenExtendUInt32(), left), field->size == 8 ? right
-                : BinaryenUnary(module, BinaryenExtendUInt32(), right)};
+                : BinaryenUnary(module, BinaryenExtendUInt32(), right),
+                BinaryenLocalGet(module, 2, BinaryenTypeInt64())};
             items[count++] = BinaryenLocalSet(module, RESULT, BinaryenCall(module, child_name,
-                args, 2, BinaryenTypeInt64()));
+                args, 3, BinaryenTypeInt64()));
         } else items[count++] = BinaryenLocalSet(module, RESULT, BinaryenUnary(module,
             BinaryenExtendUInt32(), BinaryenBinary(module,
                 field->size == 8 ? BinaryenEqInt64() : BinaryenEqInt32(), left, right)));
@@ -7146,7 +7210,7 @@ static bool represented_product_equal_function(BinaryenModuleRef module,
                     BinaryenLiteralInt64(0))), NULL);
     }
     items[count++] = BinaryenReturn(module, BinaryenConst(module, BinaryenLiteralInt64(1)));
-    return BinaryenAddFunction(module, name, BinaryenTypeCreate(parameters, 2), BinaryenTypeInt64(),
+    return BinaryenAddFunction(module, name, BinaryenTypeCreate(parameters, 3), BinaryenTypeInt64(),
         locals, 1, BinaryenBlock(module, NULL, items, (BinaryenIndex)count, BinaryenTypeNone())) != NULL;
 }
 
@@ -7158,7 +7222,7 @@ static bool represented_sum_helper_name(char name[64], const char *kind,
 
 static BinaryenExpressionRef represented_field_copy(BinaryenModuleRef module,
     const SolMirConcreteProgram *concrete, SolMirRecipeId child, const SolMirFieldLayout *field,
-    BinaryenExpressionRef source, BinaryenExpressionRef site) {
+    BinaryenExpressionRef source, BinaryenExpressionRef site, BinaryenExpressionRef step_record) {
     SolMirRecipeId physical;
     if (!represented_backing_recipe(concrete, child, &physical)) return NULL;
     BinaryenExpressionRef loaded = BinaryenLoad(module, (uint32_t)field->size, false,
@@ -7167,19 +7231,19 @@ static BinaryenExpressionRef represented_field_copy(BinaryenModuleRef module,
                 BinaryenWrapInt64(), source), P43_MEMORY);
     BinaryenExpressionRef value = field->size == 8 ? loaded : extend_u32(module, loaded);
     if (represented_text_recipe(concrete, child)) {
-        BinaryenExpressionRef arguments[] = {value, site};
-        return BinaryenCall(module, P43_TEXT_COPY, arguments, 2, BinaryenTypeInt64());
+        BinaryenExpressionRef arguments[] = {value, site, step_record};
+        return BinaryenCall(module, P43_TEXT_COPY, arguments, 3, BinaryenTypeInt64());
     }
     char name[64];
     if (represented_product_recipe(concrete, child)) {
         if (!represented_product_helper_name(name, "copy", physical)) return NULL;
-        BinaryenExpressionRef arguments[] = {value, site};
-        return BinaryenCall(module, name, arguments, 2, BinaryenTypeInt64());
+        BinaryenExpressionRef arguments[] = {value, site, step_record};
+        return BinaryenCall(module, name, arguments, 3, BinaryenTypeInt64());
     }
     if (represented_sum_recipe(concrete, child)) {
         if (!represented_sum_helper_name(name, "copy", physical)) return NULL;
-        BinaryenExpressionRef arguments[] = {value, site};
-        return BinaryenCall(module, name, arguments, 2, BinaryenTypeInt64());
+        BinaryenExpressionRef arguments[] = {value, site, step_record};
+        return BinaryenCall(module, name, arguments, 3, BinaryenTypeInt64());
     }
     return value;
 }
@@ -7191,9 +7255,9 @@ static bool represented_sum_copy_function(BinaryenModuleRef module,
     char name[64];
     if (!represented_sum_recipe_depth(concrete, recipe, 0)
         || !represented_sum_helper_name(name, "copy", recipe)) return false;
-    BinaryenType parameters[] = {BinaryenTypeInt64(), BinaryenTypeInt64()};
+    BinaryenType parameters[] = {BinaryenTypeInt64(), BinaryenTypeInt64(), BinaryenTypeInt64()};
     BinaryenType locals[] = {BinaryenTypeInt64(), BinaryenTypeInt64(), BinaryenTypeInt32()};
-    enum { HANDLE = 2, CHILD, TAG };
+    enum { HANDLE = 3, CHILD, TAG };
     BinaryenExpressionRef items[REPRESENTED_SUM_HELPER_ITEMS]; size_t count = 0;
     if (!represented_sum_helper_variant_count_supported(r->recipes[recipe].variants.count)) return false;
     BinaryenExpressionRef allocation_args[] = {i64(&(RepresentedFunction){.module = module},
@@ -7228,15 +7292,15 @@ static bool represented_sum_copy_function(BinaryenModuleRef module,
                 || field->offset > UINT32_MAX) { ok = false; break; }
             BinaryenExpressionRef copied = represented_field_copy(module, concrete, child, field,
                 BinaryenLocalGet(module, 0, BinaryenTypeInt64()), BinaryenLocalGet(module, 1,
-                    BinaryenTypeInt64()));
+                    BinaryenTypeInt64()), BinaryenLocalGet(module, 2, BinaryenTypeInt64()));
             if (copied == NULL || !represented_nodes_push(&branch, BinaryenLocalSet(module, CHILD, copied))) {
                 ok = false; break;
             }
             if (represented_indirect_recipe(concrete, child)
                 && !represented_nodes_push(&branch, BinaryenIf(module, BinaryenBinary(module,
-                    BinaryenEqInt64(), BinaryenLocalGet(module, CHILD, BinaryenTypeInt64()),
+                    BinaryenLeSInt64(), BinaryenLocalGet(module, CHILD, BinaryenTypeInt64()),
                     BinaryenConst(module, BinaryenLiteralInt64(0))), BinaryenReturn(module,
-                        BinaryenConst(module, BinaryenLiteralInt64(0))), NULL))) { ok = false; break; }
+                        BinaryenLocalGet(module, CHILD, BinaryenTypeInt64())), NULL))) { ok = false; break; }
             BinaryenExpressionRef value = field->size == 8 ? BinaryenLocalGet(module, CHILD,
                 BinaryenTypeInt64()) : BinaryenUnary(module, BinaryenWrapInt64(), BinaryenLocalGet(module,
                     CHILD, BinaryenTypeInt64()));
@@ -7261,13 +7325,14 @@ static bool represented_sum_copy_function(BinaryenModuleRef module,
     }
     if (count >= REPRESENTED_SUM_HELPER_ITEMS) return false;
     items[count++] = represented_text_copy_fail(module, SOL_MIR_RUNTIME_FAILURE_ALLOCATION_FAILED);
-    return BinaryenAddFunction(module, name, BinaryenTypeCreate(parameters, 2), BinaryenTypeInt64(),
+    return BinaryenAddFunction(module, name, BinaryenTypeCreate(parameters, 3), BinaryenTypeInt64(),
         locals, 3, BinaryenBlock(module, NULL, items, (BinaryenIndex)count, BinaryenTypeNone())) != NULL;
 }
 
 static BinaryenExpressionRef represented_field_equal(BinaryenModuleRef module,
     const SolMirConcreteProgram *concrete, SolMirRecipeId child, const SolMirFieldLayout *field,
-    BinaryenExpressionRef left_source, BinaryenExpressionRef right_source) {
+    BinaryenExpressionRef left_source, BinaryenExpressionRef right_source,
+    BinaryenExpressionRef step_record) {
     SolMirRecipeId physical;
     if (!represented_backing_recipe(concrete, child, &physical)) return NULL;
     BinaryenExpressionRef left = BinaryenLoad(module, (uint32_t)field->size, false,
@@ -7281,19 +7346,19 @@ static BinaryenExpressionRef represented_field_equal(BinaryenModuleRef module,
     BinaryenExpressionRef a = field->size == 8 ? left : extend_u32(module, left);
     BinaryenExpressionRef b = field->size == 8 ? right : extend_u32(module, right);
     if (represented_text_recipe(concrete, child)) {
-        BinaryenExpressionRef arguments[] = {a, b};
-        return BinaryenCall(module, P43_TEXT_EQUAL, arguments, 2, BinaryenTypeInt64());
+        BinaryenExpressionRef arguments[] = {a, b, step_record};
+        return BinaryenCall(module, P43_TEXT_EQUAL, arguments, 3, BinaryenTypeInt64());
     }
     char name[64];
     if (represented_product_recipe(concrete, child)) {
         if (!represented_product_helper_name(name, "equal", physical)) return NULL;
-        BinaryenExpressionRef arguments[] = {a, b};
-        return BinaryenCall(module, name, arguments, 2, BinaryenTypeInt64());
+        BinaryenExpressionRef arguments[] = {a, b, step_record};
+        return BinaryenCall(module, name, arguments, 3, BinaryenTypeInt64());
     }
     if (represented_sum_recipe(concrete, child)) {
         if (!represented_sum_helper_name(name, "equal", physical)) return NULL;
-        BinaryenExpressionRef arguments[] = {a, b};
-        return BinaryenCall(module, name, arguments, 2, BinaryenTypeInt64());
+        BinaryenExpressionRef arguments[] = {a, b, step_record};
+        return BinaryenCall(module, name, arguments, 3, BinaryenTypeInt64());
     }
     return i64_bool(module, BinaryenBinary(module, field->size == 8 ? BinaryenEqInt64()
         : BinaryenEqInt32(), left, right));
@@ -7306,9 +7371,9 @@ static bool represented_sum_equal_function(BinaryenModuleRef module,
     char name[64];
     if (!represented_sum_recipe_depth(concrete, recipe, 0)
         || !represented_sum_helper_name(name, "equal", recipe)) return false;
-    BinaryenType parameters[] = {BinaryenTypeInt64(), BinaryenTypeInt64()};
+    BinaryenType parameters[] = {BinaryenTypeInt64(), BinaryenTypeInt64(), BinaryenTypeInt64()};
     BinaryenType locals[] = {BinaryenTypeInt32(), BinaryenTypeInt64()};
-    enum { TAG = 2, RESULT };
+    enum { TAG = 3, RESULT };
     BinaryenExpressionRef items[REPRESENTED_SUM_HELPER_ITEMS]; size_t count = 0;
     if (!represented_sum_helper_variant_count_supported(r->recipes[recipe].variants.count)) return false;
     items[count++] = BinaryenIf(module, BinaryenBinary(module, BinaryenEqInt64(),
@@ -7343,7 +7408,7 @@ static bool represented_sum_equal_function(BinaryenModuleRef module,
                 || field->offset > UINT32_MAX) { ok = false; break; }
             BinaryenExpressionRef equal = represented_field_equal(module, concrete, child, field,
                 BinaryenLocalGet(module, 0, BinaryenTypeInt64()), BinaryenLocalGet(module, 1,
-                    BinaryenTypeInt64()));
+                    BinaryenTypeInt64()), BinaryenLocalGet(module, 2, BinaryenTypeInt64()));
             if (equal == NULL || !represented_nodes_push(&branch, BinaryenLocalSet(module, RESULT,
                     equal)) || !represented_nodes_push(&branch, BinaryenIf(module, BinaryenBinary(module,
                     BinaryenEqInt64(), BinaryenLocalGet(module, RESULT, BinaryenTypeInt64()),
@@ -7363,7 +7428,7 @@ static bool represented_sum_equal_function(BinaryenModuleRef module,
     }
     if (count >= REPRESENTED_SUM_HELPER_ITEMS) return false;
     items[count++] = BinaryenReturn(module, BinaryenConst(module, BinaryenLiteralInt64(0)));
-    return BinaryenAddFunction(module, name, BinaryenTypeCreate(parameters, 2), BinaryenTypeInt64(),
+    return BinaryenAddFunction(module, name, BinaryenTypeCreate(parameters, 3), BinaryenTypeInt64(),
         locals, 2, BinaryenBlock(module, NULL, items, (BinaryenIndex)count, BinaryenTypeNone())) != NULL;
 }
 
@@ -7398,26 +7463,29 @@ static bool represented_inactive_payload_probe_functions(BinaryenModuleRef modul
     for (size_t probe = 0; probe < 2; ++probe) {
         const SolMirRecipeVariant *variant = &r->variants[r->recipes[recipe].variants.offset + variants[probe]];
         if (variant->semantic_tag > INT32_MAX) return false;
-        BinaryenExpressionRef items[5];
-        items[0] = BinaryenStore(module, 4, 0, 4, BinaryenConst(module,
+        BinaryenExpressionRef items[6];
+        items[0] = BinaryenGlobalSet(module, P44_STEPS,
+            BinaryenConst(module, BinaryenLiteralInt64(0)));
+        items[1] = BinaryenStore(module, 4, 0, 4, BinaryenConst(module,
             BinaryenLiteralInt32((int32_t)left)), BinaryenConst(module,
             BinaryenLiteralInt32((int32_t)variant->semantic_tag)), BinaryenTypeInt32(), P43_MEMORY);
-        items[1] = BinaryenStore(module, 4, 0, 4, BinaryenConst(module,
+        items[2] = BinaryenStore(module, 4, 0, 4, BinaryenConst(module,
             BinaryenLiteralInt32((int32_t)right)), BinaryenConst(module,
             BinaryenLiteralInt32((int32_t)variant->semantic_tag)), BinaryenTypeInt32(), P43_MEMORY);
-        items[2] = BinaryenStore(module, 8, (uint32_t)layout->types[recipe].payload_offset, 8,
+        items[3] = BinaryenStore(module, 8, (uint32_t)layout->types[recipe].payload_offset, 8,
             BinaryenConst(module, BinaryenLiteralInt32((int32_t)left)), BinaryenConst(module,
             BinaryenLiteralInt64(left_poison)), BinaryenTypeInt64(), P43_MEMORY);
-        items[3] = BinaryenStore(module, 8, (uint32_t)layout->types[recipe].payload_offset, 8,
+        items[4] = BinaryenStore(module, 8, (uint32_t)layout->types[recipe].payload_offset, 8,
             BinaryenConst(module, BinaryenLiteralInt32((int32_t)right)), BinaryenConst(module,
             BinaryenLiteralInt64(right_poison)), BinaryenTypeInt64(), P43_MEMORY);
         BinaryenExpressionRef arguments[] = {BinaryenUnary(module, BinaryenExtendUInt32(),
             BinaryenConst(module, BinaryenLiteralInt32((int32_t)left))), BinaryenUnary(module,
-            BinaryenExtendUInt32(), BinaryenConst(module, BinaryenLiteralInt32((int32_t)right)))};
-        items[4] = BinaryenCall(module, helper, arguments, 2, BinaryenTypeInt64());
+            BinaryenExtendUInt32(), BinaryenConst(module, BinaryenLiteralInt32((int32_t)right))),
+            BinaryenConst(module, BinaryenLiteralInt64(0))};
+        items[5] = BinaryenCall(module, helper, arguments, 3, BinaryenTypeInt64());
         if (items[0] == NULL || items[1] == NULL || items[2] == NULL || items[3] == NULL
-            || items[4] == NULL || BinaryenAddFunction(module, names[probe], BinaryenTypeNone(),
-                BinaryenTypeInt64(), NULL, 0, BinaryenBlock(module, NULL, items, 5,
+            || items[4] == NULL || items[5] == NULL || BinaryenAddFunction(module, names[probe], BinaryenTypeNone(),
+                BinaryenTypeInt64(), NULL, 0, BinaryenBlock(module, NULL, items, 6,
                     BinaryenTypeInt64())) == NULL
             || BinaryenAddFunctionExport(module, names[probe], names[probe]) == NULL) return false;
     }
@@ -7719,6 +7787,15 @@ static bool represented_predicate_instruction_emit(const RepresentedFunction *fu
     const SolMirOperations *o = &function->request->program->conventions->concrete->operations;
     if (id >= o->predicate_instruction_count) return false;
     const SolMirPredicateInstruction *item = &o->predicate_instructions[id];
+    const SolMirRuntimeLoweredPredicateInstruction *row =
+        &function->request->program->predicate_instructions[id];
+    size_t record = 0;
+    if (row->state != SOL_MIR_RUNTIME_LOWERED_PRESENT
+        || !represented_failure_record_index(function->provenance, row->step_failure_site, &record)
+        || !represented_nodes_push(nodes, BinaryenIf(function->module,
+            BinaryenUnary(function->module, BinaryenEqZInt32(), represented_step_call(function->module,
+                i64(function, (int64_t)record))), BinaryenBreak(function->module, exit_label, NULL, NULL),
+            NULL))) return false;
     size_t destination = represented_predicate_value_index(function, item->result);
     if (destination == SIZE_MAX) return false;
     if (item->kind == SOL_MIR_PREDICATE_INST_I64) return represented_nodes_push(nodes,
@@ -7781,6 +7858,15 @@ static bool represented_predicate_emit(const RepresentedFunction *function, size
         for (size_t i = 0; ok && i < block->instructions.count; ++i)
             ok = represented_predicate_instruction_emit(function, body_id,
                 block->instructions.offset + i, exit_label, &part);
+        const SolMirRuntimeLoweredPredicateTerminator *row =
+            &function->request->program->predicate_terminators[b];
+        size_t record = 0;
+        if (ok) ok = row->state == SOL_MIR_RUNTIME_LOWERED_PRESENT
+            && represented_failure_record_index(function->provenance, row->step_failure_site, &record)
+            && represented_nodes_push(&part, BinaryenIf(function->module,
+                BinaryenUnary(function->module, BinaryenEqZInt32(), represented_step_call(function->module,
+                    i64(function, (int64_t)record))), BinaryenBreak(function->module, exit_label, NULL, NULL),
+                NULL));
         if (ok && block->terminator.kind == SOL_MIR_PREDICATE_TERM_RETURN) {
             BinaryenExpressionRef value = represented_predicate_get(function, body_id, block->terminator.value);
             ok = value != NULL && represented_nodes_push(&part, BinaryenLocalSet(function->module,
@@ -8272,6 +8358,43 @@ static bool represented_supplemental_record_index(const RepresentedProvenance *p
     return true;
 }
 
+/* Authentication has already certified this exact PRE_STEP pair. Never select
+ * this route merely because a previously active packet contains code six. */
+static bool represented_step_failure_emit(const RepresentedFunction *function,
+    size_t event_id, RepresentedNodes *nodes) {
+    const SolMirRuntimeCleanup *cleanup = function->request->program->cleanup;
+    if (event_id >= cleanup->event_count) return false;
+    const SolMirRuntimeCleanupEvent *event = &cleanup->events[event_id];
+    if (event->transitions.count != 2 || event->transitions.offset >= cleanup->transition_count
+        || cleanup->transition_count - event->transitions.offset < 2) return false;
+    const SolMirRuntimeCleanupTransition *failure = &cleanup->transitions[event->transitions.offset + 1];
+    return failure->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_STEP_FAILURE
+        && represented_cleanup_actions_emit_traced(function, event, failure, nodes)
+        && represented_nodes_push(nodes, BinaryenReturn(function->module, i64(function, 0)));
+}
+
+static bool represented_image_step_emit(const RepresentedFunction *function,
+    size_t site, size_t event, RepresentedNodes *nodes) {
+    size_t record = 0;
+    if (!represented_failure_record_index(function->provenance, site, &record)) return false;
+    RepresentedNodes failed = {0};
+    bool ok = represented_step_failure_emit(function, event, &failed);
+    BinaryenExpressionRef failure = ok ? BinaryenBlock(function->module, NULL, failed.items,
+        (BinaryenIndex)failed.count, BinaryenTypeNone()) : NULL;
+    deallocate(failed.items);
+    return ok && represented_nodes_push(nodes, BinaryenIf(function->module,
+        BinaryenUnary(function->module, BinaryenEqZInt32(), represented_step_call(function->module,
+            i64(function, (int64_t)record))), failure, NULL));
+}
+
+static BinaryenExpressionRef represented_instruction_step_record(const RepresentedFunction *function,
+    size_t instruction) {
+    size_t record = 0;
+    return represented_failure_record_index(function->provenance,
+        function->request->program->image_instructions[instruction].step_failure_site, &record)
+        ? i64(function, (int64_t)record) : NULL;
+}
+
 static bool represented_failure_emit(const RepresentedFunction *function, size_t instruction,
     SolMirRuntimeFailureCode code, RepresentedNodes *nodes) {
     const SolMirRuntimeLoweredProgram *owner = function->request->program;
@@ -8316,9 +8439,19 @@ static bool represented_terminal_failure_emit(const RepresentedFunction *functio
      * bounded copied prefix, while this private helper never touches the heap. */
     if (detail == SOL_MIR_RUNTIME_FAILURE_DETAIL_PANIC_TEXT) {
         BinaryenExpressionRef value = get_value(function, term->value);
-        BinaryenExpressionRef arguments[] = {value};
-        if (value == NULL || !represented_nodes_push(nodes, BinaryenCall(function->module,
-                P44_PANIC_CAPTURE, arguments, 1, BinaryenTypeNone()))) return false;
+        size_t step_record = 0;
+        if (!represented_failure_record_index(function->provenance, row->step_failure_site,
+                &step_record)) return false;
+        BinaryenExpressionRef arguments[] = {value, i64(function, (int64_t)step_record)};
+        if (value == NULL) return false;
+        RepresentedNodes failed = {0};
+        bool ok = represented_step_failure_emit(function, row->step_cleanup_event, &failed);
+        BinaryenExpressionRef failure = ok ? BinaryenBlock(function->module, NULL, failed.items,
+            (BinaryenIndex)failed.count, BinaryenTypeNone()) : NULL;
+        deallocate(failed.items);
+        if (!ok || !represented_nodes_push(nodes, BinaryenIf(function->module,
+                BinaryenUnary(function->module, BinaryenEqZInt32(), BinaryenCall(function->module,
+                    P44_PANIC_CAPTURE, arguments, 2, BinaryenTypeInt32())), failure, NULL))) return false;
     }
     size_t record = 0;
     if (!represented_failure_record_index(function->provenance, row->failure_site, &record)
@@ -8394,18 +8527,41 @@ static bool represented_supplemental_normal_emit(const RepresentedFunction *func
     return true;
 }
 
+static bool represented_copy_failure_emit(const RepresentedFunction *function,
+    size_t instruction, RepresentedNodes *nodes) {
+    /* Copy helpers return -1 only for their own exhausted byte tick, zero for
+     * allocation failure, and a positive Wasm32 handle on completion. Nested
+     * copies preserve that marker. An existing code-six packet is not evidence
+     * of a new local step failure. */
+    RepresentedNodes step = {0}, allocation = {0};
+    bool ok = represented_step_failure_emit(function,
+        function->request->program->image_instructions[instruction].step_cleanup_event, &step)
+        && represented_supplemental_failure_emit(function, instruction, &allocation);
+    BinaryenExpressionRef yes = ok ? BinaryenBlock(function->module, NULL, step.items,
+        (BinaryenIndex)step.count, BinaryenTypeNone()) : NULL;
+    BinaryenExpressionRef no = ok ? BinaryenBlock(function->module, NULL, allocation.items,
+        (BinaryenIndex)allocation.count, BinaryenTypeNone()) : NULL;
+    deallocate(step.items); deallocate(allocation.items);
+    return ok && represented_nodes_push(nodes, BinaryenIf(function->module,
+        BinaryenBinary(function->module, BinaryenEqInt64(), BinaryenLocalGet(function->module,
+            (BinaryenIndex)function->scratch_base, BinaryenTypeInt64()),
+            i64(function, P44_COPY_STEP_FAILURE)), yes, no));
+}
+
 static bool represented_text_allocate_emit(const RepresentedFunction *function, size_t instruction,
     BinaryenExpressionRef source, size_t destination, RepresentedNodes *nodes) {
     size_t supplemental = 0, record = 0;
     if (source == NULL || destination == SIZE_MAX
         || !represented_text_allocation_route(function->request, instruction, &supplemental)
         || !represented_supplemental_record_index(function->provenance, supplemental, &record)) return false;
-    BinaryenExpressionRef arguments[] = {source, i64(function, (int64_t)record)};
+    BinaryenExpressionRef step_record = represented_instruction_step_record(function, instruction);
+    if (step_record == NULL) return false;
+    BinaryenExpressionRef arguments[] = {source, i64(function, (int64_t)record), step_record};
     if (!represented_nodes_push(nodes, BinaryenLocalSet(function->module,
             (BinaryenIndex)function->scratch_base, BinaryenCall(function->module, P43_TEXT_COPY,
-                arguments, 2, BinaryenTypeInt64())))) return false;
+                arguments, 3, BinaryenTypeInt64())))) return false;
     RepresentedNodes failed = {0};
-    bool ok = represented_supplemental_failure_emit(function, instruction, &failed);
+    bool ok = represented_copy_failure_emit(function, instruction, &failed);
     BinaryenExpressionRef failure = ok ? BinaryenBlock(function->module, NULL, failed.items,
         (BinaryenIndex)failed.count, BinaryenTypeNone()) : NULL;
     deallocate(failed.items);
@@ -8418,8 +8574,8 @@ static bool represented_text_allocate_emit(const RepresentedFunction *function, 
         (BinaryenIndex)succeeded.count, BinaryenTypeNone()) : NULL;
     deallocate(succeeded.items);
     return ok && represented_nodes_push(nodes, BinaryenIf(function->module, BinaryenBinary(
-        function->module, BinaryenEqInt64(), BinaryenLocalGet(function->module,
-            (BinaryenIndex)function->scratch_base, BinaryenTypeInt64()), i64(function, 0)), failure, success));
+        function->module, BinaryenLeSInt64(), BinaryenLocalGet(function->module,
+             (BinaryenIndex)function->scratch_base, BinaryenTypeInt64()), i64(function, 0)), failure, success));
 }
 
 static bool represented_function_value_emit(const RepresentedFunction *function, size_t instruction,
@@ -8474,12 +8630,14 @@ static bool represented_product_copy_emit(const RepresentedFunction *function, s
         || !represented_supplemental_record_index(function->provenance, supplemental, &record)) {
         return false;
     }
-    BinaryenExpressionRef arguments[] = {source, i64(function, (int64_t)record)};
+    BinaryenExpressionRef step_record = represented_instruction_step_record(function, instruction);
+    if (step_record == NULL) return false;
+    BinaryenExpressionRef arguments[] = {source, i64(function, (int64_t)record), step_record};
     if (!represented_nodes_push(nodes, BinaryenLocalSet(function->module,
             (BinaryenIndex)function->scratch_base, BinaryenCall(function->module, name,
-                arguments, 2, BinaryenTypeInt64())))) return false;
+                arguments, 3, BinaryenTypeInt64())))) return false;
     RepresentedNodes failed = {0}, succeeded = {0};
-    bool ok = represented_supplemental_failure_emit(function, instruction, &failed);
+    bool ok = represented_copy_failure_emit(function, instruction, &failed);
     BinaryenExpressionRef failure = ok ? BinaryenBlock(function->module, NULL, failed.items,
         (BinaryenIndex)failed.count, BinaryenTypeNone()) : NULL;
     deallocate(failed.items);
@@ -8491,8 +8649,8 @@ static bool represented_product_copy_emit(const RepresentedFunction *function, s
         (BinaryenIndex)succeeded.count, BinaryenTypeNone()) : NULL;
     deallocate(succeeded.items);
     return ok && represented_nodes_push(nodes, BinaryenIf(function->module, BinaryenBinary(
-        function->module, BinaryenEqInt64(), BinaryenLocalGet(function->module,
-            (BinaryenIndex)function->scratch_base, BinaryenTypeInt64()), i64(function, 0)), failure, success));
+        function->module, BinaryenLeSInt64(), BinaryenLocalGet(function->module,
+             (BinaryenIndex)function->scratch_base, BinaryenTypeInt64()), i64(function, 0)), failure, success));
 }
 
 static bool represented_sum_copy_emit(const RepresentedFunction *function, size_t instruction,
@@ -8505,12 +8663,14 @@ static bool represented_sum_copy_emit(const RepresentedFunction *function, size_
         || !represented_supplemental_record_index(function->provenance, supplemental, &record)) {
         return false;
     }
-    BinaryenExpressionRef arguments[] = {source, i64(function, (int64_t)record)};
+    BinaryenExpressionRef step_record = represented_instruction_step_record(function, instruction);
+    if (step_record == NULL) return false;
+    BinaryenExpressionRef arguments[] = {source, i64(function, (int64_t)record), step_record};
     if (!represented_nodes_push(nodes, BinaryenLocalSet(function->module,
             (BinaryenIndex)function->scratch_base, BinaryenCall(function->module, name,
-                arguments, 2, BinaryenTypeInt64())))) return false;
+                arguments, 3, BinaryenTypeInt64())))) return false;
     RepresentedNodes failed = {0}, succeeded = {0};
-    bool ok = represented_supplemental_failure_emit(function, instruction, &failed);
+    bool ok = represented_copy_failure_emit(function, instruction, &failed);
     BinaryenExpressionRef failure = ok ? BinaryenBlock(function->module, NULL, failed.items,
         (BinaryenIndex)failed.count, BinaryenTypeNone()) : NULL;
     deallocate(failed.items);
@@ -8522,8 +8682,8 @@ static bool represented_sum_copy_emit(const RepresentedFunction *function, size_
         (BinaryenIndex)succeeded.count, BinaryenTypeNone()) : NULL;
     deallocate(succeeded.items);
     return ok && represented_nodes_push(nodes, BinaryenIf(function->module, BinaryenBinary(
-        function->module, BinaryenEqInt64(), BinaryenLocalGet(function->module,
-            (BinaryenIndex)function->scratch_base, BinaryenTypeInt64()), i64(function, 0)), failure, success));
+        function->module, BinaryenLeSInt64(), BinaryenLocalGet(function->module,
+             (BinaryenIndex)function->scratch_base, BinaryenTypeInt64()), i64(function, 0)), failure, success));
 }
 
 static bool represented_checked_emit(const RepresentedFunction *function, size_t instruction,
@@ -8749,11 +8909,42 @@ static bool represented_pattern_value_emit(const RepresentedFunction *function, 
     return false;
 }
 
+static bool represented_equality_emit(const RepresentedFunction *function, size_t instruction,
+    const SolMirOperationArithmeticPlan *plan, size_t destination, RepresentedNodes *nodes) {
+    RepresentedNodes failed = {0};
+    bool ok = represented_step_failure_emit(function,
+        function->request->program->image_instructions[instruction].step_cleanup_event, &failed);
+    BinaryenExpressionRef failure = ok ? BinaryenBlock(function->module, NULL, failed.items,
+        (BinaryenIndex)failed.count, BinaryenTypeNone()) : NULL;
+    deallocate(failed.items);
+    BinaryenExpressionRef value = represented_binary(function, instruction, plan);
+    BinaryenExpressionRef pending_value = represented_binary(function, instruction, plan);
+    if (!ok || value == NULL || pending_value == NULL) return false;
+    BinaryenExpressionRef items[] = {
+        BinaryenLocalSet(function->module, (BinaryenIndex)function->scratch_base, value),
+        BinaryenIf(function->module, BinaryenGlobalGet(function->module, P43_CODE,
+            BinaryenTypeInt32()), failure, NULL),
+        BinaryenLocalSet(function->module, (BinaryenIndex)destination,
+            BinaryenLocalGet(function->module, (BinaryenIndex)function->scratch_base, BinaryenTypeInt64())),
+    };
+    /* Only a packet-free helper invocation can have a new local failure. */
+    return represented_nodes_push(nodes, BinaryenIf(function->module,
+        BinaryenUnary(function->module, BinaryenEqZInt32(), BinaryenGlobalGet(function->module,
+            P43_CODE, BinaryenTypeInt32())), BinaryenBlock(function->module, NULL, items, 3,
+                BinaryenTypeNone()), BinaryenLocalSet(function->module, (BinaryenIndex)destination,
+                    pending_value)));
+}
+
 static bool represented_instruction_emit(const RepresentedFunction *function, size_t instruction,
     RepresentedNodes *nodes) {
     const SolMirConcreteProgram *concrete = function->request->program->conventions->concrete;
     const SolMirMaterialization *materialization = &concrete->materialization;
     const SolMirMaterializedInstruction *item = &materialization->instructions[instruction];
+    const SolMirRuntimeLoweredImageInstruction *row =
+        &function->request->program->image_instructions[instruction];
+    if (row->state == SOL_MIR_RUNTIME_LOWERED_PRESENT
+        && !represented_image_step_emit(function, row->step_failure_site, row->step_cleanup_event,
+            nodes)) return false;
     size_t destination = value_index(function, item->result);
     size_t local, init, temporary;
     switch (item->kind) {
@@ -9024,9 +9215,16 @@ static bool represented_instruction_emit(const RepresentedFunction *function, si
             if (represented_checked_opcode(plan)) ok = represented_checked_emit(function, instruction,
                 plan, destination, nodes);
             else {
-                BinaryenExpressionRef value = represented_binary(function, plan);
-                ok = value != NULL && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
-                    (BinaryenIndex)destination, value));
+                SolMirRecipeId physical;
+                if ((plan->opcode == SOL_MIR_OPERATION_VALUE_EQ || plan->opcode == SOL_MIR_OPERATION_VALUE_NE)
+                    && represented_backing_recipe(concrete, plan->operand_recipe, &physical)
+                    && represented_indirect_recipe(concrete, physical)) {
+                    ok = represented_equality_emit(function, instruction, plan, destination, nodes);
+                } else {
+                    BinaryenExpressionRef value = represented_binary(function, instruction, plan);
+                    ok = value != NULL && represented_nodes_push(nodes, BinaryenLocalSet(function->module,
+                        (BinaryenIndex)destination, value));
+                }
             }
             if (ok && plan->compound) {
                 init = temporary_init_index(function, plan->previous);
@@ -9647,6 +9845,10 @@ static bool represented_terminator_emit(const RepresentedFunction *function, siz
     RepresentedNodes *nodes) {
     const SolMirMaterializedTerminator *term = &function->request->program->conventions
         ->concrete->materialization.blocks[block].terminator;
+    const SolMirRuntimeLoweredImageTerminator *row = &function->request->program->image_terminators[block];
+    if (row->state == SOL_MIR_RUNTIME_LOWERED_PRESENT
+        && !represented_image_step_emit(function, row->step_failure_site, row->step_cleanup_event,
+            nodes)) return false;
     switch (term->kind) {
         case SOL_MIR_TERM_GOTO: case SOL_MIR_TERM_BREAK: case SOL_MIR_TERM_CONTINUE: {
             const SolMirRuntimeCleanupTransition *transition = represented_control_transition(
@@ -9868,7 +10070,7 @@ static bool represented_entry_packet_reset_emit(BinaryenModuleRef module, uint32
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
     trace_items = represented_trace_ledger_enabled() ? 2 : 0;
 #endif
-    if (items == NULL || count == NULL || capacity < 5 + (panic_detail ? 2 : 0) + trace_items) return false;
+    if (items == NULL || count == NULL || capacity < 6 + (panic_detail ? 2 : 0) + trace_items) return false;
     *count = 0;
     items[(*count)++] = BinaryenGlobalSet(module, P43_CODE,
         BinaryenConst(module, BinaryenLiteralInt32(0)));
@@ -9879,6 +10081,8 @@ static bool represented_entry_packet_reset_emit(BinaryenModuleRef module, uint32
     items[(*count)++] = BinaryenGlobalSet(module, P43_REQUESTS,
         BinaryenConst(module, BinaryenLiteralInt64(0)));
     items[(*count)++] = BinaryenGlobalSet(module, P43_BYTES,
+        BinaryenConst(module, BinaryenLiteralInt64(0)));
+    items[(*count)++] = BinaryenGlobalSet(module, P44_STEPS,
         BinaryenConst(module, BinaryenLiteralInt64(0)));
     if (panic_detail) {
         items[(*count)++] = BinaryenGlobalSet(module, P44_PANIC_DETAIL_LENGTH,
@@ -10016,11 +10220,23 @@ static bool represented_read_uleb32(const uint8_t **cursor, const uint8_t *end,
     return false;
 }
 
-static bool represented_skip_leb(const uint8_t **cursor, const uint8_t *end,
-    unsigned maximum_bytes) {
-    for (unsigned i = 0; i < maximum_bytes; ++i) {
+/* Read an MVP i64.const signed LEB as its unsigned bit pattern. The tenth
+ * byte may contain only the sign extension of bit 63; overlong/truncated
+ * encodings and out-of-width high bits are rejected without a signed shift. */
+static bool represented_read_i64_bits(const uint8_t **cursor, const uint8_t *end,
+    uint64_t *value) {
+    uint64_t bits = 0;
+    for (unsigned i = 0; i < 10; ++i) {
         if (*cursor == end) return false;
-        if ((*(*cursor)++ & UINT8_C(0x80)) == 0) return true;
+        uint8_t byte = *(*cursor)++;
+        if (i == 9 && byte != 0 && byte != UINT8_C(0x7f)) return false;
+        bits |= (uint64_t)(byte & UINT8_C(0x7f)) << (i * 7);
+        if ((byte & UINT8_C(0x80)) == 0) {
+            unsigned used = (i + 1) * 7;
+            if (used < 64 && (byte & UINT8_C(0x40)) != 0) bits |= UINT64_MAX << used;
+            *value = bits;
+            return true;
+        }
     }
     return false;
 }
@@ -10298,7 +10514,7 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
 #endif
     uint8_t global_type[REPRESENTED_WIRE_MAX_FUNCTIONS] = {0};
     bool global_mutable[REPRESENTED_WIRE_MAX_FUNCTIONS] = {0};
-    uint32_t global_initial[REPRESENTED_WIRE_MAX_FUNCTIONS] = {0};
+    uint64_t global_initial[REPRESENTED_WIRE_MAX_FUNCTIONS] = {0};
     uint32_t global_count = 0, active_data_end = 0, heap_base = 0;
     bool saw_active_data = false;
     bool saw_writeback_export = false;
@@ -10350,7 +10566,7 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
                 if (global_type[i] == UINT8_C(0x7f)) {
                     if (!represented_read_uleb32(&cursor, section_end, &initial)) goto invalid;
                     global_initial[i] = initial;
-                } else if (!represented_skip_leb(&cursor, section_end, 10)) goto invalid;
+                } else if (!represented_read_i64_bits(&cursor, section_end, &global_initial[i])) goto invalid;
                 if (cursor == section_end || *cursor++ != UINT8_C(0x0b)) goto invalid;
             }
             if (cursor != section_end) goto invalid;
@@ -10358,7 +10574,10 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
              * authenticated below only when the P4.4 packet relies on it;
              * P4.3 table-shape controls intentionally permit their legacy
              * synthetic global layouts. */
-            if (global_count > 2) heap_base = global_initial[2];
+            if (global_count > 2) {
+                if (global_initial[2] > UINT32_MAX) goto invalid;
+                heap_base = (uint32_t)global_initial[2];
+            }
         } else if (id == 2) {
             uint32_t count = 0;
             if (!represented_read_uleb32(&cursor, section_end, &count) || count != 0) goto invalid;
@@ -10406,6 +10625,7 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
                 uint8_t kind = *cursor++;
                 if (kind > 3 || !represented_read_uleb32(&cursor, section_end, &ignored)) goto invalid;
                 if (kind == 1) goto invalid; /* The callback table is private. */
+                if (kind == 3 && (ignored == 7 || ignored == 8)) goto invalid;
                 if (represented_name_equal(name, name_count, P43_MEMORY)) {
                     if (kind != 2 || saw_memory_export) goto invalid;
                     saw_memory_export = true;
@@ -10608,6 +10828,9 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
         cursor = section_end;
     }
     bool valid = provenance_sections == 1 && memory_sections == 1
+        && global_count >= 9 && global_type[7] == UINT8_C(0x7e) && !global_mutable[7]
+        && global_initial[7] != 0 && global_type[8] == UINT8_C(0x7e) && global_mutable[8]
+        && global_initial[8] == 0
         && ((table_sections == 0 && element_sections == 0)
             || (table_sections == 1 && element_sections == 1)) && saw_memory_export
         && saw_code_export && saw_site_export && saw_provenance_payload && saw_exports_payload
@@ -10750,19 +10973,17 @@ SolWasmRepresentedResult sol_wasm_represented_build(
             return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
         }
     }
-    /* The private Text copy/equality helpers are physical functions too.  The
-     * census convention includes parameters, just as it does for represented
-     * callables: (2 + 12) + (2 + 5) physical local slots. */
-    if (!represented_add(usage.functions, 2, &usage.functions)
-        || !represented_add(usage.locals, 21, &usage.locals)) {
+    /* Text copy/equality own three parameters each; the meter owns one. */
+    if (!represented_add(usage.functions, 3, &usage.functions)
+        || !represented_add(usage.locals, 24, &usage.locals)) {
         diagnostic(diagnostics, "P4.3 represented helper census overflowed");
         return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
     }
-    /* One i64 parameter plus six declared locals is seven physical slots in
+    /* Two i64 parameters plus six declared locals are eight physical slots in
      * the census convention.  The helper is emitted iff PANIC provenance is
      * present and consequently participates in every function/local limit. */
     if (panic_detail && (!represented_add(usage.functions, 1, &usage.functions)
-            || !represented_add(usage.locals, 7, &usage.locals))) {
+            || !represented_add(usage.locals, 8, &usage.locals))) {
         diagnostic(diagnostics, "P4.4 panic-detail helper census overflowed");
         return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
     }
@@ -10774,25 +10995,25 @@ SolWasmRepresentedResult sol_wasm_represented_build(
     for (size_t recipe = 0; recipe < concrete->representation.recipe_count; ++recipe) {
         if (represented_product_copy_needed(request, recipe)
             && (!represented_add(usage.functions, 1, &usage.functions)
-                || !represented_add(usage.locals, 4, &usage.locals))) {
+                || !represented_add(usage.locals, 5, &usage.locals))) {
             diagnostic(diagnostics, "P4.3 product-copy helper census overflowed");
             return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
         }
         if (represented_product_equal_needed(request, recipe)
             && (!represented_add(usage.functions, 1, &usage.functions)
-                || !represented_add(usage.locals, 3, &usage.locals))) {
+                || !represented_add(usage.locals, 4, &usage.locals))) {
             diagnostic(diagnostics, "P4.3 product-equality helper census overflowed");
             return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
         }
         if (represented_sum_copy_needed(request, recipe)
             && (!represented_add(usage.functions, 1, &usage.functions)
-                || !represented_add(usage.locals, 5, &usage.locals))) {
+                || !represented_add(usage.locals, 6, &usage.locals))) {
             diagnostic(diagnostics, "P4.3 sum-copy helper census overflowed");
             return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
         }
         if (represented_sum_equal_needed(request, recipe)
             && (!represented_add(usage.functions, 1, &usage.functions)
-                || !represented_add(usage.locals, 4, &usage.locals))) {
+                || !represented_add(usage.locals, 5, &usage.locals))) {
             diagnostic(diagnostics, "P4.3 sum-equality helper census overflowed");
             return SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED;
         }
@@ -11010,6 +11231,10 @@ SolWasmRepresentedResult sol_wasm_represented_build(
         BinaryenConst(module, BinaryenLiteralInt64(0))) != NULL
         && BinaryenAddGlobal(module, P43_BYTES, BinaryenTypeInt64(), true,
         BinaryenConst(module, BinaryenLiteralInt64(0))) != NULL
+        && BinaryenAddGlobal(module, P44_MAX_STEPS, BinaryenTypeInt64(), false,
+        BinaryenConst(module, BinaryenLiteralInt64((int64_t)limits.max_steps))) != NULL
+        && BinaryenAddGlobal(module, P44_STEPS, BinaryenTypeInt64(), true,
+        BinaryenConst(module, BinaryenLiteralInt64(0))) != NULL
         && (!panic_detail || (BinaryenAddGlobal(module, P44_PANIC_DETAIL_OFFSET,
                 BinaryenTypeInt32(), false, BinaryenConst(module,
                     BinaryenLiteralInt32((int32_t)panic_detail_offset))) != NULL
@@ -11067,6 +11292,7 @@ SolWasmRepresentedResult sol_wasm_represented_build(
         }
 #endif
     }
+    if (ok) ok = represented_step_function(module);
     if (ok) ok = represented_text_copy_function(module);
     if (ok) ok = represented_text_equal_function(module);
     if (ok && panic_detail) ok = represented_panic_capture_function(module);
