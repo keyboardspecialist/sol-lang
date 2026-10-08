@@ -366,6 +366,56 @@ static void expect_descriptor(bool ok, SolMirRuntimeLoweredDemandDescriptor actu
 #define EXPECT_PREDICATE_TERMINATOR(kind, runtime_class, family, facilities) do { SolMirRuntimeLoweredDemandDescriptor actual; expect_descriptor(sol_mir_runtime_lowered_program_test_predicate_terminator_descriptor(kind, &actual), actual, runtime_class, family, facilities); } while (0)
 #define EXPECT_PROVENANCE(kind, runtime_class, family, facilities) do { SolMirRuntimeLoweredDemandDescriptor actual; expect_descriptor(sol_mir_runtime_lowered_program_test_provenance_descriptor(kind, &actual), actual, runtime_class, family, facilities); } while (0)
 #define F(name) SOL_MIR_RUNTIME_LOWERED_FACILITY_##name
+static void test_site_domains(void) {
+    const char *leaves[] = {"p44f_site_domains_branch", "p44f_site_domains_direct", "p44f_site_domains_refined"};
+    for (size_t test = 0; test < 3; ++test) {
+        Fixture f; Pipeline p; char directory[512]; init(&p);
+        snprintf(directory, sizeof directory, "%s/tests/conformance/%s", SOL_TEST_SOURCE_DIR, leaves[test]);
+        bool built = setup_at(&f, directory) && build_named(&f, &p, "launch");
+        CHECK(built);
+        if (!built) { done(&p); finish(&f); continue; }
+        char *baseline = rendered(&p.lowered, NULL);
+        size_t mutations = 0;
+        for (size_t block = 0; block < p.lowered.image_terminator_count; ++block) {
+            SolMirRuntimeLoweredImageTerminator *row = &p.lowered.image_terminators[block];
+            if (row->kind != SOL_MIR_TERM_BRANCH && row->kind != SOL_MIR_TERM_RETURN) continue;
+            CHECK(row->failure_site == SOL_MIR_RUNTIME_NONE);
+            if (test > 1 || row->image != 0 || block != 0) continue;
+            SolMirRuntimeCleanupEvent *event = &p.cleanup.events[row->cleanup_event];
+            event->inherited_failure_site = 1; row->failure_site = 1;
+            reseal(&p.lowered);
+            CHECK(!sol_mir_runtime_cleanup_validate(&p.cleanup, NULL)
+                && !sol_mir_runtime_lowered_program_validate(&p.lowered, NULL)
+                && lowered_render_rejected(&p.lowered));
+            event->inherited_failure_site = SOL_MIR_RUNTIME_NONE;
+            row->failure_site = SOL_MIR_RUNTIME_NONE; reseal(&p.lowered); ++mutations;
+        }
+        for (size_t block = 0; block < p.lowered.predicate_terminator_count; ++block) {
+            SolMirRuntimeLoweredPredicateTerminator *row = &p.lowered.predicate_terminators[block];
+            if (row->kind != SOL_MIR_PREDICATE_TERM_RETURN) continue;
+            CHECK(row->failure_site < p.conventions.failure_site_count);
+            if (row->failure_site >= p.conventions.failure_site_count) continue;
+            const SolMirRuntimeFailureSite *site = &p.conventions.failure_sites[row->failure_site];
+            CHECK(site->origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT
+                && site->owner == row->body && site->block == row->block);
+            if (test != 2 || row->body != 1 || block != 5) continue;
+            CHECK(row->failure_site == 2);
+            size_t saved = row->failure_site;
+            SolMirRuntimeCleanupEvent *event = &p.cleanup.events[row->cleanup_event];
+            row->failure_site = 0; event->inherited_failure_site = 0; reseal(&p.lowered);
+            CHECK(!sol_mir_runtime_cleanup_validate(&p.cleanup, NULL)
+                && !sol_mir_runtime_lowered_program_validate(&p.lowered, NULL)
+                && lowered_render_rejected(&p.lowered));
+            row->failure_site = saved; event->inherited_failure_site = saved;
+            reseal(&p.lowered); ++mutations;
+        }
+        CHECK(mutations == 1 && sol_mir_runtime_lowered_program_validate(&p.lowered, NULL));
+        char *restored = rendered(&p.lowered, NULL);
+        CHECK(baseline && restored && !strcmp(baseline, restored));
+        free(restored); free(baseline); done(&p); finish(&f);
+    }
+}
+
 static void test_vocabulary(void) {
     EXPECT_IMAGE_INSTRUCTION(SOL_MIR_INST_CONST_INT64,SOL_MIR_RUNTIME_LOWERED_CLASS_EXECUTABLE,SOL_MIR_RUNTIME_LOWERED_PLAN_VALUE,F(RECIPE)|F(VALUE));
     EXPECT_IMAGE_INSTRUCTION(SOL_MIR_INST_CONST_BOOL,SOL_MIR_RUNTIME_LOWERED_CLASS_EXECUTABLE,SOL_MIR_RUNTIME_LOWERED_PLAN_VALUE,F(RECIPE)|F(VALUE));
@@ -2681,4 +2731,7 @@ static void test_require_never_fallback_pipeline(void) {
     finish_text(&f);
 }
 
-int main(void) { test_vocabulary();Fixture f;Pipeline p;init(&p);CHECK(setup(&f));bool built=!failures&&build(&f,&p,NULL);if(!built)sol_diagnostics_render_human(stderr,&f.p.source,&f.d);CHECK(built);if(built)check_build_work(&p);CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));check_step_render_identity(&p);test_e6_census_and_missing(&p);test_slice_b_graph_joins(&p);test_executable_plan_event_value_joins(&p);test_slice_c_cleanup_and_host(&p);test_slice_d_raw_owner_preflight(&p);test_slice_d_e6_usage(&p);test_slice_e_render(&p);test_slice_d_resource_limits(&p);test_slice_d_allocation_faults(&p);{ Fixture pre_fixture; CHECK(setup(&pre_fixture)); if(!failures) check_pre_operation_render_stability(&pre_fixture); finish(&pre_fixture); }test_erased_loop_census();test_propagation_value_demand();test_pattern_copy_pipeline();test_nontrivial_copy_demand();test_callback_prerequisite();test_callable_hole_prerequisite();test_callable_hole_exact();test_immediate_method_prerequisite();test_require_never_fallback_pipeline();test_bound_environment_indirect_graph();test_source_backed_p36_graph_keys();test_generic_type_place_keys();test_slice_c_handlers();test_long_virtual_path_validation_work();test_snapshot_cleanup_mirror();FILE*s=tmpfile();CHECK(s&&sol_mir_runtime_lowered_program_render(s,&p.lowered));if(s)fclose(s);uint64_t seal=p.lowered.authentication;p.lowered.authentication^=1;CHECK(!sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));p.lowered.authentication=seal;CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));SolMirRuntimeLoweredProgramLimits exact=p.lowered.limits;exact.max_owned_bytes=p.lowered.usage.owned_bytes? p.lowered.usage.owned_bytes-1:1;Pipeline bad;init(&bad);CHECK(!build(&f,&bad,&exact)&&!bad.lowered.image_instructions);done(&bad);done(&p);finish(&f);return failures?1:0; }
+int main(void) {
+    test_site_domains();
+    test_vocabulary();Fixture f;Pipeline p;init(&p);CHECK(setup(&f));bool built=!failures&&build(&f,&p,NULL);if(!built)sol_diagnostics_render_human(stderr,&f.p.source,&f.d);CHECK(built);if(built)check_build_work(&p);CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));check_step_render_identity(&p);test_e6_census_and_missing(&p);test_slice_b_graph_joins(&p);test_executable_plan_event_value_joins(&p);test_slice_c_cleanup_and_host(&p);test_slice_d_raw_owner_preflight(&p);test_slice_d_e6_usage(&p);test_slice_e_render(&p);test_slice_d_resource_limits(&p);test_slice_d_allocation_faults(&p);{ Fixture pre_fixture; CHECK(setup(&pre_fixture)); if(!failures) check_pre_operation_render_stability(&pre_fixture); finish(&pre_fixture); }test_erased_loop_census();test_propagation_value_demand();test_pattern_copy_pipeline();test_nontrivial_copy_demand();test_callback_prerequisite();test_callable_hole_prerequisite();test_callable_hole_exact();test_immediate_method_prerequisite();test_require_never_fallback_pipeline();test_bound_environment_indirect_graph();test_source_backed_p36_graph_keys();test_generic_type_place_keys();test_slice_c_handlers();test_long_virtual_path_validation_work();test_snapshot_cleanup_mirror();FILE*s=tmpfile();CHECK(s&&sol_mir_runtime_lowered_program_render(s,&p.lowered));if(s)fclose(s);uint64_t seal=p.lowered.authentication;p.lowered.authentication^=1;CHECK(!sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));p.lowered.authentication=seal;CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));SolMirRuntimeLoweredProgramLimits exact=p.lowered.limits;exact.max_owned_bytes=p.lowered.usage.owned_bytes? p.lowered.usage.owned_bytes-1:1;Pipeline bad;init(&bad);CHECK(!build(&f,&bad,&exact)&&!bad.lowered.image_instructions);done(&bad);done(&p);finish(&f);return failures?1:0;
+}

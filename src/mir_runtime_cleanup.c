@@ -100,7 +100,19 @@ static void *workspace_take(Workspace *w,size_t count,size_t size) {
 }
 static bool source_for(const SolIr *ir,SolSpan span,SolMirRuntimeSource *out) { bool one=false;if(span.start>span.end)return false;for(size_t i=0;i<ir->file_count;i++){const SolIrSourceFile *f=&ir->files[i];if(span.start<f->aggregate_start||span.end>f->aggregate_end)continue;if(one)return false;*out=(SolMirRuntimeSource){i,span.start-f->aggregate_start,span.end-f->aggregate_start};one=true;}return one; }
 static uint32_t failbit(SolMirRuntimeFailureCode c) { return c ? UINT32_C(1)<<((unsigned)c-1) : 0; }
-static SolMirRuntimeFailureSiteId inherited(const SolMirRuntimeConventions *c,size_t owner,size_t block,size_t op) { for(size_t i=0;i<c->failure_site_count;i++){if(!METER())return SOL_MIR_RUNTIME_NONE;const SolMirRuntimeFailureSite *s=&c->failure_sites[i];if(s->origin_kind!=SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP&&s->origin_kind!=SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP&&s->owner==owner&&s->block==block&&s->instruction==op)return i;}return SOL_MIR_RUNTIME_NONE; }
+/* Coordinates are local to an origin arena, never an ownership proof. The
+ * authenticated predecessor validates source, mask and uniqueness; this replay
+ * additionally selects only the actual operation's producer domain. */
+static SolMirRuntimeFailureSiteId inherited(const SolMirRuntimeConventions *c,
+    SolMirRuntimeFailureOriginKind origin, size_t owner, size_t block, size_t op) {
+    for (size_t i = 0; i < c->failure_site_count; ++i) {
+        if (!METER()) return SOL_MIR_RUNTIME_NONE;
+        const SolMirRuntimeFailureSite *site = &c->failure_sites[i];
+        if (site->origin_kind == origin && site->owner == owner
+            && site->block == block && site->instruction == op) return i;
+    }
+    return SOL_MIR_RUNTIME_NONE;
+}
 static SolMirRuntimeFailureSiteId step_site(const SolMirRuntimeConventions *c,
     SolMirRuntimeFailureOriginKind origin,size_t owner,size_t block,size_t op) {
     size_t found=SOL_MIR_RUNTIME_NONE;
@@ -120,20 +132,44 @@ static SolMirRuntimeFailureSiteId step_site(const SolMirRuntimeConventions *c,
 static SolMirRuntimeFailureSiteId control_inherited(const SolMirRuntimeConventions *c,
     const SolMirMaterialization *m, const SolMirMaterializedImage *image, size_t owner,
     size_t block, const SolMirMaterializedTerminator *term) {
-    SolMirRuntimeFailureSiteId site = inherited(c, owner, block, SOL_MIR_RUNTIME_NONE);
-    if (site >= c->failure_site_count
-        || c->failure_sites[site].origin_kind != SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT)
-        return site;
+    SolMirRuntimeFailureOriginKind origin;
+    switch (term->kind) {
+    case SOL_MIR_TERM_INVOKE: origin = SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_CALL; break;
+    case SOL_MIR_TERM_PANIC: origin = SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_PANIC; break;
+    case SOL_MIR_TERM_MATCH_FAILURE: origin = SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_NO_MATCH; break;
+    case SOL_MIR_TERM_UNREACHABLE: origin = SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_UNREACHABLE; break;
+    default:
+        if ((term->kind != SOL_MIR_TERM_GOTO && term->kind != SOL_MIR_TERM_BREAK
+                && term->kind != SOL_MIR_TERM_CONTINUE)
+            || term->edge >= m->edge_count
+            || m->edges[term->edge].block != image->contract_epilogue)
+            return SOL_MIR_RUNTIME_NONE;
+        origin = SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT;
+        break;
+    }
+    SolMirRuntimeFailureSiteId site = inherited(c, origin, owner, block, SOL_MIR_RUNTIME_NONE);
+    if (origin != SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT
+        || site >= c->failure_site_count) return site;
     const SolMirOperations *operations = &c->concrete->operations;
     size_t body = c->failure_sites[site].owner;
     if (body >= operations->predicate_body_count
-        || (operations->predicate_bodies[body].outcome != SOL_CONTRACT_OUTCOME_SUCCESS
-            && operations->predicate_bodies[body].outcome != SOL_CONTRACT_OUTCOME_FAILURE))
-        return site;
-    return (term->kind == SOL_MIR_TERM_GOTO || term->kind == SOL_MIR_TERM_BREAK
-            || term->kind == SOL_MIR_TERM_CONTINUE)
-            && term->edge < m->edge_count && m->edges[term->edge].block == image->contract_epilogue
-        ? site : SOL_MIR_RUNTIME_NONE;
+        || operations->predicate_bodies[body].owner_kind != SOL_MIR_PREDICATE_OWNER_INSTANCE
+        || operations->predicate_bodies[body].instance != owner
+        || operations->predicate_bodies[body].phase != SOL_CONTRACT_ENSURES)
+        return SOL_MIR_RUNTIME_NONE;
+    size_t matches = 0;
+    for (size_t i = 0; i < operations->predicate_count; ++i) {
+        if (!METER()) return SOL_MIR_RUNTIME_NONE;
+        const SolMirOperationPredicatePlan *plan = &operations->predicates[i];
+        if (plan->kind == SOL_MIR_OPERATION_PREDICATE_CONTRACT
+            && plan->body == body && plan->image == owner
+            && plan->block == image->contract_epilogue
+            && plan->context == operations->predicate_bodies[body].context
+            && plan->contract_phase == SOL_CONTRACT_ENSURES
+            && plan->contract_outcome == operations->predicate_bodies[body].outcome)
+            ++matches;
+    }
+    return matches == 1 ? site : SOL_MIR_RUNTIME_NONE;
 }
 static bool is_root(const SolMirMaterialization *m,size_t place,size_t local) { return place<m->place_count&&m->places[place].local==local&&!m->places[place].projections.count; }
 static size_t root_place(const Replay *r,size_t local) { for(size_t p=0;p<r->places;p++){if(!METER())return SOL_MIR_RUNTIME_NONE;size_t x=r->image->places.offset+p;if(is_root(r->m,x,local))return x;}return SOL_MIR_RUNTIME_NONE; }
@@ -482,7 +518,7 @@ static bool allocation_pattern_instruction(const SolMirRuntimeValues *values,
     }
     return false;
 }
-static bool emit_implicit(Sink*s,const SolMirRuntimeCleanup *owner,const Replay*r,size_t block,size_t instruction,SolSpan span,bool allocation,Storage *stt,unsigned char*holes,size_t*tmp,size_t*tmpo,size_t td,size_t*snap,size_t sd,size_t*scope,size_t cd,size_t*region,size_t rd,size_t*handler,size_t hd) { SolMirRuntimeSource src;if(!source_for(owner->conventions->concrete->program.ir,span,&src))return false;SolMirRuntimeCleanupEvent e={SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION,SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION,SOL_MIR_RUNTIME_CLEANUP_ORIGIN_IMPLICIT,r->image_id,block,instruction,SOL_MIR_RUNTIME_NONE,src,inherited(owner->conventions,r->image_id,block,instruction),SOL_MIR_RUNTIME_NONE,{action_pos(s),0},{s->count.transitions,0},SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL,false,SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE};e.captures_failure_detail=true;if(allocation)e.producer=SOL_MIR_RUNTIME_CLEANUP_PRODUCER_SUPPLEMENTAL_ALLOCATION;size_t id=event_pos(s);if(allocation&&e.inherited_failure_site==SOL_MIR_RUNTIME_NONE){e.supplemental_site=s->count.supplemental_sites;if(!sink_supplemental(s,&(SolMirRuntimeCleanupSupplementalSite){id,src,failbit(SOL_MIR_RUNTIME_FAILURE_ALLOCATION_LIMIT)|failbit(SOL_MIR_RUNTIME_FAILURE_ALLOCATION_FAILED)}))return false;}
+static bool emit_implicit(Sink*s,const SolMirRuntimeCleanup *owner,const Replay*r,size_t block,size_t instruction,SolSpan span,bool allocation,Storage *stt,unsigned char*holes,size_t*tmp,size_t*tmpo,size_t td,size_t*snap,size_t sd,size_t*scope,size_t cd,size_t*region,size_t rd,size_t*handler,size_t hd) { SolMirRuntimeSource src;if(!source_for(owner->conventions->concrete->program.ir,span,&src))return false;SolMirRuntimeCleanupEvent e={SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION,SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION,SOL_MIR_RUNTIME_CLEANUP_ORIGIN_IMPLICIT,r->image_id,block,instruction,SOL_MIR_RUNTIME_NONE,src,allocation ? SOL_MIR_RUNTIME_NONE : inherited(owner->conventions,SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_ARITHMETIC,r->image_id,block,instruction),SOL_MIR_RUNTIME_NONE,{action_pos(s),0},{s->count.transitions,0},SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL,false,SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE};e.captures_failure_detail=true;if(allocation)e.producer=SOL_MIR_RUNTIME_CLEANUP_PRODUCER_SUPPLEMENTAL_ALLOCATION;size_t id=event_pos(s);if(allocation&&e.inherited_failure_site==SOL_MIR_RUNTIME_NONE){e.supplemental_site=s->count.supplemental_sites;if(!sink_supplemental(s,&(SolMirRuntimeCleanupSupplementalSite){id,src,failbit(SOL_MIR_RUNTIME_FAILURE_ALLOCATION_LIMIT)|failbit(SOL_MIR_RUNTIME_FAILURE_ALLOCATION_FAILED)}))return false;}
  if(!sink_event(s,&e))return false;size_t at=action_pos(s);if(!sink_transition(s,id,SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,SOL_MIR_RUNTIME_NONE,at))return false;at=action_pos(s);if(!emit_implicit_cleanup(s,owner,r,stt,holes,tmp,tmpo,td,snap,sd,scope,cd,region,rd,handler,hd)||!sink_action(s,SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE,SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY,e.inherited_failure_site!=SOL_MIR_RUNTIME_NONE?e.inherited_failure_site:e.supplemental_site,SOL_MIR_RECIPE_NONE)||!sink_transition(s,id,SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE,SOL_MIR_RUNTIME_NONE,at))return false;if(s->writing){SolMirRuntimeCleanupEvent *x=&s->out->events[id];x->actions.count=s->out->action_count-x->actions.offset;x->transitions.count=s->out->transition_count-x->transitions.offset;}return true; }
 static bool emit_step(Sink*s,const SolMirRuntimeCleanup*owner,const Replay*r,
     SolMirRuntimeCleanupEventKind kind,size_t block,size_t operation,SolSpan span,
@@ -1139,7 +1175,7 @@ static bool emit_predicates(Sink *s, const SolMirRuntimeCleanup *o) {
             SolMirRuntimeCleanupEvent e = {SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION,
                 SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION, fallible ? SOL_MIR_RUNTIME_CLEANUP_ORIGIN_IMPLICIT : SOL_MIR_RUNTIME_CLEANUP_ORIGIN_EXPLICIT,
                 pb->body, block, instruction, SOL_MIR_RUNTIME_NONE, src,
-                inherited(o->conventions, pb->body, block, instruction), SOL_MIR_RUNTIME_NONE,
+                in->failures ? inherited(o->conventions, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, pb->body, block, instruction) : SOL_MIR_RUNTIME_NONE, SOL_MIR_RUNTIME_NONE,
                 {action_pos(s), 0}, {s->count.transitions, 0}, SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL,false,SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE};
             e.captures_failure_detail = fallible;
             size_t id = event_pos(s);
@@ -1173,7 +1209,13 @@ static bool emit_predicates(Sink *s, const SolMirRuntimeCleanup *o) {
         SolMirRuntimeCleanupEvent e = {SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR,
             SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION, terminal_failure ? SOL_MIR_RUNTIME_CLEANUP_ORIGIN_IMPLICIT : SOL_MIR_RUNTIME_CLEANUP_ORIGIN_EXPLICIT,
             pb->body, block, SOL_MIR_RUNTIME_NONE, SOL_MIR_RUNTIME_NONE, src,
-            inherited(o->conventions, pb->body, block, SOL_MIR_RUNTIME_NONE), SOL_MIR_RUNTIME_NONE,
+            term->kind == SOL_MIR_PREDICATE_TERM_INVOKE
+                ? inherited(o->conventions, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_CALL, pb->body, block, SOL_MIR_RUNTIME_NONE)
+                : term->kind == SOL_MIR_PREDICATE_TERM_FAILURE
+                    ? inherited(o->conventions, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_NO_MATCH, pb->body, block, SOL_MIR_RUNTIME_NONE)
+                    : term->kind == SOL_MIR_PREDICATE_TERM_RETURN
+                        ? inherited(o->conventions, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT, pb->body, block, SOL_MIR_RUNTIME_NONE)
+                        : SOL_MIR_RUNTIME_NONE, SOL_MIR_RUNTIME_NONE,
             {action_pos(s), 0}, {s->count.transitions, 0}, SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL,false,SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE};
         e.captures_failure_detail = terminal_failure || term->kind == SOL_MIR_PREDICATE_TERM_INVOKE || term->kind == SOL_MIR_PREDICATE_TERM_CHECK_REFINED;
         size_t id = event_pos(s);

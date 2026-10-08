@@ -692,7 +692,7 @@ typedef enum {
     FAULT_STRESS, FAULT_OLD_SNAPSHOT, FAULT_ENSURES_ROOTS, FAULT_REFINED,
     FAULT_CALLABLE_HOLE, FAULT_CALLBACK_INOUT, FAULT_METHOD, FAULT_CALLBACK,
     FAULT_PATTERN, FAULT_PANIC, FAULT_PRODUCT_TREE, FAULT_SUM_TEXT,
-    FAULT_PARSER_MAP, FAULT_TEXT_BUILD, FAULT_DEPTH, FAULT_SWEEP_COUNT
+    FAULT_PARSER_MAP, FAULT_TEXT_BUILD, FAULT_DEPTH, FAULT_SITE_EXCLUSIVE, FAULT_SWEEP_COUNT
 } RepresentedFault;
 static void represented_control(const char *id);
 static void represented_fault(RepresentedFault sweep, size_t ordinal, size_t hook_after);
@@ -929,29 +929,37 @@ static bool propagation_pipeline_build_named_with_import(PropagationPipeline *pi
         && sol_ir_lower_scoped(&pipeline->package.source, &pipeline->package.syntax, &pipeline->hir,
             &pipeline->types, &pipeline->effects, &pipeline->contracts, pipeline->package.files, 1,
             &pipeline->ir, &pipeline->diagnostics);
+    bool exclusive_roots = pair_method_failure
+        && entry != NULL && (!strcmp(entry, "launch") || !strcmp(entry, "other"))
+        && strstr(directory, "p44f_site_domains_exclusive_") != NULL;
     SolIrCallableId callable = SOL_IR_NONE, companion = SOL_IR_NONE, imported = SOL_IR_NONE;
     if (ok && entry != NULL) for (size_t i = 0; i < pipeline->ir.callable_count; ++i) {
         if (import_name != NULL && !strcmp(pipeline->ir.callables[i].name, import_name)
             && pipeline->ir.callables[i].kind == SOL_IR_CALLABLE_CAPABILITY) imported = i;
         if (pipeline->ir.callables[i].kind != SOL_IR_CALLABLE_FUNCTION) continue;
         if (!strcmp(pipeline->ir.callables[i].name, entry)) callable = i;
-        else if ((!strcmp(entry, "fail") && !strcmp(pipeline->ir.callables[i].name, "launch"))
+        else if ((exclusive_roots && ((!strcmp(entry, "launch") && !strcmp(pipeline->ir.callables[i].name, "other"))
+                || (!strcmp(entry, "other") && !strcmp(pipeline->ir.callables[i].name, "launch"))))
+            || (!strcmp(entry, "fail") && !strcmp(pipeline->ir.callables[i].name, "launch"))
             || (!strcmp(entry, "launch") && !strcmp(pipeline->ir.callables[i].name, "fail")))
             companion = i;
     }
     SolMirTargetDescriptor target = sol_mir_target_wasm32();
-    bool paired_method_failure = pair_method_failure && ((entry != NULL && !strcmp(entry, "fail")
+    bool paired_method_failure = exclusive_roots || (pair_method_failure && ((entry != NULL && !strcmp(entry, "fail")
             && strstr(directory, "p43_method_failure_entry") != NULL)
         || (entry != NULL && !strcmp(entry, "launch")
             && (strstr(directory, "p43_method_prereq") != NULL
                 || strstr(directory, "p44e_depth_method_inout") != NULL
                 || strstr(directory, "p44e_depth_callback_inout") != NULL
                 || strstr(directory, "p44e_depth_pending") != NULL
-                || strstr(directory, "p44c_requires_") != NULL)));
+                 || strstr(directory, "p44c_requires_") != NULL))));
     SolMirProgramRoot roots[2] = {{callable, root_kind},
         {companion, SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE}};
     size_t root_count = paired_method_failure ? 2 : 1;
-    if (paired_method_failure && !strcmp(entry, "fail")) {
+    if (exclusive_roots) {
+        roots[0].kind = !strcmp(entry, "launch") ? SOL_MIR_PROGRAM_ROOT_ENTRY : SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE;
+        roots[1].kind = !strcmp(entry, "launch") ? SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE : SOL_MIR_PROGRAM_ROOT_ENTRY;
+    } else if (paired_method_failure && !strcmp(entry, "fail")) {
         roots[0] = (SolMirProgramRoot){companion, SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE};
         roots[1] = (SolMirProgramRoot){callable, SOL_MIR_PROGRAM_ROOT_ENTRY};
     } else if (paired_method_failure) {
@@ -5523,9 +5531,12 @@ static bool p44c_ensures_acceptance_matrix(void) {
         {.leaf="p44c_ensures_text_reject", .build_result=SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE},
         {.leaf="p44c_ensures_import_reject", .build_result=SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE,
             .source_shape=C2A_SOURCE_IMPORT_OWNER},
-        {.leaf="p44c_ensures_exclusive_reject",
-            .build_result=SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE,
-            .source_shape=C2A_SOURCE_EXCLUSIVE_OWNER},
+        /* Historical name/bytes retained: this contract consumes launch's
+         * owned result, not the callback's exclusive parameter. The old reject
+         * came from a coincidental predicate site on increment's RETURN. No
+         * writeback/raw-export hook is enabled for this original fixture. */
+        {.leaf="p44c_ensures_exclusive_reject", .value=42,
+            .build_result=SOL_WASM_REPRESENTED_OK},
         {.leaf="p44c_ensures_qualified_reject",
             .build_result=SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE,
             .source_shape=C2A_SOURCE_QUALIFIED_RESULT},
@@ -11284,7 +11295,876 @@ static void run_step_owner(size_t first, size_t last) {
     CHECK(p44d_step_authentication());
 }
 
+/* Packet ownership starts from the named source producer and literal predicate
+ * or arithmetic expression span/mask, never from an observed runtime packet. */
+static bool p44f_failure_owner(const PropagationPipeline *p,
+    const SolWasmRepresentedOutput *output, size_t test, uint32_t expected_record) {
+    static const struct { size_t test; int32_t code; SolMirRuntimeFailureOriginKind origin;
+        uint32_t mask, start, end; } packets[] = {
+        {5, 14, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT, 8192, 126, 146},
+        {6, 14, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT, 8192, 126, 146},
+        {7, 3, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, 6, 126, 142},
+        {8, 3, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC, 6, 126, 142},
+        {10, 14, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT, 8192, 129, 163},
+        {11, 3, SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_ARITHMETIC, 6, 225, 239},
+    };
+    const SolMirMaterialization *m = &p->concrete.materialization;
+    size_t image = SOL_MIR_RUNTIME_NONE, images = 0;
+    for (size_t i = 0; i < m->image_count; ++i)
+        if (m->images[i].source_callable < p->ir.callable_count
+            && !strcmp(p->ir.callables[m->images[i].source_callable].name, "checked")) {
+            image = i; ++images;
+        }
+    if (images != 1) return false;
+    for (size_t i = 0; i < sizeof packets / sizeof *packets; ++i) {
+        if (packets[i].test != test) continue;
+        C1TraceCase want = {.callable = "checked", .symbol = p44_symbol_for_image(p, image),
+            .code = packets[i].code, .record = expected_record, .origin = packets[i].origin,
+            .code_mask = packets[i].mask, .start = packets[i].start, .end = packets[i].end};
+        size_t site = SOL_MIR_RUNTIME_NONE;
+        if (want.symbol == NULL) return false;
+        if (want.origin != SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_ARITHMETIC) {
+            if (!c1_failure_site(p, &want, &site)) return false;
+            size_t body = p->conventions.failure_sites[site].owner;
+            if (body >= p->concrete.operations.predicate_body_count
+                || p->concrete.operations.predicate_bodies[body].instance != image) return false;
+        } else {
+            size_t matches = 0;
+            for (size_t q = 0; q < p->conventions.failure_site_count; ++q) {
+                const SolMirRuntimeFailureSite *candidate = &p->conventions.failure_sites[q];
+                if (candidate->origin_kind != want.origin || candidate->owner != image
+                    || candidate->allowed_codes != want.code_mask || candidate->source.file != 0
+                    || candidate->source.start != want.start || candidate->source.end != want.end
+                    || candidate->instruction >= m->instruction_count) continue;
+                const SolMirMaterializedInstruction *instruction = &m->instructions[candidate->instruction];
+                if (instruction->block != candidate->block || instruction->span.start != want.start
+                    || instruction->span.end != want.end) continue;
+                size_t plans = 0;
+                for (size_t a = 0; a < p->concrete.operations.arithmetic_count; ++a)
+                    if (p->concrete.operations.arithmetic[a].image == image
+                        && p->concrete.operations.arithmetic[a].instruction == candidate->instruction) ++plans;
+                if (plans != 1) return false;
+                site = q; ++matches;
+            }
+            if (matches != 1) return false;
+        }
+        return c1_canonical_record(output, &want, expected_record, site);
+    }
+    return false;
+}
+
+/* Source path selects complete P3.3 slices, not the backend trace: positive
+ * first takes block 2 -> satisfied epilogue -> RETURN, negative/one takes block
+ * 3 -> violation epilogue -> FAIL_CONTRACT, negative/zero fails at block 3's
+ * divide before the epilogue. Scalar cleanup then propagates through the entry
+ * call's failure block. c1_trace_matches independently authenticates every
+ * literal action/disposition/record against its unique owning P3.3 slice. */
+static bool p44f_snapshot_trace(const PropagationPipeline *p, size_t test,
+    const P44TraceSlot *actual, size_t count, bool overflow) {
+    static const P44TraceSlot success[] = {
+        {10,1,0},{11,1,0},{0,257,0},{22,1,0},{23,1,0},{24,1,0},
+        {25,1,0},{26,1,0},{42,1,0},{43,1,0},
+    };
+    static const P44TraceSlot violation[] = {
+        {20,1,0},{21,1,0},{1,5,4},{27,1,0},{28,1,0},{29,1,0},
+        {30,5,4},{31,5,4},{32,517,4},{42,1,0},{43,1,0},{44,533,4},
+    };
+    static const P44TraceSlot arithmetic[] = {
+        {12,13,7},{13,13,7},{14,13,7},{15,13,7},{16,13,7},{17,13,7},
+        {18,13,7},{19,525,7},{42,1,0},{43,1,0},{44,533,7},
+    };
+    const P44TraceSlot *expected = test == 9 ? success : test == 10 ? violation : arithmetic;
+    size_t expected_count = test == 9 ? sizeof success / sizeof *success
+        : test == 10 ? sizeof violation / sizeof *violation : sizeof arithmetic / sizeof *arithmetic;
+    uint32_t record = test == 9 ? 0 : test == 10 ? 4 : 7;
+    if (test < 9 || test > 11
+        || !c1_trace_matches(p, expected, expected_count, record, actual, count, overflow)) return false;
+    size_t first_drop = test == 9 ? 25 : test == 10 ? 30 : 15;
+    return p->cleanup.actions[first_drop].kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT
+        && p->cleanup.actions[first_drop].target == 1
+        && p->cleanup.actions[first_drop + 1].kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT
+        && p->cleanup.actions[first_drop + 1].target == 0;
+}
+
+static bool p44f_site_domains(void) {
+    static const struct { size_t test, bytes, build_work, validation_work; int32_t record; const char *hash; } frozen[] = {
+        {0, 8750, 9078, 7391, 0, "bd3d5664bd69bf69a37232ebf807f1c2013f9c91b4b0d6f5b5979301dce5f3c8"},
+        {3, 10829, 13785, 10558, 0, "30e6f3e1f49fbf99c0569ee8698b77307967e6427a33d79cabab7f85f722ad0a"},
+        {4, 11478, 14982, 11368, 0, "7f116508bddaaf6402a5de375ad62fcb4d10bc7c7fa188ab3c59e09f6d50c040"},
+        {5, 11157, 14379, 10985, 5, "dd4abe7dcd07eebc77649307fca1aeddf8bf153b0678d564772f72027ba2b0c2"},
+        {6, 11149, 14373, 10985, 5, "1afd127ee0ff0a3403043d3d38b3f99c2c0d6f4ab4dad827e00e077e0cfc05c2"},
+        {7, 10829, 13785, 10584, 4, "3eea7badf9cf9957b63c3b06f9b269949de2246d0fa48cb2bc84e2e0e3f544fa"},
+        {8, 11149, 14373, 10981, 4, "1306af4e792c500777029ae6e8e4ea4a3bfe34f896c1c4e56edb326449c4924d"},
+        {9, 32974, 19227, 14210, 0, "c29a89f98f177610dea4177e1d0b76d76c432e2980975c509fc2d15e73b613c3"},
+        {10, 33663, 19857, 14641, 4, "1cc109186d33e81d2f3d13c864ec86e9daee5edcaeb96d4e3527c7ec0cc2019a"},
+        {11, 33663, 19857, 14649, 7, "4469736c9f394e900a5d5dd045337f65081caf5dcdec1a4e3095d09b3af7e048"},
+    };
+    static const struct { size_t test, backend_allocations, events, actions, transitions, sites, steps; } census[] = {
+        {0,90,71,135,118,46,44}, {3,103,84,174,144,59,55},
+        {4,108,88,188,152,63,57}, {5,106,86,182,148,61,56},
+        {6,106,86,180,148,61,56}, {7,103,84,174,144,59,55},
+        {8,106,86,180,148,61,56}, {9,113,91,318,156,64,59},
+        {10,116,93,324,160,66,60}, {11,116,93,324,160,66,60},
+    };
+    static const struct { const char *leaf, *entry; int64_t value; int32_t code; bool rejected, snapshots; } cases[] = {
+        {"p44f_site_domains_branch", "launch", 4, 0, false, false},
+        {"p44f_site_domains_direct", "launch", 0, 0, true, false},
+        {"p44f_site_domains_refined", "launch", 0, 0, true, false},
+        {"p44f_site_domains_execution", "launch", 4, 0, false, false},
+        {"p44f_site_domains_execution_other", "other", -1, 0, false, false},
+        {"p44f_site_domains_execution_false_true", "false_true", 0, 14, false, false},
+        {"p44f_site_domains_execution_false_false", "false_false", 0, 14, false, false},
+        {"p44f_site_domains_execution_eval_true", "eval_true", 0, 3, false, false},
+        {"p44f_site_domains_execution_eval_false", "eval_false", 0, 3, false, false},
+        {"p44f_site_domains_snapshots", "launch", 42, 0, false, true},
+        {"p44f_site_domains_snapshots_other", "other", 0, 14, false, true},
+        {"p44f_site_domains_snapshots_failure", "failure", 0, 3, false, true},
+        {"p44_guard_call_reject", "launch", 0, 0, true, false},
+        {"p44f_site_domains_text", "launch", 0, 0, true, false},
+        {"p44f_site_domains_tuple", "launch", 0, 0, true, false},
+        {"p44f_site_domains_project", "launch", 0, 0, true, false},
+        {"p44f_site_domains_match", "launch", 0, 0, true, false},
+        {"p44f_site_domains_function", "launch", 0, 0, true, false},
+        {"p44f_site_domains_callback", "launch", 0, 0, true, false},
+        {"p44f_site_domains_refined_call", "launch", 0, 0, true, false},
+    };
+    bool ok = true;
+    for (size_t test = 0; test < sizeof cases / sizeof *cases; ++test) {
+        PropagationPipeline p; propagation_pipeline_init(&p);
+        SolWasmRepresentedOutput output, repeated;
+        sol_wasm_represented_output_init(&output); sol_wasm_represented_output_init(&repeated);
+        char directory[512], entry[256];
+        snprintf(directory, sizeof directory, "%s/tests/conformance/%s", SOL_TEST_SOURCE_DIR, cases[test].leaf);
+        /* P2/P3 pipeline allocations are not counted by the backend hook. The
+         * hook resets at each represented_build invocation; capture N directly
+         * after each build, before validation/instance/parser allocations. */
+        size_t before_pipeline = sol_wasm_represented_test_allocation_attempts();
+        bool passed = propagation_pipeline_build_named(&p, directory, cases[test].entry, false)
+            && sol_wasm_represented_test_allocation_attempts() == before_pipeline;
+        SolWasmRepresentedBuildRequest request = {&p.lowered, directory, NULL};
+        if (cases[test].snapshots) sol_wasm_represented_test_p44_cleanup_trace_probe(true);
+        SolWasmRepresentedResult result = passed ? sol_wasm_represented_build(&request, &output,
+            &p.diagnostics) : SOL_WASM_REPRESENTED_INVALID_INPUT;
+        size_t backend_allocations = sol_wasm_represented_test_allocation_attempts();
+        if (cases[test].rejected) passed = passed && result == SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE
+            && output.bytes.bytes == NULL && output.bytes.count == 0;
+        else {
+            const size_t missing = SOL_MIR_RUNTIME_NONE;
+            size_t expected = missing;
+            for (size_t i = 0; i < sizeof frozen / sizeof *frozen; ++i)
+                if (frozen[i].test == test) { if (expected != missing) passed = false; expected = i; }
+            if (expected == missing) { ok = false; goto case_done; }
+            int32_t expected_record = frozen[expected].record;
+            WasmInstance instance = {0}; int64_t value = 0; int32_t code = 0, record = 0;
+            passed = passed && result == SOL_WASM_REPRESENTED_OK
+                && entry_symbol(&output.bytes, entry, sizeof entry)
+                && wasm_instance_open(&output.bytes, entry, &instance)
+                && wasm_instance_observe(&instance, &value, &code, &record)
+                && value == cases[test].value && code == cases[test].code && record == expected_record;
+            if (passed && cases[test].code != 0)
+                passed = p44f_failure_owner(&p, &output, test, (uint32_t)expected_record);
+            if (passed && cases[test].snapshots) {
+                P44TraceSlot slots[64]; size_t count = 0; bool overflow = false;
+                passed = wasm_instance_trace(&instance, slots, 64, &count, &overflow)
+                    && p44f_snapshot_trace(&p, test, slots, count, overflow);
+                P44TraceSlot second[64]; size_t second_count = 0; bool second_overflow = false;
+                passed = passed && wasm_instance_call(&instance, cases[test].value, cases[test].code, expected_record)
+                    && wasm_instance_trace(&instance, second, 64, &second_count, &second_overflow)
+                    && !second_overflow && second_count == count
+                    && !memcmp(slots, second, count * sizeof *slots)
+                    && p44f_snapshot_trace(&p, test, second, second_count, second_overflow);
+            }
+            if (!cases[test].snapshots)
+                passed = passed && wasm_instance_call(&instance, cases[test].value, cases[test].code, expected_record);
+            wasm_instance_close(&instance);
+            SolWasmRepresentedResult repeated_result = passed
+                ? sol_wasm_represented_build(&request, &repeated, &p.diagnostics) : SOL_WASM_REPRESENTED_INVALID_INPUT;
+            size_t repeated_allocations = sol_wasm_represented_test_allocation_attempts();
+            passed = passed && repeated_result == SOL_WASM_REPRESENTED_OK && repeated.bytes.count == output.bytes.count
+                && !memcmp(repeated.bytes.bytes, output.bytes.bytes, output.bytes.count)
+                && usage_equal(&repeated.usage, &output.usage);
+            uint8_t hash[32]; sha256(output.bytes.bytes, output.bytes.count, hash);
+            char hex[65];
+            for (size_t i = 0; i < sizeof hash; ++i) snprintf(hex + i * 2, 3, "%02x", hash[i]);
+            size_t matches = 0;
+            for (size_t i = 0; i < sizeof frozen / sizeof *frozen; ++i) {
+                if (frozen[i].test != test) continue;
+                ++matches;
+                passed = passed && frozen[i].bytes == output.bytes.count
+                    && frozen[i].record == record && !strcmp(frozen[i].hash, hex)
+                    && frozen[i].build_work == p.cleanup.usage.build_work
+                    && frozen[i].validation_work == p.cleanup.usage.validation_work;
+            }
+            passed = passed && matches == 1;
+            matches = 0;
+            size_t step_events = 0;
+            for (size_t i = 0; i < p.cleanup.event_count; ++i)
+                if (p.cleanup.events[i].phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP) ++step_events;
+            for (size_t i = 0; i < sizeof census / sizeof *census; ++i) {
+                if (census[i].test != test) continue;
+                ++matches;
+                passed = passed && backend_allocations == census[i].backend_allocations
+                    && repeated_allocations == census[i].backend_allocations
+                    && p.cleanup.event_count == census[i].events && p.cleanup.action_count == census[i].actions
+                    && p.cleanup.transition_count == census[i].transitions
+                    && p.conventions.failure_site_count == census[i].sites && step_events == census[i].steps
+                    && p.lowered.image_instruction_count + p.lowered.image_terminator_count
+                        + p.lowered.predicate_instruction_count + p.lowered.predicate_terminator_count == census[i].steps;
+            }
+            passed = passed && matches == 1;
+            fprintf(stderr, "p44f %s/%s passed=%d code=%d record=%d bytes=%zu hash=",
+                cases[test].leaf, cases[test].entry, passed, code, record, output.bytes.count);
+            for (size_t i = 0; i < sizeof hash; ++i) fprintf(stderr, "%02x", hash[i]);
+            fprintf(stderr, " cleanup-work=%zu/%zu N=%zu events=%zu actions=%zu transitions=%zu sites=%zu steps=%zu\n",
+                p.cleanup.usage.build_work, p.cleanup.usage.validation_work,
+                backend_allocations, p.cleanup.event_count,
+                p.cleanup.action_count, p.cleanup.transition_count, p.conventions.failure_site_count,
+                p.lowered.image_instruction_count + p.lowered.image_terminator_count
+                    + p.lowered.predicate_instruction_count + p.lowered.predicate_terminator_count);
+        }
+case_done:
+        if (!passed) sol_diagnostics_render_human(stderr, &p.package.source, &p.diagnostics);
+        ok = passed && ok;
+        sol_wasm_represented_test_p44_cleanup_trace_probe(false);
+        sol_wasm_represented_output_free(&repeated); sol_wasm_represented_output_free(&output);
+        propagation_pipeline_free(&p);
+    }
+    char guard_directory[512], guard_entry[256];
+    snprintf(guard_directory, sizeof guard_directory,
+        "%s/tests/conformance/p44f_site_domains_guard_nested", SOL_TEST_SOURCE_DIR);
+    SolWasmRepresentedOutput guard; sol_wasm_represented_output_init(&guard);
+    bool guard_ok = build_named_root(guard_directory, "launch", &guard, NULL, SOL_WASM_REPRESENTED_OK)
+        && guard.bytes.count == 13308 && entry_symbol(&guard.bytes, guard_entry, sizeof guard_entry)
+        && invoke_named(&guard.bytes, guard_entry, 4, 0, 0);
+    sol_wasm_represented_output_free(&guard); ok = guard_ok && ok;
+    /* The two roots retain a genuine image/predicate coordinate collision.
+     * Root-order and relocation must not change canonical module metadata. */
+    char directory[512], relocated[512], source[1024], destination[1024];
+    snprintf(directory, sizeof directory, "%s/tests/conformance/p44f_site_domains_roots", SOL_TEST_SOURCE_DIR);
+    snprintf(relocated, sizeof relocated, "%s/p44f_site_domains_relocated", SOL_TEST_BINARY_DIR);
+    (void)mkdir(SOL_TEST_BINARY_DIR, 0700); (void)mkdir(relocated, 0700);
+    snprintf(source, sizeof source, "%s/main.sol", directory);
+    snprintf(destination, sizeof destination, "%s/main.sol", relocated);
+    FILE *input = fopen(source, "rb"), *copy = fopen(destination, "wb");
+    bool copied = input != NULL && copy != NULL;
+    if (copied) {
+        uint8_t buffer[256]; size_t bytes;
+        while ((bytes = fread(buffer, 1, sizeof buffer, input)) != 0)
+            if (fwrite(buffer, 1, bytes, copy) != bytes) copied = false;
+        if (ferror(input)) copied = false;
+    }
+    if (input != NULL) fclose(input);
+    if (copy != NULL && fclose(copy) != 0) copied = false;
+    SolWasmRepresentedOutput forward, reverse, moved;
+    sol_wasm_represented_output_init(&forward); sol_wasm_represented_output_init(&reverse);
+    sol_wasm_represented_output_init(&moved);
+    size_t ids[2], reverse_ids[2], moved_ids[2];
+    bool canonical = copied && build_multiroot(directory, false, &forward, ids, NULL, SOL_WASM_REPRESENTED_OK)
+        && build_multiroot(directory, true, &reverse, reverse_ids, NULL, SOL_WASM_REPRESENTED_OK)
+        && build_multiroot(relocated, false, &moved, moved_ids, NULL, SOL_WASM_REPRESENTED_OK)
+        && forward.bytes.count == reverse.bytes.count && forward.bytes.count == moved.bytes.count
+        && !memcmp(forward.bytes.bytes, reverse.bytes.bytes, forward.bytes.count)
+        && !memcmp(forward.bytes.bytes, moved.bytes.bytes, forward.bytes.count)
+        && usage_equal(&forward.usage, &reverse.usage) && usage_equal(&forward.usage, &moved.usage)
+        && !memcmp(ids, reverse_ids, sizeof ids) && !memcmp(ids, moved_ids, sizeof ids);
+    sol_wasm_represented_output_free(&moved); sol_wasm_represented_output_free(&reverse);
+    sol_wasm_represented_output_free(&forward);
+    return ok && canonical;
+}
+
+/* These are three distinct modules, not an instrumentation equivalence claim:
+ * launch-only with probes, launch-only plain, and the plain two-root closure.
+ * Hook nodes increase generated_nodes/output/work; other adds an image and its
+ * call/step sites. Freeze each context rather than suppressing those deltas. */
+typedef struct {
+    const char *hash;
+    SolWasmRepresentedUsage usage;
+    size_t allocations, events, actions, transitions, sites, steps;
+    size_t cleanup_build, cleanup_validation, lowered_build;
+} P44fExclusiveGolden;
+static const P44fExclusiveGolden p44f_exclusive_goldens[5][3] = {
+    {
+        {"5f0bf0d763b3e7fb4b64ae94a6b50c43c732bae803db6503b634916217813b88", {8,12,8,20,72,5604,2,0,0,0,72,38383,16007,34780,24540}, 124,94,191,162,67,62,17082,13340,312548},
+        {"e6af97fc415fc57f6eaef19a28e4f273c16e0206fa879c95632adac02502b63b", {8,12,8,20,72,1388,2,0,0,0,72,37615,15951,22947,12707}, 122,94,191,162,67,62,17082,13340,312548},
+        {"719e238b6094854e813d54ea9b59cd1c406e37fcc746223b65e22b4f64bf25ed", {9,15,10,24,78,1566,2,0,0,0,86,43122,18942,25199,14959}, 144,113,223,194,80,73,22689,17218,370893},
+    }, {
+        {"a2e54bb2048136bdfce25107dba3202d655fdff148ff5a978e85c23f0af3d140", {8,12,8,20,72,5604,2,0,0,0,72,38383,16007,34780,24540}, 124,94,191,162,67,62,17082,13336,312548},
+        {"019b19673e28eb8050ddd8789cfca620a5d3f64fa5aa5c6e6cd5b0612a7094b2", {8,12,8,20,72,1388,2,0,0,0,72,37615,15951,22947,12707}, 122,94,191,162,67,62,17082,13336,312548},
+        {"81c8b180b50acd649eede1fb607299bfc47feb879613eb0c5ea2fef9f181dc4b", {9,15,10,24,78,1566,2,0,0,0,86,43122,18942,25199,14959}, 144,113,223,194,80,73,22689,17214,370893},
+    }, {
+        {"2ca3fbd8853f43e9582d4b2aae203ba770adb8de2b59dbf6bc032209664346fa", {8,12,8,23,77,6385,2,0,0,0,80,41207,17679,37952,27712}, 133,103,219,179,75,69,20691,15780,351751},
+        {"204b36153b76a46778872c9e20da80b098cc3a3fc8cabc1a07749da8a48c6515", {8,12,8,23,77,1487,2,0,0,0,80,40951,17679,24222,13982}, 132,103,219,179,75,69,20691,15780,351751},
+        {"7717c0ac1ce4293a87f51252753c038b0d6e6e72f61fc3054b627f8efdb7b031", {9,15,10,27,83,1665,2,0,0,0,94,46458,20670,26474,16234}, 154,122,251,211,88,80,26841,20020,410521},
+    }, {
+        {"aaab46f81789f039dcce2a0bc2a7ae62d72e724735d49a45a0657e019f7127af", {8,12,8,22,74,6010,2,0,0,0,75,39523,16619,36271,26031}, 128,97,203,168,70,64,18312,14172,328514},
+        {"9eb5612523c9f982466d339b06fdbd28b2a831c5dde816ac58972c1c857ca830", {8,12,8,22,74,1442,2,0,0,0,75,39011,16579,23462,13222}, 127,97,203,168,70,64,18312,14172,328514},
+        {"850a0fe5ac43a241170ec00f67a9abf4daa231a0c928ab17ca4859aac87587be", {9,15,10,26,80,1620,2,0,0,0,89,44518,19570,25714,15474}, 149,116,235,200,83,75,24102,18172,387004},
+    }, {
+        {"7c4cc7183f9336e6fdd5b4c62103de8bcc816cdd20d81ed51508f2506cc1635e", {8,12,8,22,74,5644,2,0,0,0,75,39267,16619,35275,25035}, 126,98,191,169,70,64,18120,14044,320678},
+        {"91acaaca573b9130647f2beb4889c831e6540caba64179d2af6cd39b37ebc9de", {8,12,8,22,74,1428,2,0,0,0,75,38499,16579,23442,13202}, 124,98,191,169,70,64,18120,14044,320678},
+        {"074e9769ad509010daaae818343b3b261a9fa22fcc4a46def728893efa6c3a38", {9,15,10,26,80,1606,2,0,0,0,89,44006,19570,25694,15454}, 146,117,223,201,83,75,23910,18044,379175},
+    },
+};
+
+static bool p44f_hash_is(const uint8_t *bytes, size_t count, const char *expected) {
+    uint8_t hash[32]; char hex[65]; sha256(bytes, count, hash);
+    for (size_t i = 0; i < sizeof hash; ++i) snprintf(hex + i * 2, 3, "%02x", hash[i]);
+    return !strcmp(hex, expected);
+}
+
+static size_t p44f_named_image(const PropagationPipeline *p, const char *name) {
+    size_t found = SOL_MIR_RUNTIME_NONE;
+    for (size_t i = 0; i < p->concrete.materialization.image_count; ++i) {
+        size_t callable = p->concrete.materialization.images[i].source_callable;
+        if (callable >= p->ir.callable_count) return SOL_MIR_RUNTIME_NONE;
+        if (strcmp(p->ir.callables[callable].name, name)) continue;
+        if (found != SOL_MIR_RUNTIME_NONE) return SOL_MIR_RUNTIME_NONE;
+        found = i;
+    }
+    return found;
+}
+
+static bool p44f_exclusive_closure(const PropagationPipeline *p, bool paired, size_t ids[4]) {
+    const char *const names[] = {"launch", "checked", "increment", "other"};
+    for (size_t i = 0; i < 4; ++i) ids[i] = p44f_named_image(p, names[i]);
+    const SolMirProgram *program = &p->concrete.program;
+    if (program->root_count != (paired ? 2u : 1u) || program->template_count != (paired ? 4u : 3u)
+        || p->concrete.materialization.image_count != (paired ? 4u : 3u)
+        || p->conventions.entry_count != 1 || ids[0] == SOL_MIR_RUNTIME_NONE
+        || ids[1] == SOL_MIR_RUNTIME_NONE || ids[2] == SOL_MIR_RUNTIME_NONE
+        || (paired ? ids[3] == SOL_MIR_RUNTIME_NONE : ids[3] != SOL_MIR_RUNTIME_NONE)) return false;
+    size_t launch_roots = 0, other_roots = 0;
+    for (size_t i = 0; i < program->root_count; ++i) {
+        const SolMirProgramRoot *root = &program->roots[i];
+        if (root->callable >= p->ir.callable_count) return false;
+        const char *name = p->ir.callables[root->callable].name;
+        if (!strcmp(name, "launch") && root->kind == SOL_MIR_PROGRAM_ROOT_ENTRY) ++launch_roots;
+        else if (!strcmp(name, "other") && root->kind == SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE) ++other_roots;
+        else return false;
+    }
+    size_t entry = p->conventions.entries[0].callable;
+    if (launch_roots != 1 || other_roots != (paired ? 1u : 0u)
+        || entry >= p->concrete.linkage.callable_count
+        || p->concrete.linkage.callables[entry].instance != ids[0]) return false;
+    if (!paired) {
+        size_t candidates = 0;
+        for (size_t i = 0; i < p->conventions.signature_count; ++i) {
+            const SolMirRuntimeSignature *s = &p->conventions.signatures[i];
+            if (s->origin != SOL_MIR_RUNTIME_SIGNATURE_INTERNAL || s->internal == entry
+                || s->slots.count != 0 || s->result_class != SOL_MIR_RUNTIME_RESULT_VALUE) continue;
+            if (s->internal >= p->concrete.linkage.callable_count
+                || p->concrete.linkage.callables[s->internal].instance != ids[1]) return false;
+            ++candidates;
+        }
+        if (candidates != 1) return false;
+    }
+    return sol_mir_concrete_program_validate(&p->concrete, NULL)
+        && sol_mir_runtime_conventions_validate(&p->conventions, NULL)
+        && sol_mir_runtime_cleanup_validate(&p->cleanup, NULL)
+        && sol_mir_runtime_lowered_program_validate(&p->lowered, NULL);
+}
+
+static bool p44f_exclusive_frozen(const PropagationPipeline *p, const SolWasmRepresentedOutput *out,
+    const P44fExclusiveGolden *g, size_t allocations) {
+    size_t steps = 0;
+    for (size_t i = 0; i < p->cleanup.event_count; ++i)
+        steps += p->cleanup.events[i].phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP;
+    return allocations == g->allocations && usage_equal(&out->usage, &g->usage)
+        && out->bytes.count == g->usage.output_bytes && p44f_hash_is(out->bytes.bytes, out->bytes.count, g->hash)
+        && p->cleanup.event_count == g->events && p->cleanup.action_count == g->actions
+        && p->cleanup.transition_count == g->transitions && p->conventions.failure_site_count == g->sites
+        && steps == g->steps && p->lowered.image_instruction_count + p->lowered.image_terminator_count
+            + p->lowered.predicate_instruction_count + p->lowered.predicate_terminator_count == steps
+        && p->cleanup.usage.build_work == g->cleanup_build
+        && p->cleanup.usage.validation_work == g->cleanup_validation
+        && p->lowered.usage.build_work == g->lowered_build
+        && sol_wasm_represented_validate(&out->bytes) == SOL_WASM_REPRESENTED_OK
+        && wasmtime_module_valid(&out->bytes);
+}
+
+/* Authenticate the packet BEFORE running the module. Owner names, full masks,
+ * source spans, the operation plan, and one unique P3.1 site select the record;
+ * neither the observed packet nor the outer CALL's code7 site is an oracle. */
+static bool p44f_exclusive_packet(const PropagationPipeline *p, const SolWasmRepresentedOutput *out,
+    size_t test, bool paired, uint32_t *record_out) {
+    static const struct { const char *owner; SolMirRuntimeFailureOriginKind origin;
+        uint32_t start, end, mask, single_record, pair_record; } packets[] = {
+        {"checked", SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT,185,197,8192,6,7},
+        {"checked", SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT,185,197,8192,6,7},
+        {"increment", SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_ARITHMETIC,144,153,6,6,7},
+        {"checked", SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_ARITHMETIC,281,290,6,8,9},
+        {"checked", SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC,185,195,6,6,7},
+    };
+    if (test >= 5) return false;
+    size_t image = p44f_named_image(p, packets[test].owner), site = SOL_MIR_RUNTIME_NONE;
+    if (image == SOL_MIR_RUNTIME_NONE) return false;
+    C1TraceCase want = {.callable = packets[test].owner, .symbol = p44_symbol_for_image(p, image),
+        .code = test <= 1 ? 14 : 3, .origin = packets[test].origin,
+        .start = packets[test].start, .end = packets[test].end, .code_mask = packets[test].mask,
+        .record = paired ? packets[test].pair_record : packets[test].single_record};
+    if (want.symbol == NULL) return false;
+    if (want.origin != SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_ARITHMETIC) {
+        if (!c1_failure_site(p, &want, &site)
+            || p->conventions.failure_sites[site].owner >= p->concrete.operations.predicate_body_count
+            || p->concrete.operations.predicate_bodies[p->conventions.failure_sites[site].owner].instance != image)
+            return false;
+    } else {
+        size_t matches = 0;
+        for (size_t i = 0; i < p->conventions.failure_site_count; ++i) {
+            const SolMirRuntimeFailureSite *s = &p->conventions.failure_sites[i];
+            if (s->owner != image || s->origin_kind != want.origin || s->allowed_codes != want.code_mask
+                || s->source.file != 0 || s->source.start != want.start || s->source.end != want.end) continue;
+            if (s->instruction >= p->concrete.materialization.instruction_count) return false;
+            const SolMirMaterializedInstruction *instruction = &p->concrete.materialization.instructions[s->instruction];
+            if (instruction->block != s->block || instruction->span.start != want.start
+                || instruction->span.end != want.end) return false;
+            size_t plans = 0;
+            for (size_t a = 0; a < p->concrete.operations.arithmetic_count; ++a)
+                plans += p->concrete.operations.arithmetic[a].image == image
+                    && p->concrete.operations.arithmetic[a].instruction == s->instruction;
+            if (plans != 1) return false;
+            site = i; ++matches;
+        }
+        if (matches != 1) return false;
+    }
+    size_t origin_events = 0, inherited_transitions = 0, result_joins = 0;
+    const SolMirRuntimeFailureSite *selected = &p->conventions.failure_sites[site];
+    for (size_t i = 0; i < p->cleanup.event_count; ++i) {
+        const SolMirRuntimeCleanupEvent *e = &p->cleanup.events[i];
+        if (e->phase != SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION) continue;
+        if (e->inherited_failure_site == site) {
+            if (e->owner != selected->owner || e->block != selected->block) return false;
+            if (want.origin == SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_ARITHMETIC) {
+                if (e->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION
+                    || e->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_ARITHMETIC
+                    || e->operation != selected->instruction) return false;
+            } else if (want.origin == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_ARITHMETIC) {
+                if (e->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION
+                    || e->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PREDICATE_ARITHMETIC
+                    || e->operation != selected->instruction) return false;
+            } else if (e->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR
+                || e->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PREDICATE_RESULT) return false;
+            ++origin_events;
+        }
+        for (size_t j = 0; j < e->transitions.count; ++j) {
+            const SolMirRuntimeCleanupTransition *t = &p->cleanup.transitions[e->transitions.offset + j];
+            if (t->failure_source != SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31
+                || t->failure_site != site) continue;
+            if (t->failure_mask != want.code_mask) return false;
+            ++inherited_transitions;
+            if (want.origin == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT) {
+                if (e->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR || e->owner != image
+                    || e->block != p->concrete.materialization.images[image].contract_epilogue
+                    || t->edge_role != SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_VIOLATION
+                    || t->contract_phase != SOL_CONTRACT_ENSURES
+                    || t->contract_outcome != SOL_CONTRACT_OUTCOME_ALWAYS) return false;
+                ++result_joins;
+            }
+        }
+    }
+    if (origin_events != 1 || inherited_transitions != 1
+        || result_joins != (want.origin == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT ? 1u : 0u)
+        || !c1_canonical_record(out, &want, want.record, site)) return false;
+    *record_out = test == 0 ? 0 : want.record;
+    return true;
+}
+
+typedef struct {
+    P44TraceSlot slots[16]; size_t count;
+    size_t transitions[20], transition_count;
+} P44fExclusiveLedger;
+/* Independently follow the source CFG from each named entry, not a runtime
+ * prefix/suffix cut. Success: increment RETURN -> callback satisfied/WRITEBACK
+ * -> checked GOTO epilogue -> ensures satisfied -> checked RETURN -> launch +.
+ * False selects violation/FAIL_CONTRACT. Callback failure selects increment's
+ * divide then checked's call-failure block (NO writeback/ensures). Body failure
+ * selects checked's divide after WRITEBACK (NO epilogue). Predicate division
+ * selects CHECK_CONTRACT evaluation-failure/RESUME, NOT violation/code14.
+ * The transition lists include empty slices; every selected nonempty slice is
+ * expanded completely. Raw starts at checked on a fresh instance, never launch. */
+static const P44fExclusiveLedger p44f_exclusive_entry_ledgers[5] = {
+    {{{4,1,0},{5,1,0},{6,1,0},{11,257,0},{18,1,0},{19,1,0},{12,257,0},{20,1,0},{31,1,0},{32,1,0}},10,
+        {2,3,4,5,8,17,18,19,10,20,21,26,31,33,34,35},16},
+    {{{4,1,0},{5,1,0},{6,1,0},{11,257,0},{18,1,0},{19,1,0},{13,5,6},{21,1,0},{22,517,6},{25,1,0},{26,1,0},{27,533,6}},12,
+        {2,3,4,5,8,17,18,19,11,22,23,27,28,29,30},15},
+    {{{4,1,0},{5,13,6},{6,13,6},{7,525,6},{18,1,0},{19,1,0},{20,1,0},{21,533,6},{29,1,0},{30,1,0},{31,533,6}},11,
+        {2,4,12,16,17,18,19,30,31,32,33},11},
+    {{{4,1,0},{5,1,0},{6,1,0},{11,257,0},{18,13,8},{19,13,8},{20,13,8},{21,525,8},{29,1,0},{30,1,0},{31,533,8}},11,
+        {2,3,4,5,8,18,29,30,31,32},10},
+    {{{4,1,0},{5,1,0},{6,1,0},{11,257,0},{18,1,0},{19,1,0},{23,1,0},{24,533,6},{25,1,0},{26,1,0},{27,533,6}},11,
+        {2,3,4,5,8,17,18,19,36,38,12,24,25,27,28,29,30},17},
+};
+static const P44fExclusiveLedger p44f_exclusive_raw_ledgers[5] = {
+    {{{4,1,0},{5,1,0},{6,1,0},{11,257,0},{18,1,0},{19,1,0},{12,257,0},{20,1,0}},8,
+        {2,3,4,5,8,17,18,19,10,20,21},11},
+    {{{4,1,0},{5,1,0},{6,1,0},{11,257,0},{18,1,0},{19,1,0},{13,5,6},{21,1,0},{22,517,6}},9,
+        {2,3,4,5,8,17,18,19,11,22,23},11},
+    {{{4,1,0},{5,13,6},{6,13,6},{7,525,6},{18,1,0},{19,1,0},{20,1,0},{21,533,6}},8,
+        {2,4,12,16,17,18,19},7},
+    {{{4,1,0},{5,1,0},{6,1,0},{11,257,0},{18,13,8},{19,13,8},{20,13,8},{21,525,8}},8,
+        {2,3,4,5,8,18},6},
+    {{{4,1,0},{5,1,0},{6,1,0},{11,257,0},{18,1,0},{19,1,0},{23,1,0},{24,533,6}},8,
+        {2,3,4,5,8,17,18,19,36,38,12,24,25},13},
+};
+
+static bool p44f_exclusive_ledger_metadata(const PropagationPipeline *p,
+    const P44fExclusiveLedger *want, uint32_t record, size_t test) {
+    P44TraceSlot derived[64]; size_t count = 0, writebacks = 0, ensures = 0;
+    for (size_t i = 0; i < want->transition_count; ++i) {
+        size_t id = want->transitions[i], owners = 0;
+        const SolMirRuntimeCleanupEvent *owner = NULL;
+        if (id >= p->cleanup.transition_count) return false;
+        const SolMirRuntimeCleanupTransition *t = &p->cleanup.transitions[id];
+        for (size_t e = 0; e < p->cleanup.event_count; ++e) {
+            const SolMirRuntimeCleanupEvent *event = &p->cleanup.events[e];
+            if (id >= event->transitions.offset && id - event->transitions.offset < event->transitions.count) {
+                owner = event; ++owners;
+            }
+        }
+        if (owners != 1 || owner->phase != SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+            || !c1_slice_valid(&p->cleanup, t->actions)) return false;
+        if (t->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING
+            && t->failure_site != SOL_MIR_RUNTIME_NONE) return false;
+        ensures += t->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_SATISFIED
+            || t->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_VIOLATION
+            || t->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_FAILURE;
+        for (size_t j = 0; j < t->actions.count; ++j) {
+            size_t action = t->actions.offset + j;
+            const SolMirRuntimeCleanupAction *a = &p->cleanup.actions[action];
+            if (count == sizeof derived / sizeof *derived || action > UINT32_MAX) return false;
+            if (a->kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_WRITEBACK) {
+                if (t->edge_role != SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_NORMAL
+                    || a->flags != SOL_MIR_RUNTIME_CLEANUP_ACTION_NORMAL_ONLY) return false;
+                ++writebacks;
+            }
+            derived[count++] = (P44TraceSlot){(uint32_t)action,c1_trace_disposition(owner,t,a),
+                t->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE ? record : 0};
+        }
+    }
+    return writebacks == (test == 2 ? 0u : 1u) && ensures == (test == 2 || test == 3 ? 0u : 1u)
+        && count == want->count && !memcmp(derived, want->slots, count * sizeof *derived)
+        && c1_trace_matches(p, want->slots, want->count, record, derived, count, false);
+}
+
+static bool p44f_exclusive_run(const PropagationPipeline *p, const SolWasmRepresentedOutput *out,
+    size_t test, uint32_t record, bool instrumented) {
+    char entry[256]; WasmInstance instance = {0};
+    int64_t value = test == 0 ? 1042 : 0; int32_t code = test == 0 ? 0 : test == 1 ? 14 : 3;
+    bool ok = entry_symbol(&out->bytes, entry, sizeof entry)
+        && wasm_instance_open(&out->bytes, entry, &instance);
+    P44TraceSlot first[64]; size_t first_count = 0;
+    for (size_t repeat = 0; ok && repeat < 2; ++repeat) {
+        ok = wasm_instance_call(&instance, value, code, (int32_t)record);
+        if (instrumented && ok) {
+            P44TraceSlot actual[64]; size_t count = 0; bool overflow = false;
+            ok = wasm_instance_writebacks(&instance, test == 2 ? 0 : 1)
+                && wasm_instance_trace(&instance, actual, 64, &count, &overflow)
+                && c1_trace_matches(p, p44f_exclusive_entry_ledgers[test].slots,
+                    p44f_exclusive_entry_ledgers[test].count, record, actual, count, overflow);
+            if (repeat == 0) { first_count = count; memcpy(first, actual, count * sizeof *actual); }
+            else ok = ok && count == first_count && !memcmp(first, actual, count * sizeof *actual);
+        }
+    }
+    if (!instrumented && ok) {
+        /* Exactly one function export: launch's wrapper. other is a genuine
+         * internal root, NOT an entry/export and is not executed here. */
+        wasm_exporttype_vec_t exports; wasm_module_exports(instance.module, &exports);
+        size_t functions = 0;
+        for (size_t i = 0; i < exports.size; ++i)
+            if (wasm_externtype_kind(wasm_exporttype_type(exports.data[i])) == WASM_EXTERN_FUNC) {
+                ++functions; ok = ok && name_equal(wasm_exporttype_name(exports.data[i]), entry);
+            }
+        wasm_exporttype_vec_delete(&exports);
+        ok = ok && functions == 1 && instance.writebacks == NULL && instance.trace_count == NULL
+            && !p44_bytes_contain(&out->bytes, SOL_WASM_REPRESENTED_TEST_FAILURE_ENTRY_EXPORT)
+            && !p44_bytes_contain(&out->bytes, SOL_WASM_REPRESENTED_TEST_WRITEBACK_EXPORT)
+            && !p44_bytes_contain(&out->bytes, SOL_WASM_REPRESENTED_TEST_P44_TRACE_OFFSET_EXPORT);
+    }
+    wasm_instance_close(&instance);
+    if (!instrumented) return ok;
+    /* No entry reset on raw. Each raw invocation starts in a different freshly
+     * instantiated module. A failed ensures must return zero, not staged42. */
+    first_count = 0;
+    for (size_t repeat = 0; ok && repeat < 2; ++repeat) {
+        P44TraceSlot actual[64]; size_t count = 0; bool overflow = false;
+        ok = wasm_instance_open(&out->bytes, entry, &instance)
+            && wasm_instance_call_named(&instance, SOL_WASM_REPRESENTED_TEST_FAILURE_ENTRY_EXPORT,
+                test == 0 ? 42 : 0, code, (int32_t)record)
+            && wasm_instance_writebacks(&instance, test == 2 ? 0 : 1)
+            && wasm_instance_trace(&instance, actual, 64, &count, &overflow)
+            && c1_trace_matches(p, p44f_exclusive_raw_ledgers[test].slots,
+                p44f_exclusive_raw_ledgers[test].count, record, actual, count, overflow);
+        if (repeat == 0) { first_count = count; memcpy(first, actual, count * sizeof *actual); }
+        else ok = ok && count == first_count && !memcmp(first, actual, count * sizeof *actual);
+        wasm_instance_close(&instance);
+    }
+    return ok;
+}
+
+static bool p44f_exclusive_profile_reject(void) {
+    PropagationPipeline p; propagation_pipeline_init(&p);
+    char directory[512], error[256];
+    snprintf(directory, sizeof directory, "%s/tests/conformance/p44f_site_domains_exclusive_input_reject",
+        SOL_TEST_SOURCE_DIR);
+    bool ok = sol_package_load_directory(&p.package, directory, &p.diagnostics, error, sizeof error);
+    SolHirFileScope scope = {0};
+    if (ok) scope = (SolHirFileScope){p.package.files[0].module_name, p.package.files[0].import_start,
+        p.package.files[0].import_count, p.package.files[0].item_start, p.package.files[0].item_count};
+    ok = ok && sol_hir_lower_scoped(&p.package.source, &p.package.syntax, &scope, 1, &p.hir, &p.diagnostics)
+        && sol_type_check(&p.package.source, &p.package.syntax, &p.hir, &p.types, &p.diagnostics)
+        && sol_effect_check(&p.package.source, &p.package.syntax, &p.hir, &p.types, &p.effects, &p.diagnostics)
+        && sol_contract_lower(&p.package.source, &p.package.syntax, &p.hir, &p.types, &p.effects,
+            &p.contracts, &p.diagnostics)
+        && sol_ir_lower_scoped(&p.package.source, &p.package.syntax, &p.hir, &p.types, &p.effects,
+            &p.contracts, p.package.files, 1, &p.ir, &p.diagnostics)
+        && sol_ir_validate(&p.ir, NULL) && p.diagnostics.count == 0
+        && p44f_hash_is((const uint8_t *)p.ir.source_bytes, p.ir.source_length,
+            "e44d737fb5f731c415136f96de40e916dfcc8b95135df16f7e9ac12fc7c93f08");
+    size_t increment = SOL_IR_NONE, launch = SOL_IR_NONE;
+    for (size_t i = 0; ok && i < p.ir.callable_count; ++i) {
+        if (!strcmp(p.ir.callables[i].name, "increment")) {
+            if (increment != SOL_IR_NONE) { ok = false; break; } increment = i;
+        }
+        if (!strcmp(p.ir.callables[i].name, "launch")) {
+            if (launch != SOL_IR_NONE) { ok = false; break; } launch = i;
+        }
+    }
+    ok = ok && increment < p.ir.callable_count && launch < p.ir.callable_count;
+    if (ok) {
+        const SolIrCallable *c = &p.ir.callables[increment];
+        ok = c->kind == SOL_IR_CALLABLE_FUNCTION && c->span.start == 48
+            && c->span.end == 152 && c->parameters.count == 1 && c->parameters.offset < p.ir.root_count
+            && c->generic_parameters.count == 0 && c->effect_parameters.count == 0
+            && c->effect_parameter == SOL_IR_NONE && c->receiver == SOL_IR_NONE
+            && c->effects.count == 0 && p.ir.snapshot_count == 0;
+        size_t local = ok ? p.ir.roots[c->parameters.offset] : SOL_IR_NONE;
+        ok = ok && local < p.ir.local_count && p.ir.locals[local].kind == SOL_IR_LOCAL_PARAMETER
+            && p.ir.locals[local].access == SOL_ACCESS_EXCLUSIVE
+            && !strcmp(p.ir.locals[local].name, "value") && p.ir.locals[local].type < p.ir.type_count
+            && p.ir.types[p.ir.locals[local].type].kind == SOL_IR_TYPE_INT64;
+        size_t owned = 0;
+        for (size_t i = 0; ok && i < p.ir.obligation_count; ++i) {
+            const SolIrObligation *o = &p.ir.obligations[i];
+            if (o->owner_kind != SOL_CONTRACT_OWNER_ITEM || o->owner != c->owner) continue;
+            ++owned;
+            ok = o->kind == SOL_CONTRACT_ENSURES && o->outcome == SOL_CONTRACT_OUTCOME_ALWAYS
+                && o->snapshots.count == 0 && o->predicate < p.ir.expression_count;
+            if (!ok) break;
+            const SolIrExpression *predicate = &p.ir.expressions[o->predicate];
+            ok = predicate->kind == SOL_IR_EXPR_BINARY && predicate->as.binary.left < p.ir.expression_count
+                && predicate->as.binary.right < p.ir.expression_count;
+            if (!ok) break;
+            const SolIrExpression *left = &p.ir.expressions[predicate->as.binary.left];
+            const SolIrExpression *right = &p.ir.expressions[predicate->as.binary.right];
+            ok = left->kind == SOL_IR_EXPR_PLACE && left->as.place < p.ir.place_count
+                && p.ir.places[left->as.place].root_kind == SOL_IR_PLACE_ROOT_LOCAL
+                && p.ir.places[left->as.place].local == local
+                && p.ir.places[left->as.place].projections.count == 0
+                && right->kind == SOL_IR_EXPR_INTEGER && right->as.integer == 42;
+        }
+        ok = ok && owned == 1 && p.ir.obligation_count == 1;
+    }
+    SolDiagnostics diagnostics; sol_diagnostics_init(&diagnostics);
+    SolMir mir, empty; sol_mir_init(&mir); sol_mir_init(&empty);
+    if (ok) ok = sol_mir_lower_callable(&p.ir, increment, &mir, &diagnostics) == SOL_MIR_LOWER_UNSUPPORTED
+        && !memcmp(&mir, &empty, sizeof mir) && diagnostics.count == 1;
+    if (ok) {
+        const SolDiagnostic *d = &diagnostics.items[0];
+        ok = d->severity == SOL_SEVERITY_ERROR && !strcmp(d->code, "SOL-MIR-001")
+            && !strcmp(d->message, "callable is outside the initial P1a MIR checkpoint")
+            && d->span.start == 48 && d->span.end == 152;
+    }
+    sol_mir_free(&mir); sol_mir_free(&empty); sol_diagnostics_free(&diagnostics);
+    sol_diagnostics_init(&diagnostics);
+    SolMirConcreteProgram concrete, concrete_empty;
+    sol_mir_concrete_program_init(&concrete); sol_mir_concrete_program_init(&concrete_empty);
+    SolMirProgramRoot root = {launch, SOL_MIR_PROGRAM_ROOT_ENTRY};
+    SolMirTargetDescriptor target = sol_mir_target_wasm32();
+    if (ok) ok = sol_mir_concrete_program_build(
+        &(SolMirConcreteBuildRequest){&p.ir, &root, 1, NULL, 0, &target, NULL}, &concrete, &diagnostics)
+            == SOL_MIR_CONCRETE_BUILD_UNSUPPORTED_CLOSURE
+        && !memcmp(&concrete, &concrete_empty, sizeof concrete) && diagnostics.count == 2;
+    if (ok) {
+        const SolDiagnostic *first = &diagnostics.items[0], *second = &diagnostics.items[1];
+        ok = first->severity == SOL_SEVERITY_ERROR && !strcmp(first->code, "SOL-MIR-001")
+            && !strcmp(first->message, "callable is outside the initial P1a MIR checkpoint")
+            && first->span.start == 48 && first->span.end == 152
+            && second->severity == SOL_SEVERITY_ERROR && !strcmp(second->code, "SOL-MIR-CONCRETE-001")
+            && !strcmp(second->message, "concrete program symbolic program build failed");
+    }
+    /* No P3 owner or represented emit: this is the real exclusive-contract MIR
+     * profile gate, not a fabricated backend rejection/zero-usage assertion. */
+    sol_mir_concrete_program_free(&concrete); sol_mir_concrete_program_free(&concrete_empty);
+    sol_diagnostics_free(&diagnostics); propagation_pipeline_free(&p);
+    return ok;
+}
+
+static bool p44f_exclusive_build(PropagationPipeline *p, const char *directory,
+    const SolWasmRepresentedLimits *limits, SolWasmRepresentedOutput *out,
+    const P44fExclusiveGolden *g) {
+    SolWasmRepresentedResult result = sol_wasm_represented_build(
+        &(SolWasmRepresentedBuildRequest){&p->lowered, directory, limits}, out, &p->diagnostics);
+    /* Must precede validators, parsers, and instances; P2/P3 allocation is not N. */
+    size_t allocations = sol_wasm_represented_test_allocation_attempts();
+    return result == SOL_WASM_REPRESENTED_OK && p44f_exclusive_frozen(p, out, g, allocations);
+}
+
+static bool p44f_exclusive_resources(PropagationPipeline *p, const char *directory,
+    const SolWasmRepresentedOutput *baseline) {
+    const P44fExclusiveGolden *g = &p44f_exclusive_goldens[0][0];
+    SolWasmRepresentedLimits exact = sol_wasm_represented_default_limits();
+#define P44F_EXACT(limit, measure) exact.limit = g->usage.measure
+    P44F_EXACT(max_functions, functions); P44F_EXACT(max_blocks, blocks); P44F_EXACT(max_edges, edges);
+    P44F_EXACT(max_values, values); P44F_EXACT(max_locals, locals); P44F_EXACT(max_generated_nodes, generated_nodes);
+    P44F_EXACT(max_table_elements, table_elements); P44F_EXACT(max_provenance_records, provenance_records);
+    P44F_EXACT(max_work_bytes, work_bytes); P44F_EXACT(max_scratch_bytes, scratch_bytes);
+    P44F_EXACT(max_owned_bytes, owned_bytes); P44F_EXACT(max_output_bytes, output_bytes);
+#undef P44F_EXACT
+    SolWasmRepresentedOutput output; sol_wasm_represented_output_init(&output);
+    bool ok = p44f_exclusive_build(p, directory, &exact, &output, g)
+        && output.bytes.count == baseline->bytes.count
+        && !memcmp(output.bytes.bytes, baseline->bytes.bytes, output.bytes.count);
+    sol_wasm_represented_output_free(&output);
+#define P44F_BELOW(field) do { \
+    SolWasmRepresentedLimits cap = exact; --cap.field; sol_wasm_represented_output_init(&output); \
+    SolWasmRepresentedResult r = sol_wasm_represented_build( \
+        &(SolWasmRepresentedBuildRequest){&p->lowered,directory,&cap}, &output, &p->diagnostics); \
+    size_t n = sol_wasm_represented_test_allocation_attempts(); \
+    ok = ok && r == SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED && n <= g->allocations \
+        && output.bytes.bytes == NULL && output.bytes.count == 0 && usage_zero(&output.usage); \
+    sol_wasm_represented_output_free(&output); \
+} while (0)
+    /* No static bytes or runtime allocation requests/bytes in these scalar
+     * fixtures; zero census has no meaningful one-below cap. */
+    P44F_BELOW(max_functions); P44F_BELOW(max_blocks); P44F_BELOW(max_edges); P44F_BELOW(max_values);
+    P44F_BELOW(max_locals); P44F_BELOW(max_generated_nodes); P44F_BELOW(max_table_elements);
+    P44F_BELOW(max_provenance_records); P44F_BELOW(max_work_bytes); P44F_BELOW(max_scratch_bytes);
+    P44F_BELOW(max_owned_bytes); P44F_BELOW(max_output_bytes);
+#undef P44F_BELOW
+    for (size_t ordinal = 1; ordinal <= g->allocations; ++ordinal) {
+        represented_fault(FAULT_SITE_EXCLUSIVE, ordinal, ordinal);
+        sol_wasm_represented_output_init(&output);
+        SolWasmRepresentedResult r = sol_wasm_represented_build(
+            &(SolWasmRepresentedBuildRequest){&p->lowered,directory,NULL}, &output, &p->diagnostics);
+        size_t attempts = sol_wasm_represented_test_allocation_attempts();
+        bool failed_cleanly = r == SOL_WASM_REPRESENTED_ALLOCATION_FAILED && attempts >= ordinal
+            && output.bytes.bytes == NULL && output.bytes.count == 0 && usage_zero(&output.usage);
+        sol_wasm_represented_output_free(&output); sol_wasm_represented_test_fail_allocation_after(0);
+        sol_wasm_represented_output_init(&output);
+        bool retried = p44f_exclusive_build(p, directory, NULL, &output, g)
+            && output.bytes.count == baseline->bytes.count
+            && !memcmp(output.bytes.bytes, baseline->bytes.bytes, output.bytes.count)
+            && usage_equal(&output.usage, &baseline->usage);
+        ok = failed_cleanly && retried && ok; sol_wasm_represented_output_free(&output);
+    }
+    sol_wasm_represented_test_fail_allocation_after(0);
+    return ok;
+}
+
+static bool p44f_exclusive_copy(const char *directory, const char *relocated) {
+    char source[1024], destination[1024];
+    (void)mkdir(SOL_TEST_BINARY_DIR, 0700); (void)mkdir(relocated, 0700);
+    snprintf(source, sizeof source, "%s/main.sol", directory);
+    snprintf(destination, sizeof destination, "%s/main.sol", relocated);
+    FILE *input = fopen(source, "rb"), *output = fopen(destination, "wb");
+    bool ok = input != NULL && output != NULL;
+    if (ok) {
+        uint8_t bytes[512]; size_t count;
+        while ((count = fread(bytes, 1, sizeof bytes, input)) != 0)
+            if (fwrite(bytes, 1, count, output) != count) ok = false;
+        if (ferror(input)) ok = false;
+    }
+    if (input != NULL) fclose(input);
+    if (output != NULL && fclose(output) != 0) ok = false;
+    return ok;
+}
+
+static bool p44f_exclusive_domains(void) {
+    const char *const leaves[] = {"success", "false", "callback_failure", "body_failure", "eval_failure"};
+    bool ok = p44f_exclusive_profile_reject();
+    fprintf(stderr, "p44f exclusive/input_reject MIR-profile passed=%d\n", ok);
+    for (size_t test = 0; test < 5; ++test) {
+        char directory[512], relocated[512];
+        snprintf(directory, sizeof directory, "%s/tests/conformance/p44f_site_domains_exclusive_%s",
+            SOL_TEST_SOURCE_DIR, leaves[test]);
+        snprintf(relocated, sizeof relocated, "%s/p44f_site_domains_exclusive_%s_relocated",
+            SOL_TEST_BINARY_DIR, leaves[test]);
+        for (size_t context = 0; context < 3; ++context) {
+            PropagationPipeline p; propagation_pipeline_init(&p);
+            SolWasmRepresentedOutput out, repeat;
+            sol_wasm_represented_output_init(&out); sol_wasm_represented_output_init(&repeat);
+            sol_wasm_represented_test_callback_writeback_probe(context == 0);
+            sol_wasm_represented_test_p44_cleanup_trace_probe(context == 0);
+            size_t before = sol_wasm_represented_test_allocation_attempts(), ids[4];
+            const P44fExclusiveGolden *g = &p44f_exclusive_goldens[test][context];
+            bool passed = propagation_pipeline_build_named(&p, directory, "launch", context == 2)
+                && sol_wasm_represented_test_allocation_attempts() == before
+                && p44f_exclusive_closure(&p, context == 2, ids)
+                && p44f_exclusive_build(&p, directory, NULL, &out, g);
+            uint32_t record = 0;
+            passed = passed && p44f_exclusive_packet(&p, &out, test, context == 2, &record);
+            /* Both independent complete slice expansions precede execution. */
+            if (context == 0) passed = passed
+                && p44f_exclusive_ledger_metadata(&p, &p44f_exclusive_entry_ledgers[test], record, test)
+                && p44f_exclusive_ledger_metadata(&p, &p44f_exclusive_raw_ledgers[test], record, test);
+            passed = passed && p44f_exclusive_run(&p, &out, test, record, context == 0)
+                && p44f_exclusive_build(&p, directory, NULL, &repeat, g)
+                && repeat.bytes.count == out.bytes.count && !memcmp(repeat.bytes.bytes, out.bytes.bytes, out.bytes.count)
+                && usage_equal(&repeat.usage, &out.usage);
+            if (context == 0 && test == 0)
+                passed = p44f_exclusive_resources(&p, directory, &out) && passed;
+            if (context == 2) {
+                bool copied = p44f_exclusive_copy(directory, relocated);
+                for (size_t variant = 0; variant < 3; ++variant) {
+                    PropagationPipeline other; propagation_pipeline_init(&other);
+                    SolWasmRepresentedOutput candidate; sol_wasm_represented_output_init(&candidate);
+                    size_t other_ids[4]; uint32_t other_record = 0;
+                    const char *path = variant == 2 ? relocated : directory;
+                    bool canonical = copied && propagation_pipeline_build_named(&other, path,
+                        variant == 0 ? "other" : "launch", true);
+                    P44fExclusiveGolden relocated_golden = *g;
+                    if (canonical && variant == 2) {
+                        /* The shared arena visitor ticks once per byte of each
+                         * borrowed text. Only IR source_path and files[0].path
+                         * change on relocation; N/backend usage/canonical bytes
+                         * do not. Assert the exact two-string delta, not an
+                         * ignored work golden or a runtime-observed adjustment. */
+                        canonical = p.ir.file_count == 1 && other.ir.file_count == 1;
+                        if (canonical) relocated_golden.cleanup_validation = g->cleanup_validation
+                            - strlen(p.ir.source_path) - strlen(p.ir.files[0].path)
+                            + strlen(other.ir.source_path) + strlen(other.ir.files[0].path);
+                    }
+                    canonical = canonical
+                        && p44f_exclusive_closure(&other, true, other_ids)
+                        && !memcmp(ids, other_ids, sizeof ids)
+                        && p44f_exclusive_build(&other, path, NULL, &candidate, &relocated_golden)
+                        && candidate.bytes.count == out.bytes.count
+                        && !memcmp(candidate.bytes.bytes, out.bytes.bytes, out.bytes.count)
+                        && usage_equal(&candidate.usage, &out.usage)
+                        && p44f_exclusive_packet(&other, &candidate, test, true, &other_record)
+                        && other_record == record && p44f_exclusive_run(&other, &candidate, test, other_record, false);
+                    passed = canonical && passed;
+                    sol_wasm_represented_output_free(&candidate); propagation_pipeline_free(&other);
+                }
+            }
+            fprintf(stderr, "p44f exclusive/%s context=%zu passed=%d N=%zu bytes=%zu\n",
+                leaves[test], context, passed, g->allocations, out.bytes.count);
+            if (!passed) sol_diagnostics_render_human(stderr, &p.package.source, &p.diagnostics);
+            ok = passed && ok;
+            sol_wasm_represented_output_free(&repeat); sol_wasm_represented_output_free(&out);
+            propagation_pipeline_free(&p);
+            sol_wasm_represented_test_callback_writeback_probe(false);
+            sol_wasm_represented_test_p44_cleanup_trace_probe(false);
+        }
+    }
+    return ok;
+}
+
 static void run_contracts(size_t first, size_t last) {
+    represented_control("contracts.site-domains-source-collisions-branch-snapshots");
+    CHECK(p44f_site_domains());
+    represented_control("contracts.site-domains-exclusive-owned-result-profile");
+    CHECK(p44f_exclusive_domains());
     (void)first; (void)last;
     represented_control("contracts.all-controls-mutations-quotas-sequences");
     CHECK(p44c_acceptance_matrix());
@@ -14765,6 +15645,8 @@ static const char *const represented_controls[] = {
     "depth.recursive-multiroot-census-caps-faults-reset-relocation",
     "depth.step-precedence-authoritative-pending-writebacks-holes",
     "contracts.all-controls-mutations-quotas-sequences",
+    "contracts.site-domains-source-collisions-branch-snapshots",
+    "contracts.site-domains-exclusive-owned-result-profile",
     "contracts.requires-ensures-qualified-gates-routes",
     "contracts.allocations-owners-mutations-exact-traces-packets",
     "contracts.old-snapshot-mutations-resources-deltas-rootorder",
@@ -14849,6 +15731,7 @@ static RepresentedFaultSweep represented_sweeps[FAULT_SWEEP_COUNT] = {
     [FAULT_PARSER_MAP] = {"parser-map", "text", 4, {false}},
     [FAULT_TEXT_BUILD] = {"text-build", "text", 147, {false}},
     [FAULT_DEPTH] = {"depth", "depth", 151, {false}},
+    [FAULT_SITE_EXCLUSIVE] = {"site-exclusive", "contracts", 124, {false}},
 };
 static const RepresentedRunner *active_runner;
 static bool control_seen[sizeof represented_controls / sizeof *represented_controls];
@@ -15003,6 +15886,8 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc == 1 && focus != NULL) {
+        if (!strcmp(focus, "site-domains")) return p44f_site_domains() && p44f_exclusive_domains() ? 0 : 1;
+        if (!strcmp(focus, "site-exclusive")) return p44f_exclusive_domains() ? 0 : 1;
         if (!strcmp(focus, "depth-gate")) return p44e_depth_gate_probe() ? 0 : 1;
         if (!strcmp(focus, "depth")) {
             if (!p44e_depth_source_probe()) return 1;
