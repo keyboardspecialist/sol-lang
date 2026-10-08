@@ -34,6 +34,8 @@ typedef struct {
     uint64_t max_allocation_bytes;
     /* Per-entry row/byte budget; default 100000, all nonzero u64 values valid. */
     uint64_t max_steps;
+    /* Active source frames including the entry root; default/hard cap 64. */
+    uint32_t max_call_depth;
     size_t max_provenance_records;
     size_t max_work_bytes;
     size_t max_scratch_bytes;

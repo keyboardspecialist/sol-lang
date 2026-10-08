@@ -23,6 +23,8 @@
 #define P44_MAX_STEPS "sol.p44.max-steps"
 #define P44_STEPS "sol.p44.steps"
 #define P44_STEP "sol.p44.step"
+#define P44_MAX_CALL_DEPTH "sol.p44.max-call-depth"
+#define P44_CALL_DEPTH "sol.p44.call-depth"
 #define P43_WRITEBACKS "sol.p43.test.writebacks"
 #define P43_CLEANUP_OLD_CALLABLE "sol.p43.test.cleanup.old-callable"
 #define P43_CLEANUP_MOVED_CALLABLE "sol.p43.test.cleanup.moved-callable"
@@ -339,6 +341,7 @@ SolWasmRepresentedLimits sol_wasm_represented_default_limits(void) {
         .max_allocation_requests = UINT64_C(1048576),
         .max_allocation_bytes = UINT64_C(16) * 1024u * 1024u,
         .max_steps = UINT64_C(100000),
+        .max_call_depth = 64,
         .max_provenance_records = REPRESENTED_WIRE_MAX_PROVENANCE_RECORDS,
         .max_work_bytes = 16u * 1024u * 1024u,
         .max_scratch_bytes = 16u * 1024u * 1024u,
@@ -353,6 +356,7 @@ static bool limits_complete(const SolWasmRepresentedLimits *limits) {
         && limits->max_generated_nodes != 0 && limits->max_table_elements != 0
         && limits->max_static_data_bytes != 0 && limits->max_allocation_requests != 0
         && limits->max_allocation_bytes != 0 && limits->max_steps != 0 && limits->max_provenance_records != 0
+        && limits->max_call_depth != 0 && limits->max_call_depth <= 64
         && limits->max_work_bytes != 0 && limits->max_scratch_bytes != 0
         && limits->max_owned_bytes != 0 && limits->max_output_bytes != 0
         && limits->max_functions <= REPRESENTED_WIRE_MAX_FUNCTIONS
@@ -366,6 +370,7 @@ static bool limits_zero(const SolWasmRepresentedLimits *limits) {
         && limits->max_generated_nodes == 0 && limits->max_table_elements == 0
         && limits->max_static_data_bytes == 0 && limits->max_allocation_requests == 0
         && limits->max_allocation_bytes == 0 && limits->max_steps == 0 && limits->max_provenance_records == 0
+        && limits->max_call_depth == 0
         && limits->max_work_bytes == 0 && limits->max_scratch_bytes == 0
         && limits->max_owned_bytes == 0 && limits->max_output_bytes == 0;
 }
@@ -1410,7 +1415,7 @@ enum { P43_STATIC_BASE = 8, P43_FIXED_SCRATCH = 1024, P44_PANIC_DETAIL_BYTES = 1
     P44_PANIC_DETAIL_MAX = P44_PANIC_DETAIL_BYTES - 1, P44_TRACE_OFFSET_IN_SCRATCH = 192,
     P44_TRACE_SLOT_BYTES = 12, P44_TRACE_CAPACITY = 64,
     P44_TRACE_BYTES = P44_TRACE_SLOT_BYTES * P44_TRACE_CAPACITY,
-    P44_ENTRY_RESET_MAX_ITEMS = 6 + 2 + 2,
+    P44_ENTRY_RESET_MAX_ITEMS = 7 + 2 + 2,
     P44_ENTRY_WRAPPER_MAX_ITEMS = P44_ENTRY_RESET_MAX_ITEMS + 1 + 4 + 1,
     P44_PACKET_RESET_PROBE_MAX_ITEMS = P44_ENTRY_RESET_MAX_ITEMS + 2 + 1 };
 
@@ -5304,12 +5309,12 @@ static bool represented_catalog_terminal_event_supported(
 /* 3B admits only supported P4.3 producers plus the independently authenticated
  * terminal set above.  An otherwise unreachable checked operation or unfamiliar
  * failure producer still defers the entire closure to 3C. */
-static bool represented_catalog_failures_supported(const SolWasmRepresentedBuildRequest *request,
-    const RepresentedCallCatalogGraph *graph) {
+static bool represented_catalog_failures_supported(const SolWasmRepresentedBuildRequest *request) {
     const SolMirRuntimeCleanup *cleanup = request->program->cleanup;
     const SolMirConcreteProgram *concrete = request->program->conventions->concrete;
     const SolMirMaterialization *m = &concrete->materialization;
-    if (graph->has_cycle || graph->longest_chain > 64) return false;
+    /* Graph depth/cycles are catalog metadata, not runtime admission gates.
+     * Each source invocation enforces the finite active-frame limit. */
     for (size_t i = 0; i < cleanup->event_count; ++i) {
         const SolMirRuntimeCleanupEvent *event = &cleanup->events[i];
         if (event->producer != SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL
@@ -7923,9 +7928,8 @@ static BinaryenExpressionRef represented_cleanup_probe_increment(BinaryenModuleR
 typedef struct {
     const SolMirRuntimeCleanupEvent *event;
     const SolMirRuntimeCleanupTransition *transition;
-    /* LOCAL_OR_PENDING has a static P3.3 source but its actual packet is only
-     * pending after the direct callee has published it. */
-    bool pending_from_packet;
+    /* Explicit runtime disposition for the shared LOCAL_OR_PENDING slice. */
+    bool pending_from_call;
 } RepresentedCleanupTraceContext;
 
 static bool represented_cleanup_trace_enabled(void) {
@@ -7991,12 +7995,12 @@ static BinaryenExpressionRef represented_cleanup_trace_emit(const RepresentedFun
                 BinaryenLiteralInt32(P44_TRACE_SLOT_BYTES))));
     BinaryenExpressionRef disposition_value = BinaryenConst(function->module,
         BinaryenLiteralInt32((int32_t)disposition));
-    if (context->pending_from_packet) {
+    if (context->pending_from_call) {
         disposition_value = BinaryenIf(function->module, BinaryenBinary(function->module,
-            BinaryenNeInt32(), BinaryenGlobalGet(function->module, P43_CODE, BinaryenTypeInt32()),
-            BinaryenConst(function->module, BinaryenLiteralInt32(0))), BinaryenConst(function->module,
-                BinaryenLiteralInt32((int32_t)(disposition
-                    | SOL_WASM_REPRESENTED_TEST_P44_TRACE_PENDING))), disposition_value);
+            BinaryenNeInt64(), BinaryenLocalGet(function->module,
+                (BinaryenIndex)function->scratch_base, BinaryenTypeInt64()), i64(function, 0)),
+            BinaryenConst(function->module, BinaryenLiteralInt32((int32_t)(disposition
+                | SOL_WASM_REPRESENTED_TEST_P44_TRACE_PENDING))), disposition_value);
     }
     BinaryenExpressionRef write[] = {
         BinaryenStore(function->module, 4, 0, 4, base, BinaryenConst(function->module,
@@ -9268,6 +9272,25 @@ static bool represented_instruction_emit(const RepresentedFunction *function, si
     }
 }
 
+static BinaryenExpressionRef represented_call_failure_emit(const RepresentedFunction *function,
+    const RepresentedCallCatalog *call, const SolMirRuntimeCleanupEvent *event,
+    const SolMirRuntimeCleanupTransition *failure, bool pending) {
+    const SolMirRuntimeCleanup *cleanup = function->request->program->cleanup;
+    RepresentedCleanupTraceContext trace = {event, failure, pending};
+    RepresentedNodes failed = {0};
+    bool ok = true;
+    for (size_t i = 0; ok && i < failure->actions.count; ++i) {
+        const SolMirRuntimeCleanupAction *action = &cleanup->actions[failure->actions.offset + i];
+        ok = action->kind != SOL_MIR_RUNTIME_CLEANUP_ACTION_WRITEBACK
+            && represented_cleanup_emit_traced(function, action, &trace, &failed);
+    }
+    if (ok) ok = represented_edge(function, call->failure_edge, &failed);
+    BinaryenExpressionRef body = ok ? BinaryenBlock(function->module, NULL, failed.items,
+        (BinaryenIndex)failed.count, BinaryenTypeNone()) : NULL;
+    deallocate(failed.items);
+    return body;
+}
+
 static bool represented_call_emit(const RepresentedFunction *function, size_t block,
     RepresentedNodes *nodes) {
     const SolMirRuntimeLoweredProgram *owner = function->request->program;
@@ -9348,10 +9371,6 @@ static bool represented_call_emit(const RepresentedFunction *function, size_t bl
                     BinaryenTypeInt32()), BinaryenBlock(function->module, NULL, body, 2,
                         BinaryenTypeNone()), NULL))) return false;
     }
-    if (call->result_class == SOL_MIR_RUNTIME_RESULT_VALUE || receiver_writeback) {
-        if (!represented_nodes_push(nodes, BinaryenLocalSet(function->module,
-                (BinaryenIndex)function->scratch_base, invoke))) return false;
-    } else if (!represented_nodes_push(nodes, BinaryenDrop(function->module, invoke))) return false;
     const SolMirRuntimeLoweredImageTerminator *row = &owner->image_terminators[block];
     if (row->cleanup_event >= owner->cleanup->event_count) return false;
     const SolMirRuntimeCleanupEvent *event = &owner->cleanup->events[row->cleanup_event];
@@ -9377,9 +9396,6 @@ static bool represented_call_emit(const RepresentedFunction *function, size_t bl
     }
     if (normal == NULL || failure == NULL) return false;
     RepresentedCleanupTraceContext normal_trace = {event, normal, false};
-    RepresentedCleanupTraceContext failure_trace = {event, failure,
-        callback == NULL && failure->failure_source
-            == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING};
     RepresentedNodes success = {0};
     bool ok = true;
     if (call->result_class == SOL_MIR_RUNTIME_RESULT_VALUE) {
@@ -9400,22 +9416,51 @@ static bool represented_call_emit(const RepresentedFunction *function, size_t bl
         (BinaryenIndex)success.count, BinaryenTypeNone()) : NULL;
     deallocate(success.items);
     if (!ok) return false;
-    RepresentedNodes failed = {0};
-    for (size_t i = 0; ok && i < failure->actions.count; ++i) {
-        const SolMirRuntimeCleanupAction *action = &owner->cleanup->actions[failure->actions.offset + i];
-        ok = action->kind != SOL_MIR_RUNTIME_CLEANUP_ACTION_WRITEBACK
-            && represented_cleanup_emit_traced(function, action, &failure_trace, &failed);
-    }
-    if (ok) ok = represented_edge(function, call->failure_edge, &failed);
-    BinaryenExpressionRef failure_body = ok ? BinaryenBlock(function->module, NULL, failed.items,
-        (BinaryenIndex)failed.count, BinaryenTypeNone()) : NULL;
-    deallocate(failed.items);
-    if (!ok) return false;
-    BinaryenExpressionRef packet = BinaryenBinary(function->module, BinaryenNeInt32(),
+    BinaryenExpressionRef failed = represented_call_failure_emit(function, call, event, failure, true);
+    size_t record = 0;
+    if (failed == NULL
+        || !represented_failure_record_index(function->provenance, call->failure_site, &record)) return false;
+    BinaryenExpressionRef local_items[] = {
+        BinaryenGlobalSet(function->module, P43_CODE, BinaryenConst(function->module,
+            BinaryenLiteralInt32(SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT))),
+        BinaryenGlobalSet(function->module, P43_SITE, BinaryenConst(function->module,
+            BinaryenLiteralInt32((int32_t)record))),
+        BinaryenLocalSet(function->module, (BinaryenIndex)function->scratch_base, i64(function, 0)),
+    };
+    BinaryenExpressionRef local_failure = BinaryenBlock(function->module, NULL, local_items, 3,
+        BinaryenTypeNone());
+    /* Only the actual source invocation owns this increment. The staged raw
+     * result is never published until the callee packet has been inspected. */
+    BinaryenExpressionRef invoked[] = {
+        BinaryenGlobalSet(function->module, P44_CALL_DEPTH, BinaryenBinary(function->module,
+            BinaryenAddInt32(), BinaryenGlobalGet(function->module, P44_CALL_DEPTH,
+                BinaryenTypeInt32()), BinaryenConst(function->module, BinaryenLiteralInt32(1)))),
+        call->result_class == SOL_MIR_RUNTIME_RESULT_VALUE || receiver_writeback
+            ? BinaryenLocalSet(function->module, (BinaryenIndex)function->scratch_base, invoke)
+            : BinaryenDrop(function->module, invoke),
+        BinaryenGlobalSet(function->module, P44_CALL_DEPTH, BinaryenBinary(function->module,
+            BinaryenSubInt32(), BinaryenGlobalGet(function->module, P44_CALL_DEPTH,
+                BinaryenTypeInt32()), BinaryenConst(function->module, BinaryenLiteralInt32(1)))),
+        BinaryenIf(function->module, BinaryenGlobalGet(function->module, P43_CODE,
+            BinaryenTypeInt32()), BinaryenLocalSet(function->module,
+                (BinaryenIndex)function->scratch_base, i64(function, 1)), NULL),
+    };
+    for (size_t i = 0; i < sizeof invoked / sizeof *invoked; ++i)
+        if (invoked[i] == NULL) return false;
+    BinaryenExpressionRef allowed = BinaryenBlock(function->module, NULL, invoked,
+        (BinaryenIndex)(sizeof invoked / sizeof *invoked), BinaryenTypeNone());
+    BinaryenExpressionRef checked = BinaryenIf(function->module,
+        BinaryenBinary(function->module, BinaryenGeUInt32(), BinaryenGlobalGet(function->module,
+            P44_CALL_DEPTH, BinaryenTypeInt32()), BinaryenGlobalGet(function->module,
+                P44_MAX_CALL_DEPTH, BinaryenTypeInt32())), local_failure, allowed);
+    /* This explicit flag describes the route, not the published packet: local
+     * code 7 is NOT pending at its originating call. Both routes use exactly
+     * the same authenticated P3.3 transition and action slice. */
+    return represented_nodes_push(nodes, BinaryenIf(function->module,
         BinaryenGlobalGet(function->module, P43_CODE, BinaryenTypeInt32()),
-        BinaryenConst(function->module, BinaryenLiteralInt32(0)));
-    return represented_nodes_push(nodes, BinaryenIf(function->module, packet,
-        failure_body, success_body));
+        BinaryenLocalSet(function->module, (BinaryenIndex)function->scratch_base, i64(function, 1)),
+        checked)) && represented_nodes_push(nodes, BinaryenIf(function->module,
+            BinaryenGlobalGet(function->module, P43_CODE, BinaryenTypeInt32()), failed, success_body));
 }
 
 static bool represented_resume_failure_emit(const RepresentedFunction *function, size_t block,
@@ -10070,7 +10115,7 @@ static bool represented_entry_packet_reset_emit(BinaryenModuleRef module, uint32
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
     trace_items = represented_trace_ledger_enabled() ? 2 : 0;
 #endif
-    if (items == NULL || count == NULL || capacity < 6 + (panic_detail ? 2 : 0) + trace_items) return false;
+    if (items == NULL || count == NULL || capacity < 7 + (panic_detail ? 2 : 0) + trace_items) return false;
     *count = 0;
     items[(*count)++] = BinaryenGlobalSet(module, P43_CODE,
         BinaryenConst(module, BinaryenLiteralInt32(0)));
@@ -10084,6 +10129,8 @@ static bool represented_entry_packet_reset_emit(BinaryenModuleRef module, uint32
         BinaryenConst(module, BinaryenLiteralInt64(0)));
     items[(*count)++] = BinaryenGlobalSet(module, P44_STEPS,
         BinaryenConst(module, BinaryenLiteralInt64(0)));
+    items[(*count)++] = BinaryenGlobalSet(module, P44_CALL_DEPTH,
+        BinaryenConst(module, BinaryenLiteralInt32(1)));
     if (panic_detail) {
         items[(*count)++] = BinaryenGlobalSet(module, P44_PANIC_DETAIL_LENGTH,
             BinaryenConst(module, BinaryenLiteralInt32(0)));
@@ -10216,6 +10263,31 @@ static bool represented_read_uleb32(const uint8_t **cursor, const uint8_t *end,
         uint8_t byte = *(*cursor)++;
         result |= (uint32_t)(byte & UINT8_C(0x7f)) << shift;
         if ((byte & UINT8_C(0x80)) == 0) { *value = result; return true; }
+    }
+    return false;
+}
+
+/* MVP i32.const uses signed LEB, unlike section sizes and indices. Keep the
+ * decoded 32-bit pattern unsigned to avoid signed shifts/conversions. At most
+ * five bytes are permitted; the fifth's unused bits must extend bit 31 and it
+ * must terminate. As with the existing i64 reader, valid redundant sign bytes
+ * within the width bound are accepted (Wasm does not require shortest LEBs). */
+static bool represented_read_i32_bits(const uint8_t **cursor, const uint8_t *end,
+    uint32_t *value) {
+    uint32_t bits = 0;
+    for (unsigned i = 0; i < 5; ++i) {
+        if (*cursor == end) return false;
+        uint8_t byte = *(*cursor)++;
+        if (i == 4 && ((byte & UINT8_C(0x80)) != 0
+                || ((byte & UINT8_C(0x78)) != 0
+                    && (byte & UINT8_C(0x78)) != UINT8_C(0x78)))) return false;
+        bits |= (uint32_t)(byte & (i == 4 ? UINT8_C(0x0f) : UINT8_C(0x7f))) << (i * 7);
+        if ((byte & UINT8_C(0x80)) == 0) {
+            unsigned used = (i + 1) * 7;
+            if (used < 32 && (byte & UINT8_C(0x40)) != 0) bits |= UINT32_MAX << used;
+            *value = bits;
+            return true;
+        }
     }
     return false;
 }
@@ -10564,7 +10636,7 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
                 if ((global_type[i] == UINT8_C(0x7f) && opcode != UINT8_C(0x41))
                     || (global_type[i] == UINT8_C(0x7e) && opcode != UINT8_C(0x42))) goto invalid;
                 if (global_type[i] == UINT8_C(0x7f)) {
-                    if (!represented_read_uleb32(&cursor, section_end, &initial)) goto invalid;
+                    if (!represented_read_i32_bits(&cursor, section_end, &initial)) goto invalid;
                     global_initial[i] = initial;
                 } else if (!represented_read_i64_bits(&cursor, section_end, &global_initial[i])) goto invalid;
                 if (cursor == section_end || *cursor++ != UINT8_C(0x0b)) goto invalid;
@@ -10625,7 +10697,7 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
                 uint8_t kind = *cursor++;
                 if (kind > 3 || !represented_read_uleb32(&cursor, section_end, &ignored)) goto invalid;
                 if (kind == 1) goto invalid; /* The callback table is private. */
-                if (kind == 3 && (ignored == 7 || ignored == 8)) goto invalid;
+                if (kind == 3 && ignored >= 7 && ignored <= 10) goto invalid;
                 if (represented_name_equal(name, name_count, P43_MEMORY)) {
                     if (kind != 2 || saw_memory_export) goto invalid;
                     saw_memory_export = true;
@@ -10828,9 +10900,12 @@ static RepresentedWireValidation represented_module_shape_validate(const SolWasm
         cursor = section_end;
     }
     bool valid = provenance_sections == 1 && memory_sections == 1
-        && global_count >= 9 && global_type[7] == UINT8_C(0x7e) && !global_mutable[7]
+        && global_count >= 11 && global_type[7] == UINT8_C(0x7e) && !global_mutable[7]
         && global_initial[7] != 0 && global_type[8] == UINT8_C(0x7e) && global_mutable[8]
         && global_initial[8] == 0
+        && global_type[9] == UINT8_C(0x7f) && !global_mutable[9]
+        && global_initial[9] >= 1 && global_initial[9] <= 64
+        && global_type[10] == UINT8_C(0x7f) && global_mutable[10] && global_initial[10] == 1
         && ((table_sections == 0 && element_sections == 0)
             || (table_sections == 1 && element_sections == 1)) && saw_memory_export
         && saw_code_export && saw_site_export && saw_provenance_payload && saw_exports_payload
@@ -11070,9 +11145,9 @@ SolWasmRepresentedResult sol_wasm_represented_build(
             represented_qualified_index_free(&qualified_index);
             represented_accounting = NULL; return result;
         }
-        if (!represented_catalog_failures_supported(request, &catalog)) {
+        if (!represented_catalog_failures_supported(request)) {
             represented_call_catalog_free(&catalog);
-            diagnostic(diagnostics, "P4.3 deferred an unsupported, cyclic, or deep call closure");
+            diagnostic(diagnostics, "P4.3 deferred an unsupported call failure closure");
             represented_qualified_index_free(&qualified_index);
             represented_accounting = NULL; return SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE;
         }
@@ -11235,6 +11310,10 @@ SolWasmRepresentedResult sol_wasm_represented_build(
         BinaryenConst(module, BinaryenLiteralInt64((int64_t)limits.max_steps))) != NULL
         && BinaryenAddGlobal(module, P44_STEPS, BinaryenTypeInt64(), true,
         BinaryenConst(module, BinaryenLiteralInt64(0))) != NULL
+        && BinaryenAddGlobal(module, P44_MAX_CALL_DEPTH, BinaryenTypeInt32(), false,
+        BinaryenConst(module, BinaryenLiteralInt32((int32_t)limits.max_call_depth))) != NULL
+        && BinaryenAddGlobal(module, P44_CALL_DEPTH, BinaryenTypeInt32(), true,
+        BinaryenConst(module, BinaryenLiteralInt32(1))) != NULL
         && (!panic_detail || (BinaryenAddGlobal(module, P44_PANIC_DETAIL_OFFSET,
                 BinaryenTypeInt32(), false, BinaryenConst(module,
                     BinaryenLiteralInt32((int32_t)panic_detail_offset))) != NULL
