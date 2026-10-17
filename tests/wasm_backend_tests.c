@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "wasm_backend_internal.h"
 
 #include "sol/mir_linkage.h"
@@ -99,9 +101,11 @@ done:
 }
 
 int main(void) {
-    test_namespaces();
-    test_probe(0);
-    test_probe(1);
-    test_rejections();
+    SOL_TEST_RUN(test_namespaces());
+    SOL_TEST_RUN(test_probe(0));
+    SOL_TEST_RUN(test_probe(1));
+    SOL_TEST_RUN(test_rejections());
     return failures == 0 ? 0 : 1;
 }
+#undef main
+SOL_TEST_ENTRY("wasm_backend")

@@ -1,3 +1,5 @@
+#include "support/native_progress.h"
+#define main sol_test_body
 #define SOL_MIR_PLAN_TEST_HOOKS 1
 #include "sol/mir_runtime_cleanup.h"
 #include "sol/effects.h"
@@ -1067,7 +1069,12 @@ static void check_owner_snapshot_contract_and_selector(const SolMirRuntimeCleanu
     const SolMirConcreteProgram *program, const SolMirRuntimeConventions *conventions) {
     bool saw_owned_formal = false, saw_snapshot = false, saw_violation = false;
     SolMirRuntimeCleanupAction trace_actions[64];
+    sol_test_progress_fixture("e6-all-roots");
+    sol_test_progress_phase("owner-snapshot-event-traces", "event", cleanup->event_count);
     for (size_t i = 0; i < cleanup->event_count; ++i) {
+        /* All earlier events completed, including their original continue paths. */
+        sol_test_progress_completed(i);
+        sol_test_progress_ordinal("cleanup-event", i + 1, cleanup->event_count);
         const SolMirRuntimeCleanupEvent *event = &cleanup->events[i];
         for (size_t a = 0; a < event->transitions.count; ++a) {
             const SolMirRuntimeCleanupTransition *left = &cleanup->transitions[event->transitions.offset + a];
@@ -1116,6 +1123,9 @@ static void check_owner_snapshot_contract_and_selector(const SolMirRuntimeCleanu
             }
         }
     }
+    sol_test_progress_completed(cleanup->event_count);
+    sol_test_progress_phase_end();
+    sol_test_progress_phase("owner-snapshot-transition-census", "transition", cleanup->transition_count);
     for (size_t i = 0; i < cleanup->transition_count; ++i) {
         const SolMirRuntimeCleanupTransition *transition = &cleanup->transitions[i];
         if (transition->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_VIOLATION) {
@@ -1123,7 +1133,9 @@ static void check_owner_snapshot_contract_and_selector(const SolMirRuntimeCleanu
             CHECK(conventions->failure_sites[transition->failure_site].origin_kind
                 == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT);
         }
+        sol_test_progress_completed(i + 1);
     }
+    sol_test_progress_phase_end();
     CHECK(saw_owned_formal && saw_snapshot && saw_violation);
 }
 
@@ -1629,6 +1641,22 @@ done:
 }
 
 int main(void) {
+#define check_site_domain_fixture(...) SOL_TEST_RUN(check_site_domain_fixture(__VA_ARGS__))
+#define check_refined_route_fixture(...) SOL_TEST_RUN(check_refined_route_fixture(__VA_ARGS__))
+#define check_predicate_propagate_schema(...) SOL_TEST_RUN(check_predicate_propagate_schema(__VA_ARGS__))
+#define check_zero_supplemental_alias_preflight(...) SOL_TEST_RUN(check_zero_supplemental_alias_preflight(__VA_ARGS__))
+#define check_snapshot_prerequisite(...) SOL_TEST_RUN(check_snapshot_prerequisite(__VA_ARGS__))
+#define check_local_or_pending(...) SOL_TEST_RUN(check_local_or_pending(__VA_ARGS__))
+#define check_callback_selector(...) SOL_TEST_RUN(check_callback_selector(__VA_ARGS__))
+#define check_graph_inherited_capability_calls(...) SOL_TEST_RUN(check_graph_inherited_capability_calls(__VA_ARGS__))
+#define check_failure_propagation_is_final(...) SOL_TEST_RUN(check_failure_propagation_is_final(__VA_ARGS__))
+#define check_eight_fixture_groups(...) SOL_TEST_RUN(check_eight_fixture_groups(__VA_ARGS__))
+#define check_owner_snapshot_contract_and_selector(...) SOL_TEST_RUN(check_owner_snapshot_contract_and_selector(__VA_ARGS__))
+#define check_authenticated_contract_suppression(...) SOL_TEST_RUN(check_authenticated_contract_suppression(__VA_ARGS__))
+#define check_scope_aware_implicit_unwind(...) SOL_TEST_RUN(check_scope_aware_implicit_unwind(__VA_ARGS__))
+#define check_affine_pair_owner(...) SOL_TEST_RUN(check_affine_pair_owner(__VA_ARGS__))
+#define check_reduced_validation_work_rejects_without_write(...) SOL_TEST_RUN(check_reduced_validation_work_rejects_without_write(__VA_ARGS__))
+#define check_cleanup_arena_alias(...) SOL_TEST_RUN(check_cleanup_arena_alias(__VA_ARGS__))
     check_site_domain_fixture("p44f_site_domains_branch", "launch", 0);
     check_site_domain_fixture("p44f_site_domains_direct", "launch", 1);
     check_site_domain_fixture("p44f_site_domains_refined", "launch", 2);
@@ -1996,11 +2024,14 @@ int main(void) {
     size_t persistent_arenas=(exact.max_events!=0)+(exact.max_actions!=0)+(exact.max_transitions!=0)
         +(exact.max_supplemental_sites!=0)+(exact.max_drop_paths!=0);
     for(size_t attempt=1;attempt<=persistent_arenas;++attempt){
+        sol_test_progress_ordinal("cleanup-persistent-arena", attempt, persistent_arenas);
         sol_mir_runtime_cleanup_test_force_persistent_allocation_failure_attempt(attempt);
         CHECK(sol_mir_runtime_cleanup_build(&rr,&bounded,NULL)==SOL_MIR_RUNTIME_CLEANUP_BUILD_ALLOCATION_FAILED);
         CHECK(sol_mir_runtime_cleanup_test_persistent_allocation_attempts()==attempt);
         CHECK(bounded.events==NULL && bounded.actions==NULL && bounded.transitions==NULL
             && bounded.supplemental_sites==NULL && bounded.drop_paths==NULL);
+        sol_test_progress_phase("persistent-fault-completed", "fault-attempt", persistent_arenas);
+        sol_test_progress_completed(attempt); sol_test_progress_phase_end();
     }
     sol_mir_runtime_cleanup_test_force_persistent_allocation_failure_attempt(0);
     sol_mir_runtime_cleanup_test_force_validation_scratch_failure(true);
@@ -2021,10 +2052,15 @@ int main(void) {
         {.max_events=exact.max_events,.max_actions=exact.max_actions,.max_transitions=exact.max_transitions,.max_supplemental_sites=exact.max_supplemental_sites,.max_drop_paths=exact.max_drop_paths,.max_owned_bytes=exact.max_owned_bytes,.max_build_scratch_bytes=exact.max_build_scratch_bytes,.max_build_work=exact.max_build_work,.max_validation_scratch_bytes=exact.max_validation_scratch_bytes,.max_validation_work=exact.max_validation_work-1},
     };
     for(size_t i=0;i<sizeof(one_below)/sizeof(one_below[0]);++i){
+        static const char *const fields[] = {"max_events", "max_actions", "max_transitions",
+            "max_supplemental_sites", "max_owned_bytes", "max_build_work",
+            "max_validation_scratch_bytes", "max_validation_work"};
+        sol_test_progress_phase(fields[i], "quota", 1);
         rr.limits=&one_below[i];
         CHECK(sol_mir_runtime_cleanup_build(&rr,&bounded,NULL)==SOL_MIR_RUNTIME_CLEANUP_BUILD_RESOURCE_EXHAUSTED);
         CHECK(bounded.events==NULL && bounded.event_count==0);
         CHECK(sol_mir_runtime_cleanup_test_persistent_allocation_attempts() == 0);
+        sol_test_progress_completed(1); sol_test_progress_phase_end();
     }
     rr.limits=&exact;
     sol_mir_runtime_cleanup_test_force_validation_scratch_failure(true);
@@ -2415,3 +2451,5 @@ int main(void) {
     sol_mir_runtime_cleanup_free(&cleanup); sol_mir_runtime_values_free(&values); sol_mir_runtime_conventions_free(&conventions); sol_mir_concrete_program_free(&program); compilation_free(&c);
     return failures == 0 ? 0 : 1;
 }
+#undef main
+SOL_TEST_ENTRY("mir_runtime_cleanup")

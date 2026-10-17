@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/mir_program.h"
 #include "sol/effects.h"
 #include "sol/lexer.h"
@@ -1261,17 +1263,17 @@ static void test_malformed_owner(void) {
 }
 
 int main(void) {
-    test_e6_closures_and_determinism();
-    test_recursion_references_and_unreachable();
-    test_evidence_and_callbacks();
-    test_callback_source_limitations();
-    test_callback_producer_discovery_limits();
-    test_import_policy_and_lifecycle();
-    test_predicate_proof_and_handler_relations();
-    test_derived_bodyful_capability_is_transactionally_unsupported();
-    test_source_backed_method_meter();
-    test_source_backed_capability_meter();
-    test_malformed_owner();
+    SOL_TEST_RUN(test_e6_closures_and_determinism());
+    SOL_TEST_RUN(test_recursion_references_and_unreachable());
+    SOL_TEST_RUN(test_evidence_and_callbacks());
+    SOL_TEST_RUN(test_callback_source_limitations());
+    SOL_TEST_RUN(test_callback_producer_discovery_limits());
+    SOL_TEST_RUN(test_import_policy_and_lifecycle());
+    SOL_TEST_RUN(test_predicate_proof_and_handler_relations());
+    SOL_TEST_RUN(test_derived_bodyful_capability_is_transactionally_unsupported());
+    SOL_TEST_RUN(test_source_backed_method_meter());
+    SOL_TEST_RUN(test_source_backed_capability_meter());
+    SOL_TEST_RUN(test_malformed_owner());
     if (failures != 0) {
         fprintf(stderr, "%d MIR program test(s) failed\n", failures);
         return 1;
@@ -1279,3 +1281,5 @@ int main(void) {
     printf("MIR program tests passed\n");
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("mir_program")

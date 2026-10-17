@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/mir_runtime_conventions.h"
 
 #include "sol/effects.h"
@@ -1928,6 +1930,19 @@ static void test_import_preflight_stress(void) {
 }
 
 int main(void) {
+#define test_e6(...) SOL_TEST_RUN(test_e6(__VA_ARGS__))
+#define test_supported_call_vocabulary(...) SOL_TEST_RUN(test_supported_call_vocabulary(__VA_ARGS__))
+#define test_predicate_calls_and_callback_boundary(...) SOL_TEST_RUN(test_predicate_calls_and_callback_boundary(__VA_ARGS__))
+#define test_indirect_predicate_and_bound_environment(...) SOL_TEST_RUN(test_indirect_predicate_and_bound_environment(__VA_ARGS__))
+#define test_bodyful_bound_capability_predicate_conventions(...) SOL_TEST_RUN(test_bodyful_bound_capability_predicate_conventions(__VA_ARGS__))
+#define test_unit_entry_exit(...) SOL_TEST_RUN(test_unit_entry_exit(__VA_ARGS__))
+#define test_stable_rendering(...) SOL_TEST_RUN(test_stable_rendering(__VA_ARGS__))
+#define test_never_callable_boundary(...) SOL_TEST_RUN(test_never_callable_boundary(__VA_ARGS__))
+#define test_computed_place_call_provenance(...) SOL_TEST_RUN(test_computed_place_call_provenance(__VA_ARGS__))
+#define test_deep_expression_provenance(...) SOL_TEST_RUN(test_deep_expression_provenance(__VA_ARGS__))
+#define test_rich_predicate_failure_sites(...) SOL_TEST_RUN(test_rich_predicate_failure_sites(__VA_ARGS__))
+#define test_valid_owner_work_deltas(...) SOL_TEST_RUN(test_valid_owner_work_deltas(__VA_ARGS__))
+#define test_import_preflight_stress(...) SOL_TEST_RUN(test_import_preflight_stress(__VA_ARGS__))
     Compilation compilation; CHECK(compile_e6(&compilation));
     SolMirConcreteProgram program; sol_mir_concrete_program_init(&program);
     CHECK(build_concrete(&compilation, &program));
@@ -1955,3 +1970,5 @@ int main(void) {
     }
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("mir_runtime_conventions")

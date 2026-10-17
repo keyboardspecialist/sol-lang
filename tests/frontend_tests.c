@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/diagnostic.h"
 #include "sol/lexer.h"
 #include "sol/parser.h"
@@ -2525,53 +2527,53 @@ static void test_tuple_syntax(void) {
 }
 
 int main(void) {
-    test_type_declaration_syntax();
-    test_invalid_type_declarations_and_recovery();
-    test_type_refinement_structure_rejections();
-    test_malformed_syntax_structure_rejections();
-    test_callable_access_syntax();
-    test_valid_declarations();
-    test_retained_imports();
-    test_malformed_imports();
-    test_generic_syntax_and_comparison_disambiguation();
-    test_unsupported_generic_syntax();
-    test_effect_row_generic_syntax();
-    test_generic_lookahead_recovery_and_spans();
-    test_missing_module();
-    test_nested_and_unterminated_comments();
-    test_clause_order();
-    test_structured_contract_syntax();
-    test_contract_diagnostics_and_recovery();
-    test_contract_rollback();
-    test_capability_contract_rollback();
-    test_carriage_return_positions();
-    test_type_depth_limit();
-    test_declaration_recovery();
-    test_expression_ast();
-    test_expression_recovery();
-    test_nested_record_condition();
-    test_expression_depth_limit();
-    test_malformed_expression_delimiters();
-    test_root_capability_member_body();
-    test_derived_capability_syntax();
-    test_derived_capability_requires_member_bodies();
-    test_failed_function_parameter_rollback();
-    test_multiline_record_return_rejected();
-    test_function_types();
-    test_function_type_requires_effects();
-    test_function_type_recovery_skips_nested_function();
-    test_handle_expression_syntax();
-    test_malformed_handle_expressions();
-    test_trait_and_implementation_syntax();
-    test_malformed_trait_method_recovery();
-    test_trait_method_authority_rejected();
-    test_region_statement_syntax();
-    test_mutable_statement_syntax();
-    test_projected_mutation_frontend();
-    test_loop_statement_syntax();
-    test_failure_statement_syntax();
-    test_tuple_syntax();
-    test_recursive_pattern_syntax();
+    SOL_TEST_RUN(test_type_declaration_syntax());
+    SOL_TEST_RUN(test_invalid_type_declarations_and_recovery());
+    SOL_TEST_RUN(test_type_refinement_structure_rejections());
+    SOL_TEST_RUN(test_malformed_syntax_structure_rejections());
+    SOL_TEST_RUN(test_callable_access_syntax());
+    SOL_TEST_RUN(test_valid_declarations());
+    SOL_TEST_RUN(test_retained_imports());
+    SOL_TEST_RUN(test_malformed_imports());
+    SOL_TEST_RUN(test_generic_syntax_and_comparison_disambiguation());
+    SOL_TEST_RUN(test_unsupported_generic_syntax());
+    SOL_TEST_RUN(test_effect_row_generic_syntax());
+    SOL_TEST_RUN(test_generic_lookahead_recovery_and_spans());
+    SOL_TEST_RUN(test_missing_module());
+    SOL_TEST_RUN(test_nested_and_unterminated_comments());
+    SOL_TEST_RUN(test_clause_order());
+    SOL_TEST_RUN(test_structured_contract_syntax());
+    SOL_TEST_RUN(test_contract_diagnostics_and_recovery());
+    SOL_TEST_RUN(test_contract_rollback());
+    SOL_TEST_RUN(test_capability_contract_rollback());
+    SOL_TEST_RUN(test_carriage_return_positions());
+    SOL_TEST_RUN(test_type_depth_limit());
+    SOL_TEST_RUN(test_declaration_recovery());
+    SOL_TEST_RUN(test_expression_ast());
+    SOL_TEST_RUN(test_expression_recovery());
+    SOL_TEST_RUN(test_nested_record_condition());
+    SOL_TEST_RUN(test_expression_depth_limit());
+    SOL_TEST_RUN(test_malformed_expression_delimiters());
+    SOL_TEST_RUN(test_root_capability_member_body());
+    SOL_TEST_RUN(test_derived_capability_syntax());
+    SOL_TEST_RUN(test_derived_capability_requires_member_bodies());
+    SOL_TEST_RUN(test_failed_function_parameter_rollback());
+    SOL_TEST_RUN(test_multiline_record_return_rejected());
+    SOL_TEST_RUN(test_function_types());
+    SOL_TEST_RUN(test_function_type_requires_effects());
+    SOL_TEST_RUN(test_function_type_recovery_skips_nested_function());
+    SOL_TEST_RUN(test_handle_expression_syntax());
+    SOL_TEST_RUN(test_malformed_handle_expressions());
+    SOL_TEST_RUN(test_trait_and_implementation_syntax());
+    SOL_TEST_RUN(test_malformed_trait_method_recovery());
+    SOL_TEST_RUN(test_trait_method_authority_rejected());
+    SOL_TEST_RUN(test_region_statement_syntax());
+    SOL_TEST_RUN(test_mutable_statement_syntax());
+    SOL_TEST_RUN(test_projected_mutation_frontend());
+    SOL_TEST_RUN(test_loop_statement_syntax());
+    SOL_TEST_RUN(test_failure_statement_syntax());
+    SOL_TEST_RUN(test_tuple_syntax());
+    SOL_TEST_RUN(test_recursive_pattern_syntax());
     if (failures != 0) {
         fprintf(stderr, "%d frontend test failure(s)\n", failures);
         return 1;
@@ -2579,3 +2581,5 @@ int main(void) {
     puts("frontend tests passed");
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("frontend")

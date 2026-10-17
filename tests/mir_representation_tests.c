@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/mir_representation.h"
 
 #include "sol/effects.h"
@@ -915,11 +917,11 @@ static void test_e6_all_roots_census(void) {
 }
 
 int main(void) {
-    test_complete_graph();
-    test_derived_capability_source_closure();
-    test_computed_bound_receiver();
-    test_open_enum_rejected_transactionally();
-    test_e6_all_roots_census();
+    SOL_TEST_RUN(test_complete_graph());
+    SOL_TEST_RUN(test_derived_capability_source_closure());
+    SOL_TEST_RUN(test_computed_bound_receiver());
+    SOL_TEST_RUN(test_open_enum_rejected_transactionally());
+    SOL_TEST_RUN(test_e6_all_roots_census());
     if (failures != 0) {
         fprintf(stderr, "%d MIR representation test(s) failed\n", failures);
         return 1;
@@ -927,3 +929,5 @@ int main(void) {
     printf("MIR representation tests passed\n");
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("mir_representation")

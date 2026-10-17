@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/diagnostic.h"
 #include "sol/effectcheck.h"
 #include "sol/hir.h"
@@ -1275,35 +1277,35 @@ static void test_malformed_implementation_trait_span(void) {
 }
 
 int main(void) {
-    test_bounded_statement_resolution();
-    test_loop_resolution_and_validation();
-    test_successful_resolution();
-    test_unresolved_name();
-    test_duplicate_declaration();
-    test_stable_semantic_identity();
-    test_generic_type_namespace();
-    test_type_declaration_hir();
-    test_imported_public_type_resolution();
-    test_effect_row_resolution_identity();
-    test_duplicate_and_malformed_generic_parameters();
-    test_scope_rules();
-    test_qualified_function_resolution();
-    test_qualified_duplicate_normalization();
-    test_semantic_depth_limit();
-    test_malformed_ast_rejected();
-    test_tuple_resolution_and_ownership();
-    test_recursive_pattern_resolution();
-    test_malformed_arena_metadata_rejected();
-    test_failure_statement_resolution();
-    test_scoped_package_resolution();
-    test_scoped_import_requires_exact_module();
-    test_scoped_builtin_type_precedence();
-    test_effectcheck_rejects_forged_scoped_metadata();
-    test_derived_capability_resolution_and_malformed_body();
-    test_malformed_handler_ast_rejected();
-    test_contract_resolution_and_cycles();
-    test_trait_resolution_and_malformed_metadata();
-    test_malformed_implementation_trait_span();
+    SOL_TEST_RUN(test_bounded_statement_resolution());
+    SOL_TEST_RUN(test_loop_resolution_and_validation());
+    SOL_TEST_RUN(test_successful_resolution());
+    SOL_TEST_RUN(test_unresolved_name());
+    SOL_TEST_RUN(test_duplicate_declaration());
+    SOL_TEST_RUN(test_stable_semantic_identity());
+    SOL_TEST_RUN(test_generic_type_namespace());
+    SOL_TEST_RUN(test_type_declaration_hir());
+    SOL_TEST_RUN(test_imported_public_type_resolution());
+    SOL_TEST_RUN(test_effect_row_resolution_identity());
+    SOL_TEST_RUN(test_duplicate_and_malformed_generic_parameters());
+    SOL_TEST_RUN(test_scope_rules());
+    SOL_TEST_RUN(test_qualified_function_resolution());
+    SOL_TEST_RUN(test_qualified_duplicate_normalization());
+    SOL_TEST_RUN(test_semantic_depth_limit());
+    SOL_TEST_RUN(test_malformed_ast_rejected());
+    SOL_TEST_RUN(test_tuple_resolution_and_ownership());
+    SOL_TEST_RUN(test_recursive_pattern_resolution());
+    SOL_TEST_RUN(test_malformed_arena_metadata_rejected());
+    SOL_TEST_RUN(test_failure_statement_resolution());
+    SOL_TEST_RUN(test_scoped_package_resolution());
+    SOL_TEST_RUN(test_scoped_import_requires_exact_module());
+    SOL_TEST_RUN(test_scoped_builtin_type_precedence());
+    SOL_TEST_RUN(test_effectcheck_rejects_forged_scoped_metadata());
+    SOL_TEST_RUN(test_derived_capability_resolution_and_malformed_body());
+    SOL_TEST_RUN(test_malformed_handler_ast_rejected());
+    SOL_TEST_RUN(test_contract_resolution_and_cycles());
+    SOL_TEST_RUN(test_trait_resolution_and_malformed_metadata());
+    SOL_TEST_RUN(test_malformed_implementation_trait_span());
     if (failures != 0) {
         fprintf(stderr, "%d semantic test failure(s)\n", failures);
         return 1;
@@ -1311,3 +1313,5 @@ int main(void) {
     puts("semantic tests passed");
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("sema")

@@ -1,3 +1,5 @@
+#include "support/native_progress.h"
+#define main sol_test_body
 #define SOL_MIR_PLAN_TEST_HOOKS 1
 #include "sol/mir_runtime_lowered_program.h"
 #include "sol/effects.h"
@@ -1026,9 +1028,11 @@ static void test_slice_d_resource_limits(Pipeline *p) {
     CHECK(rebuild_lowered(p, &limits));
 #define BELOW(member,type,singular) do { \
     if (p->lowered.usage.member) { \
+        sol_test_progress_phase("quota:max_" #member, "limit-check", 1); \
         SolMirRuntimeLoweredProgramLimits less = limits; \
         less.max_##member = p->lowered.usage.member - 1; \
         CHECK(!rebuild_lowered(p, &less)); \
+        sol_test_progress_completed(1); sol_test_progress_phase_end(); \
     } \
 } while (0);
     SOL_MIR_RUNTIME_LOWERED_TABLES(BELOW)
@@ -2732,6 +2736,37 @@ static void test_require_never_fallback_pipeline(void) {
 }
 
 int main(void) {
+#define test_site_domains(...) SOL_TEST_RUN(test_site_domains(__VA_ARGS__))
+#define test_vocabulary(...) SOL_TEST_RUN(test_vocabulary(__VA_ARGS__))
+#define check_build_work(...) SOL_TEST_RUN(check_build_work(__VA_ARGS__))
+#define check_step_render_identity(...) SOL_TEST_RUN(check_step_render_identity(__VA_ARGS__))
+#define test_e6_census_and_missing(...) SOL_TEST_RUN(test_e6_census_and_missing(__VA_ARGS__))
+#define test_slice_b_graph_joins(...) SOL_TEST_RUN(test_slice_b_graph_joins(__VA_ARGS__))
+#define test_executable_plan_event_value_joins(...) SOL_TEST_RUN(test_executable_plan_event_value_joins(__VA_ARGS__))
+#define test_slice_c_cleanup_and_host(...) SOL_TEST_RUN(test_slice_c_cleanup_and_host(__VA_ARGS__))
+#define test_slice_d_raw_owner_preflight(...) SOL_TEST_RUN(test_slice_d_raw_owner_preflight(__VA_ARGS__))
+#define test_slice_d_e6_usage(...) SOL_TEST_RUN(test_slice_d_e6_usage(__VA_ARGS__))
+#define test_slice_e_render(...) SOL_TEST_RUN(test_slice_e_render(__VA_ARGS__))
+#define test_slice_d_resource_limits(...) SOL_TEST_RUN(test_slice_d_resource_limits(__VA_ARGS__))
+#define test_slice_d_allocation_faults(...) SOL_TEST_RUN(test_slice_d_allocation_faults(__VA_ARGS__))
+#define check_pre_operation_render_stability(...) SOL_TEST_RUN(check_pre_operation_render_stability(__VA_ARGS__))
+#define test_erased_loop_census(...) SOL_TEST_RUN(test_erased_loop_census(__VA_ARGS__))
+#define test_propagation_value_demand(...) SOL_TEST_RUN(test_propagation_value_demand(__VA_ARGS__))
+#define test_pattern_copy_pipeline(...) SOL_TEST_RUN(test_pattern_copy_pipeline(__VA_ARGS__))
+#define test_nontrivial_copy_demand(...) SOL_TEST_RUN(test_nontrivial_copy_demand(__VA_ARGS__))
+#define test_callback_prerequisite(...) SOL_TEST_RUN(test_callback_prerequisite(__VA_ARGS__))
+#define test_callable_hole_prerequisite(...) SOL_TEST_RUN(test_callable_hole_prerequisite(__VA_ARGS__))
+#define test_callable_hole_exact(...) SOL_TEST_RUN(test_callable_hole_exact(__VA_ARGS__))
+#define test_immediate_method_prerequisite(...) SOL_TEST_RUN(test_immediate_method_prerequisite(__VA_ARGS__))
+#define test_require_never_fallback_pipeline(...) SOL_TEST_RUN(test_require_never_fallback_pipeline(__VA_ARGS__))
+#define test_bound_environment_indirect_graph(...) SOL_TEST_RUN(test_bound_environment_indirect_graph(__VA_ARGS__))
+#define test_source_backed_p36_graph_keys(...) SOL_TEST_RUN(test_source_backed_p36_graph_keys(__VA_ARGS__))
+#define test_generic_type_place_keys(...) SOL_TEST_RUN(test_generic_type_place_keys(__VA_ARGS__))
+#define test_slice_c_handlers(...) SOL_TEST_RUN(test_slice_c_handlers(__VA_ARGS__))
+#define test_long_virtual_path_validation_work(...) SOL_TEST_RUN(test_long_virtual_path_validation_work(__VA_ARGS__))
+#define test_snapshot_cleanup_mirror(...) SOL_TEST_RUN(test_snapshot_cleanup_mirror(__VA_ARGS__))
     test_site_domains();
     test_vocabulary();Fixture f;Pipeline p;init(&p);CHECK(setup(&f));bool built=!failures&&build(&f,&p,NULL);if(!built)sol_diagnostics_render_human(stderr,&f.p.source,&f.d);CHECK(built);if(built)check_build_work(&p);CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));check_step_render_identity(&p);test_e6_census_and_missing(&p);test_slice_b_graph_joins(&p);test_executable_plan_event_value_joins(&p);test_slice_c_cleanup_and_host(&p);test_slice_d_raw_owner_preflight(&p);test_slice_d_e6_usage(&p);test_slice_e_render(&p);test_slice_d_resource_limits(&p);test_slice_d_allocation_faults(&p);{ Fixture pre_fixture; CHECK(setup(&pre_fixture)); if(!failures) check_pre_operation_render_stability(&pre_fixture); finish(&pre_fixture); }test_erased_loop_census();test_propagation_value_demand();test_pattern_copy_pipeline();test_nontrivial_copy_demand();test_callback_prerequisite();test_callable_hole_prerequisite();test_callable_hole_exact();test_immediate_method_prerequisite();test_require_never_fallback_pipeline();test_bound_environment_indirect_graph();test_source_backed_p36_graph_keys();test_generic_type_place_keys();test_slice_c_handlers();test_long_virtual_path_validation_work();test_snapshot_cleanup_mirror();FILE*s=tmpfile();CHECK(s&&sol_mir_runtime_lowered_program_render(s,&p.lowered));if(s)fclose(s);uint64_t seal=p.lowered.authentication;p.lowered.authentication^=1;CHECK(!sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));p.lowered.authentication=seal;CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));SolMirRuntimeLoweredProgramLimits exact=p.lowered.limits;exact.max_owned_bytes=p.lowered.usage.owned_bytes? p.lowered.usage.owned_bytes-1:1;Pipeline bad;init(&bad);CHECK(!build(&f,&bad,&exact)&&!bad.lowered.image_instructions);done(&bad);done(&p);finish(&f);return failures?1:0;
 }
+#undef main
+SOL_TEST_ENTRY("mir_runtime_lowered_program")

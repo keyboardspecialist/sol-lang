@@ -1,4 +1,6 @@
+include("${CMAKE_CURRENT_LIST_DIR}/../support/test_progress.cmake")
 function(run_effects name expected format source)
+    sol_test_phase("effects:${name}:${format}:${source}")
     set(arguments effects)
     if(NOT "${format}" STREQUAL "")
         list(APPEND arguments "--diagnostic-format=${format}")
@@ -15,6 +17,7 @@ function(run_effects name expected format source)
     endif()
     set("${name}_output" "${output}" PARENT_SCOPE)
     set("${name}_error" "${error}" PARENT_SCOPE)
+    sol_test_done("effects-subcommand:${name}")
 endfunction()
 
 run_effects(human 0 human "${SOURCE_FILE}")
@@ -68,6 +71,7 @@ if(NOT load_failure_output MATCHES "\"schema\":\"sol.cli-error/1\""
     message(FATAL_ERROR "effects load failure mismatch: ${load_failure_output}")
 endif()
 
+sol_test_phase("effects-usage-rejection")
 execute_process(
     COMMAND "${SOL_EXECUTABLE}" effects --bad "${SOURCE_FILE}"
     RESULT_VARIABLE usage_result
@@ -76,3 +80,4 @@ execute_process(
 if(NOT usage_result EQUAL 2 OR NOT usage_error MATCHES "unknown option")
     message(FATAL_ERROR "effects usage mismatch: ${usage_result} ${usage_error}")
 endif()
+sol_test_done("effects-cli")

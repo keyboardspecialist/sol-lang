@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/diagnostic.h"
 #include "sol/hir.h"
 #include "sol/lexer.h"
@@ -2556,6 +2558,76 @@ static void test_exact_callable_field_restore(void) {
 }
 
 int main(void) {
+#define test_tuple_types_expressions_and_projections(...) SOL_TEST_RUN(test_tuple_types_expressions_and_projections(__VA_ARGS__))
+#define test_exact_callable_field_restore(...) SOL_TEST_RUN(test_exact_callable_field_restore(__VA_ARGS__))
+#define test_valid_types(...) SOL_TEST_RUN(test_valid_types(__VA_ARGS__))
+#define test_invalid_operator(...) SOL_TEST_RUN(test_invalid_operator(__VA_ARGS__))
+#define test_invalid_return_and_condition(...) SOL_TEST_RUN(test_invalid_return_and_condition(__VA_ARGS__))
+#define test_invalid_call(...) SOL_TEST_RUN(test_invalid_call(__VA_ARGS__))
+#define test_mismatched_if_branches(...) SOL_TEST_RUN(test_mismatched_if_branches(__VA_ARGS__))
+#define test_unresolved_declared_type(...) SOL_TEST_RUN(test_unresolved_declared_type(__VA_ARGS__))
+#define test_body_fallthrough_type(...) SOL_TEST_RUN(test_body_fallthrough_type(__VA_ARGS__))
+#define test_function_value_and_noncallable(...) SOL_TEST_RUN(test_function_value_and_noncallable(__VA_ARGS__))
+#define test_forward_and_recursive_calls(...) SOL_TEST_RUN(test_forward_and_recursive_calls(__VA_ARGS__))
+#define test_local_function_call_and_unreachable(...) SOL_TEST_RUN(test_local_function_call_and_unreachable(__VA_ARGS__))
+#define test_invalid_named_arguments(...) SOL_TEST_RUN(test_invalid_named_arguments(__VA_ARGS__))
+#define test_malformed_hir_rejected(...) SOL_TEST_RUN(test_malformed_hir_rejected(__VA_ARGS__))
+#define test_forged_type_resolutions_rejected(...) SOL_TEST_RUN(test_forged_type_resolutions_rejected(__VA_ARGS__))
+#define test_structural_generic_types(...) SOL_TEST_RUN(test_structural_generic_types(__VA_ARGS__))
+#define test_invalid_generic_component(...) SOL_TEST_RUN(test_invalid_generic_component(__VA_ARGS__))
+#define test_user_generics_and_instantiations(...) SOL_TEST_RUN(test_user_generics_and_instantiations(__VA_ARGS__))
+#define test_nested_generic_substitution_growth(...) SOL_TEST_RUN(test_nested_generic_substitution_growth(__VA_ARGS__))
+#define test_generic_variant_constructor_identity(...) SOL_TEST_RUN(test_generic_variant_constructor_identity(__VA_ARGS__))
+#define test_generic_function_signature_substitution_and_inference(...) SOL_TEST_RUN(test_generic_function_signature_substitution_and_inference(__VA_ARGS__))
+#define test_effect_row_type_boundaries(...) SOL_TEST_RUN(test_effect_row_type_boundaries(__VA_ARGS__))
+#define test_bounded_callback_effect_authority(...) SOL_TEST_RUN(test_bounded_callback_effect_authority(__VA_ARGS__))
+#define test_invalid_capability_qualified_generic_types(...) SOL_TEST_RUN(test_invalid_capability_qualified_generic_types(__VA_ARGS__))
+#define test_generic_recursion_through_nongeneric_helper(...) SOL_TEST_RUN(test_generic_recursion_through_nongeneric_helper(__VA_ARGS__))
+#define test_invalid_user_generics(...) SOL_TEST_RUN(test_invalid_user_generics(__VA_ARGS__))
+#define test_record_fields(...) SOL_TEST_RUN(test_record_fields(__VA_ARGS__))
+#define test_invalid_record_fields(...) SOL_TEST_RUN(test_invalid_record_fields(__VA_ARGS__))
+#define test_invalid_record_declaration(...) SOL_TEST_RUN(test_invalid_record_declaration(__VA_ARGS__))
+#define test_enum_constructors_and_match(...) SOL_TEST_RUN(test_enum_constructors_and_match(__VA_ARGS__))
+#define test_invalid_match(...) SOL_TEST_RUN(test_invalid_match(__VA_ARGS__))
+#define test_recursive_pattern_semantics(...) SOL_TEST_RUN(test_recursive_pattern_semantics(__VA_ARGS__))
+#define test_recursive_uninhabited_match_domains(...) SOL_TEST_RUN(test_recursive_uninhabited_match_domains(__VA_ARGS__))
+#define test_nested_bare_enum_variant_ambiguity(...) SOL_TEST_RUN(test_nested_bare_enum_variant_ambiguity(__VA_ARGS__))
+#define test_invalid_enum_constructor(...) SOL_TEST_RUN(test_invalid_enum_constructor(__VA_ARGS__))
+#define test_capability_operation_calls(...) SOL_TEST_RUN(test_capability_operation_calls(__VA_ARGS__))
+#define test_invalid_capability_operations(...) SOL_TEST_RUN(test_invalid_capability_operations(__VA_ARGS__))
+#define test_computed_capability_provenance(...) SOL_TEST_RUN(test_computed_capability_provenance(__VA_ARGS__))
+#define test_mixed_computed_capability_provenance(...) SOL_TEST_RUN(test_mixed_computed_capability_provenance(__VA_ARGS__))
+#define test_mixed_match_alias_and_never_provenance(...) SOL_TEST_RUN(test_mixed_match_alias_and_never_provenance(__VA_ARGS__))
+#define test_invalid_capability_declarations(...) SOL_TEST_RUN(test_invalid_capability_declarations(__VA_ARGS__))
+#define test_general_function_types(...) SOL_TEST_RUN(test_general_function_types(__VA_ARGS__))
+#define test_invalid_general_function_types(...) SOL_TEST_RUN(test_invalid_general_function_types(__VA_ARGS__))
+#define test_invalid_return_authority_contract(...) SOL_TEST_RUN(test_invalid_return_authority_contract(__VA_ARGS__))
+#define test_invalid_derived_capabilities(...) SOL_TEST_RUN(test_invalid_derived_capabilities(__VA_ARGS__))
+#define test_derived_capability_cycles(...) SOL_TEST_RUN(test_derived_capability_cycles(__VA_ARGS__))
+#define test_handler_types_and_metadata(...) SOL_TEST_RUN(test_handler_types_and_metadata(__VA_ARGS__))
+#define test_invalid_handlers(...) SOL_TEST_RUN(test_invalid_handlers(__VA_ARGS__))
+#define test_contract_expression_types(...) SOL_TEST_RUN(test_contract_expression_types(__VA_ARGS__))
+#define test_traits_bounds_and_method_metadata(...) SOL_TEST_RUN(test_traits_bounds_and_method_metadata(__VA_ARGS__))
+#define test_nested_self_substitution_growth(...) SOL_TEST_RUN(test_nested_self_substitution_growth(__VA_ARGS__))
+#define test_malformed_trait_method_links(...) SOL_TEST_RUN(test_malformed_trait_method_links(__VA_ARGS__))
+#define test_computed_enum_receiver_methods(...) SOL_TEST_RUN(test_computed_enum_receiver_methods(__VA_ARGS__))
+#define test_bound_evidence_forwarding(...) SOL_TEST_RUN(test_bound_evidence_forwarding(__VA_ARGS__))
+#define test_method_named_arguments(...) SOL_TEST_RUN(test_method_named_arguments(__VA_ARGS__))
+#define test_distinct_type_identity_and_construction(...) SOL_TEST_RUN(test_distinct_type_identity_and_construction(__VA_ARGS__))
+#define test_refined_type_predicates_and_construction(...) SOL_TEST_RUN(test_refined_type_predicates_and_construction(__VA_ARGS__))
+#define test_declared_constructor_requires_definition_head(...) SOL_TEST_RUN(test_declared_constructor_requires_definition_head(__VA_ARGS__))
+#define test_invalid_type_representations_and_constructors(...) SOL_TEST_RUN(test_invalid_type_representations_and_constructors(__VA_ARGS__))
+#define test_generic_representation_safety(...) SOL_TEST_RUN(test_generic_representation_safety(__VA_ARGS__))
+#define test_representation_storage_cycles(...) SOL_TEST_RUN(test_representation_storage_cycles(__VA_ARGS__))
+#define test_type_metadata_defensive_validation(...) SOL_TEST_RUN(test_type_metadata_defensive_validation(__VA_ARGS__))
+#define test_runtime_identity_equality_rejected(...) SOL_TEST_RUN(test_runtime_identity_equality_rejected(__VA_ARGS__))
+#define test_access_modes_are_exact(...) SOL_TEST_RUN(test_access_modes_are_exact(__VA_ARGS__))
+#define test_region_types(...) SOL_TEST_RUN(test_region_types(__VA_ARGS__))
+#define test_loop_types_and_reachability(...) SOL_TEST_RUN(test_loop_types_and_reachability(__VA_ARGS__))
+#define test_loop_specification_types_scope_and_facts(...) SOL_TEST_RUN(test_loop_specification_types_scope_and_facts(__VA_ARGS__))
+#define test_termination_statement_types_and_facts(...) SOL_TEST_RUN(test_termination_statement_types_and_facts(__VA_ARGS__))
+#define test_bounded_mutation_types(...) SOL_TEST_RUN(test_bounded_mutation_types(__VA_ARGS__))
+#define test_mutable_local_types_and_targets(...) SOL_TEST_RUN(test_mutable_local_types_and_targets(__VA_ARGS__))
     test_tuple_types_expressions_and_projections();
     test_exact_callable_field_restore();
     test_valid_types();
@@ -2633,3 +2705,5 @@ int main(void) {
     puts("type-checking tests passed");
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("typecheck")

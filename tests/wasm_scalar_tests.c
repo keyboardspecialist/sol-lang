@@ -1,4 +1,7 @@
+#include "support/native_progress.h"
+#define main sol_test_body
 #include "wasm_scalar_internal.h"
+#include "support/scalar_progress.h"
 #include "sol/package.h"
 
 #include <errno.h>
@@ -281,12 +284,15 @@ static void test_limits_and_usage(void) {
     limited = sol_wasm_scalar_default_limits(); limited.max_locals = 1; r.limits = &limited;
     CHECK(sol_wasm_scalar_build_scalar(&r, &o, &f.d) == SOL_WASM_SCALAR_RESOURCE_EXHAUSTED && output_zero(&o));
 #define CHECK_EXACT_LIMIT(limit_member, usage_member, measured) do { \
+    sol_test_progress_phase("quota:" #limit_member, "limit-check", 2); \
     limited = sol_wasm_scalar_default_limits(); limited.limit_member = (measured); r.limits = &limited; \
     CHECK(sol_wasm_scalar_build_scalar(&r, &o, &f.d) == SOL_WASM_SCALAR_OK \
         && o.usage.usage_member == (measured) && usage_equal(&o.usage, &published)); \
+    sol_test_progress_completed(1); \
     sol_wasm_scalar_output_free(&o); limited.limit_member = (measured) - 1; \
     CHECK(sol_wasm_scalar_build_scalar(&r, &o, &f.d) == SOL_WASM_SCALAR_RESOURCE_EXHAUSTED \
         && output_zero(&o)); sol_wasm_scalar_output_free(&o); \
+    sol_test_progress_completed(2); sol_test_progress_phase_end(); \
 } while (0)
     CHECK_EXACT_LIMIT(max_functions, functions, function_count);
     CHECK_EXACT_LIMIT(max_locals, locals, local_count);
@@ -343,15 +349,17 @@ static void test_final_acceptance(void) {
         && !memcmp(output.bytes.bytes, first.bytes.bytes, first.bytes.count));
     sol_wasm_scalar_output_free(&output);
 #define FINAL_LIMIT(field, value) do { \
+    sol_test_progress_phase("quota:" #field, "limit-check", 3); \
     SolWasmScalarLimits limits = sol_wasm_scalar_default_limits(); limits.field = (value); r.limits = &limits; \
     CHECK(sol_wasm_scalar_build_scalar(&r, &output, &f.d) == SOL_WASM_SCALAR_OK \
         && usage_equal(&output.usage, &expected)); sol_wasm_scalar_output_free(&output); \
-    limits.field = (value) - 1; \
+    sol_test_progress_completed(1); limits.field = (value) - 1; \
     CHECK(sol_wasm_scalar_build_scalar(&r, &output, &f.d) == SOL_WASM_SCALAR_RESOURCE_EXHAUSTED \
         && output_zero(&output)); sol_wasm_scalar_output_free(&output); \
-    limits = sol_wasm_scalar_default_limits(); limits.field = 0; \
+    sol_test_progress_completed(2); limits = sol_wasm_scalar_default_limits(); limits.field = 0; \
     CHECK(sol_wasm_scalar_build_scalar(&r, &output, &f.d) == SOL_WASM_SCALAR_INVALID_ARGUMENT \
         && output_zero(&output)); sol_wasm_scalar_output_free(&output); \
+    sol_test_progress_completed(3); sol_test_progress_phase_end(); \
 } while (0)
     FINAL_LIMIT(max_functions, expected.functions);
     FINAL_LIMIT(max_blocks, expected.blocks);
@@ -376,10 +384,13 @@ static void test_allocation_sweep_fixture(const char *leaf) {
     CHECK(sol_wasm_scalar_build_scalar(&r, &o, &f.d) == SOL_WASM_SCALAR_OK); size_t count = sol_wasm_scalar_test_allocation_attempts() - before;
     sol_wasm_scalar_output_free(&o);
     for (size_t nth = 1; nth <= count; ++nth) {
+        sol_test_progress_ordinal("scalar-allocation-ordinal", nth, count);
         size_t start = sol_wasm_scalar_test_allocation_attempts();
         sol_wasm_scalar_test_fail_allocation_after(start + nth);
         CHECK(sol_wasm_scalar_build_scalar(&r, &o, &f.d) == SOL_WASM_SCALAR_ALLOCATION_FAILED && output_zero(&o));
         sol_wasm_scalar_test_fail_allocation_after(0); sol_wasm_scalar_output_free(&o);
+        sol_test_progress_phase("allocation-attempt-completed", "fault-attempt", count);
+        sol_test_progress_completed(nth); sol_test_progress_phase_end();
     }
     pipeline_free(&p); fixture_free(&f);
 }
@@ -387,5 +398,25 @@ static void test_allocation_sweep(void) {
     test_allocation_sweep_fixture("p42_scalar");
     test_allocation_sweep_fixture("p42_scalar_call_nested_overflow");
 }
+#define test_limits_and_usage(...) SOL_TEST_RUN(test_limits_and_usage(__VA_ARGS__))
+#define test_call_scratch_limit(...) SOL_TEST_RUN(test_call_scratch_limit(__VA_ARGS__))
+#define test_final_acceptance(...) SOL_TEST_RUN(test_final_acceptance(__VA_ARGS__))
+#define test_allocation_sweep(...) SOL_TEST_RUN(test_allocation_sweep(__VA_ARGS__))
+#define test_fixture(...) SOL_TEST_RUN(test_fixture(__VA_ARGS__))
+#define test_rejections(...) SOL_TEST_RUN(test_rejections(__VA_ARGS__))
+#define test_compound_rejection(...) SOL_TEST_RUN(test_compound_rejection(__VA_ARGS__))
+#define test_compound_overflow(...) SOL_TEST_RUN(test_compound_overflow(__VA_ARGS__))
+#define test_arithmetic_failure(...) SOL_TEST_RUN(test_arithmetic_failure(__VA_ARGS__))
+#define test_rejected_fixture(...) SOL_TEST_RUN(test_rejected_fixture(__VA_ARGS__))
+#define test_call_catalog(...) SOL_TEST_RUN(test_call_catalog(__VA_ARGS__))
+#define test_provenance_limit(...) SOL_TEST_RUN(test_provenance_limit(__VA_ARGS__))
+#define test_relocated_canonicality(...) SOL_TEST_RUN(test_relocated_canonicality(__VA_ARGS__))
+#define test_internal_root_order(...) SOL_TEST_RUN(test_internal_root_order(__VA_ARGS__))
+#define test_call_failure_fixture(...) SOL_TEST_RUN(test_call_failure_fixture(__VA_ARGS__))
+#define test_call_failure_reset(...) SOL_TEST_RUN(test_call_failure_reset(__VA_ARGS__))
+#define test_call_depth_boundary(...) SOL_TEST_RUN(test_call_depth_boundary(__VA_ARGS__))
+#define test_call_root_order(...) SOL_TEST_RUN(test_call_root_order(__VA_ARGS__))
 
 int main(void) { SolWasmScalarOutput output;sol_wasm_scalar_output_init(&output);CHECK(sol_wasm_scalar_build_scalar(NULL,&output,NULL)==SOL_WASM_SCALAR_INVALID_ARGUMENT);CHECK(sol_wasm_scalar_validate_scalar(NULL)==SOL_WASM_SCALAR_INVALID_ARGUMENT);SolWasmBackendBytes malformed={(uint8_t*)"x",1};CHECK(sol_wasm_scalar_validate_scalar(&malformed)==SOL_WASM_SCALAR_WASMTIME_VALIDATION_FAILED);CHECK(sol_wasm_scalar_test_parallel_moves());CHECK(sol_wasm_scalar_test_rejects_capture_snapshot());CHECK(sol_wasm_scalar_test_rejects_resume_failure());CHECK(sol_wasm_scalar_test_size_add_overflow());sol_wasm_scalar_output_free(&output);test_limits_and_usage();test_call_scratch_limit();test_final_acceptance();test_allocation_sweep();test_fixture("p42_scalar","launch",SOL_MIR_PROGRAM_ROOT_ENTRY,29);test_fixture("p42_scalar_zero_loop","launch",SOL_MIR_PROGRAM_ROOT_ENTRY,31);test_fixture("p42_scalar_checked","launch",SOL_MIR_PROGRAM_ROOT_ENTRY,42);test_fixture("p42_scalar_compound","launch",SOL_MIR_PROGRAM_ROOT_ENTRY,42);test_fixture("p42_scalar_sub_success","launch",SOL_MIR_PROGRAM_ROOT_ENTRY,-5);test_fixture("p42_scalar_div_success","launch",SOL_MIR_PROGRAM_ROOT_ENTRY,-4);test_fixture("p42_scalar_rem_success","launch",SOL_MIR_PROGRAM_ROOT_ENTRY,-1);test_fixture("p42_scalar_mul_success","launch",SOL_MIR_PROGRAM_ROOT_ENTRY,0);test_fixture("p42_scalar_mul_signed","launch",SOL_MIR_PROGRAM_ROOT_ENTRY,-12);test_fixture("p42_scalar_neg_success","launch",SOL_MIR_PROGRAM_ROOT_ENTRY,-7);test_fixture("p42_scalar_compound_div","launch",SOL_MIR_PROGRAM_ROOT_ENTRY,4);test_fixture("p42_scalar_internal","scalar",SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE,0);test_rejections();test_compound_rejection();test_compound_overflow();test_arithmetic_failure("p42_scalar_add_overflow",SOL_MIR_OPERATION_I64_ADD,false,2);test_arithmetic_failure("p42_scalar_sub_overflow",SOL_MIR_OPERATION_I64_SUB,false,2);test_arithmetic_failure("p42_scalar_mul_overflow",SOL_MIR_OPERATION_I64_MUL,false,2);test_arithmetic_failure("p42_scalar_neg_overflow",SOL_MIR_OPERATION_I64_NEG,false,2);test_arithmetic_failure("p42_scalar_divzero",SOL_MIR_OPERATION_I64_DIV,false,3);test_arithmetic_failure("p42_scalar_remzero",SOL_MIR_OPERATION_I64_REM,false,3);test_arithmetic_failure("p42_scalar_div_overflow",SOL_MIR_OPERATION_I64_DIV,false,2);test_arithmetic_failure("p42_scalar_rem_overflow",SOL_MIR_OPERATION_I64_REM,false,2);test_arithmetic_failure("p42_scalar_compound_divzero",SOL_MIR_OPERATION_I64_DIV,true,3);test_rejected_fixture("p42_scalar_panic");test_call_catalog("p42_scalar_call",false,1,7);test_call_catalog("p42_scalar_call_args",false,1,5);test_call_catalog("p42_scalar_call_nested",false,2,19);test_call_catalog("p42_scalar_call_unit",false,1,0);test_call_catalog("p42_scalar_call_repeated",false,1,23);test_call_catalog("p42_scalar_call_cycle",true,0,0);test_provenance_limit();test_relocated_canonicality();test_internal_root_order();test_call_failure_fixture();test_call_failure_reset();test_call_depth_boundary(64,SOL_WASM_SCALAR_OK);test_call_depth_boundary(65,SOL_WASM_SCALAR_UNSUPPORTED_CLOSURE);test_call_root_order();return failures==0?0:1;}
+#undef main
+SOL_TEST_ENTRY("wasm_scalar")

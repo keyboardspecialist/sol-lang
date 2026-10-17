@@ -1,4 +1,6 @@
+include("${CMAKE_CURRENT_LIST_DIR}/../support/test_progress.cmake")
 function(run_case name)
+    sol_test_phase("e6:${name}:${ARGN}")
     execute_process(
         COMMAND "${SOL_EXECUTABLE}" ${ARGN}
         RESULT_VARIABLE result
@@ -10,6 +12,7 @@ function(run_case name)
     endif()
     set("${name}_output" "${output}" PARENT_SCOPE)
     set("${name}_error" "${error}" PARENT_SCOPE)
+    sol_test_done("e6-subcommand:${name}")
 endfunction()
 
 run_case(format fmt --check "${PACKAGE_DIR}")
@@ -66,6 +69,7 @@ if(NOT run_output STREQUAL "E6 ok\n" OR NOT run_error STREQUAL "")
     message(FATAL_ERROR "run output mismatch: ${run_output}${run_error}")
 endif()
 
+sol_test_phase("e6:run-panic-failure-summary")
 execute_process(
     COMMAND "${SOL_EXECUTABLE}" run --config=mode=panic "${PACKAGE_DIR}"
     RESULT_VARIABLE failure_result
@@ -78,3 +82,4 @@ if(NOT failure_result EQUAL 1
     OR NOT failure_error MATCHES "conformance failure")
     message(FATAL_ERROR "runtime failure mismatch: ${failure_output}${failure_error}")
 endif()
+sol_test_done("e6-conformance")

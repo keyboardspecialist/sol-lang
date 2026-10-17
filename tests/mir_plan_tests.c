@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/mir_plan.h"
 
 #include "sol/effects.h"
@@ -1041,15 +1043,15 @@ static void test_pattern_text_root_depth(void) {
 }
 
 int main(void) {
-    test_instances_types_cycles_and_limits();
-    test_callback_producer_planning_limits();
-    test_evidence_self_and_generic_root_policy();
-    test_e6_entry_census();
-    test_nested_types_effect_closure_and_root_policy();
-    test_callee_effect_coordinates();
-    test_predicate_function_value_demand();
-    test_recursion_classification();
-    test_pattern_text_root_depth();
+    SOL_TEST_RUN(test_instances_types_cycles_and_limits());
+    SOL_TEST_RUN(test_callback_producer_planning_limits());
+    SOL_TEST_RUN(test_evidence_self_and_generic_root_policy());
+    SOL_TEST_RUN(test_e6_entry_census());
+    SOL_TEST_RUN(test_nested_types_effect_closure_and_root_policy());
+    SOL_TEST_RUN(test_callee_effect_coordinates());
+    SOL_TEST_RUN(test_predicate_function_value_demand());
+    SOL_TEST_RUN(test_recursion_classification());
+    SOL_TEST_RUN(test_pattern_text_root_depth());
     if (failures != 0) {
         fprintf(stderr, "%d MIR plan test(s) failed\n", failures);
         return 1;
@@ -1057,3 +1059,5 @@ int main(void) {
     printf("MIR plan tests passed\n");
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("mir_plan")

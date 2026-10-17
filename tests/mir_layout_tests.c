@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/mir_layout.h"
 
 #include "sol/effects.h"
@@ -1042,10 +1044,10 @@ static void test_e6_census(void) {
 }
 
 int main(void) {
-    test_descriptors();
-    test_layout_contract();
-    test_dead_shapes_do_not_consume_object_bytes();
-    test_e6_census();
+    SOL_TEST_RUN(test_descriptors());
+    SOL_TEST_RUN(test_layout_contract());
+    SOL_TEST_RUN(test_dead_shapes_do_not_consume_object_bytes());
+    SOL_TEST_RUN(test_e6_census());
     if (failures != 0) {
         fprintf(stderr, "%d MIR layout test(s) failed\n", failures);
         return 1;
@@ -1053,3 +1055,5 @@ int main(void) {
     printf("MIR layout tests passed\n");
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("mir_layout")

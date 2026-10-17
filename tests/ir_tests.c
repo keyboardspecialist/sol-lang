@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/ir.h"
 #include "sol/lexer.h"
 #include "sol/package.h"
@@ -3645,34 +3647,36 @@ static void test_forged_callable_restore_authority_components(void) {
 }
 
 int main(void) {
-    test_geometric_growth();
-    test_complete_ir_and_lifetime();
-    test_classified_calls_handler_contract();
-    test_variants_nested_arenas_and_evidence();
-    test_context_probes_and_escapes();
-    test_generic_metadata_and_cycles();
-    test_builtin_context_and_propagation_rejection();
-    test_record_resolution_and_malformed_rejection();
-    test_package_file_lifetime();
-    test_forged_ir_domains();
-    test_exact_validation_findings();
-    test_release_gate_domains();
-    test_exact_member_table_ownership();
-    test_affine_ownership();
-    test_region_cleanup_metadata();
-    test_mutable_assignment_ir_and_ownership();
-    test_initialization_modify_and_compound_ir();
-    test_place_representation_and_validation();
-    test_projected_ownership();
-    test_exhaustive_validation_domains();
-    test_loop_ir_and_ownership();
-    test_loop_obligation_ir();
-    test_terminating_statement_ir();
-    test_tuple_ir_ownership_and_validation();
-    test_recursive_pattern_ir_and_guards();
-    test_recursive_uninhabited_ir_coverage();
-    test_entrypoint_metadata_validation();
-    test_forged_callable_restore_authority_components();
+    SOL_TEST_RUN(test_geometric_growth());
+    SOL_TEST_RUN(test_complete_ir_and_lifetime());
+    SOL_TEST_RUN(test_classified_calls_handler_contract());
+    SOL_TEST_RUN(test_variants_nested_arenas_and_evidence());
+    SOL_TEST_RUN(test_context_probes_and_escapes());
+    SOL_TEST_RUN(test_generic_metadata_and_cycles());
+    SOL_TEST_RUN(test_builtin_context_and_propagation_rejection());
+    SOL_TEST_RUN(test_record_resolution_and_malformed_rejection());
+    SOL_TEST_RUN(test_package_file_lifetime());
+    SOL_TEST_RUN(test_forged_ir_domains());
+    SOL_TEST_RUN(test_exact_validation_findings());
+    SOL_TEST_RUN(test_release_gate_domains());
+    SOL_TEST_RUN(test_exact_member_table_ownership());
+    SOL_TEST_RUN(test_affine_ownership());
+    SOL_TEST_RUN(test_region_cleanup_metadata());
+    SOL_TEST_RUN(test_mutable_assignment_ir_and_ownership());
+    SOL_TEST_RUN(test_initialization_modify_and_compound_ir());
+    SOL_TEST_RUN(test_place_representation_and_validation());
+    SOL_TEST_RUN(test_projected_ownership());
+    SOL_TEST_RUN(test_exhaustive_validation_domains());
+    SOL_TEST_RUN(test_loop_ir_and_ownership());
+    SOL_TEST_RUN(test_loop_obligation_ir());
+    SOL_TEST_RUN(test_terminating_statement_ir());
+    SOL_TEST_RUN(test_tuple_ir_ownership_and_validation());
+    SOL_TEST_RUN(test_recursive_pattern_ir_and_guards());
+    SOL_TEST_RUN(test_recursive_uninhabited_ir_coverage());
+    SOL_TEST_RUN(test_entrypoint_metadata_validation());
+    SOL_TEST_RUN(test_forged_callable_restore_authority_components());
     if (failures != 0) fprintf(stderr, "%d IR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }
+#undef main
+SOL_TEST_ENTRY("ir")

@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/mir_concrete.h"
 
 #include "sol/effects.h"
@@ -1110,13 +1112,15 @@ int main(void) {
     E6Request e6; e6_request(&compilation.ir, &e6);
     CHECK(e6.root_count == 5);
     for (size_t i = 0; i < 4; ++i) CHECK(e6.imports[i] != SOL_IR_NONE);
-    test_lifecycle_requests_and_limits(&compilation, &e6);
-    test_unsupported_closure();
-    test_e6_complete_and_deterministic(&compilation, &e6);
-    test_independent_ir_and_collision(&compilation, &e6);
+    SOL_TEST_RUN(test_lifecycle_requests_and_limits(&compilation, &e6));
+    SOL_TEST_RUN(test_unsupported_closure());
+    SOL_TEST_RUN(test_e6_complete_and_deterministic(&compilation, &e6));
+    SOL_TEST_RUN(test_independent_ir_and_collision(&compilation, &e6));
     compilation_free(&compilation);
     if (failures != 0) {
         fprintf(stderr, "%d MIR concrete test(s) failed\n", failures); return 1;
     }
     printf("MIR concrete tests passed\n"); return 0;
 }
+#undef main
+SOL_TEST_ENTRY("mir_concrete")

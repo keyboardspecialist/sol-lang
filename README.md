@@ -58,9 +58,14 @@ Python 3. Run these commands from the repository root:
 ```sh
 cmake -S . -B build -G Ninja -DSOL_ENABLE_SANITIZERS=ON
 cmake --build build
-cmake --build build --target test
+ctest --test-dir build --verbose --output-on-failure
 ./build/sol run tests/run_cli/console.sol
 ```
+
+Use verbose CTest for live test output, including when redirecting CI logs.
+Bare `ctest` and the build's `test` target buffer successful test output; flushing
+inside a child does not change that. See [test instructions](tests/README.md)
+for progress records, supervision, and focused harness validation.
 
 The final command runs this complete existing
 [console fixture](tests/run_cli/console.sol), not a target-language sketch:

@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/compilation.h"
 #include "sol/interpreter.h"
 
@@ -882,16 +884,16 @@ static void test_resource_limits(void) {
 }
 
 int main(void) {
-    test_text_success_and_transfer();
-    test_rejections_and_failure_teardown();
-    test_entrypoint_abi();
-    test_safe_host_registry();
-    test_root_specific_allowlist();
-    test_host_preflight_and_results();
-    test_invalid_arguments_and_state();
-    test_source_bytes_validation_and_retry();
-    test_paths_and_scopes();
-    test_resource_limits();
+    SOL_TEST_RUN(test_text_success_and_transfer());
+    SOL_TEST_RUN(test_rejections_and_failure_teardown());
+    SOL_TEST_RUN(test_entrypoint_abi());
+    SOL_TEST_RUN(test_safe_host_registry());
+    SOL_TEST_RUN(test_root_specific_allowlist());
+    SOL_TEST_RUN(test_host_preflight_and_results());
+    SOL_TEST_RUN(test_invalid_arguments_and_state());
+    SOL_TEST_RUN(test_source_bytes_validation_and_retry());
+    SOL_TEST_RUN(test_paths_and_scopes());
+    SOL_TEST_RUN(test_resource_limits());
     if (failures != 0) {
         fprintf(stderr, "%d compilation test%s failed\n",
             failures, failures == 1 ? "" : "s");
@@ -900,3 +902,5 @@ int main(void) {
     puts("compilation tests passed");
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("compilation")

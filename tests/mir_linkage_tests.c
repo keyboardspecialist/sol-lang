@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/mir_linkage.h"
 
 #include "sol/effects.h"
@@ -1082,19 +1084,21 @@ static void test_e6_all_roots_census(void) {
 }
 
 int main(void) {
-    test_sha256_known_answer();
-    test_sha256_exhaustion_boundaries();
-    test_limits_and_destination_transactionality();
-    test_entry_and_host_requirement();
-    test_callable_table_and_collision();
-    test_callable_target_deduplication();
-    test_recursion_trait_and_import_helper();
-    test_recursive_nominal_framing();
-    test_dictionary_dense_id_independence();
-    test_deterministic_rendering();
-    test_e6_all_roots_census();
+    SOL_TEST_RUN(test_sha256_known_answer());
+    SOL_TEST_RUN(test_sha256_exhaustion_boundaries());
+    SOL_TEST_RUN(test_limits_and_destination_transactionality());
+    SOL_TEST_RUN(test_entry_and_host_requirement());
+    SOL_TEST_RUN(test_callable_table_and_collision());
+    SOL_TEST_RUN(test_callable_target_deduplication());
+    SOL_TEST_RUN(test_recursion_trait_and_import_helper());
+    SOL_TEST_RUN(test_recursive_nominal_framing());
+    SOL_TEST_RUN(test_dictionary_dense_id_independence());
+    SOL_TEST_RUN(test_deterministic_rendering());
+    SOL_TEST_RUN(test_e6_all_roots_census());
     if (failures != 0) {
         fprintf(stderr, "%d MIR linkage test(s) failed\n", failures); return 1;
     }
     printf("MIR linkage tests passed\n"); return 0;
 }
+#undef main
+SOL_TEST_ENTRY("mir_linkage")

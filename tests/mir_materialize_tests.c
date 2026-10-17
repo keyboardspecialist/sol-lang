@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/mir_materialize.h"
 
 #include "sol/effects.h"
@@ -2073,21 +2075,21 @@ static void test_e6_concrete_closure_and_determinism(void) {
 
 int main(void) {
     CHECK(sol_mir_materialization_test_callable_site_target_equality());
-    test_bodyful_capability_internal_bindings();
-    test_generic_recursion_lifecycle_limits_and_render();
-    test_evidence_and_import_bindings();
-    test_handlers_are_materialized();
-    test_refinement_contexts_copy_and_concrete_records();
-    test_recursive_nominal_planning_and_copy_cycle();
-    test_exclusive_writeback_order();
-    test_copy_specialization_normalizes_move();
-    test_partial_path_restore_and_loop_metadata();
-    test_refinement_predicate_site_and_temp_suffix();
-    test_non_cfg_predicate_function_site();
-    test_callable_hole_field_trace();
-    test_multiple_predicate_dependencies();
-    test_terminator_scope_topology_provenance();
-    test_e6_concrete_closure_and_determinism();
+    SOL_TEST_RUN(test_bodyful_capability_internal_bindings());
+    SOL_TEST_RUN(test_generic_recursion_lifecycle_limits_and_render());
+    SOL_TEST_RUN(test_evidence_and_import_bindings());
+    SOL_TEST_RUN(test_handlers_are_materialized());
+    SOL_TEST_RUN(test_refinement_contexts_copy_and_concrete_records());
+    SOL_TEST_RUN(test_recursive_nominal_planning_and_copy_cycle());
+    SOL_TEST_RUN(test_exclusive_writeback_order());
+    SOL_TEST_RUN(test_copy_specialization_normalizes_move());
+    SOL_TEST_RUN(test_partial_path_restore_and_loop_metadata());
+    SOL_TEST_RUN(test_refinement_predicate_site_and_temp_suffix());
+    SOL_TEST_RUN(test_non_cfg_predicate_function_site());
+    SOL_TEST_RUN(test_callable_hole_field_trace());
+    SOL_TEST_RUN(test_multiple_predicate_dependencies());
+    SOL_TEST_RUN(test_terminator_scope_topology_provenance());
+    SOL_TEST_RUN(test_e6_concrete_closure_and_determinism());
     if (failures != 0) {
         fprintf(stderr, "%d MIR materialization test(s) failed\n", failures);
         return 1;
@@ -2095,3 +2097,5 @@ int main(void) {
     printf("MIR materialization tests passed\n");
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("mir_materialize")

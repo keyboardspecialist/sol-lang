@@ -1,4 +1,6 @@
 #define _DARWIN_C_SOURCE
+#include "support/test_progress.h"
+#define main sol_test_body
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
 
@@ -608,11 +610,11 @@ static void test_composite_relocation(void) {
 }
 
 int main(void) {
-    test_directory_load_and_boundaries();
-    test_package_reuse();
-    test_source_identity_boundaries();
-    test_type_declaration_relocation();
-    test_composite_relocation();
+    SOL_TEST_RUN(test_directory_load_and_boundaries());
+    SOL_TEST_RUN(test_package_reuse());
+    SOL_TEST_RUN(test_source_identity_boundaries());
+    SOL_TEST_RUN(test_type_declaration_relocation());
+    SOL_TEST_RUN(test_composite_relocation());
     if (failures != 0) {
         fprintf(stderr, "%d package test failure(s)\n", failures);
         return 1;
@@ -620,3 +622,5 @@ int main(void) {
     puts("package tests passed");
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("package")

@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/diagnostic.h"
 #include "sol/formatter.h"
 #include "sol/source.h"
@@ -529,22 +531,22 @@ static void test_nested_pattern_formatting(void) {
 }
 
 int main(void) {
-    test_golden_formatting();
-    test_comments_and_preserved_bytes();
-    test_final_line_comment_preserves_trailing_spaces();
-    test_angle_canonicality();
-    test_blank_line_collapse_and_final_newline();
-    test_continuation_indentation();
-    test_malformed_source_preserves_output();
-    test_embedded_nul_is_rejected();
-    test_access_qualifiers();
-    test_region_formatting();
-    test_projected_mutation_formatting();
-    test_loop_formatting();
-    test_construct_golden_formatting();
-    test_failure_statement_formatting();
-    test_tuple_formatting();
-    test_nested_pattern_formatting();
+    SOL_TEST_RUN(test_golden_formatting());
+    SOL_TEST_RUN(test_comments_and_preserved_bytes());
+    SOL_TEST_RUN(test_final_line_comment_preserves_trailing_spaces());
+    SOL_TEST_RUN(test_angle_canonicality());
+    SOL_TEST_RUN(test_blank_line_collapse_and_final_newline());
+    SOL_TEST_RUN(test_continuation_indentation());
+    SOL_TEST_RUN(test_malformed_source_preserves_output());
+    SOL_TEST_RUN(test_embedded_nul_is_rejected());
+    SOL_TEST_RUN(test_access_qualifiers());
+    SOL_TEST_RUN(test_region_formatting());
+    SOL_TEST_RUN(test_projected_mutation_formatting());
+    SOL_TEST_RUN(test_loop_formatting());
+    SOL_TEST_RUN(test_construct_golden_formatting());
+    SOL_TEST_RUN(test_failure_statement_formatting());
+    SOL_TEST_RUN(test_tuple_formatting());
+    SOL_TEST_RUN(test_nested_pattern_formatting());
 
     if (failures != 0) {
         fprintf(stderr, "%d formatter test(s) failed\n", failures);
@@ -552,3 +554,5 @@ int main(void) {
     }
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("formatter")

@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/contract.h"
 #include "sol/effectcheck.h"
 #include "sol/hir.h"
@@ -364,11 +366,13 @@ static void test_complete_test_shape_validation(void) {
 }
 
 int main(void) {
-    test_pipeline_and_entry();
-    test_ordinary_function_value();
-    test_nonfunction_definition_value_rejected();
-    test_non_addressable_and_duplicates();
-    test_parser_recovery_and_restrictions();
-    test_complete_test_shape_validation();
+    SOL_TEST_RUN(test_pipeline_and_entry());
+    SOL_TEST_RUN(test_ordinary_function_value());
+    SOL_TEST_RUN(test_nonfunction_definition_value_rejected());
+    SOL_TEST_RUN(test_non_addressable_and_duplicates());
+    SOL_TEST_RUN(test_parser_recovery_and_restrictions());
+    SOL_TEST_RUN(test_complete_test_shape_validation());
     return failures == 0 ? 0 : 1;
 }
+#undef main
+SOL_TEST_ENTRY("test_declarations")

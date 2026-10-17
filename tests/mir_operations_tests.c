@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/mir_operations.h"
 
 #include "sol/effects.h"
@@ -2324,27 +2326,29 @@ int main(void) {
     SolMirOperationsLimits defaults = sol_mir_operations_default_limits();
     CHECK(defaults.max_access_plans != 0 && defaults.max_validation_work != 0);
     sol_mir_operations_free(&empty);
-    test_e6_operations();
-    test_cross_recipe_result_propagation();
-    test_capability_constructor_plan();
-    test_recursive_equality_graph();
-    test_source_search_work_is_not_an_arena_count();
-    test_handlers_and_unresolved_callable_rejection();
-    test_bodyless_import_contract();
-    test_import_contract_helper_is_retained_and_lowered();
-    test_multiple_import_context_canonicalization();
-    test_predicate_body_count_wrap_rejection();
-    test_contract_propagation_rejection();
-    test_dynamic_predicate_callback_rejection();
-    test_image_callback_operations();
-    test_callable_hole_field_operations();
-    test_predicate_local_bound_capability_producer();
-    test_match_binding_dfs_authentication();
-    test_p2_6b2_rich_predicates();
-    test_exact_nested_refinement_context();
-    test_predicate_literal_authentication_and_rendering();
+    SOL_TEST_RUN(test_e6_operations());
+    SOL_TEST_RUN(test_cross_recipe_result_propagation());
+    SOL_TEST_RUN(test_capability_constructor_plan());
+    SOL_TEST_RUN(test_recursive_equality_graph());
+    SOL_TEST_RUN(test_source_search_work_is_not_an_arena_count());
+    SOL_TEST_RUN(test_handlers_and_unresolved_callable_rejection());
+    SOL_TEST_RUN(test_bodyless_import_contract());
+    SOL_TEST_RUN(test_import_contract_helper_is_retained_and_lowered());
+    SOL_TEST_RUN(test_multiple_import_context_canonicalization());
+    SOL_TEST_RUN(test_predicate_body_count_wrap_rejection());
+    SOL_TEST_RUN(test_contract_propagation_rejection());
+    SOL_TEST_RUN(test_dynamic_predicate_callback_rejection());
+    SOL_TEST_RUN(test_image_callback_operations());
+    SOL_TEST_RUN(test_callable_hole_field_operations());
+    SOL_TEST_RUN(test_predicate_local_bound_capability_producer());
+    SOL_TEST_RUN(test_match_binding_dfs_authentication());
+    SOL_TEST_RUN(test_p2_6b2_rich_predicates());
+    SOL_TEST_RUN(test_exact_nested_refinement_context());
+    SOL_TEST_RUN(test_predicate_literal_authentication_and_rendering());
     if (failures != 0) {
         fprintf(stderr, "%d MIR operations test(s) failed\n", failures); return 1;
     }
     printf("MIR operations tests passed\n"); return 0;
 }
+#undef main
+SOL_TEST_ENTRY("mir_operations")

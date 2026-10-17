@@ -1,10 +1,13 @@
+include("${CMAKE_CURRENT_LIST_DIR}/../support/test_progress.cmake")
 function(require_result actual expected context)
+    sol_test_phase("assert-exit:${context}")
     if(NOT "${actual}" STREQUAL "${expected}")
         message(FATAL_ERROR "${context}: expected exit ${expected}, got ${actual}")
     endif()
 endfunction()
 
 function(require_equal actual expected context)
+    sol_test_phase("compare-bytes:${context}")
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E compare_files "${actual}" "${expected}"
         RESULT_VARIABLE comparison
@@ -15,6 +18,7 @@ function(require_equal actual expected context)
 endfunction()
 
 function(require_no_transaction_artifacts directory context)
+    sol_test_phase("transaction-artifacts:${context}")
     file(GLOB_RECURSE artifacts
         "${directory}/*.solfmt-stage.*"
         "${directory}/*.solfmt-backup.*"
@@ -25,12 +29,14 @@ function(require_no_transaction_artifacts directory context)
     endif()
 endfunction()
 
+sol_test_phase("formatter:${CASE}:setup")
 execute_process(COMMAND "${CMAKE_COMMAND}" -E rm -rf "${TEST_DIR}" RESULT_VARIABLE setup_result)
 require_result("${setup_result}" 0 "remove old test directory")
 execute_process(COMMAND "${CMAKE_COMMAND}" -E make_directory "${TEST_DIR}" RESULT_VARIABLE setup_result)
 require_result("${setup_result}" 0 "create test directory")
 
 if(CASE STREQUAL "malformed_directory")
+    sol_test_phase("formatter:malformed-directory-fixture")
     set(input "${TEST_DIR}/package")
     execute_process(
         COMMAND "${CMAKE_COMMAND}" -E copy_directory "${FIXTURE_DIR}/malformed_directory" "${input}"
@@ -42,6 +48,7 @@ if(CASE STREQUAL "malformed_directory")
     execute_process(COMMAND "${CMAKE_COMMAND}" -E copy "${input}/bad.sol" "${TEST_DIR}/bad.before" RESULT_VARIABLE setup_result)
     require_result("${setup_result}" 0 "snapshot malformed file")
 
+    sol_test_phase("formatter:malformed-directory-rollback")
     execute_process(
         COMMAND "${SOL_EXECUTABLE}" fmt "${input}"
         RESULT_VARIABLE result
@@ -52,10 +59,12 @@ if(CASE STREQUAL "malformed_directory")
     require_equal("${input}/good.sol" "${TEST_DIR}/good.before" "valid file changed after directory failure")
     require_equal("${input}/bad.sol" "${TEST_DIR}/bad.before" "malformed file changed after directory failure")
     require_no_transaction_artifacts("${TEST_DIR}" "malformed directory cleanup")
+    sol_test_done("formatter:malformed-directory")
     return()
 endif()
 
 if(CASE STREQUAL "symlink")
+    sol_test_phase("formatter:symlink-fixture-and-rejection")
     set(target "${TEST_DIR}/target.sol")
     set(input "${TEST_DIR}/input.sol")
     execute_process(COMMAND "${CMAKE_COMMAND}" -E copy "${FIXTURE_DIR}/unformatted.sol" "${target}" RESULT_VARIABLE setup_result)
@@ -79,6 +88,7 @@ if(CASE STREQUAL "symlink")
     if(NOT IS_SYMLINK "${input}")
         message(FATAL_ERROR "formatter replaced direct symlink operand")
     endif()
+    sol_test_done("formatter:symlink")
     return()
 endif()
 
@@ -89,6 +99,7 @@ execute_process(COMMAND "${CMAKE_COMMAND}" -E copy "${input}" "${TEST_DIR}/input
 require_result("${setup_result}" 0 "snapshot input fixture")
 
 if(CASE STREQUAL "stdout")
+    sol_test_phase("formatter:stdout")
     execute_process(
         COMMAND "${SOL_EXECUTABLE}" fmt --stdout "${input}"
         RESULT_VARIABLE result
@@ -99,6 +110,7 @@ if(CASE STREQUAL "stdout")
     require_equal("${TEST_DIR}/stdout.actual" "${FIXTURE_DIR}/expected.sol" "fmt --stdout output")
     require_equal("${input}" "${TEST_DIR}/input.before" "fmt --stdout modified its input")
 elseif(CASE STREQUAL "check")
+    sol_test_phase("formatter:check-unformatted")
     execute_process(
         COMMAND "${SOL_EXECUTABLE}" fmt --check "${input}"
         RESULT_VARIABLE result
@@ -112,20 +124,24 @@ elseif(CASE STREQUAL "check")
     endif()
     require_equal("${input}" "${TEST_DIR}/input.before" "fmt --check modified its input")
 elseif(CASE STREQUAL "rewrite")
+    sol_test_phase("formatter:rewrite")
     execute_process(COMMAND "${SOL_EXECUTABLE}" fmt "${input}" RESULT_VARIABLE result ERROR_VARIABLE error)
     require_result("${result}" 0 "fmt rewrite")
     require_equal("${input}" "${FIXTURE_DIR}/expected.sol" "fmt rewrite output")
     require_no_transaction_artifacts("${TEST_DIR}" "successful rewrite cleanup")
 
+    sol_test_phase("formatter:check-after-rewrite")
     execute_process(COMMAND "${SOL_EXECUTABLE}" fmt --check "${input}" RESULT_VARIABLE result ERROR_VARIABLE error)
     require_result("${result}" 0 "fmt --check after rewrite")
     execute_process(COMMAND "${CMAKE_COMMAND}" -E copy "${input}" "${TEST_DIR}/first-rewrite.sol" RESULT_VARIABLE setup_result)
     require_result("${setup_result}" 0 "snapshot first rewrite")
+    sol_test_phase("formatter:second-rewrite-idempotence")
     execute_process(COMMAND "${SOL_EXECUTABLE}" fmt "${input}" RESULT_VARIABLE result ERROR_VARIABLE error)
     require_result("${result}" 0 "second fmt rewrite")
     require_equal("${input}" "${TEST_DIR}/first-rewrite.sol" "second rewrite was not byte-idempotent")
     require_no_transaction_artifacts("${TEST_DIR}" "idempotent rewrite cleanup")
 elseif(CASE STREQUAL "exclusive_options")
+    sol_test_phase("formatter:exclusive-options")
     execute_process(
         COMMAND "${SOL_EXECUTABLE}" fmt --check --stdout "${input}"
         RESULT_VARIABLE result
@@ -140,3 +156,4 @@ elseif(CASE STREQUAL "exclusive_options")
 else()
     message(FATAL_ERROR "unknown formatter CLI test case: ${CASE}")
 endif()
+sol_test_done("formatter-cli:${CASE}")

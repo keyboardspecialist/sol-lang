@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/mir_eval.h"
 #include "sol/effects.h"
 #include "sol/lexer.h"
@@ -1267,11 +1269,13 @@ static void test_resource_limits_and_provider_failures(void) {
 }
 
 int main(void) {
-    test_differential_core();
-    test_calls_places_methods_and_host();
-    test_resource_limits_and_provider_failures();
-    test_trace_limits_and_requests();
-    test_bodyful_capability_rejection();
+    SOL_TEST_RUN(test_differential_core());
+    SOL_TEST_RUN(test_calls_places_methods_and_host());
+    SOL_TEST_RUN(test_resource_limits_and_provider_failures());
+    SOL_TEST_RUN(test_trace_limits_and_requests());
+    SOL_TEST_RUN(test_bodyful_capability_rejection());
     if (failures != 0) fprintf(stderr, "%d MIR evaluator test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }
+#undef main
+SOL_TEST_ENTRY("mir_eval")

@@ -1,4 +1,6 @@
+include("${CMAKE_CURRENT_LIST_DIR}/../support/test_progress.cmake")
 function(run_case name expected)
+    sol_test_phase("run:${name}:${ARGN}")
     execute_process(
         COMMAND "${SOL_EXECUTABLE}" run ${ARGN}
         RESULT_VARIABLE result
@@ -10,6 +12,7 @@ function(run_case name expected)
     endif()
     set("${name}_output" "${output}" PARENT_SCOPE)
     set("${name}_error" "${error}" PARENT_SCOPE)
+    sol_test_done("run-subcommand:${name}")
 endfunction()
 
 run_case(unit 0 "${FIXTURE_DIR}/unit.sol")
@@ -145,3 +148,4 @@ run_case(missing_path 1 "${FIXTURE_DIR}/missing.sol")
 if(NOT missing_path_error MATCHES "cannot inspect" OR NOT missing_path_output STREQUAL "")
     message(FATAL_ERROR "missing path mismatch: ${missing_path_output}${missing_path_error}")
 endif()
+sol_test_done("run-cli")

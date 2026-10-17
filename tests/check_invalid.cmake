@@ -1,3 +1,5 @@
+include("${CMAKE_CURRENT_LIST_DIR}/support/test_progress.cmake")
+sol_test_phase("check-json:${SOL_SOURCE}:${EXPECTED_CODE}")
 execute_process(
     COMMAND "${SOL_EXECUTABLE}" check --diagnostic-format=json "${SOL_SOURCE}"
     RESULT_VARIABLE result
@@ -12,3 +14,4 @@ endif()
 if(NOT output MATCHES "\"code\":\"${EXPECTED_CODE}\"")
     message(FATAL_ERROR "expected ${EXPECTED_CODE} JSON diagnostic, got: ${output}")
 endif()
+sol_test_done("check-json-and-expected-diagnostic")

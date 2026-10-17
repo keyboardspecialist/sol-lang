@@ -1,3 +1,5 @@
+#include "support/native_progress.h"
+#define main sol_test_body
 #define SOL_MIR_PLAN_TEST_HOOKS 1
 #include "sol/mir_runtime_values.h"
 
@@ -4087,6 +4089,13 @@ static void test_equality_model(const SolMirRuntimeValues *values) {
 }
 
 int main(void) {
+#define test_inventory(...) SOL_TEST_RUN(test_inventory(__VA_ARGS__))
+#define test_no_import_recipe_accounting(...) SOL_TEST_RUN(test_no_import_recipe_accounting(__VA_ARGS__))
+#define test_bound_environment_exclusion(...) SOL_TEST_RUN(test_bound_environment_exclusion(__VA_ARGS__))
+#define test_host_result_result_fixture(...) SOL_TEST_RUN(test_host_result_result_fixture(__VA_ARGS__))
+#define test_forbidden_host_result_requirement(...) SOL_TEST_RUN(test_forbidden_host_result_requirement(__VA_ARGS__))
+#define test_plan_classification_fixture(...) SOL_TEST_RUN(test_plan_classification_fixture(__VA_ARGS__))
+#define test_recursive_copy_transaction_model(...) SOL_TEST_RUN(test_recursive_copy_transaction_model(__VA_ARGS__))
     Compilation compilation;
     CHECK(compile_e6(&compilation));
     SolMirConcreteProgram programs[2];
@@ -4130,3 +4139,5 @@ int main(void) {
     }
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("mir_runtime_values")

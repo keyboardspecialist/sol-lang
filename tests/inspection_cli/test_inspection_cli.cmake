@@ -1,4 +1,6 @@
+include("${CMAKE_CURRENT_LIST_DIR}/../support/test_progress.cmake")
 function(run_inspect name expected source)
+    sol_test_phase("inspect:${name}:${source}")
     execute_process(
         COMMAND "${SOL_EXECUTABLE}" inspect "${source}"
         RESULT_VARIABLE result
@@ -12,6 +14,7 @@ function(run_inspect name expected source)
     set("${name}_error" "${error}" PARENT_SCOPE)
     if(expected EQUAL 0)
         file(WRITE "${TEST_DIR}/${name}.json" "${output}")
+        sol_test_phase("schema-and-json-semantics:${name}")
         execute_process(
             COMMAND "${PYTHON_EXECUTABLE}"
                 "${CMAKE_CURRENT_LIST_DIR}/validate_inspection.py"
@@ -24,6 +27,7 @@ function(run_inspect name expected source)
             message(FATAL_ERROR "${name}: validation failed\n${validation_output}${validation_error}")
         endif()
     endif()
+    sol_test_done("inspect-and-schema:${name}")
 endfunction()
 
 file(MAKE_DIRECTORY "${TEST_DIR}")
@@ -88,6 +92,7 @@ if(NOT load_failure_output MATCHES "\"schema\":\"sol.cli-error/1\""
     message(FATAL_ERROR "load failure mismatch: ${load_failure_output}")
 endif()
 
+sol_test_phase("inspect-usage-rejection")
 execute_process(
     COMMAND "${SOL_EXECUTABLE}" inspect --diagnostic-format=json "${SOURCE_FILE}"
     RESULT_VARIABLE usage_result
@@ -96,3 +101,4 @@ execute_process(
 if(NOT usage_result EQUAL 2 OR NOT usage_error MATCHES "exactly one")
     message(FATAL_ERROR "inspection usage mismatch: ${usage_result} ${usage_error}")
 endif()
+sol_test_done("inspection-cli")

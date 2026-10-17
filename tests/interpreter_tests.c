@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/interpreter.h"
 #include "sol/effects.h"
 #include "sol/lexer.h"
@@ -2560,27 +2562,29 @@ static void test_runtime_callable_contracts(void) {
 }
 
 int main(void) {
-    test_primitives_control_and_lifetime();
-    test_place_projection_execution();
-    test_data_callbacks_generics_and_traits();
-    test_exact_generic_evidence_bindings();
-    test_borrowed_host_results();
-    test_computed_bound_operations();
-    test_capability_policy_and_malformed();
-    test_deep_handler();
-    test_package_diagnostic_mapping();
-    test_copy_and_move_reads();
-    test_callable_borrow_execution();
-    test_regions_and_deterministic_cleanup();
-    test_assignment_replacement_and_failure();
-    test_declaration_modify_and_compound_runtime();
-    test_projected_moves_assignments_and_inout();
-    test_malformed_top_level_requests();
-    test_loop_execution_and_cleanup();
-    test_terminating_statements_runtime();
-    test_tuple_runtime_and_host_values();
-    test_recursive_patterns_guards_and_cleanup();
-    test_runtime_callable_contracts();
+    SOL_TEST_RUN(test_primitives_control_and_lifetime());
+    SOL_TEST_RUN(test_place_projection_execution());
+    SOL_TEST_RUN(test_data_callbacks_generics_and_traits());
+    SOL_TEST_RUN(test_exact_generic_evidence_bindings());
+    SOL_TEST_RUN(test_borrowed_host_results());
+    SOL_TEST_RUN(test_computed_bound_operations());
+    SOL_TEST_RUN(test_capability_policy_and_malformed());
+    SOL_TEST_RUN(test_deep_handler());
+    SOL_TEST_RUN(test_package_diagnostic_mapping());
+    SOL_TEST_RUN(test_copy_and_move_reads());
+    SOL_TEST_RUN(test_callable_borrow_execution());
+    SOL_TEST_RUN(test_regions_and_deterministic_cleanup());
+    SOL_TEST_RUN(test_assignment_replacement_and_failure());
+    SOL_TEST_RUN(test_declaration_modify_and_compound_runtime());
+    SOL_TEST_RUN(test_projected_moves_assignments_and_inout());
+    SOL_TEST_RUN(test_malformed_top_level_requests());
+    SOL_TEST_RUN(test_loop_execution_and_cleanup());
+    SOL_TEST_RUN(test_terminating_statements_runtime());
+    SOL_TEST_RUN(test_tuple_runtime_and_host_values());
+    SOL_TEST_RUN(test_recursive_patterns_guards_and_cleanup());
+    SOL_TEST_RUN(test_runtime_callable_contracts());
     if (failures != 0) fprintf(stderr, "%d interpreter test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }
+#undef main
+SOL_TEST_ENTRY("interpreter")

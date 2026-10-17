@@ -1,4 +1,6 @@
+include("${CMAKE_CURRENT_LIST_DIR}/../support/test_progress.cmake")
 function(run_test name expected source format)
+    sol_test_phase("test:${name}:${format}:${source}")
     set(arguments test)
     if(NOT "${format}" STREQUAL "")
         list(APPEND arguments "--diagnostic-format=${format}")
@@ -15,9 +17,11 @@ function(run_test name expected source format)
     endif()
     set("${name}_output" "${output}" PARENT_SCOPE)
     set("${name}_error" "${error}" PARENT_SCOPE)
+    sol_test_done("test-subcommand:${name}")
 endfunction()
 
 function(run_cli name expected)
+    sol_test_phase("cli:${name}:${ARGN}")
     execute_process(
         COMMAND "${SOL_EXECUTABLE}" ${ARGN}
         RESULT_VARIABLE result
@@ -29,6 +33,7 @@ function(run_cli name expected)
     endif()
     set("${name}_output" "${output}" PARENT_SCOPE)
     set("${name}_error" "${error}" PARENT_SCOPE)
+    sol_test_done("cli-subcommand:${name}")
 endfunction()
 
 run_test(pass 0 "${FIXTURE_DIR}/pass.sol" human)
@@ -125,6 +130,7 @@ foreach(command check test)
     endif()
 endforeach()
 
+sol_test_phase("test-usage-rejection")
 execute_process(
     COMMAND "${SOL_EXECUTABLE}" test --bad "${FIXTURE_DIR}/pass.sol"
     RESULT_VARIABLE usage_result
@@ -135,6 +141,7 @@ if(NOT usage_result EQUAL 2 OR NOT usage_error MATCHES "unknown option")
     message(FATAL_ERROR "usage mismatch: ${usage_result} ${usage_output}${usage_error}")
 endif()
 
+sol_test_phase("fmt-check-test-source")
 execute_process(
     COMMAND "${SOL_EXECUTABLE}" fmt --check "${FIXTURE_DIR}/pass.sol"
     RESULT_VARIABLE format_result
@@ -146,6 +153,7 @@ if(NOT format_result EQUAL 0)
 endif()
 
 if(UNIX AND NOT "${CLI_IO_HELPER}" STREQUAL "")
+    sol_test_phase("cli-io-helper:closed-stdout-unicode-invalid-bytes")
     execute_process(
         COMMAND "${CLI_IO_HELPER}" "${SOL_EXECUTABLE}" "${FIXTURE_DIR}/pass.sol"
             "${FIXTURE_DIR}/non_ascii_é.sol" "${RUN_FIXTURE}" "${RUN_NONZERO_FIXTURE}"
@@ -155,3 +163,4 @@ if(UNIX AND NOT "${CLI_IO_HELPER}" STREQUAL "")
         message(FATAL_ERROR "CLI stdout/invalid-byte helper failed: ${io_result}")
     endif()
 endif()
+sol_test_done("test-cli")

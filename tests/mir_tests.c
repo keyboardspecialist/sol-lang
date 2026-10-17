@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/mir.h"
 #include "sol/effects.h"
 #include "sol/lexer.h"
@@ -3992,34 +3994,36 @@ static void test_scope_terminator_provenance(void) {
 }
 
 int main(void) {
-    test_canonical_rendering();
-    test_initial_lowering_and_determinism();
-    test_require_never_fallback_lowering();
-    test_lexical_scope_markers();
-    test_scope_terminator_provenance();
-    test_transactional_unsupported();
-    test_callable_contract_envelope();
-    test_calls_and_remaining_local_control();
-    test_validator_rejects_corruption();
-    test_cfg_ssa_dominance();
-    test_cfg_ssa_ownership();
-    test_loop_control_lowering();
-    test_bounded_value_construction();
-    test_compound_update_lowering();
-    test_authority_bearing_construction();
-    test_e6_executable_callable_census();
-    test_refined_failure_cleanup();
-    test_recursive_match_lowering();
-    test_propagation_lowering();
-    test_projected_place_lowering();
-    test_partial_move_path_state();
-    test_callback_invoke_lowering();
-    test_concrete_method_invoke_lowering();
-    test_capability_invoke_lowering();
-    test_handler_lowering();
-    test_owned_temporary_cleanup();
-    test_generic_evidence_and_implementation_checkpoint();
-    test_render_vocabulary_census();
+    SOL_TEST_RUN(test_canonical_rendering());
+    SOL_TEST_RUN(test_initial_lowering_and_determinism());
+    SOL_TEST_RUN(test_require_never_fallback_lowering());
+    SOL_TEST_RUN(test_lexical_scope_markers());
+    SOL_TEST_RUN(test_scope_terminator_provenance());
+    SOL_TEST_RUN(test_transactional_unsupported());
+    SOL_TEST_RUN(test_callable_contract_envelope());
+    SOL_TEST_RUN(test_calls_and_remaining_local_control());
+    SOL_TEST_RUN(test_validator_rejects_corruption());
+    SOL_TEST_RUN(test_cfg_ssa_dominance());
+    SOL_TEST_RUN(test_cfg_ssa_ownership());
+    SOL_TEST_RUN(test_loop_control_lowering());
+    SOL_TEST_RUN(test_bounded_value_construction());
+    SOL_TEST_RUN(test_compound_update_lowering());
+    SOL_TEST_RUN(test_authority_bearing_construction());
+    SOL_TEST_RUN(test_e6_executable_callable_census());
+    SOL_TEST_RUN(test_refined_failure_cleanup());
+    SOL_TEST_RUN(test_recursive_match_lowering());
+    SOL_TEST_RUN(test_propagation_lowering());
+    SOL_TEST_RUN(test_projected_place_lowering());
+    SOL_TEST_RUN(test_partial_move_path_state());
+    SOL_TEST_RUN(test_callback_invoke_lowering());
+    SOL_TEST_RUN(test_concrete_method_invoke_lowering());
+    SOL_TEST_RUN(test_capability_invoke_lowering());
+    SOL_TEST_RUN(test_handler_lowering());
+    SOL_TEST_RUN(test_owned_temporary_cleanup());
+    SOL_TEST_RUN(test_generic_evidence_and_implementation_checkpoint());
+    SOL_TEST_RUN(test_render_vocabulary_census());
     if (failures != 0) fprintf(stderr, "%d MIR test failure(s)\n", failures);
     return failures == 0 ? 0 : 1;
 }
+#undef main
+SOL_TEST_ENTRY("mir")

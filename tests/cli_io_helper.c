@@ -1,4 +1,6 @@
 #define _POSIX_C_SOURCE 200809L
+#include "support/test_progress.h"
+#define main sol_test_body
 
 #include <errno.h>
 #include <fcntl.h>
@@ -22,6 +24,8 @@ static bool wait_for(pid_t child, int *exit_code) {
 }
 
 static bool run_closed(const char *sol, char *const arguments[], int expected) {
+    sol_test_progress_case(arguments[1]);
+    sol_test_progress_phase("closed-child-stdout", "child", 1);
     int descriptors[2];
     int gate[2];
     if (pipe(descriptors) != 0) return false;
@@ -56,12 +60,17 @@ static bool run_closed(const char *sol, char *const arguments[], int expected) {
     (void)write(gate[1], &ready, 1);
     close(gate[1]);
     int exit_code;
-    return wait_for(child, &exit_code) && exit_code == expected;
+    bool result = wait_for(child, &exit_code) && exit_code == expected;
+    sol_test_progress_completed(1);
+    sol_test_progress_phase_end();
+    return result;
 }
 
 static bool run_capture(
     const char *sol, char *const arguments[], char *output, size_t capacity
 ) {
+    sol_test_progress_case(arguments[1]);
+    sol_test_progress_phase("capture-child-stdout", "child", 1);
     int descriptors[2];
     if (capacity == 0 || pipe(descriptors) != 0) return false;
     pid_t child = fork();
@@ -89,7 +98,10 @@ static bool run_capture(
     close(descriptors[0]);
     output[count] = '\0';
     int exit_code;
-    return wait_for(child, &exit_code) && exit_code == 0;
+    bool result = wait_for(child, &exit_code) && exit_code == 0;
+    sol_test_progress_completed(1);
+    sol_test_progress_phase_end();
+    return result;
 }
 
 static bool valid_utf8(const unsigned char *text) {
@@ -268,3 +280,5 @@ int main(int argc, char **argv) {
     }
     return safe_json && safe_human ? 0 : 1;
 }
+#undef main
+SOL_TEST_ARGV_ENTRY("cli_io_helper")

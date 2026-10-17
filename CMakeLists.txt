@@ -175,6 +175,24 @@ enable_testing()
 if(BUILD_TESTING)
     target_compile_definitions(sol_compiler PRIVATE SOL_MIR_PLAN_TEST_HOOKS)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    include(cmake/SolTestSupport.cmake)
+    add_library(sol_test_progress STATIC tests/support/test_progress.c)
+    target_include_directories(sol_test_progress PUBLIC tests/support)
+    add_executable(sol_progress_child tests/support/progress_child.c)
+    target_link_libraries(sol_progress_child PRIVATE sol_test_progress)
+    set_target_properties(sol_test_progress sol_progress_child PROPERTIES
+        C_STANDARD 17 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+    foreach(progress_target sol_test_progress sol_progress_child)
+        if(MSVC)
+            target_compile_options(${progress_target} PRIVATE /W4)
+        elseif(CMAKE_C_COMPILER_ID MATCHES "Clang|GNU")
+            target_compile_options(${progress_target} PRIVATE -Wall -Wextra -Wpedantic -Wshadow -Wconversion)
+            if(SOL_ENABLE_SANITIZERS)
+                target_compile_options(${progress_target} PRIVATE -fsanitize=address,undefined -fno-omit-frame-pointer)
+                target_link_options(${progress_target} PRIVATE -fsanitize=address,undefined)
+            endif()
+        endif()
+    endforeach()
     add_executable(sol_frontend_tests tests/frontend_tests.c)
     target_link_libraries(sol_frontend_tests PRIVATE sol_compiler)
     add_executable(sol_compilation_tests tests/compilation_tests.c)
@@ -305,6 +323,7 @@ if(BUILD_TESTING)
     endif()
     if(UNIX)
         add_executable(sol_cli_io_helper tests/cli_io_helper.c)
+        target_link_libraries(sol_cli_io_helper PRIVATE sol_test_progress)
         set(SOL_CLI_IO_HELPER $<TARGET_FILE:sol_cli_io_helper>)
     else()
         set(SOL_CLI_IO_HELPER "")
@@ -315,6 +334,12 @@ if(BUILD_TESTING)
     target_compile_definitions(sol_ir_tests PRIVATE
         SOL_TEST_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
     )
+    get_property(sol_test_targets DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(test_target IN LISTS sol_test_targets)
+        if(test_target MATCHES "^sol_.*_tests$")
+            target_link_libraries(${test_target} PRIVATE sol_test_progress)
+        endif()
+    endforeach()
     if(MSVC)
         target_compile_options(sol_frontend_tests PRIVATE /std:c17 /W4)
         target_compile_options(sol_compilation_tests PRIVATE /std:c17 /W4)
@@ -470,40 +495,46 @@ if(BUILD_TESTING)
         endif()
     endif()
 
-    add_test(NAME frontend COMMAND sol_frontend_tests)
-    add_test(NAME compilation COMMAND sol_compilation_tests)
-    add_test(NAME formatter COMMAND sol_formatter_tests)
-    add_test(NAME sema COMMAND sol_sema_tests)
-    add_test(NAME typecheck COMMAND sol_typecheck_tests)
-    add_test(NAME effectcheck COMMAND sol_effectcheck_tests)
-    add_test(NAME contract COMMAND sol_contract_tests)
-    add_test(NAME package COMMAND sol_package_tests)
-    add_test(NAME ir COMMAND sol_ir_tests)
-    add_test(NAME mir COMMAND sol_mir_tests)
-    add_test(NAME mir_eval COMMAND sol_mir_eval_tests)
-    add_test(NAME mir_program COMMAND sol_mir_program_tests)
-    add_test(NAME mir_plan COMMAND sol_mir_plan_tests)
-    add_test(NAME mir_materialize COMMAND sol_mir_materialize_tests)
-    add_test(NAME mir_representation COMMAND sol_mir_representation_tests)
-    add_test(NAME mir_layout COMMAND sol_mir_layout_tests)
-    add_test(NAME mir_operations COMMAND sol_mir_operations_tests)
-    add_test(NAME mir_linkage COMMAND sol_mir_linkage_tests)
-    add_test(NAME mir_concrete COMMAND sol_mir_concrete_tests)
-    add_test(NAME mir_runtime_conventions COMMAND sol_mir_runtime_conventions_tests)
-    add_test(NAME mir_runtime_values COMMAND sol_mir_runtime_values_tests)
-    add_test(NAME mir_runtime_cleanup COMMAND sol_mir_runtime_cleanup_tests)
-    add_test(NAME mir_runtime_host_abi COMMAND sol_mir_runtime_host_abi_tests)
-    add_test(NAME mir_runtime_handler_abi COMMAND sol_mir_runtime_handler_abi_tests)
-    add_test(NAME mir_runtime_lowered_program COMMAND sol_mir_runtime_lowered_program_tests)
-    add_test(NAME interpreter COMMAND sol_interpreter_tests)
-    add_test(NAME inspection COMMAND sol_inspection_tests)
-    add_test(NAME test_declarations COMMAND sol_test_declaration_tests)
+    sol_add_test(NAME progress_support COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/support/test_progress_support.py"
+        --child "$<TARGET_FILE:sol_progress_child>" --cmake "${CMAKE_COMMAND}")
+    sol_add_test(NAME progress_integration COMMAND "${Python3_EXECUTABLE}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/support/test_progress_integration.py"
+        --cmake "${CMAKE_COMMAND}")
+    sol_add_test(NAME frontend COMMAND sol_frontend_tests)
+    sol_add_test(NAME compilation COMMAND sol_compilation_tests)
+    sol_add_test(NAME formatter COMMAND sol_formatter_tests)
+    sol_add_test(NAME sema COMMAND sol_sema_tests)
+    sol_add_test(NAME typecheck COMMAND sol_typecheck_tests)
+    sol_add_test(NAME effectcheck COMMAND sol_effectcheck_tests)
+    sol_add_test(NAME contract COMMAND sol_contract_tests)
+    sol_add_test(NAME package COMMAND sol_package_tests)
+    sol_add_test(NAME ir COMMAND sol_ir_tests)
+    sol_add_test(NAME mir COMMAND sol_mir_tests)
+    sol_add_test(NAME mir_eval COMMAND sol_mir_eval_tests)
+    sol_add_test(NAME mir_program COMMAND sol_mir_program_tests)
+    sol_add_test(NAME mir_plan COMMAND sol_mir_plan_tests)
+    sol_add_test(NAME mir_materialize COMMAND sol_mir_materialize_tests)
+    sol_add_test(NAME mir_representation COMMAND sol_mir_representation_tests)
+    sol_add_test(NAME mir_layout COMMAND sol_mir_layout_tests)
+    sol_add_test(NAME mir_operations COMMAND sol_mir_operations_tests)
+    sol_add_test(NAME mir_linkage COMMAND sol_mir_linkage_tests)
+    sol_add_test(NAME mir_concrete COMMAND sol_mir_concrete_tests)
+    sol_add_test(NAME mir_runtime_conventions COMMAND sol_mir_runtime_conventions_tests)
+    sol_add_test(NAME mir_runtime_values COMMAND sol_mir_runtime_values_tests)
+    sol_add_test(NAME mir_runtime_cleanup COMMAND sol_mir_runtime_cleanup_tests)
+    sol_add_test(NAME mir_runtime_host_abi COMMAND sol_mir_runtime_host_abi_tests)
+    sol_add_test(NAME mir_runtime_handler_abi COMMAND sol_mir_runtime_handler_abi_tests)
+    sol_add_test(NAME mir_runtime_lowered_program COMMAND sol_mir_runtime_lowered_program_tests)
+    sol_add_test(NAME interpreter COMMAND sol_interpreter_tests)
+    sol_add_test(NAME inspection COMMAND sol_inspection_tests)
+    sol_add_test(NAME test_declarations COMMAND sol_test_declaration_tests)
     if(SOL_ENABLE_WASM_BACKEND)
-        add_test(NAME wasm_backend COMMAND sol_wasm_backend_tests)
-        add_test(NAME wasm_scalar COMMAND sol_wasm_scalar_tests)
-        add_test(NAME wasm_represented COMMAND sol_wasm_represented_tests)
+        sol_add_test(NAME wasm_backend COMMAND sol_wasm_backend_tests)
+        sol_add_test(NAME wasm_scalar COMMAND sol_wasm_scalar_tests)
+        sol_add_test(NAME wasm_represented COMMAND sol_wasm_represented_tests)
         if(UNIX)
-            add_test(NAME wasm_backend_config_rejections
+            sol_add_test(NAME wasm_backend_config_rejections
                 COMMAND ${CMAKE_COMMAND}
                     -DSOL_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}
                     -DSOL_CMAKE_GENERATOR=${CMAKE_GENERATOR}
@@ -513,17 +544,17 @@ if(BUILD_TESTING)
                     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/wasm_backend_config_rejections.cmake)
         endif()
     endif()
-    add_test(NAME cli_valid COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/valid.sol)
-    add_test(NAME cli_mutable COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/mutable.sol)
-    add_test(
+    sol_add_test(NAME cli_valid COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/valid.sol)
+    sol_add_test(NAME cli_mutable COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/mutable.sol)
+    sol_add_test(
         NAME cli_package_valid
         COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/packages/valid
     )
-    add_test(
+    sol_add_test(
         NAME cli_package_mutable
         COMMAND sol check ${CMAKE_CURRENT_SOURCE_DIR}/tests/packages/mutable
     )
-    add_test(
+    sol_add_test(
         NAME cli_package_private_import
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -531,7 +562,7 @@ if(BUILD_TESTING)
             -DEXPECTED_CODE=SOL-RESOLVE-010
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
-    add_test(
+    sol_add_test(
         NAME cli_package_missing_import
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -539,7 +570,7 @@ if(BUILD_TESTING)
             -DEXPECTED_CODE=SOL-RESOLVE-008
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
-    add_test(
+    sol_add_test(
         NAME cli_package_duplicate
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -547,7 +578,7 @@ if(BUILD_TESTING)
             -DEXPECTED_CODE=SOL-RESOLVE-001
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
-    add_test(
+    sol_add_test(
         NAME cli_invalid
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -555,7 +586,7 @@ if(BUILD_TESTING)
             -DEXPECTED_CODE=SOL-PARSE-004
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
-    add_test(
+    sol_add_test(
         NAME cli_unresolved
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -563,7 +594,7 @@ if(BUILD_TESTING)
             -DEXPECTED_CODE=SOL-RESOLVE-002
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
-    add_test(
+    sol_add_test(
         NAME cli_type_error
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -571,7 +602,7 @@ if(BUILD_TESTING)
             -DEXPECTED_CODE=SOL-TYPE-002
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
-    add_test(
+    sol_add_test(
         NAME cli_effect_error
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -579,7 +610,7 @@ if(BUILD_TESTING)
             -DEXPECTED_CODE=SOL-EFFECT-002
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
-    add_test(
+    sol_add_test(
         NAME cli_authority_error
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -587,7 +618,7 @@ if(BUILD_TESTING)
             -DEXPECTED_CODE=SOL-EFFECT-010
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
-    add_test(
+    sol_add_test(
         NAME cli_ownership_error
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -595,7 +626,7 @@ if(BUILD_TESTING)
             -DEXPECTED_CODE=SOL-OWNERSHIP-001
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
-    add_test(
+    sol_add_test(
         NAME cli_borrow_error
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -603,7 +634,7 @@ if(BUILD_TESTING)
             -DEXPECTED_CODE=SOL-OWNERSHIP-002
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/check_invalid.cmake
     )
-    add_test(
+    sol_add_test(
         NAME cli_region_error
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -613,7 +644,7 @@ if(BUILD_TESTING)
     )
 
     foreach(formatter_cli_case stdout check rewrite malformed_directory symlink exclusive_options)
-        add_test(
+        sol_add_test(
             NAME formatter_cli_${formatter_cli_case}
             COMMAND ${CMAKE_COMMAND}
                 -DCASE=${formatter_cli_case}
@@ -624,7 +655,7 @@ if(BUILD_TESTING)
         )
         set_tests_properties(formatter_cli_${formatter_cli_case} PROPERTIES LABELS formatter_cli)
     endforeach()
-    add_test(
+    sol_add_test(
         NAME test_cli
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -635,7 +666,7 @@ if(BUILD_TESTING)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli/test_test_cli.cmake
     )
     set_tests_properties(test_cli PROPERTIES LABELS test_cli)
-    add_test(
+    sol_add_test(
         NAME run_cli
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -643,7 +674,7 @@ if(BUILD_TESTING)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_cli/test_run_cli.cmake
     )
     set_tests_properties(run_cli PROPERTIES LABELS run_cli)
-    add_test(
+    sol_add_test(
         NAME effects_cli
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -653,7 +684,7 @@ if(BUILD_TESTING)
             -DINVALID_FILE=${CMAKE_CURRENT_SOURCE_DIR}/tests/invalid.sol
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/effects_cli/test_effects_cli.cmake
     )
-    add_test(
+    sol_add_test(
         NAME inspection_cli
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>
@@ -670,7 +701,7 @@ if(BUILD_TESTING)
             -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/inspection_cli/test_inspection_cli.cmake
     )
     set_tests_properties(inspection_cli PROPERTIES LABELS inspection_cli)
-    add_test(
+    sol_add_test(
         NAME e6_conformance
         COMMAND ${CMAKE_COMMAND}
             -DSOL_EXECUTABLE=$<TARGET_FILE:sol>

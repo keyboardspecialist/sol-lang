@@ -1,4 +1,7 @@
+#include "support/native_progress.h"
+#define main sol_test_body
 #include "wasm_represented.h"
+#include "support/represented_progress.h"
 #include "sol/package.h"
 #include "sol/interpreter.h"
 
@@ -1732,6 +1735,7 @@ static bool callable_hole_c32_repair_controls(const char *directory) {
             baseline.bytes.count) == 0 && usage_equal(&output.usage, &baseline.usage);
     sol_wasm_represented_output_free(&output);
 #define CHECK_C32_CAP(field, cap) do { \
+    sol_test_progress_phase("quota:c32:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits limits = sol_wasm_represented_default_limits(); \
     limits.field = (cap); sol_wasm_represented_output_init(&output); \
     ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
@@ -1754,6 +1758,7 @@ static bool callable_hole_c32_repair_controls(const char *directory) {
     CHECK_C32_CAP(max_owned_bytes, expected.owned_bytes); CHECK_C32_CAP(max_output_bytes, expected.output_bytes);
 #undef CHECK_C32_CAP
 #define CHECK_C32_PARTIAL(field) do { \
+    sol_test_progress_phase("quota:c32-partial:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits limits = sol_wasm_represented_default_limits(); limits.field = 0; \
     sol_wasm_represented_output_init(&output); \
     ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
@@ -2778,6 +2783,7 @@ static bool verify_propagation_build_controls(const char *directory,
         && usage_equal(&output.usage, &baseline->usage);
     sol_wasm_represented_output_free(&output);
 #define CHECK_PROPAGATION_BUILD_CAP(field, exact) do { \
+    sol_test_progress_phase("quota:propagation:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits capped = sol_wasm_represented_default_limits(); \
     capped.field = (exact); sol_wasm_represented_output_init(&output); \
     ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
@@ -2808,6 +2814,7 @@ static bool verify_propagation_build_controls(const char *directory,
     CHECK_PROPAGATION_BUILD_CAP(max_output_bytes, baseline->usage.output_bytes);
 #undef CHECK_PROPAGATION_BUILD_CAP
 #define CHECK_PROPAGATION_PARTIAL_ZERO(field) do { \
+    sol_test_progress_phase("quota:propagation-partial:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits partial = sol_wasm_represented_default_limits(); \
     partial.field = 0; sol_wasm_represented_output_init(&output); \
     ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
@@ -3963,6 +3970,7 @@ static bool p44_trace_freeze_case(const char *directory, const SolWasmRepresente
         && memcmp(copy.bytes.bytes, traced.bytes.bytes, traced.bytes.count) == 0;
     sol_wasm_represented_output_free(&copy);
 #define CHECK_P44_TRACE_FREEZE_CAP(field, exact) do { \
+    sol_test_progress_phase("quota:trace:" #field, "quota-field", 0); \
     cap = sol_wasm_represented_default_limits(); cap.field = (exact); \
     sol_wasm_represented_output_init(&copy); \
     ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
@@ -3982,6 +3990,7 @@ static bool p44_trace_freeze_case(const char *directory, const SolWasmRepresente
     }
 #undef CHECK_P44_TRACE_FREEZE_CAP
 #define CHECK_P44_TRACE_PARTIAL_ZERO(field) do { \
+    sol_test_progress_phase("quota:trace-partial:" #field, "quota-field", 0); \
     cap = sol_wasm_represented_default_limits(); cap.field = 0; \
     sol_wasm_represented_output_init(&copy); \
     ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
@@ -5004,6 +5013,7 @@ static bool p44c_parameter_forward_resource_determinism(const char *directory) {
         && usage_equal(&output.usage, &baseline.usage);
     sol_wasm_represented_output_free(&output);
 #define CHECK_C1_RESOURCE_CAP(field, value) do { \
+    sol_test_progress_phase("quota:c1:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits cap = sol_wasm_represented_default_limits(); \
     cap.field = (value); sol_wasm_represented_output_init(&output); \
     ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
@@ -5029,6 +5039,7 @@ static bool p44c_parameter_forward_resource_determinism(const char *directory) {
     CHECK_C1_RESOURCE_CAP(max_output_bytes, expected.output_bytes);
 #undef CHECK_C1_RESOURCE_CAP
 #define CHECK_C1_PARTIAL_LIMIT(field) do { \
+    sol_test_progress_phase("quota:c1-partial:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits partial = sol_wasm_represented_default_limits(); \
     partial.field = 0; sol_wasm_represented_output_init(&output); \
     ok = ok && sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&pipeline.lowered, \
@@ -5885,6 +5896,7 @@ static bool c2b2_frozen_closure(const C2b2FrozenClosure *frozen, size_t first, s
     if (ok) ok = C2B2_BUILD_IDENTITY(&limits);
     sol_wasm_represented_output_free(&output);
 #define C2B2_EXACT_AND_BELOW(field, exact) do { \
+    sol_test_progress_phase("quota:c2b2:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits cap = sol_wasm_represented_default_limits(); cap.field = (exact); \
     sol_wasm_represented_output_init(&output); ok = ok && C2B2_BUILD_IDENTITY(&cap); \
     sol_wasm_represented_output_free(&output); cap.field = (exact) - 1; \
@@ -5917,6 +5929,7 @@ static bool c2b2_frozen_closure(const C2b2FrozenClosure *frozen, size_t first, s
     }
 #undef C2B2_EXACT_AND_BELOW
 #define C2B2_PARTIAL_ZERO(field) do { \
+    sol_test_progress_phase("quota:c2b2-partial:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits partial = sol_wasm_represented_default_limits(); partial.field = 0; \
     sol_wasm_represented_output_init(&output); ok = ok && sol_wasm_represented_build( \
         &(SolWasmRepresentedBuildRequest){&pipeline.lowered, directory, &partial}, &output, \
@@ -6193,6 +6206,7 @@ static bool p44c_qualified_sequential_stress(size_t first, size_t last) {
         && usage_equal(&reverse.usage, &expected) && usage_equal(&repeat.usage, &expected);
 
 #define C2B2_STRESS_CAP(field, exact) do { \
+    sol_test_progress_phase("quota:c2b2-stress:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits cap = sol_wasm_represented_default_limits(); cap.field = (exact); \
     sol_wasm_represented_output_free(&output); sol_wasm_represented_output_init(&output); \
     ok = ok && build_multiroot(directory, false, &output, forward_ids, &cap, \
@@ -8330,6 +8344,7 @@ static bool p44c_old_resource_determinism(const char *directory, const char *cur
         && usage_equal(&output.usage, &expected);
     sol_wasm_represented_output_free(&output);
 #define CHECK_C2B1_RESOURCE_CAP(field, value) do { \
+    sol_test_progress_phase("quota:c2b1:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits cap = sol_wasm_represented_default_limits(); cap.field = (value) - 1; \
     sol_wasm_represented_output_init(&output); \
     ok = ok && build_named_root(directory, "launch", &output, &cap, \
@@ -8636,6 +8651,7 @@ static bool p44c_ensures_resource_determinism(const char *directory) {
         && usage_equal(&output.usage, &expected);
     sol_wasm_represented_output_free(&output);
 #define CHECK_C2A_RESOURCE_CAP(field, value) do { \
+    sol_test_progress_phase("quota:c2a:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits cap = sol_wasm_represented_default_limits(); cap.field = (value); \
     sol_wasm_represented_output_init(&output); \
     ok = ok && build_multiroot(directory, false, &output, repeat_ids, &cap, \
@@ -9140,6 +9156,7 @@ static bool c3a_refined_resources(void) {
         && memcmp(output.bytes.bytes, baseline.bytes.bytes, baseline.bytes.count) == 0;
     sol_wasm_represented_output_free(&output);
 #define C3A_CAP(field, exact_value) do { \
+    sol_test_progress_phase("quota:c3a:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits cap = sol_wasm_represented_default_limits(); cap.field=(exact_value)-1; \
     sol_wasm_represented_output_init(&output); ok = ok && build_named_root(directory, "launch_true", \
         &output, &cap, SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED) && output.bytes.bytes == NULL \
@@ -10594,6 +10611,7 @@ static bool p44e_depth_resources(size_t first, size_t last) {
         ok=usage_equal(&baseline.usage,&expected) && memcmp(hash,expected_hash,sizeof hash)==0;
     }
 #define DEPTH_CAP(field,value) do { \
+    sol_test_progress_phase("quota:depth:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits limits=sol_wasm_represented_default_limits(); limits.field=(value); \
     bool exact=build_multiroot(directory,false,&output,ids,&limits,SOL_WASM_REPRESENTED_OK) \
         && usage_equal(&output.usage,&expected) && output.bytes.count==baseline.bytes.count \
@@ -12026,6 +12044,7 @@ static bool p44f_exclusive_resources(PropagationPipeline *p, const char *directo
         && !memcmp(output.bytes.bytes, baseline->bytes.bytes, output.bytes.count);
     sol_wasm_represented_output_free(&output);
 #define P44F_BELOW(field) do { \
+    sol_test_progress_phase("quota:p44f:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits cap = exact; --cap.field; sol_wasm_represented_output_init(&output); \
     SolWasmRepresentedResult r = sol_wasm_represented_build( \
         &(SolWasmRepresentedBuildRequest){&p->lowered,directory,&cap}, &output, &p->diagnostics); \
@@ -12362,6 +12381,7 @@ static void run_callable_holes(size_t first, size_t last) {
             && usage_equal(&callable_hole_retry.usage, &output.usage));
         sol_wasm_represented_output_free(&callable_hole_retry);
 #define CHECK_CALLABLE_HOLE_CAP(field, exact) do { \
+    sol_test_progress_phase("quota:callable-hole:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits capped = sol_wasm_represented_default_limits(); \
     capped.field = (exact); sol_wasm_represented_output_init(&callable_hole_retry); \
     CHECK(build_named_root(callable_hole_directory, "launch", &callable_hole_retry, &capped, \
@@ -12388,6 +12408,7 @@ static void run_callable_holes(size_t first, size_t last) {
         CHECK_CALLABLE_HOLE_CAP(max_output_bytes, output.usage.output_bytes);
 #undef CHECK_CALLABLE_HOLE_CAP
 #define CHECK_CALLABLE_HOLE_PARTIAL(field) do { \
+    sol_test_progress_phase("quota:callable-hole-partial:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits partial = sol_wasm_represented_default_limits(); \
     partial.field = 0; sol_wasm_represented_output_init(&callable_hole_retry); \
     CHECK(build_named_root(callable_hole_directory, "launch", &callable_hole_retry, &partial, \
@@ -12630,6 +12651,7 @@ static void run_callback_inout(size_t first, size_t last) {
             sizeof callback_inout_roots_hash) == 0
         && callback_inout_allocation_attempts == 122);
 #define CHECK_C2B_BUILD_CAP(field, exact) do { \
+    sol_test_progress_phase("quota:c2b:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits cap = sol_wasm_represented_default_limits(); \
     SolWasmRepresentedOutput capped; cap.field = (exact); sol_wasm_represented_output_init(&capped); \
     CHECK(build_multiroot(callback_inout_directory, false, &capped, callback_inout_ids, &cap, \
@@ -12659,6 +12681,7 @@ static void run_callback_inout(size_t first, size_t last) {
         && usage_equal(&callback_inout_copy.usage, &callback_inout_roots.usage));
     sol_wasm_represented_output_free(&callback_inout_copy);
 #define CHECK_C2B_PARTIAL_ZERO(field) do { \
+    sol_test_progress_phase("quota:c2b-partial:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits partial = sol_wasm_represented_default_limits(); \
     SolWasmRepresentedOutput rejected; partial.field = 0; sol_wasm_represented_output_init(&rejected); \
     CHECK(build_multiroot(callback_inout_directory, false, &rejected, callback_inout_ids, &partial, \
@@ -12900,6 +12923,7 @@ static void run_methods(size_t first, size_t last) {
        fail one below.  The direct method slice owns neither table/static data
        nor runtime allocation quota demand. */
 #define CHECK_METHOD_BUILD_CAP(field, exact) do { \
+    sol_test_progress_phase("quota:method:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits cap = sol_wasm_represented_default_limits(); \
     SolWasmRepresentedOutput capped; cap.field = (exact); sol_wasm_represented_output_init(&capped); \
     CHECK(build_named_root(method_directory, "launch", &capped, &cap, SOL_WASM_REPRESENTED_OK) \
@@ -12949,6 +12973,7 @@ static void run_methods(size_t first, size_t last) {
     }
     sol_wasm_represented_test_fail_allocation_after(0);
 #define CHECK_METHOD_PARTIAL_ZERO(field) do { \
+    sol_test_progress_phase("quota:method-partial:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits partial = sol_wasm_represented_default_limits(); \
     SolWasmRepresentedOutput rejected; partial.field = 0; sol_wasm_represented_output_init(&rejected); \
     CHECK(build_named_root(method_directory, "launch", &rejected, &partial, \
@@ -13219,6 +13244,7 @@ static void run_callback_table_wire(size_t first, size_t last) {
     /* Freeze every nonzero physical build field, including the sentinel plus
      * two private callback table entries.  Runtime quotas are exercised below. */
 #define CHECK_CALLBACK_BUILD_CAP(field, exact) do { \
+    sol_test_progress_phase("quota:callback:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits cap_limits = sol_wasm_represented_default_limits(); \
     SolWasmRepresentedOutput capped; cap_limits.field = (exact); \
     sol_wasm_represented_output_init(&capped); \
@@ -13249,6 +13275,7 @@ static void run_callback_table_wire(size_t first, size_t last) {
         && usage_equal(&callback_copy.usage, &output.usage));
     sol_wasm_represented_output_free(&callback_copy);
 #define CHECK_CALLBACK_PARTIAL_ZERO(field) do { \
+    sol_test_progress_phase("quota:callback-partial:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits partial = sol_wasm_represented_default_limits(); \
     SolWasmRepresentedOutput rejected; partial.field = 0; sol_wasm_represented_output_init(&rejected); \
     CHECK(build_named_root(callback_directory, "launch", &rejected, &partial, \
@@ -13720,6 +13747,7 @@ static void run_patterns(size_t first, size_t last) {
     /* Every nonzero build census field is exact-or-one-below.  Runtime Text
      * caps are covered above and intentionally do not constrain emission. */
 #define CHECK_PATTERN_BUILD_CAP(field, exact) do { \
+    sol_test_progress_phase("quota:pattern:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits cap_limits = sol_wasm_represented_default_limits(); \
     SolWasmRepresentedOutput capped; cap_limits.field = (exact); \
     sol_wasm_represented_output_init(&capped); \
@@ -13749,6 +13777,7 @@ static void run_patterns(size_t first, size_t last) {
         && memcmp(pattern_default.bytes.bytes, pattern.bytes.bytes, pattern.bytes.count) == 0);
     sol_wasm_represented_output_free(&pattern_default);
 #define CHECK_PATTERN_PARTIAL_ZERO(field) do { \
+    sol_test_progress_phase("quota:pattern-partial:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits partial = sol_wasm_represented_default_limits(); \
     SolWasmRepresentedOutput rejected; partial.field = 0; sol_wasm_represented_output_init(&rejected); \
     CHECK(build_multiroot(pattern_directory, false, &rejected, pattern_ids, &partial, \
@@ -14098,6 +14127,7 @@ static void run_panic_wire_resource(size_t first, size_t last) {
             && memcmp(p44_panic_hash, expected_p44_panic_hash, sizeof p44_panic_hash) == 0
             && sol_wasm_represented_test_allocation_attempts() == 27);
 #define CHECK_P44_LIMIT(field, exact) do { \
+    sol_test_progress_phase("quota:p44:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits p44_limit = sol_wasm_represented_default_limits(); \
     SolWasmRepresentedOutput p44_limited; sol_wasm_represented_output_init(&p44_limited); \
     p44_limit.field = (exact); \
@@ -14432,6 +14462,7 @@ static void run_product_tree(size_t first, size_t last) {
     wasm_instance_close(&grown); sol_wasm_represented_output_free(&tree_grow);
     sol_wasm_represented_test_allocator_memory(0, 0);
 #define CHECK_TREE_BUILD_CAP(field, exact) do { \
+    sol_test_progress_phase("quota:tree:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits cap_limits = sol_wasm_represented_default_limits(); \
     SolWasmRepresentedOutput capped; sol_wasm_represented_output_init(&capped); \
     cap_limits.field = (exact); \
@@ -14469,6 +14500,7 @@ static void run_product_tree(size_t first, size_t last) {
         && memcmp(tree_default.bytes.bytes, tree.bytes.bytes, tree.bytes.count) == 0);
     sol_wasm_represented_output_free(&tree_default);
 #define CHECK_TREE_PARTIAL_ZERO(field) do { \
+    sol_test_progress_phase("quota:tree-partial:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits partial = sol_wasm_represented_default_limits(); \
     SolWasmRepresentedOutput rejected; partial.field = 0; \
     sol_wasm_represented_output_init(&rejected); \
@@ -14950,6 +14982,7 @@ static void run_unit_text_sums(size_t first, size_t last) {
     /* Every nonzero build quota is exact-or-one-below.  Dynamic allocator caps
      * above remain runtime checks and are covered by the 40/402 probes. */
 #define CHECK_SUM_TEXT_BUILD_CAP(field, exact) do { \
+    sol_test_progress_phase("quota:sum-text:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits capped_limits = sol_wasm_represented_default_limits(); \
     SolWasmRepresentedOutput capped; capped_limits.field = (exact); \
     sol_wasm_represented_output_init(&capped); \
@@ -14979,6 +15012,7 @@ static void run_unit_text_sums(size_t first, size_t last) {
         && memcmp(sum_text_default.bytes.bytes, sum_text.bytes.bytes, sum_text.bytes.count) == 0);
     sol_wasm_represented_output_free(&sum_text_default);
 #define CHECK_SUM_TEXT_PARTIAL_ZERO(field) do { \
+    sol_test_progress_phase("quota:sum-text-partial:" #field, "quota-field", 0); \
     SolWasmRepresentedLimits partial = sol_wasm_represented_default_limits(); \
     SolWasmRepresentedOutput rejected; partial.field = 0; sol_wasm_represented_output_init(&rejected); \
     CHECK(build_multiroot(sum_text_directory, false, &rejected, sum_text_ids, &partial, \
@@ -15375,6 +15409,7 @@ static void run_text(size_t first, size_t last) {
      * through entry invocation, since they intentionally do not reject module
      * construction. */
 #define CHECK_BUILD_CAP(field, exact) do { \
+    sol_test_progress_phase("quota:build:" #field, "quota-field", 0); \
     SolWasmRepresentedOutput capped; \
     SolWasmRepresentedLimits cap_limits = limits; \
     cap_limits.field = (exact); \
@@ -15433,6 +15468,7 @@ static void run_text(size_t first, size_t last) {
         && memcmp(identity.bytes.bytes, output.bytes.bytes, output.bytes.count) == 0);
     sol_wasm_represented_output_free(&identity);
 #define CHECK_PARTIAL_ZERO(field) do { \
+    sol_test_progress_phase("quota:partial:" #field, "quota-field", 0); \
     SolWasmRepresentedOutput rejected; \
     SolWasmRepresentedLimits partial = limits; \
     partial.field = 0; \
@@ -15749,6 +15785,8 @@ static void represented_control(const char *id) {
             CHECK(control_owned(id, active_runner));
             control_seen[i] = true;
             fprintf(stderr, "CONTROL\t%s\n", id);
+            fflush(stderr);
+            sol_test_progress_phase(id, "control-record", 0);
             return;
         }
     }
@@ -15765,6 +15803,8 @@ static void represented_fault(RepresentedFault sweep, size_t ordinal, size_t hoo
             if (ordinal != 0 && ordinal <= record->count) {
                 record->seen[ordinal] = true; ++observed_faults;
                 fprintf(stderr, "FAULT\t%s.%04zu\n", record->id, ordinal);
+                fflush(stderr);
+                sol_test_progress_ordinal(record->id, ordinal, record->count);
             }
         }
     }
@@ -15827,6 +15867,8 @@ static void execute_runner(const RepresentedRunner *runner, size_t first, size_t
         memset(represented_sweeps[i].seen, 0, sizeof represented_sweeps[i].seen);
     int before = failures;
     fprintf(stderr, "SHARD_START\t%s\tfirst=%zu\tlast=%zu\n", name, first, last);
+    fflush(stderr);
+    sol_test_progress_case(name);
     runner->run(first, last);
     size_t controls = 0, expected_faults = 0;
     for (size_t i = 0; i < sizeof represented_controls / sizeof *represented_controls; ++i)
@@ -15848,10 +15890,13 @@ static void execute_runner(const RepresentedRunner *runner, size_t first, size_t
     fprintf(stderr, "SHARD_COMPLETE\t%s\tstatus=%s\tseconds=%.3f\tcontrols=%zu\tfaults=%zu/%zu\n",
         name, failures == before ? "PASS" : "FAIL", elapsed, controls,
         observed_faults, expected_faults);
+    fflush(stderr);
+    sol_test_progress_case_end();
     active_runner = NULL;
 }
 
 int main(int argc, char **argv) {
+    sol_test_progress_case("select-manifest-or-owned-shard");
     bool manifest = false, list = false;
     const char *selected = NULL;
     const RepresentedRunner *runner = NULL;
@@ -15911,3 +15956,5 @@ int main(int argc, char **argv) {
     }
     return failures == 0 ? 0 : 1;
 }
+#undef main
+SOL_TEST_ARGV_ENTRY("wasm_represented")

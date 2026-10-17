@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/inspection.h"
 
 #include "sol/effectcheck.h"
@@ -503,16 +505,18 @@ int main(void) {
         long length = 0;
         CHECK(render(&compilation, &length));
         CHECK(length > 0);
-        test_expression_kind_spellings(&compilation);
-        test_source_line_preflight(&compilation);
-        test_contract_preflight(&compilation);
-        test_mutable_projection(&compilation);
-        test_tuple_projection_preflight(&compilation);
-        test_semantic_reference_preflight(&compilation);
-        test_pattern_preflight(&compilation);
-        test_windows_basename(&compilation);
-        test_windows_package_path(&compilation);
+        SOL_TEST_RUN(test_expression_kind_spellings(&compilation));
+        SOL_TEST_RUN(test_source_line_preflight(&compilation));
+        SOL_TEST_RUN(test_contract_preflight(&compilation));
+        SOL_TEST_RUN(test_mutable_projection(&compilation));
+        SOL_TEST_RUN(test_tuple_projection_preflight(&compilation));
+        SOL_TEST_RUN(test_semantic_reference_preflight(&compilation));
+        SOL_TEST_RUN(test_pattern_preflight(&compilation));
+        SOL_TEST_RUN(test_windows_basename(&compilation));
+        SOL_TEST_RUN(test_windows_package_path(&compilation));
     }
     free_fixture(&compilation);
     return failures == 0 ? 0 : 1;
 }
+#undef main
+SOL_TEST_ENTRY("inspection")

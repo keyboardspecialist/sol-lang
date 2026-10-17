@@ -1,3 +1,5 @@
+#include "support/test_progress.h"
+#define main sol_test_body
 #include "sol/contract.h"
 #include "sol/diagnostic.h"
 #include "sol/effectcheck.h"
@@ -1163,24 +1165,24 @@ static void test_match_guard_contract_traversal(void) {
 }
 
 int main(void) {
-    test_match_guard_contract_traversal();
-    test_tuple_contract_purity_and_metadata();
-    test_obligations_result_and_snapshots();
-    test_member_contract_ownership();
-    test_generic_contract_templates();
-    test_effect_row_call_contract_purity();
-    test_signature_scope_boundaries();
-    test_contract_type_errors();
-    test_purity_and_effect_firewall();
-    test_table_determinism_and_malformed_input();
-    test_trait_method_contract_purity();
-    test_refinement_contracts_and_distinct_construction();
-    test_function_valued_distinct_construction();
-    test_regions_forbidden_in_predicates();
-    test_loops_forbidden_in_predicates();
-    test_mutation_forbidden_in_predicates();
-    test_loop_proof_templates_and_termination();
-    test_unreachable_obligations_and_firewall();
+    SOL_TEST_RUN(test_match_guard_contract_traversal());
+    SOL_TEST_RUN(test_tuple_contract_purity_and_metadata());
+    SOL_TEST_RUN(test_obligations_result_and_snapshots());
+    SOL_TEST_RUN(test_member_contract_ownership());
+    SOL_TEST_RUN(test_generic_contract_templates());
+    SOL_TEST_RUN(test_effect_row_call_contract_purity());
+    SOL_TEST_RUN(test_signature_scope_boundaries());
+    SOL_TEST_RUN(test_contract_type_errors());
+    SOL_TEST_RUN(test_purity_and_effect_firewall());
+    SOL_TEST_RUN(test_table_determinism_and_malformed_input());
+    SOL_TEST_RUN(test_trait_method_contract_purity());
+    SOL_TEST_RUN(test_refinement_contracts_and_distinct_construction());
+    SOL_TEST_RUN(test_function_valued_distinct_construction());
+    SOL_TEST_RUN(test_regions_forbidden_in_predicates());
+    SOL_TEST_RUN(test_loops_forbidden_in_predicates());
+    SOL_TEST_RUN(test_mutation_forbidden_in_predicates());
+    SOL_TEST_RUN(test_loop_proof_templates_and_termination());
+    SOL_TEST_RUN(test_unreachable_obligations_and_firewall());
     if (failures != 0) {
         fprintf(stderr, "%d contract test failure(s)\n", failures);
         return 1;
@@ -1188,3 +1190,5 @@ int main(void) {
     puts("contract tests passed");
     return 0;
 }
+#undef main
+SOL_TEST_ENTRY("contract")

@@ -1,3 +1,5 @@
+#include "support/native_progress.h"
+#define main sol_test_body
 #define SOL_MIR_PLAN_TEST_HOOKS 1
 #include "sol/mir_runtime_host_abi.h"
 #include "sol/effects.h"
@@ -433,6 +435,13 @@ static void test_host_call_cleanup_links(const SolMirRuntimeHostAbi *abi,
                 == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31);
     }
 }
+#define test_option_result_transfer(...) SOL_TEST_RUN(test_option_result_transfer(__VA_ARGS__))
+#define test_render_and_semantic_seal(...) SOL_TEST_RUN(test_render_and_semantic_seal(__VA_ARGS__))
+#define check_render_rejects_mutation(...) SOL_TEST_RUN(check_render_rejects_mutation(__VA_ARGS__))
+#define test_exact_host_abi_limits(...) SOL_TEST_RUN(test_exact_host_abi_limits(__VA_ARGS__))
+#define test_host_call_cleanup_links(...) SOL_TEST_RUN(test_host_call_cleanup_links(__VA_ARGS__))
+#define test_independent_render_determinism(...) SOL_TEST_RUN(test_independent_render_determinism(__VA_ARGS__))
+#define test_distinct_roots_and_derived_sources(...) SOL_TEST_RUN(test_distinct_roots_and_derived_sources(__VA_ARGS__))
 int main(void){Fixture f;CHECK(setup(&f));SolMirConcreteProgram p;sol_mir_concrete_program_init(&p);SolMirProgramRoot root={find(&f.ir,"launch",SOL_IR_CALLABLE_FUNCTION),SOL_MIR_PROGRAM_ROOT_ENTRY};const char*names[]={"write","get","count","read"};SolIrCallableId imports[4];for(size_t i=0;i<4;i++)imports[i]=find(&f.ir,names[i],SOL_IR_CALLABLE_CAPABILITY);SolMirTargetDescriptor target=sol_mir_target_wasm32();SolMirConcreteBuildRequest request={&f.ir,&root,1,imports,4,&target,NULL};CHECK(sol_mir_concrete_program_build(&request,&p,&f.d)==SOL_MIR_CONCRETE_BUILD_SUCCEEDED);SolMirRuntimeConventions c;SolMirRuntimeValues v;SolMirRuntimeCleanup cl;SolMirRuntimeHostAbi a;sol_mir_runtime_conventions_init(&c);sol_mir_runtime_values_init(&v);sol_mir_runtime_cleanup_init(&cl);sol_mir_runtime_host_abi_init(&a);CHECK(sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){&p,NULL},&c,&f.d)==SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED);CHECK(sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){&c,NULL},&v,&f.d)==SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED);CHECK(sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){&c,&v,NULL},&cl,&f.d)==SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED);size_t forbidden=0,unreachable=0;for(size_t i=0;i<v.host_result_plan_count;i++){forbidden+=v.host_result_plans[i].classification==SOL_MIR_RUNTIME_HOST_RESULT_FORBIDDEN;unreachable+=v.host_result_plans[i].classification==SOL_MIR_RUNTIME_HOST_RESULT_UNREACHABLE;}CHECK(forbidden!=0&&unreachable!=0);size_t host_result=c.concrete->linkage.host_requirements[0].result;SolMirRuntimeHostResultClass saved_class=v.host_result_plans[host_result].classification;SolMirRuntimeHostAbi rejected_owner;sol_mir_runtime_host_abi_init(&rejected_owner);v.host_result_plans[host_result].classification=SOL_MIR_RUNTIME_HOST_RESULT_FORBIDDEN;CHECK(sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){&c,&v,&cl,NULL},&rejected_owner,&f.d)==SOL_MIR_RUNTIME_HOST_ABI_BUILD_INVALID_PREDECESSOR);v.host_result_plans[host_result].classification=SOL_MIR_RUNTIME_HOST_RESULT_UNREACHABLE;CHECK(sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){&c,&v,&cl,NULL},&rejected_owner,&f.d)==SOL_MIR_RUNTIME_HOST_ABI_BUILD_INVALID_PREDECESSOR);v.host_result_plans[host_result].classification=saved_class;sol_mir_runtime_host_abi_free(&rejected_owner);CHECK(sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){&c,&v,&cl,NULL},&a,&f.d)==SOL_MIR_RUNTIME_HOST_ABI_BUILD_SUCCEEDED);CHECK(sol_mir_runtime_host_abi_validate(&a,NULL));CHECK(a.operation_count==4&&a.requirement_count==5&&a.entry_root_count==3);
     CHECK(a.usage.capabilities==3&&a.usage.entry_roots==3&&a.usage.operations==4
         &&a.usage.arguments==3&&a.usage.formals==3&&a.usage.shapes==3
@@ -542,3 +551,5 @@ SolMirRuntimeHostAbi bounded;sol_mir_runtime_host_abi_init(&bounded);
     ++exact.max_owned_bytes;size_t saved_validation_work=a.limits.max_validation_work;a.limits.max_validation_work=a.usage.validation_work-1;CHECK(!sol_mir_runtime_host_abi_validate(&a,NULL));CHECK(sol_mir_runtime_host_abi_preflight(&a,&pre)==SOL_MIR_RUNTIME_HOST_PREFLIGHT_INVALID);a.limits.max_validation_work=saved_validation_work;
 sol_mir_runtime_host_abi_test_force_build_scratch_allocation_failure(true);exact.max_owned_bytes=a.usage.owned_bytes;CHECK(sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){&c,&v,&cl,&exact},&bounded,&f.d)==SOL_MIR_RUNTIME_HOST_ABI_BUILD_ALLOCATION_FAILED);sol_mir_runtime_host_abi_test_force_build_scratch_allocation_failure(false);
 test_independent_render_determinism(&a);sol_mir_runtime_host_abi_free(&a);sol_mir_runtime_cleanup_free(&cl);sol_mir_runtime_values_free(&v);sol_mir_runtime_conventions_free(&c);sol_mir_concrete_program_free(&p);finish(&f);test_distinct_roots_and_derived_sources();return failures?1:0;}
+#undef main
+SOL_TEST_ENTRY("mir_runtime_host_abi")

@@ -1,0 +1,25 @@
+# CMake 3.17-compatible registration. CTest still needs --verbose for live logs.
+set(SOL_TEST_SUPERVISOR "${CMAKE_CURRENT_SOURCE_DIR}/tests/support/run_with_progress.py")
+
+function(sol_add_test)
+    cmake_parse_arguments(PARSE_ARGV 0 test "" "NAME" "COMMAND")
+    if(test_UNPARSED_ARGUMENTS OR NOT test_NAME OR NOT test_COMMAND)
+        message(FATAL_ERROR "sol_add_test requires NAME and COMMAND")
+    endif()
+    set(command ${test_COMMAND})
+    list(GET command 0 executable)
+    if(TARGET "${executable}")
+        list(REMOVE_AT command 0)
+        list(INSERT command 0 "$<TARGET_FILE:${executable}>")
+    endif()
+    if(SOL_ENABLE_SANITIZERS)
+        set(safety_timeout 180)
+    else()
+        set(safety_timeout 120)
+    endif()
+    math(EXPR supervisor_timeout "${safety_timeout} - 5")
+    add_test(NAME "${test_NAME}"
+        COMMAND "${Python3_EXECUTABLE}" "${SOL_TEST_SUPERVISOR}"
+            --name "${test_NAME}" --timeout "${supervisor_timeout}" -- ${command})
+    set_tests_properties("${test_NAME}" PROPERTIES TIMEOUT "${safety_timeout}")
+endfunction()
