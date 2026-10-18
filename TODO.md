@@ -15,7 +15,8 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 - **Active overall cursor: P4.4 residual predicate-execution planning.** The next
   bounded task is Sol 6.1 High planning for predicate execution over richer forms;
   it is not a resource-first prerequisite task. P4.4f1a's metadata checkpoint is
-  independently accepted and review-approved, pending coordinator integration;
+  independently accepted and review-approved, committed as `5c9c056` and pushed to
+  `master`;
   the broad P4.4 checkbox remains unchecked. See the [versioned handoff](docs/p4.4f1a-handoff.md).
 - T1's bounded observability/audit checkpoint (`6eef9ca`) and T2's independently
   review-approved nine-file cleanup/portability change and audit documentation
@@ -72,8 +73,8 @@ they are unrelated to the gated maintenance-workflow experiment M1-M5 below.
 - **Retained P4.4 work is not throwaway:** the separate resource-prerequisite WIP
   spans six paths and remains unaccepted with its coverage extension pending. The
   resumed seven-file/five-fixture P4.4f1a metadata change has since received bounded
-  independent acceptance and is pending coordinator integration, not broad P4.4
-  closure. Preserve the older `paused-p44-wip` bytes and historical records.
+  independent acceptance and was committed/pushed to `master` as `5c9c056`, not broad
+  P4.4 closure. Preserve the older `paused-p44-wip` bytes and historical records.
 
 ## Completed Foundation Through E6, P1, P2, and P3
 
@@ -182,7 +183,7 @@ deferred until a concrete core API requires their smallest coherent subset.
 
 ## End-to-End and Production Track
 
-E1-E6, P1, P2, and P3 are complete for the frozen E6 profile. P4.1 through P4.3 are complete; P4 remains open. The active cursor is bounded planning for residual P4.4 predicate execution; P4.4f1a is a separately accepted metadata slice pending integration, not closure of P4.4.
+E1-E6, P1, P2, and P3 are complete for the frozen E6 profile. P4.1 through P4.3 are complete; P4 remains open. The active cursor is bounded planning for residual P4.4 predicate execution; P4.4f1a is a separately accepted metadata slice, committed/pushed to `master` as `5c9c056`, not closure of P4.4.
 Deferred language breadth is not a prerequisite for P2-P5 unless a
 milestone explicitly activates a bounded numbered-task slice. Existing numbered
 capability IDs remain stable; named slices such as `48A` account for completed portions
@@ -422,13 +423,13 @@ P4.4 implementation audit (October 8, 2026; records bounded acceptance evidence,
 | P4.4e1 | Accepted after independent technical and test-sharding review plus final acceptance; committed and pushed as `16f4cf9`. Executes `max_steps` for four base rows, Text, and panic bytes with exact code 6 cleanup in the bounded represented subset. Matching final-source full ON 58/58 and OFF 54/54 passed, as did all 47 native and 47 ASan/UBSan shards covering exactly 3504 fault IDs and 63 controls. The initial native 1500-second timeout was corrected to an explicit 7200-second budget and full ON passed. The historical monolithic ASan 7200-second timeout is superseded for the sanitizer gate by the approved exhaustive shard union; no monolithic ASan, full-project sanitizer, or leak-check pass is claimed. |
 | P4.4e2 | Final Sol 6.1 acceptance approved; committed and pushed as `f9a8432`. Bounded runtime depth is implemented: `uint32_t max_call_depth` accepts 1..64 (default 64), with root depth 1, for supported direct calls, methods, and exact callbacks. Depth decrements before packet inspection, preserves callee failures, and emits code 7 at the call site on exhaustion. Cycles and statically deep graphs are admitted within this supported subset and bounded at runtime; step exhaustion code 6 takes precedence over depth code 7. Pinned corrected-source full ON 58/58 and OFF 54/54 passed, together with all 50 native and 50 ASan/UBSan shards covering exactly 3655 fault IDs and 67 controls. Interruptions affected only unfinished work, which was recovered; the signed-LEB negative-initializer regression is covered. This is exhaustive shard-union sanitizer evidence, not a monolithic ASan, full-project sanitizer, or leak-check pass. |
 | P4.4f0 | Final Sol 6.1 review and Astra scoped-commit readiness approved; accepted and committed/pushed as `bfc6479`. A narrow origin-domain cleanup metadata correction makes the builder and independent validator use exact producer-origin namespaces, preserving authenticated same-image ensures ingress and bounded work. It enables already-supported branch/snapshot/outer-ensures composition with callbacks that was accidentally rejected; true exclusive contract-owner cases still reject upstream in MIR. No schema/emitter changes or predicate executor are added. Final-source full ON 58/58, OFF 54/54, and owner sanitizer 3/3 passed, together with all 50 native and 50 ASan/UBSan shards covering exactly 3779 fault IDs and 69 unique controls; prior IDs are preserved, with strict known-repeat CONTROL accounting and no blanket deduplication. Pinned final-source validation is complete after interruption/harness recoveries, not a test waiver. Sanitizer evidence is the exhaustive shard union, not a full-project sanitizer or leak-check pass. |
-| P4.4f1a | Bounded metadata checkpoint independently accepted on 2026-10-18; review-approved, pending coordinator integration. Seven contexts/eight predicate-call pairs, five new fixtures, and the required OFF/ON/SAN sets are accepted as documented in [the handoff](docs/p4.4f1a-handoff.md). This does not admit predicate-call Wasm execution, resolve R-AUTH, or close P4.4; no commit/push hash exists yet. |
+| P4.4f1a | Bounded metadata checkpoint independently accepted on 2026-10-18; review-approved and committed/pushed to `master` as `5c9c056`. Seven contexts/eight predicate-call pairs, five new fixtures, and the required OFF/ON/SAN sets are accepted as documented in [the handoff](docs/p4.4f1a-handoff.md). This does not admit predicate-call Wasm execution, resolve R-AUTH, or close P4.4. |
 | Residual P4.4 | The bounded gap census is complete (26 probes): richer predicate calls/value operations and guard control remain open, as do exact handler execution, depth/step execution beyond the accepted bounded represented subset, and full cleanup/profile closure. The P4.4f0 committed-baseline dependency is resolved by `bfc6479`; f1a accepts only the metadata slice. Next is a bounded Sol 6.1 High PLANNING brief for predicate execution over richer forms. R-AUTH remains a separate genuine P3.6 resource-authentication defect, not an imposed resource-first dependency; preserve its six-path WIP and unaccepted coverage extension, with held `build_work`/`build_scratch_bytes` resealed ±1 checks unresolved. |
 
 #### Current P4.4 status and handoff
 
-The 2026-10-18 P4.4f1a metadata result is review-approved and pending coordinator
-integration (no commit or push has occurred). It covers only the seven-context /
+The 2026-10-18 P4.4f1a metadata result is review-approved, committed as `5c9c056`,
+fast-forwarded onto `master`, and pushed to `origin/master`. It covers only the seven-context /
 eight-pair transport metadata and its bounded evidence; the broad P4.4 row stays
 unchecked. The accepted OFF/ON/SAN coverage is not the full default suite, all shards,
 or overall P4.4 acceptance. The prior accepted P4.4e1/e2/f0 records above remain
@@ -450,7 +451,7 @@ The following are status handoffs, not competing execution cursors:
 | --- | --- | --- |
 | Predicate execution / Sol 6.1 High planning | **Next bounded planning task:** design residual predicate execution for richer forms. Do not make R-AUTH/resource-first an assumed prerequisite. | Produce a bounded brief with scope, dependencies, interpreter expectations, Wasm admission boundary, tests, and validation; implementation follows only after coordinator dispatch and separate review. |
 | R-AUTH / separate Sol 6.1 High brief | Independent inherited P3.6 resource-authentication defect and preserved six-path resource WIP; coverage extension is pending and unaccepted. | Specify independent exactness reconstruction and truthful coverage; keep held `build_work`/`build_scratch_bytes` ±1 assertions unresolved until evidence exists. |
-| P4.4f1a integration / coordinator | Review-approved bounded metadata checkpoint, pending integration. Existing default selectors and full registrations remain unchanged. | Commit and push only after documentation review/audit; record the actual commit reference in a later status update, never pre-assign a hash. |
+| P4.4f1a integration / coordinator | Bounded metadata checkpoint committed as `5c9c056`, fast-forwarded to `master`, and pushed to `origin/master`; existing default selectors and full registrations remain unchanged. | Integration complete. This publication update does not refresh or extend the accepted test receipts. |
 | P4.5/P5 and host | Dependency-deferred; no host adapter, E6 execution, artifact writer, or `sol build` work is authorized by f1a. | Requires its own approved interface and task briefs. |
 | Documentation/status / Luna 6 xhigh; steering / Astra 6 | Update only assigned status documents from reviewed evidence; Astra audits alignment and the coordinator owns cursor changes. | Diff/consistency review; distinguish implemented, active, residual, and independently accepted scope. |
 

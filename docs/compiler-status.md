@@ -15,12 +15,13 @@ historical September 9 snapshot; no post-baseline commit hash is asserted here. 
 completed as infeasible and M2-M5 remain gated unless it is reopened feasibly.
 
 **Current status addendum, October 18, 2026:** The bounded P4.4f1a metadata
-checkpoint is independently accepted and review-approved, pending coordinator
-integration; it does not close P4.4. P4.4 remains open and unchecked. The sole live
-cursor is bounded planning for residual predicate execution over richer forms; the
-test-speed goals remain unmet, not resolved. See [TODO.md](../TODO.md#execution-cursor)
-for execution order and the [P4.4f1a handoff](p4.4f1a-handoff.md) for evidence and
-remaining boundaries. No checkpoint commit hash is assigned before integration.
+checkpoint is independently accepted and review-approved, committed as `5c9c056`,
+fast-forwarded onto `master`, and pushed to `origin/master`; it does not close P4.4.
+P4.4 remains open and unchecked. The sole live cursor is bounded planning for
+residual predicate execution over richer forms; the test-speed goals remain unmet,
+not resolved. Publication does not refresh or extend the handoff's accepted test
+receipts. See [TODO.md](../TODO.md#execution-cursor) for execution order and the
+[P4.4f1a handoff](p4.4f1a-handoff.md) for evidence and remaining boundaries.
 
 Use the [README](../README.md) for onboarding and runnable examples, and
 [project analysis](project-analysis.md) for the dated product assessment. The
