@@ -1212,12 +1212,15 @@ static bool emit_predicates(Sink *s, const SolMirRuntimeCleanup *o) {
             term->kind == SOL_MIR_PREDICATE_TERM_INVOKE
                 ? inherited(o->conventions, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_CALL, pb->body, block, SOL_MIR_RUNTIME_NONE)
                 : term->kind == SOL_MIR_PREDICATE_TERM_FAILURE
+                    && term->failure_kind != SOL_MIR_PREDICATE_FAILURE_CALL
                     ? inherited(o->conventions, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_NO_MATCH, pb->body, block, SOL_MIR_RUNTIME_NONE)
                     : term->kind == SOL_MIR_PREDICATE_TERM_RETURN
                         ? inherited(o->conventions, SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT, pb->body, block, SOL_MIR_RUNTIME_NONE)
                         : SOL_MIR_RUNTIME_NONE, SOL_MIR_RUNTIME_NONE,
             {action_pos(s), 0}, {s->count.transitions, 0}, SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL,false,SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE};
-        e.captures_failure_detail = terminal_failure || term->kind == SOL_MIR_PREDICATE_TERM_INVOKE || term->kind == SOL_MIR_PREDICATE_TERM_CHECK_REFINED;
+        e.captures_failure_detail = (terminal_failure
+                && term->failure_kind != SOL_MIR_PREDICATE_FAILURE_CALL)
+            || term->kind == SOL_MIR_PREDICATE_TERM_INVOKE || term->kind == SOL_MIR_PREDICATE_TERM_CHECK_REFINED;
         size_t id = event_pos(s);
         if (!sink_event(s, &e)) return false;
         size_t edge[2], count = predicate_edges(term, edge);
@@ -1455,6 +1458,9 @@ static void cleanup_finalize_metadata(SolMirRuntimeCleanup *cleanup) {
             else if (term->kind == SOL_MIR_PREDICATE_TERM_FAILURE
                 && term->failure_kind == SOL_MIR_PREDICATE_FAILURE_NO_MATCH)
                 event->producer = SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PREDICATE_NO_MATCH;
+            else if (term->kind == SOL_MIR_PREDICATE_TERM_FAILURE
+                && term->failure_kind == SOL_MIR_PREDICATE_FAILURE_CALL)
+                event->producer = SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL;
             else if (term->kind == SOL_MIR_PREDICATE_TERM_RETURN)
                 event->producer = SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PREDICATE_RESULT;
         }
@@ -1519,7 +1525,22 @@ static void cleanup_finalize_metadata(SolMirRuntimeCleanup *cleanup) {
             if (event->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
                 && event->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR
                 && event->block < m->block_count
-                && m->blocks[event->block].terminator.kind == SOL_MIR_TERM_RESUME_FAILURE) {
+                && (m->blocks[event->block].terminator.kind == SOL_MIR_TERM_RESUME_FAILURE
+                    || (m->blocks[event->block].terminator.kind == SOL_MIR_TERM_CHECK_CONTRACT
+                        && t->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_FAILURE
+                        && t->continuation == m->blocks[event->block].terminator.failure_edge))) {
+                t->failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING;
+                t->failure_site = SOL_MIR_RUNTIME_NONE;
+                t->failure_mask = 0;
+            }
+            if (event->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+                && event->kind == SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR
+                && event->block < ops->predicate_block_count
+                && ops->predicate_blocks[event->block].body == event->owner
+                && ops->predicate_blocks[event->block].terminator.kind == SOL_MIR_PREDICATE_TERM_FAILURE
+                && ops->predicate_blocks[event->block].terminator.failure_kind == SOL_MIR_PREDICATE_FAILURE_CALL
+                && t->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_TERMINAL_FAILURE
+                && t->continuation == SOL_MIR_RUNTIME_NONE) {
                 t->failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING;
                 t->failure_site = SOL_MIR_RUNTIME_NONE;
                 t->failure_mask = 0;

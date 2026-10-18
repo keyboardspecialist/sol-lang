@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <wasm.h>
 #include <binaryen-c.h>
+#include <errno.h>
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -695,7 +696,8 @@ typedef enum {
     FAULT_STRESS, FAULT_OLD_SNAPSHOT, FAULT_ENSURES_ROOTS, FAULT_REFINED,
     FAULT_CALLABLE_HOLE, FAULT_CALLBACK_INOUT, FAULT_METHOD, FAULT_CALLBACK,
     FAULT_PATTERN, FAULT_PANIC, FAULT_PRODUCT_TREE, FAULT_SUM_TEXT,
-    FAULT_PARSER_MAP, FAULT_TEXT_BUILD, FAULT_DEPTH, FAULT_SITE_EXCLUSIVE, FAULT_SWEEP_COUNT
+    FAULT_PARSER_MAP, FAULT_TEXT_BUILD, FAULT_DEPTH, FAULT_SITE_EXCLUSIVE,
+    FAULT_PREDICATE_TRANSPORT_REJECTION, FAULT_SWEEP_COUNT
 } RepresentedFault;
 static void represented_control(const char *id);
 static void represented_fault(RepresentedFault sweep, size_t ordinal, size_t hook_after);
@@ -12179,7 +12181,252 @@ static bool p44f_exclusive_domains(void) {
     return ok;
 }
 
+/* Metadata-only preflight. The catalog gate stays closed; helpers never become
+ * externally executed roots. Selected and default drivers share this exact case. */
+static const struct {const char *name,*leaf;size_t images,calls,fault_base;} p44f1a_cases[]={
+    {"direct","p44f_site_domains_direct",3,1,0},
+    {"refined_call","p44f_site_domains_refined_call",3,1,2},
+    {"ensures_old","p44_parallel_predicate_transport_ensures_old",4,1,5},
+    {"recursive","p44_parallel_predicate_transport_recursive",3,1,7},
+    {"bool_unit","p44_parallel_predicate_transport_bool_unit",4,1,9},
+    {"unit_direct","p44_parallel_predicate_transport_unit_direct",3,1,11},
+    {"unit_input_result","p44_parallel_predicate_transport_unit_input_result",4,2,13},
+};
+static bool p44f1a_predicate_transport_case(size_t test,size_t ordinal) {
+    PropagationPipeline p;propagation_pipeline_init(&p);
+    char directory[512];snprintf(directory,sizeof directory,"%s/tests/conformance/%s",SOL_TEST_SOURCE_DIR,p44f1a_cases[test].leaf);
+    sol_test_progress_phase("source-predecessors-owner","pipeline",1);
+    sol_test_progress_operation_begin("predicate-source-pipeline");
+    bool passed=propagation_pipeline_build_named(&p,directory,"launch",false);
+    sol_test_progress_operation_end();
+    if(passed)sol_test_progress_completed(1);sol_test_progress_phase_end();
+    const SolMirOperations *ops=&p.concrete.operations;const SolMirMaterialization *m=&p.concrete.materialization;
+    size_t calls=0,recursion=0;
+    if(passed)passed=m->image_count==p44f1a_cases[test].images&&p.conventions.entry_count==1;
+    sol_test_progress_phase("source-call-authentication","pair",p44f1a_cases[test].calls);
+    for(size_t i=0;passed&&i<p.conventions.call_count;++i) {
+        const SolMirRuntimeCall *call=&p.conventions.calls[i];
+        const SolMirRuntimeSignature *sig=&p.conventions.signatures[call->signature];
+        size_t callee=p.concrete.linkage.callables[call->internal].instance;
+        if(call->owner_kind==SOL_MIR_RUNTIME_CALL_OWNER_IMAGE) {recursion+=test==3&&call->image==callee;continue;}
+        ++calls;
+        const SolMirPredicateBody *body=&ops->predicate_bodies[call->predicate];
+        const SolMirPredicateBlock *block=&ops->predicate_blocks[call->block];
+        const SolMirPredicateTerminator *term=&block->terminator;
+        const SolMirPlanContext *context=&m->contexts[body->context];
+        const SolIrObligation *obligation=&p.ir.obligations[context->obligation];
+        const SolIrExpression *predicate=&p.ir.expressions[obligation->predicate];
+        /* Resolve expected CALL from semantic binding/body BEFORE observed site. */
+        size_t expected_internal=p.concrete.linkage.bindings[term->binding].internal;
+        size_t expected_image=p.concrete.linkage.callables[expected_internal].instance;
+        SolSpan expected_span={0};size_t source_calls=0;
+        for(size_t q=0;q<p.ir.expression_count;++q) {
+            const SolIrExpression *expr=&p.ir.expressions[q];
+            if(expr->kind!=SOL_IR_EXPR_CALL||expr->as.call.callable!=m->images[expected_image].source_callable
+                ||expr->span.start<predicate->span.start||expr->span.end>predicate->span.end)continue;
+            expected_span=expr->span;++source_calls;
+        }
+        const SolMirRuntimeFailureSite *site=&p.conventions.failure_sites[call->failure_site];
+        passed=passed&&source_calls==1&&site->source.file==0&&site->source.start==expected_span.start&&site->source.end==expected_span.end
+            &&body->owner_kind==SOL_MIR_PREDICATE_OWNER_INSTANCE&&block->body==call->predicate
+            &&call->image==SOL_MIR_RUNTIME_NONE&&call->call_kind==SOL_IR_CALL_FUNCTION
+            &&call->target_kind==SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL&&expected_internal==call->internal
+            &&expected_image==callee&&sig->internal==call->internal&&sig->result==term->result_recipe
+            &&term->result<ops->predicate_value_count&&ops->predicate_values[term->result].recipe==sig->result
+            &&call->normal_edge==term->normal_edge&&call->failure_edge==term->failure_edge
+            &&site->origin_kind==SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_CALL&&site->owner==call->predicate
+            &&site->block==call->block&&site->instruction==SOL_MIR_RUNTIME_NONE&&site->allowed_codes==64
+            &&!call->writebacks.count&&call->operands.count==sig->slots.count;
+        if(sig->result_class==SOL_MIR_RUNTIME_RESULT_UNIT)passed=passed&&call->result.kind==SOL_MIR_RUNTIME_VALUE_NONE&&call->result.id==SOL_MIR_RUNTIME_NONE;
+        else passed=passed&&call->result.kind==SOL_MIR_RUNTIME_VALUE_PREDICATE_VALUE&&call->result.id==term->result;
+        for(size_t q=0;q<sig->slots.count;++q) {
+            const SolMirRuntimeSignatureSlot *slot=&p.conventions.signature_slots[sig->slots.offset+q];
+            const SolMirRuntimeOperand *operand=&p.conventions.operands[call->operands.offset+q];
+            passed=passed&&slot->formal==q&&slot->access==SOL_ACCESS_OWNED&&operand->signature_slot==sig->slots.offset+q
+                &&operand->value.kind==SOL_MIR_RUNTIME_VALUE_PREDICATE_VALUE
+                &&operand->value.id==ops->predicate_operands[term->arguments.offset+q].value
+                &&ops->predicate_values[operand->value.id].recipe==slot->recipe;
+        }
+        const SolMirRuntimeLoweredPredicateTerminator *invoke=&p.lowered.predicate_terminators[call->block];
+        size_t failure=ops->predicate_edges[call->failure_edge].target;
+        const SolMirRuntimeLoweredPredicateTerminator *transport=&p.lowered.predicate_terminators[failure];
+        const SolMirRuntimeCleanupEvent *event=&p.cleanup.events[transport->cleanup_event];
+        const SolMirRuntimeCleanupTransition *transition=&p.cleanup.transitions[event->transitions.offset];
+        passed=passed&&invoke->call==i&&invoke->failure_site==call->failure_site
+            &&ops->predicate_blocks[failure].terminator.failure_kind==SOL_MIR_PREDICATE_FAILURE_CALL
+            &&transport->body==call->predicate&&transport->call==SOL_MIR_RUNTIME_NONE
+            &&event->kind==SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR&&event->phase==SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION
+            &&event->producer==SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL&&!event->captures_failure_detail
+            &&event->capture_detail_kind==SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE
+            &&event->inherited_failure_site==SOL_MIR_RUNTIME_NONE&&event->supplemental_site==SOL_MIR_RUNTIME_NONE
+            &&event->transitions.count==1&&event->actions.count==1
+            &&transition->failure_source==SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING
+            &&transition->failure_site==SOL_MIR_RUNTIME_NONE&&!transition->failure_mask
+            &&p.cleanup.actions[event->actions.offset].kind==SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE
+            &&transport->step_cleanup_event!=transport->cleanup_event
+            &&p.conventions.failure_sites[transport->step_failure_site].origin_kind==SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP;
+        if(passed)sol_test_progress_completed(calls);
+    }
+    passed=passed&&calls==p44f1a_cases[test].calls&&(test!=3||recursion==1);sol_test_progress_phase_end();
+    SolWasmRepresentedOutput output;sol_wasm_represented_output_init(&output);
+    SolDiagnostics d;sol_diagnostics_init(&d);
+    size_t rejection_n=test==1?3:2;
+    sol_test_progress_phase(ordinal?"fault-retry":"catalog-rejection","complete-obligation",1);
+    sol_wasm_represented_test_fail_allocation_after(0);
+    if(ordinal)represented_fault(FAULT_PREDICATE_TRANSPORT_REJECTION,p44f1a_cases[test].fault_base+ordinal,ordinal);
+    SolWasmRepresentedResult result=passed?sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&p.lowered,directory,NULL},&output,&d):SOL_WASM_REPRESENTED_INVALID_INPUT;
+    size_t attempts=sol_wasm_represented_test_allocation_attempts();sol_wasm_represented_test_fail_allocation_after(0);
+    passed=passed&&!output.bytes.bytes&&!output.bytes.count&&usage_zero(&output.usage);
+    if(ordinal) {
+        passed=passed&&result==SOL_WASM_REPRESENTED_ALLOCATION_FAILED;
+        sol_wasm_represented_output_free(&output);sol_wasm_represented_output_free(&output);sol_diagnostics_free(&d);sol_diagnostics_init(&d);
+        result=passed?sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&p.lowered,directory,NULL},&output,&d):SOL_WASM_REPRESENTED_INVALID_INPUT;
+        attempts=sol_wasm_represented_test_allocation_attempts();
+    }
+    passed=passed&&result==SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE&&!output.bytes.bytes&&!output.bytes.count&&usage_zero(&output.usage)
+        &&attempts==rejection_n&&d.count==1&&!strcmp(d.items[0].code,"wasm-p43")
+        &&!strcmp(d.items[0].message,"P4.3 rejected an unauthenticated represented call catalog")
+        &&sol_mir_runtime_lowered_program_validate(&p.lowered,NULL);
+    if(passed)sol_test_progress_completed(1);sol_test_progress_phase_end();
+    if(!passed)sol_diagnostics_render_human(stderr,&p.package.source,&d);
+    sol_test_progress_phase("teardown","case",1);
+    sol_diagnostics_free(&d);sol_wasm_represented_output_free(&output);propagation_pipeline_free(&p);
+    sol_test_progress_completed(1);sol_test_progress_phase_end();return passed;
+}
+static bool p44f1a_plain_identity(void) {
+    const char *directory=SOL_TEST_SOURCE_DIR "/tests/conformance/p44c_requires_false";
+    const char *artifact_path=SOL_TEST_BINARY_DIR "/p44f1a-plain.wasm";
+    PropagationPipeline p;propagation_pipeline_init(&p);
+    SolWasmRepresentedOutput out;sol_wasm_represented_output_init(&out);SolDiagnostics d;sol_diagnostics_init(&d);
+    /* No trace probe: this is the plain, existing executed scalar-contract source.
+     * The reference compiler produces a separate artifact for byte-for-byte proof. */
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false);
+    sol_wasm_represented_test_fail_allocation_after(0);
+    sol_test_progress_phase("plain-pipeline","pipeline",1);
+    sol_test_progress_operation_begin("plain-pipeline-build");
+    bool pipeline_ok=propagation_pipeline_build_named(&p,directory,"launch",false);
+    sol_test_progress_operation_end();
+    if(pipeline_ok)sol_test_progress_completed(1);
+    sol_test_progress_phase_end();
+    fprintf(stderr,"P44F1A_PLAIN_STAGE stage=pipeline result=%s package_directory=%s bytes=%zu diagnostics=%zu\n",
+        pipeline_ok?"OK":"FAILED",directory,out.bytes.count,p.diagnostics.count);
+    fflush(stderr);
+    if(!pipeline_ok)sol_diagnostics_render_human(stderr,&p.package.source,&p.diagnostics);
+
+    sol_test_progress_phase("plain-build-render","module",1);
+    SolWasmRepresentedResult backend_result=SOL_WASM_REPRESENTED_INVALID_INPUT;
+    const char *backend_result_name="NOT_CALLED";
+    if(pipeline_ok) {
+        backend_result=sol_wasm_represented_build(&(SolWasmRepresentedBuildRequest){&p.lowered,directory,NULL},&out,&d);
+        switch(backend_result) {
+        case SOL_WASM_REPRESENTED_OK: backend_result_name="OK"; break;
+        case SOL_WASM_REPRESENTED_INVALID_ARGUMENT: backend_result_name="INVALID_ARGUMENT"; break;
+        case SOL_WASM_REPRESENTED_INVALID_INPUT: backend_result_name="INVALID_INPUT"; break;
+        case SOL_WASM_REPRESENTED_UNSUPPORTED_CLOSURE: backend_result_name="UNSUPPORTED_CLOSURE"; break;
+        case SOL_WASM_REPRESENTED_RESOURCE_EXHAUSTED: backend_result_name="RESOURCE_EXHAUSTED"; break;
+        case SOL_WASM_REPRESENTED_ALLOCATION_FAILED: backend_result_name="ALLOCATION_FAILED"; break;
+        case SOL_WASM_REPRESENTED_BINARYEN_VALIDATION_FAILED: backend_result_name="BINARYEN_VALIDATION_FAILED"; break;
+        case SOL_WASM_REPRESENTED_SERIALIZATION_FAILED: backend_result_name="SERIALIZATION_FAILED"; break;
+        case SOL_WASM_REPRESENTED_WASMTIME_VALIDATION_FAILED: backend_result_name="WASMTIME_VALIDATION_FAILED"; break;
+        }
+        fprintf(stderr,"P44F1A_PLAIN_STAGE stage=backend result=%s package_directory=%s bytes=%zu diagnostics=%zu\n",
+            backend_result_name,directory,out.bytes.count,d.count);
+        fflush(stderr);
+        if(backend_result==SOL_WASM_REPRESENTED_OK)sol_test_progress_completed(1);
+        else sol_diagnostics_render_human(stderr,&p.package.source,&d);
+    } else {
+        fprintf(stderr,"P44F1A_PLAIN_STAGE stage=backend result=NOT_CALLED package_directory=%s bytes=%zu diagnostics=%zu\n",
+            directory,out.bytes.count,d.count);
+        fflush(stderr);
+    }
+    sol_test_progress_phase_end();
+
+    bool ok=pipeline_ok&&backend_result==SOL_WASM_REPRESENTED_OK;
+    sol_test_progress_phase("plain-artifact-write","artifact",1);
+    bool artifact_ok=false;
+    if(ok) {
+        errno=0;
+        if(mkdir(SOL_TEST_BINARY_DIR,0700)!=0&&errno!=EEXIST) {
+            int mkdir_errno=errno;
+            fprintf(stderr,"P44F1A_PLAIN_IO stage=mkdir result=FAILED path=%s errno=%d bytes=%zu\n",
+                artifact_path,mkdir_errno,out.bytes.count);
+            fflush(stderr);
+        } else {
+            errno=0;
+            FILE *file=fopen(artifact_path,"wb");
+            if(!file) {
+                int open_errno=errno;
+                fprintf(stderr,"P44F1A_PLAIN_IO stage=open result=FAILED path=%s errno=%d bytes=%zu\n",
+                    artifact_path,open_errno,out.bytes.count);
+                fflush(stderr);
+            } else {
+                errno=0;
+                size_t written=fwrite(out.bytes.bytes,1,out.bytes.count,file);
+                int write_errno=errno;
+                bool write_ok=written==out.bytes.count&&!ferror(file);
+                if(!write_ok) {
+                    fprintf(stderr,"P44F1A_PLAIN_IO stage=write result=FAILED path=%s errno=%d bytes=%zu written=%zu\n",
+                        artifact_path,write_errno,out.bytes.count,written);
+                    fflush(stderr);
+                }
+                errno=0;
+                int close_result=fclose(file);
+                int close_errno=errno;
+                bool close_ok=close_result==0;
+                if(!close_ok) {
+                    fprintf(stderr,"P44F1A_PLAIN_IO stage=close result=FAILED path=%s errno=%d bytes=%zu\n",
+                        artifact_path,close_errno,out.bytes.count);
+                    fflush(stderr);
+                }
+                artifact_ok=write_ok&&close_ok;
+                if(artifact_ok) {
+                    fprintf(stderr,"P44F1A_PLAIN_IO stage=publish result=SUCCESS path=%s errno=0 bytes=%zu\n",
+                        artifact_path,out.bytes.count);
+                    fflush(stderr);
+                }
+            }
+        }
+        if(artifact_ok) {
+            uint8_t hash[32];sha256(out.bytes.bytes,out.bytes.count,hash);
+            fprintf(stderr,"P44F1A_PLAIN hash=");for(size_t i=0;i<32;++i)fprintf(stderr,"%02x",hash[i]);
+            fprintf(stderr," bytes=%zu usage=%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%llu,%llu,%zu,%zu,%zu,%zu,%zu\n",
+                out.bytes.count,out.usage.functions,out.usage.blocks,out.usage.edges,out.usage.values,out.usage.locals,
+                out.usage.generated_nodes,out.usage.table_elements,out.usage.static_data_bytes,
+                (unsigned long long)out.usage.allocation_requests,(unsigned long long)out.usage.allocation_bytes,
+                out.usage.provenance_records,out.usage.work_bytes,out.usage.scratch_bytes,out.usage.owned_bytes,out.usage.output_bytes);
+            fflush(stderr);
+            sol_test_progress_completed(1);
+        }
+    } else {
+        fprintf(stderr,"P44F1A_PLAIN_IO stage=artifact result=NOT_CALLED path=%s errno=0 bytes=%zu\n",
+            artifact_path,out.bytes.count);
+        fflush(stderr);
+    }
+    sol_test_progress_phase_end();
+    ok=ok&&artifact_ok;
+    sol_test_progress_phase("teardown","case",1);sol_diagnostics_free(&d);sol_wasm_represented_output_free(&out);propagation_pipeline_free(&p);
+    sol_test_progress_completed(1);sol_test_progress_phase_end();return ok;
+}
+static int p44f1a_dispatch(const char *selected,bool list) {
+    bool found=selected==NULL;
+    if(list)puts("represented.baseline.plain-contract");
+    else if(!selected||!strcmp(selected,"represented.baseline.plain-contract")) {
+        found=true;sol_test_progress_case("represented.baseline.plain-contract");CHECK(p44f1a_plain_identity());sol_test_progress_case_end();
+    }
+    for(size_t test=0;test<sizeof p44f1a_cases/sizeof *p44f1a_cases;++test) {
+        size_t count=test==1?3:2;
+        for(size_t ordinal=0;ordinal<=count;++ordinal) {
+            char key[160];snprintf(key,sizeof key,"represented.%s.%s.%zu",p44f1a_cases[test].name,ordinal?"fault":"preflight",ordinal);
+            if(list){puts(key);continue;}if(selected&&strcmp(selected,key))continue;
+            found=true;sol_test_progress_case(key);CHECK(p44f1a_predicate_transport_case(test,ordinal));sol_test_progress_case_end();
+        }
+    }
+    return found?(failures?1:0):2;
+}
+static bool p44f1a_predicate_transport_preflight(void) {return p44f1a_dispatch(NULL,false)==0;}
 static void run_contracts(size_t first, size_t last) {
+    represented_control("contracts.predicate-call-pending-transport-preflight");
+    CHECK(p44f1a_predicate_transport_preflight());
     represented_control("contracts.site-domains-source-collisions-branch-snapshots");
     CHECK(p44f_site_domains());
     represented_control("contracts.site-domains-exclusive-owned-result-profile");
@@ -15681,6 +15928,7 @@ static const char *const represented_controls[] = {
     "depth.recursive-multiroot-census-caps-faults-reset-relocation",
     "depth.step-precedence-authoritative-pending-writebacks-holes",
     "contracts.all-controls-mutations-quotas-sequences",
+    "contracts.predicate-call-pending-transport-preflight",
     "contracts.site-domains-source-collisions-branch-snapshots",
     "contracts.site-domains-exclusive-owned-result-profile",
     "contracts.requires-ensures-qualified-gates-routes",
@@ -15768,6 +16016,7 @@ static RepresentedFaultSweep represented_sweeps[FAULT_SWEEP_COUNT] = {
     [FAULT_TEXT_BUILD] = {"text-build", "text", 147, {false}},
     [FAULT_DEPTH] = {"depth", "depth", 151, {false}},
     [FAULT_SITE_EXCLUSIVE] = {"site-exclusive", "contracts", 124, {false}},
+    [FAULT_PREDICATE_TRANSPORT_REJECTION] = {"predicate-transport-rejection", "contracts", 15, {false}},
 };
 static const RepresentedRunner *active_runner;
 static bool control_seen[sizeof represented_controls / sizeof *represented_controls];
@@ -15896,6 +16145,12 @@ static void execute_runner(const RepresentedRunner *runner, size_t first, size_t
 }
 
 int main(int argc, char **argv) {
+    if(argc>=2&&(!strcmp(argv[1],"--list-p44f1a-cases")||!strcmp(argv[1],"--p44f1a-case"))) {
+        if(getenv("SOL_P44E_FOCUS"))return 2;
+        if(argc==2&&!strcmp(argv[1],"--list-p44f1a-cases"))return p44f1a_dispatch(NULL,true);
+        if(argc==3&&!strcmp(argv[1],"--p44f1a-case"))return p44f1a_dispatch(argv[2],false);
+        return 2;
+    }
     sol_test_progress_case("select-manifest-or-owned-shard");
     bool manifest = false, list = false;
     const char *selected = NULL;
@@ -15931,7 +16186,7 @@ int main(int argc, char **argv) {
         return 0;
     }
     if (argc == 1 && focus != NULL) {
-        if (!strcmp(focus, "site-domains")) return p44f_site_domains() && p44f_exclusive_domains() ? 0 : 1;
+        if (!strcmp(focus, "site-domains")) return p44f1a_predicate_transport_preflight() && p44f_site_domains() && p44f_exclusive_domains() ? 0 : 1;
         if (!strcmp(focus, "site-exclusive")) return p44f_exclusive_domains() ? 0 : 1;
         if (!strcmp(focus, "depth-gate")) return p44e_depth_gate_probe() ? 0 : 1;
         if (!strcmp(focus, "depth")) {

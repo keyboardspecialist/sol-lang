@@ -1,4 +1,5 @@
 #include "support/native_progress.h"
+#include "support/path_work.h"
 #define main sol_test_body
 #define SOL_MIR_PLAN_TEST_HOOKS 1
 #include "sol/mir_runtime_lowered_program.h"
@@ -6,6 +7,9 @@
 #include "sol/lexer.h"
 #include "sol/ownership.h"
 #include "sol/package.h"
+#include "../src/mir_runtime_arena_internal.h"
+#include "../src/mir_runtime_lowered_program_internal.h"
+#include "../src/mir_linkage_internal.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -260,9 +264,10 @@ static bool build_snapshots(Fixture *f, Pipeline *p, bool reverse) {
 }
 static void test_snapshot_cleanup_mirror(void) {
     Fixture fixture; Pipeline first, second; init(&first); init(&second);
-    CHECK(setup_at(&fixture, SOL_TEST_SOURCE_DIR "/tests/conformance/p33_snapshots"));
-    bool built = !failures && build_snapshots(&fixture, &first, false)
-        && build_snapshots(&fixture, &second, true);
+    bool setup_ok = setup_at(&fixture, SOL_TEST_SOURCE_DIR "/tests/conformance/p33_snapshots"); CHECK(setup_ok);
+    bool first_built = setup_ok && build_snapshots(&fixture, &first, false);
+    bool second_built = setup_ok && build_snapshots(&fixture, &second, true);
+    bool built = first_built && second_built;
     if (!built) sol_diagnostics_render_human(stderr, &fixture.p.source, &fixture.d);
     CHECK(built);
     if (built) {
@@ -368,9 +373,9 @@ static void expect_descriptor(bool ok, SolMirRuntimeLoweredDemandDescriptor actu
 #define EXPECT_PREDICATE_TERMINATOR(kind, runtime_class, family, facilities) do { SolMirRuntimeLoweredDemandDescriptor actual; expect_descriptor(sol_mir_runtime_lowered_program_test_predicate_terminator_descriptor(kind, &actual), actual, runtime_class, family, facilities); } while (0)
 #define EXPECT_PROVENANCE(kind, runtime_class, family, facilities) do { SolMirRuntimeLoweredDemandDescriptor actual; expect_descriptor(sol_mir_runtime_lowered_program_test_provenance_descriptor(kind, &actual), actual, runtime_class, family, facilities); } while (0)
 #define F(name) SOL_MIR_RUNTIME_LOWERED_FACILITY_##name
-static void test_site_domains(void) {
+static void test_site_domains_range(size_t first, size_t last) {
     const char *leaves[] = {"p44f_site_domains_branch", "p44f_site_domains_direct", "p44f_site_domains_refined"};
-    for (size_t test = 0; test < 3; ++test) {
+    for (size_t test = first; test < last; ++test) {
         Fixture f; Pipeline p; char directory[512]; init(&p);
         snprintf(directory, sizeof directory, "%s/tests/conformance/%s", SOL_TEST_SOURCE_DIR, leaves[test]);
         bool built = setup_at(&f, directory) && build_named(&f, &p, "launch");
@@ -418,6 +423,7 @@ static void test_site_domains(void) {
     }
 }
 
+static void test_site_domains(void) { test_site_domains_range(0, 3); }
 static void test_vocabulary(void) {
     EXPECT_IMAGE_INSTRUCTION(SOL_MIR_INST_CONST_INT64,SOL_MIR_RUNTIME_LOWERED_CLASS_EXECUTABLE,SOL_MIR_RUNTIME_LOWERED_PLAN_VALUE,F(RECIPE)|F(VALUE));
     EXPECT_IMAGE_INSTRUCTION(SOL_MIR_INST_CONST_BOOL,SOL_MIR_RUNTIME_LOWERED_CLASS_EXECUTABLE,SOL_MIR_RUNTIME_LOWERED_PLAN_VALUE,F(RECIPE)|F(VALUE));
@@ -580,8 +586,9 @@ static void test_e6_census_and_missing(Pipeline*p) {
     size_t demanded=0,not_demanded=0,demanded_id=SOL_MIR_RUNTIME_LOWERED_NONE,not_demanded_id=SOL_MIR_RUNTIME_LOWERED_NONE;for(size_t i=0;i<p->lowered.recipe_count;i++){if(p->lowered.recipes[i].state==SOL_MIR_RUNTIME_LOWERED_PRESENT){++demanded;demanded_id=i;}if(p->lowered.recipes[i].state==SOL_MIR_RUNTIME_LOWERED_NOT_DEMANDED){++not_demanded;not_demanded_id=i;}CHECK((p->lowered.value_plans[i].state==SOL_MIR_RUNTIME_LOWERED_PRESENT)==(p->lowered.value_plans[i].facilities!=0));}size_t eligible_unused=0,used_value=0;for(size_t i=0;i<p->lowered.recipe_count;i++){const SolMirRuntimeLoweredValuePlan*value=&p->lowered.value_plans[i];if(value->facilities&&!value->demanded_facilities)++eligible_unused;if(value->demanded_facilities)++used_value;CHECK(value->state==(value->demanded_facilities?SOL_MIR_RUNTIME_LOWERED_PRESENT:SOL_MIR_RUNTIME_LOWERED_NOT_DEMANDED));}(void)eligible_unused;CHECK(used_value>0);CHECK(sol_mir_runtime_lowered_program_test_recipe_facilities(SOL_MIR_LINKAGE_RUNTIME_CREATE)!=0&&sol_mir_runtime_lowered_program_test_value_facilities(SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE,SOL_MIR_RUNTIME_COPY_UNREACHABLE,SOL_MIR_RUNTIME_EQUALITY_UNREACHABLE,SOL_MIR_RUNTIME_OWNERSHIP_UNREACHABLE,SOL_MIR_RUNTIME_HOST_RESULT_UNREACHABLE,false)==0);CHECK(sol_mir_runtime_lowered_program_test_recipe_facilities(0)==0&&(sol_mir_runtime_lowered_program_test_value_facilities(SOL_MIR_RUNTIME_ALLOCATION_PLAN_FIXED_OBJECT,SOL_MIR_RUNTIME_COPY_UNREACHABLE,SOL_MIR_RUNTIME_EQUALITY_UNREACHABLE,SOL_MIR_RUNTIME_OWNERSHIP_UNREACHABLE,SOL_MIR_RUNTIME_HOST_RESULT_UNREACHABLE,false)&SOL_MIR_RUNTIME_LOWERED_FACILITY_ALLOCATION)!=0);CHECK(demanded>0&&not_demanded>0);if(demanded_id!=SOL_MIR_RUNTIME_LOWERED_NONE){SolMirRuntimeLoweredState state=p->lowered.value_plans[demanded_id].state;p->lowered.value_plans[demanded_id].state=SOL_MIR_RUNTIME_LOWERED_NOT_DEMANDED;CHECK(!sol_mir_runtime_lowered_program_validate(&p->lowered,NULL));p->lowered.value_plans[demanded_id].state=state;CHECK(sol_mir_runtime_lowered_program_validate(&p->lowered,NULL));}if(not_demanded_id!=SOL_MIR_RUNTIME_LOWERED_NONE){SolMirRuntimeLoweredState state=p->lowered.recipes[not_demanded_id].state;p->lowered.recipes[not_demanded_id].state=SOL_MIR_RUNTIME_LOWERED_PRESENT;CHECK(!sol_mir_runtime_lowered_program_validate(&p->lowered,NULL));p->lowered.recipes[not_demanded_id].state=state;CHECK(sol_mir_runtime_lowered_program_validate(&p->lowered,NULL));}
 }
 static void test_erased_loop_census(void) {
-    Fixture fixture; Pipeline pipeline; init(&pipeline); CHECK(setup_at(&fixture,SOL_TEST_SOURCE_DIR "/tests/conformance/p33"));
-    SolMirProgramRoot root={find(&fixture.ir,"branching",SOL_IR_CALLABLE_FUNCTION),SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE}; SolMirTargetDescriptor target=sol_mir_target_wasm32();
+    Fixture fixture; Pipeline pipeline; init(&pipeline);
+    bool setup_ok = setup_at(&fixture,SOL_TEST_SOURCE_DIR "/tests/conformance/p33"); CHECK(setup_ok);
+    SolMirProgramRoot root={setup_ok ? find(&fixture.ir,"branching",SOL_IR_CALLABLE_FUNCTION) : SOL_IR_NONE,SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE}; SolMirTargetDescriptor target=sol_mir_target_wasm32();
     bool built=root.callable!=SOL_IR_NONE&&sol_mir_concrete_program_build(&(SolMirConcreteBuildRequest){&fixture.ir,&root,1,NULL,0,&target,NULL},&pipeline.concrete,&fixture.d)==SOL_MIR_CONCRETE_BUILD_SUCCEEDED&&sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){&pipeline.concrete,NULL},&pipeline.conventions,&fixture.d)==SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED&&sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){&pipeline.conventions,NULL},&pipeline.values,&fixture.d)==SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED&&sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){&pipeline.conventions,&pipeline.values,NULL},&pipeline.cleanup,&fixture.d)==SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED&&sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){&pipeline.conventions,&pipeline.values,&pipeline.cleanup,NULL},&pipeline.host,&fixture.d)==SOL_MIR_RUNTIME_HOST_ABI_BUILD_SUCCEEDED&&sol_mir_runtime_handler_abi_build(&(SolMirRuntimeHandlerAbiBuildRequest){&pipeline.conventions,&pipeline.values,&pipeline.cleanup,&pipeline.host,NULL},&pipeline.handlers,&fixture.d)==SOL_MIR_RUNTIME_HANDLER_ABI_BUILD_SUCCEEDED&&sol_mir_runtime_lowered_program_build(&(SolMirRuntimeLoweredProgramBuildRequest){&pipeline.conventions,&pipeline.values,&pipeline.cleanup,&pipeline.host,&pipeline.handlers,NULL},&pipeline.lowered,&fixture.d)==SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_SUCCEEDED;
     CHECK(built); if (!built) sol_diagnostics_render_human(stderr,&fixture.p.source,&fixture.d); if (built) { CHECK(pipeline.concrete.materialization.loop_count>0); CHECK(pipeline.lowered.usage.erased_loops==pipeline.concrete.materialization.loop_count); CHECK(sol_mir_runtime_lowered_program_validate(&pipeline.lowered,NULL)); }
     done(&pipeline);finish(&fixture);
@@ -589,7 +596,8 @@ static void test_erased_loop_census(void) {
 
 static void test_propagation_value_demand(void) {
     Fixture fixture; Pipeline pipeline; init(&pipeline);
-    CHECK(setup(&fixture)); bool built = !failures && build_named(&fixture, &pipeline, "increment_option");
+    bool setup_ok = setup(&fixture); CHECK(setup_ok);
+    bool built = setup_ok && build_named(&fixture, &pipeline, "increment_option");
     if (!built) sol_diagnostics_render_human(stderr, &fixture.p.source, &fixture.d);
     CHECK(built); if (built) check_build_work(&pipeline);
     if (built) {
@@ -622,8 +630,8 @@ static void test_propagation_value_demand(void) {
 }
 static void test_pattern_copy_pipeline(void) {
     Fixture fixture; Pipeline pipeline; init(&pipeline);
-    CHECK(setup_at(&fixture, SOL_TEST_SOURCE_DIR "/tests/conformance/p43_pattern_copy"));
-    bool built = !failures && build_named(&fixture, &pipeline, "launch");
+    bool setup_ok = setup_at(&fixture, SOL_TEST_SOURCE_DIR "/tests/conformance/p43_pattern_copy"); CHECK(setup_ok);
+    bool built = setup_ok && build_named(&fixture, &pipeline, "launch");
     if (!built) sol_diagnostics_render_human(stderr, &fixture.p.source, &fixture.d);
     CHECK(built);
     if (built) {
@@ -724,8 +732,8 @@ static void test_pattern_copy_pipeline(void) {
 
 static void test_nontrivial_copy_demand(void) {
     Fixture fixture; Pipeline pipeline; init(&pipeline);
-    CHECK(setup_at(&fixture, SOL_TEST_SOURCE_DIR "/tests/conformance/p36_copy"));
-    bool built = !failures && build_named(&fixture, &pipeline, "copy_text");
+    bool setup_ok = setup_at(&fixture, SOL_TEST_SOURCE_DIR "/tests/conformance/p36_copy"); CHECK(setup_ok);
+    bool built = setup_ok && build_named(&fixture, &pipeline, "copy_text");
     if (!built) sol_diagnostics_render_human(stderr, &fixture.p.source, &fixture.d);
     CHECK(built); if (built) check_build_work(&pipeline);
     if (built) {
@@ -1109,7 +1117,10 @@ static void test_slice_d_e6_usage(const Pipeline *p) {
     }
     CHECK(pre_invoke == 5 && pre_residual == 0);
     static const size_t expected[] = {471,65,64,64,64,65,4,6,4,0,0,0,4,80,12,12,52,20,20,295,7668,5,4,5,0,0,0};
-    expect_slice_d_usage(p, expected, 2362008, 2362586, 5763131, 17968, 3562274,
+    size_t work = 0;
+    /* 28 local ranges: byte visit +28*(iteration+overlap)=57; four paths. */
+    CHECK(sol_test_path_work(3555662, 228, sizeof SOL_TEST_SOURCE_DIR - 1, &work));
+    expect_slice_d_usage(p, expected, 2362008, 2362586, 5763131, 17968, work,
         36799488, 36870336);
 }
 static size_t distinct_render_row_keys(const char *text, const char *prefix,
@@ -1283,33 +1294,193 @@ static void test_slice_e_render(const Pipeline *p) {
 }
 static bool set_long_virtual_source_path(SolIr *ir, size_t extension) {
     static const char prefix[] = "virtual://runtime-lowered/";
-    size_t length = sizeof prefix - 1 + extension;
+    size_t original = strlen(ir->source_path);
+    if (original > SIZE_MAX - extension) return false;
+    size_t length = original + extension;
+    if (length < sizeof prefix - 1 || length == SIZE_MAX) return false;
     char *path = malloc(length + 1);
     if (!path) return false;
     memcpy(path, prefix, sizeof prefix - 1);
-    memset(path + sizeof prefix - 1, 'x', extension);
+    memset(path + sizeof prefix - 1, 'x', length - (sizeof prefix - 1));
     path[length] = '\0';
     free(ir->source_path);
     ir->source_path = path;
     return true;
 }
+static bool build_path_work_entry(Fixture *f, Pipeline *p) {
+    SolIrCallableId launch = find(&f->ir, "launch", SOL_IR_CALLABLE_FUNCTION);
+    if (launch == SOL_IR_NONE) return false;
+    SolMirProgramRoot root = {launch, SOL_MIR_PROGRAM_ROOT_ENTRY};
+    SolMirTargetDescriptor target = sol_mir_target_wasm32();
+    bool built;
+    sol_test_progress_phase("path-owner-concrete", "stage", 1);
+    built = sol_mir_concrete_program_build(&(SolMirConcreteBuildRequest){
+        &f->ir, &root, 1, NULL, 0, &target, NULL}, &p->concrete, &f->d)
+        == SOL_MIR_CONCRETE_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(1);
+    sol_test_progress_phase_end(); if (!built) return false;
+    sol_test_progress_phase("path-owner-conventions", "stage", 1);
+    built = sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){
+        &p->concrete, NULL}, &p->conventions, &f->d) == SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(1);
+    sol_test_progress_phase_end(); if (!built) return false;
+    sol_test_progress_phase("path-owner-values", "stage", 1);
+    built = sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){
+        &p->conventions, NULL}, &p->values, &f->d) == SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(1);
+    sol_test_progress_phase_end(); if (!built) return false;
+    sol_test_progress_phase("path-owner-cleanup", "stage", 1);
+    built = sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){
+        &p->conventions, &p->values, NULL}, &p->cleanup, &f->d) == SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(1);
+    sol_test_progress_phase_end(); if (!built) return false;
+    sol_test_progress_phase("path-owner-host", "stage", 1);
+    built = sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){
+        &p->conventions, &p->values, &p->cleanup, NULL}, &p->host, &f->d)
+        == SOL_MIR_RUNTIME_HOST_ABI_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(1);
+    sol_test_progress_phase_end(); if (!built) return false;
+    sol_test_progress_phase("path-owner-handlers", "stage", 1);
+    built = sol_mir_runtime_handler_abi_build(&(SolMirRuntimeHandlerAbiBuildRequest){
+        &p->conventions, &p->values, &p->cleanup, &p->host, NULL}, &p->handlers, &f->d)
+        == SOL_MIR_RUNTIME_HANDLER_ABI_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(1);
+    sol_test_progress_phase_end(); if (!built) return false;
+    sol_test_progress_phase("path-owner-lowered", "stage", 1);
+    built = sol_mir_runtime_lowered_program_build(&(SolMirRuntimeLoweredProgramBuildRequest){
+        &p->conventions, &p->values, &p->cleanup, &p->host, &p->handlers, NULL},
+        &p->lowered, &f->d) == SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(1);
+    sol_test_progress_phase_end();
+    return built;
+}
 static void test_long_virtual_path_validation_work(void) {
     Fixture base_fixture, long_fixture; Pipeline base, longer; init(&base); init(&longer);
-    CHECK(setup(&base_fixture)); CHECK(setup(&long_fixture));
-    CHECK(set_long_virtual_source_path(&long_fixture.ir, 257));
-    bool built = !failures && build(&base_fixture, &base, NULL)
-        && build(&long_fixture, &longer, NULL);
+    const char *directory = SOL_TEST_SOURCE_DIR "/tests/conformance/p44f_site_domains_direct";
+    bool base_setup, long_setup;
+    sol_test_progress_phase("path-source", "fixture", 2);
+    sol_test_progress_operation_begin("base-source");
+    base_setup = setup_at(&base_fixture, directory);
+    sol_test_progress_operation_end();
+    CHECK(base_setup);
+    if (base_setup) sol_test_progress_completed(1);
+    sol_test_progress_operation_begin("extended-source");
+    long_setup = setup_at(&long_fixture, directory);
+    sol_test_progress_operation_end();
+    CHECK(long_setup);
+    if (long_setup) sol_test_progress_completed(base_setup ? 2 : 1);
+    sol_test_progress_phase_end();
+
+    bool source_pair = base_setup && long_setup;
+    size_t physical_base_path = 0, physical_long_path = 0;
+    size_t physical_base_file = 0, physical_long_file = 0;
+    if (base_setup && base_fixture.ir.source_path != NULL)
+        physical_base_path = strlen(base_fixture.ir.source_path);
+    if (long_setup && long_fixture.ir.source_path != NULL)
+        physical_long_path = strlen(long_fixture.ir.source_path);
+    if (base_setup && base_fixture.ir.file_count == 1 && base_fixture.ir.files != NULL
+        && base_fixture.ir.files[0].path != NULL)
+        physical_base_file = strlen(base_fixture.ir.files[0].path);
+    if (long_setup && long_fixture.ir.file_count == 1 && long_fixture.ir.files != NULL
+        && long_fixture.ir.files[0].path != NULL)
+        physical_long_file = strlen(long_fixture.ir.files[0].path);
+    if (source_pair) {
+        source_pair = base_fixture.ir.source_bytes != NULL && long_fixture.ir.source_bytes != NULL
+            && base_fixture.ir.source_length == long_fixture.ir.source_length
+            && !memcmp(base_fixture.ir.source_bytes, long_fixture.ir.source_bytes, base_fixture.ir.source_length)
+            && base_fixture.p.source.text != NULL && long_fixture.p.source.text != NULL
+            && base_fixture.p.source.length == long_fixture.p.source.length
+            && !memcmp(base_fixture.p.source.text, long_fixture.p.source.text, base_fixture.p.source.length)
+            && base_fixture.ir.file_count == 1 && long_fixture.ir.file_count == 1
+            && base_fixture.ir.files != NULL && long_fixture.ir.files != NULL
+            && base_fixture.ir.files[0].path != NULL && long_fixture.ir.files[0].path != NULL
+            && !strcmp(base_fixture.ir.files[0].path, long_fixture.ir.files[0].path)
+            && base_fixture.ir.source_path != NULL && long_fixture.ir.source_path != NULL;
+        CHECK(source_pair);
+        CHECK(base_fixture.ir.source_path != NULL && long_fixture.ir.source_path != NULL
+            && !strcmp(base_fixture.ir.source_path, long_fixture.ir.source_path)
+            && physical_base_path == physical_long_path && physical_base_file == physical_long_file);
+    }
+    sol_test_progress_phase("path-extension", "checked", 1);
+    bool path_ok = long_setup && long_fixture.ir.source_path != NULL
+        && set_long_virtual_source_path(&long_fixture.ir, 233);
+    size_t expected_virtual_length = 0, virtual_path_length = 0;
+    bool virtual_length_ok = path_ok && physical_long_path <= SIZE_MAX - 233;
+    if (virtual_length_ok) {
+        expected_virtual_length = physical_long_path + 233;
+        virtual_path_length = strlen(long_fixture.ir.source_path);
+        virtual_length_ok = virtual_path_length == expected_virtual_length;
+    }
+    CHECK(path_ok && virtual_length_ok);
+    path_ok = path_ok && virtual_length_ok;
+    if (path_ok) sol_test_progress_completed(1);
+    sol_test_progress_phase_end();
+
+    sol_test_progress_phase("path-full-owner", "owner", 2);
+    sol_test_progress_operation_begin("base-full-owner");
+    bool base_built = base_setup && build_path_work_entry(&base_fixture, &base);
+    CHECK(base_built);
+    sol_test_progress_operation_end(); if (base_built) sol_test_progress_completed(1);
+    sol_test_progress_operation_begin("extended-full-owner");
+    bool long_built = long_setup && path_ok && build_path_work_entry(&long_fixture, &longer);
+    CHECK(long_built);
+    sol_test_progress_operation_end();
+    if (long_built) sol_test_progress_completed(base_built ? 2 : 1);
+    sol_test_progress_phase_end();
+    bool built = base_built && long_built;
     CHECK(built);
     if (built) {
-        CHECK(base.lowered.image_instruction_count == longer.lowered.image_instruction_count
+        sol_test_progress_phase("path-pair-oracle", "assertion", 1);
+        bool nonempty = base.lowered.image_instruction_count != 0
+            && base.lowered.semantic_plan_count != 0 && base.lowered.cleanup_failure_count != 0;
+        CHECK(nonempty && base.lowered.image_instruction_count == longer.lowered.image_instruction_count
             && base.lowered.semantic_plan_count == longer.lowered.semantic_plan_count
             && base.lowered.cleanup_failure_count == longer.lowered.cleanup_failure_count);
-        CHECK(longer.lowered.usage.validation_work
-            == base.lowered.usage.validation_work + 13281);
+        size_t path_delta = 0, expected_work = 0;
+        bool delta_ok = sol_test_path_work(0, 57, 233, &path_delta);
+        CHECK(delta_ok && path_delta == 13281);
+        bool sum_ok = delta_ok && base.lowered.usage.validation_work <= SIZE_MAX - path_delta;
+        CHECK(sum_ok);
+        if (sum_ok) expected_work = base.lowered.usage.validation_work + path_delta;
+        CHECK(sum_ok && longer.lowered.usage.validation_work == expected_work);
+#define SAME_TABLE(member,type,singular) \
+        CHECK(base.lowered.usage.member == longer.lowered.usage.member);
+        SOL_MIR_RUNTIME_LOWERED_TABLES(SAME_TABLE)
+#undef SAME_TABLE
+        CHECK(base.lowered.usage.erased_loops == longer.lowered.usage.erased_loops
+            && base.lowered.usage.provenance_records == longer.lowered.usage.provenance_records
+            && base.lowered.usage.demanded_semantic_plans == longer.lowered.usage.demanded_semantic_plans
+            && base.lowered.usage.owned_bytes == longer.lowered.usage.owned_bytes
+            && base.lowered.usage.build_scratch_bytes == longer.lowered.usage.build_scratch_bytes
+            && base.lowered.usage.build_work == longer.lowered.usage.build_work
+            && base.lowered.usage.validation_scratch_bytes == longer.lowered.usage.validation_scratch_bytes
+            && base.lowered.usage.render_bytes == longer.lowered.usage.render_bytes
+            && base.lowered.usage.render_scratch_bytes == longer.lowered.usage.render_scratch_bytes);
+        CHECK(virtual_length_ok && virtual_path_length == expected_virtual_length
+            && physical_base_path == physical_long_path && physical_base_file == physical_long_file
+            && source_pair);
+        size_t actual_delta = 0;
+        bool actual_delta_ok = longer.lowered.usage.validation_work >= base.lowered.usage.validation_work;
+        if (actual_delta_ok) actual_delta = longer.lowered.usage.validation_work - base.lowered.usage.validation_work;
+        CHECK(actual_delta_ok && actual_delta == path_delta);
+        fprintf(stderr, "P44_PATH_WORK physical_source=%zu physical_file=%zu virtual_source=%zu extension=233 coefficient=57 expected_delta=%zu actual_delta=%zu base_work=%zu extended_work=%zu\n",
+            physical_base_path, physical_base_file, virtual_path_length, path_delta,
+            actual_delta,
+            base.lowered.usage.validation_work, longer.lowered.usage.validation_work);
+        sol_test_progress_completed(1); sol_test_progress_phase_end();
+        sol_test_progress_phase("path-exact-limit", "owner", 2);
+        sol_test_progress_operation_begin("base-exact-limit");
         test_exact_validation_work_limit(&base);
+        sol_test_progress_operation_end(); sol_test_progress_completed(1);
+        sol_test_progress_operation_begin("extended-exact-limit");
         test_exact_validation_work_limit(&longer);
+        sol_test_progress_operation_end(); sol_test_progress_completed(2);
+        sol_test_progress_phase_end();
     }
-    done(&base); done(&longer); finish(&base_fixture); finish(&long_fixture);
+    sol_test_progress_phase("path-teardown", "owner", 2);
+    done(&base); finish(&base_fixture); sol_test_progress_completed(1);
+    done(&longer); finish(&long_fixture); sol_test_progress_completed(2);
+    sol_test_progress_phase_end();
 }
 static void test_slice_d_p35_usage(const Pipeline *p, size_t validation_work) {
     static const size_t expected[] = {198,16,10,10,10,16,0,0,0,0,0,0,0,33,5,7,11,7,7,54,2742,0,0,0,7,14,128};
@@ -1560,16 +1731,22 @@ static void test_slice_c_cleanup_and_host(Pipeline *p) {
 
 static void test_slice_c_handlers(void) {
     Fixture first, reordered; Pipeline left, right; init(&left); init(&right);
-    CHECK(setup_at(&first, SOL_TEST_SOURCE_DIR "/tests/conformance/p35"));
-    CHECK(setup_at(&reordered, SOL_TEST_SOURCE_DIR "/tests/conformance/p35_reordered"));
-    bool built = !failures && build_handlers(&first, &left) && build_handlers(&reordered, &right);
+    bool first_setup = setup_at(&first, SOL_TEST_SOURCE_DIR "/tests/conformance/p35");
+    bool reordered_setup = setup_at(&reordered, SOL_TEST_SOURCE_DIR "/tests/conformance/p35_reordered");
+    CHECK(first_setup); CHECK(reordered_setup);
+    bool left_built = first_setup && build_handlers(&first, &left);
+    bool right_built = reordered_setup && build_handlers(&reordered, &right);
+    bool built = left_built && right_built;
     if (!built) { sol_diagnostics_render_human(stderr, &first.p.source, &first.d); sol_diagnostics_render_human(stderr, &reordered.p.source, &reordered.d); }
     CHECK(built); if (built) check_build_work(&right);
     if (built) {
         CHECK(left.lowered.handler_frame_count == 7 && left.lowered.handler_marker_count == 14 && left.lowered.handler_exit_count == 128);
         CHECK(right.lowered.handler_frame_count == 7 && right.lowered.handler_marker_count == 14 && right.lowered.handler_exit_count == 128);
-        test_slice_d_p35_usage(&left, 1276307);
-        test_slice_d_p35_usage(&right, 1278587);
+        size_t left_work = 0, right_work = 0;
+        CHECK(sol_test_path_work(1269695, 228, sizeof SOL_TEST_SOURCE_DIR - 1, &left_work));
+        CHECK(sol_test_path_work(1271975, 228, sizeof SOL_TEST_SOURCE_DIR - 1, &right_work));
+        test_slice_d_p35_usage(&left, left_work);
+        test_slice_d_p35_usage(&right, right_work);
         size_t left_length=0,right_length=0;
         char *left_bytes=rendered(&left.lowered,&left_length);
         char *right_bytes=rendered(&right.lowered,&right_length);
@@ -1618,8 +1795,8 @@ static void test_slice_c_handlers(void) {
 
 static void test_bound_environment_indirect_graph(void) {
     Fixture fixture; Pipeline pipeline; init(&pipeline);
-    CHECK(setup_at(&fixture, SOL_TEST_SOURCE_DIR "/tests/conformance/p36_graph"));
-    bool built = !failures && build_graph(&fixture, &pipeline);
+    bool setup_ok = setup_at(&fixture, SOL_TEST_SOURCE_DIR "/tests/conformance/p36_graph"); CHECK(setup_ok);
+    bool built = setup_ok && build_graph(&fixture, &pipeline);
     if (!built) sol_diagnostics_render_human(stderr, &fixture.p.source, &fixture.d);
     CHECK(built); if (built) check_build_work(&pipeline);
     if (built) {
@@ -1711,11 +1888,12 @@ static void test_source_backed_p36_graph_keys(void) {
     Fixture original_fixture, shifted_fixture; Pipeline original, shifted;
     P36GraphKeys original_keys, shifted_keys;
     init(&original); init(&shifted);
-    CHECK(setup_at(&original_fixture, SOL_TEST_SOURCE_DIR "/tests/conformance/p36_graph")
-        && setup_at(&shifted_fixture,
-            SOL_TEST_SOURCE_DIR "/tests/conformance/p36_graph_shifted"));
-    bool built = !failures && build_graph(&original_fixture, &original)
-        && build_graph(&shifted_fixture, &shifted);
+    bool original_setup = setup_at(&original_fixture, SOL_TEST_SOURCE_DIR "/tests/conformance/p36_graph");
+    bool shifted_setup = setup_at(&shifted_fixture, SOL_TEST_SOURCE_DIR "/tests/conformance/p36_graph_shifted");
+    CHECK(original_setup); CHECK(shifted_setup);
+    bool original_built = original_setup && build_graph(&original_fixture, &original);
+    bool shifted_built = shifted_setup && build_graph(&shifted_fixture, &shifted);
+    bool built = original_built && shifted_built;
     CHECK(built);
     if (built) {
         CHECK(collect_p36_graph_keys(&original, &original_keys)
@@ -1731,8 +1909,8 @@ static void test_source_backed_p36_graph_keys(void) {
 }
 static void test_generic_type_place_keys(void) {
     Fixture fixture; Pipeline pipeline; init(&pipeline);
-    CHECK(setup_at(&fixture, SOL_TEST_SOURCE_DIR "/tests/conformance/p36_generic"));
-    bool built = !failures && build_named(&fixture, &pipeline, "boxes");
+    bool setup_ok = setup_at(&fixture, SOL_TEST_SOURCE_DIR "/tests/conformance/p36_generic"); CHECK(setup_ok);
+    bool built = setup_ok && build_named(&fixture, &pipeline, "boxes");
     CHECK(built);
     if (built) {
         const SolMirMaterialization *m = &pipeline.concrete.materialization;
@@ -1769,8 +1947,8 @@ static void test_generic_type_place_keys(void) {
 
 static void test_callback_prerequisite(void) {
     Fixture f; Pipeline p; init(&p);
-    CHECK(setup_at(&f, SOL_TEST_SOURCE_DIR "/tests/conformance/p43_callback_prereq"));
-    bool built = !failures && build_named(&f, &p, "launch");
+    bool setup_ok = setup_at(&f, SOL_TEST_SOURCE_DIR "/tests/conformance/p43_callback_prereq"); CHECK(setup_ok);
+    bool built = setup_ok && build_named(&f, &p, "launch");
     if (!built) sol_diagnostics_render_human(stderr, &f.p.source, &f.d);
     CHECK(built);
     if (built) {
@@ -1946,8 +2124,8 @@ static void test_callback_prerequisite(void) {
 
 static void test_callable_hole_prerequisite(void) {
     Fixture f; Pipeline p; init(&p);
-    CHECK(setup_at(&f, SOL_TEST_SOURCE_DIR "/tests/conformance/p43_callable_hole_prereq"));
-    bool built = !failures && build_named(&f, &p, "launch");
+    bool setup_ok = setup_at(&f, SOL_TEST_SOURCE_DIR "/tests/conformance/p43_callable_hole_prereq"); CHECK(setup_ok);
+    bool built = setup_ok && build_named(&f, &p, "launch");
     if (!built) sol_diagnostics_render_human(stderr, &f.p.source, &f.d);
     CHECK(built);
     if (built) {
@@ -2467,8 +2645,8 @@ static void test_callable_hole_exact(void) {
     };
     for (size_t i = 0; i < sizeof cases / sizeof *cases; ++i) {
         Fixture f; Pipeline p; init(&p);
-        CHECK(setup_at(&f, SOL_TEST_SOURCE_DIR "/tests/conformance/p43_callable_hole_exact"));
-        bool built = build_named(&f, &p, cases[i].root);
+        bool setup_ok = setup_at(&f, SOL_TEST_SOURCE_DIR "/tests/conformance/p43_callable_hole_exact"); CHECK(setup_ok);
+        bool built = setup_ok && build_named(&f, &p, cases[i].root);
         if (!built) sol_diagnostics_render_human(stderr, &f.p.source, &f.d);
         CHECK(built);
         if (built) {
@@ -2493,8 +2671,8 @@ static void test_callable_hole_exact(void) {
 
 static void test_immediate_method_prerequisite(void) {
     Fixture f; Pipeline p; init(&p);
-    CHECK(setup_at(&f, SOL_TEST_SOURCE_DIR "/tests/conformance/p43_method_prereq"));
-    bool built = !failures && build_named(&f, &p, "launch");
+    bool setup_ok = setup_at(&f, SOL_TEST_SOURCE_DIR "/tests/conformance/p43_method_prereq"); CHECK(setup_ok);
+    bool built = setup_ok && build_named(&f, &p, "launch");
     if (!built) sol_diagnostics_render_human(stderr, &f.p.source, &f.d);
     CHECK(built);
     if (built) {
@@ -2697,8 +2875,8 @@ static void test_require_never_fallback_pipeline(void) {
         {"false_unreachable", SOL_MIR_TERM_UNREACHABLE}, {"final_unit", SOL_MIR_TERM_PANIC},
     };
     TextFixture f;
-    CHECK(setup_text(&f, source));
-    for (size_t c = 0; c < sizeof cases / sizeof *cases; ++c) {
+    bool setup_ok = setup_text(&f, source); CHECK(setup_ok);
+    for (size_t c = 0; setup_ok && c < sizeof cases / sizeof *cases; ++c) {
         Pipeline p; init(&p);
         bool built = build_text_named(&f, &p, cases[c].name);
         CHECK(built);
@@ -2735,7 +2913,694 @@ static void test_require_never_fallback_pipeline(void) {
     finish_text(&f);
 }
 
-int main(void) {
+/* Each selected fault owns setup, the failed build, preservation, immediate
+ * retry, canonical render and teardown. The default driver uses these same
+ * cases; an ordinal is never counted before the complete obligation returns. */
+typedef struct {
+    const void *address;
+    size_t length;
+    unsigned char *bytes;
+} TransportMemory;
+typedef struct { TransportMemory *ranges; size_t count, capacity; } TransportSnapshot;
+static bool transport_save_range(const void *pointer, size_t count, size_t size, void *context) {
+    TransportSnapshot *snapshot = context;
+    if (!count || !size) return true;
+    if (count > SIZE_MAX / size) return false;
+    if (snapshot->count == snapshot->capacity) {
+        size_t capacity = snapshot->capacity ? snapshot->capacity * 2 : 256;
+        if (capacity < snapshot->capacity || capacity > SIZE_MAX / sizeof *snapshot->ranges) return false;
+        void *ranges = realloc(snapshot->ranges, capacity * sizeof *snapshot->ranges);
+        if (!ranges) return false;
+        snapshot->ranges = ranges; snapshot->capacity = capacity;
+    }
+    size_t length = count * size;
+    unsigned char *bytes = malloc(length); if (!bytes) return false;
+    memcpy(bytes, pointer, length);
+    snapshot->ranges[snapshot->count++] = (TransportMemory){pointer, length, bytes};
+    return true;
+}
+static bool transport_snapshot(Pipeline *p, TransportSnapshot *snapshot) {
+    bool ok = sol_mir_runtime_visit_concrete_arenas(&p->concrete, transport_save_range, snapshot)
+        == SOL_MIR_RUNTIME_ARENA_VISIT_OK;
+#define HEADER(owner) ok = transport_save_range(&(owner), 1, sizeof(owner), snapshot) && ok
+#define ARENA(owner, member, singular) ok = transport_save_range((owner).member, \
+    (owner).singular##_capacity, sizeof *(owner).member, snapshot) && ok
+    HEADER(p->conventions); HEADER(p->values); HEADER(p->cleanup);
+    HEADER(p->host); HEADER(p->handlers); HEADER(p->lowered);
+#define CONVENTION(member, type, singular) ARENA(p->conventions, member, singular);
+    SOL_MIR_RUNTIME_CONVENTIONS_ARENAS(CONVENTION)
+#undef CONVENTION
+    ARENA(p->values, recipe_operations, recipe_operation); ARENA(p->values, allocation_plans, allocation_plan);
+    ARENA(p->values, copy_plans, copy_plan); ARENA(p->values, equality_plans, equality_plan);
+    ARENA(p->values, host_result_plans, host_result_plan); ARENA(p->values, host_result_requirements, host_result_requirement);
+    ARENA(p->values, ownership_plans, ownership_plan); ARENA(p->values, ownership_variants, ownership_variant);
+    ARENA(p->values, owned_edges, owned_edge);
+    ARENA(p->cleanup, events, event); ARENA(p->cleanup, actions, action);
+    ARENA(p->cleanup, transitions, transition); ARENA(p->cleanup, supplemental_sites, supplemental_site);
+    ARENA(p->cleanup, drop_paths, drop_path);
+    ARENA(p->host, capabilities, capability); ARENA(p->host, entry_roots, entry_root);
+    ARENA(p->host, operations, operation); ARENA(p->host, arguments, argument);
+    ARENA(p->host, formals, formal); ARENA(p->host, shapes, shape);
+    ARENA(p->host, shape_cases, shape_case); ARENA(p->host, requirements, requirement);
+    ARENA(p->handlers, frames, frame); ARENA(p->handlers, exit_markers, exit_marker);
+    ARENA(p->handlers, cleanup_exits, cleanup_exit);
+#define LOWERED(member, type, singular) ARENA(p->lowered, member, singular);
+    SOL_MIR_RUNTIME_LOWERED_TABLES(LOWERED)
+#undef LOWERED
+#undef ARENA
+#undef HEADER
+    return ok;
+}
+static void transport_snapshot_check(const TransportSnapshot *snapshot) {
+    for (size_t i = 0; i < snapshot->count; ++i)
+        CHECK(!memcmp(snapshot->ranges[i].address, snapshot->ranges[i].bytes, snapshot->ranges[i].length));
+}
+static void transport_snapshot_free(TransportSnapshot *snapshot) {
+    for (size_t i = 0; i < snapshot->count; ++i) free(snapshot->ranges[i].bytes);
+    free(snapshot->ranges); memset(snapshot, 0, sizeof *snapshot);
+}
+static bool transport_empty_lowered(const SolMirRuntimeLoweredProgram *p) {
+    bool empty = !p->authentication && !p->conventions && !p->values && !p->cleanup
+        && !p->host_abi && !p->handler_abi
+        && !memcmp(&p->usage, &(SolMirRuntimeLoweredProgramUsage){0}, sizeof p->usage);
+#define EMPTY(member,type,singular) empty = empty && !p->member && !p->singular##_count && !p->singular##_capacity;
+    SOL_MIR_RUNTIME_LOWERED_TABLES(EMPTY)
+#undef EMPTY
+    return empty;
+}
+static void transport_disable_faults(void) {
+    sol_mir_runtime_lowered_program_test_fail_build_scratch_allocation_after(0);
+    sol_mir_runtime_lowered_program_test_fail_persistent_allocation_after(0);
+    sol_mir_runtime_lowered_program_test_force_validation_scratch_failure(false);
+    sol_mir_runtime_lowered_program_test_force_validation_scratch_failure_attempt(0);
+}
+static bool build_transport_roots(Fixture *f, Pipeline *p, bool paired, bool reverse, const char *path) {
+    size_t length = strlen(path);
+    if (length == SIZE_MAX) return false;
+    char *normalized = malloc(length + 1); if (!normalized) return false;
+    memcpy(normalized, path, length + 1); free(f->ir.source_path); f->ir.source_path = normalized;
+    SolMirProgramRoot roots[] = {{find(&f->ir, "launch", SOL_IR_CALLABLE_FUNCTION), SOL_MIR_PROGRAM_ROOT_ENTRY},
+        {find(&f->ir, "helper", SOL_IR_CALLABLE_FUNCTION), SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE}};
+    /* Resolve source identities and roles before owner construction. */
+    if (roots[0].callable == SOL_IR_NONE || (paired && (roots[1].callable == SOL_IR_NONE
+            || roots[0].callable == roots[1].callable))) return false;
+    if (paired && reverse) { SolMirProgramRoot saved = roots[0]; roots[0] = roots[1]; roots[1] = saved; }
+    SolMirTargetDescriptor target = sol_mir_target_wasm32();
+    sol_test_progress_phase("predecessors", "owner", 6);
+    bool built = sol_mir_concrete_program_build(
+        &(SolMirConcreteBuildRequest){&f->ir, roots, paired ? 2 : 1, NULL, 0, &target, NULL}, &p->concrete, &f->d)
+            == SOL_MIR_CONCRETE_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(1);
+    built = built && sol_mir_runtime_conventions_build(&(SolMirRuntimeConventionsBuildRequest){&p->concrete, NULL},
+        &p->conventions, &f->d) == SOL_MIR_RUNTIME_CONVENTIONS_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(2);
+    built = built && sol_mir_runtime_values_build(&(SolMirRuntimeValuesBuildRequest){&p->conventions, NULL},
+        &p->values, &f->d) == SOL_MIR_RUNTIME_VALUES_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(3);
+    built = built && sol_mir_runtime_cleanup_build(&(SolMirRuntimeCleanupBuildRequest){&p->conventions, &p->values, NULL},
+        &p->cleanup, &f->d) == SOL_MIR_RUNTIME_CLEANUP_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(4);
+    built = built && sol_mir_runtime_host_abi_build(&(SolMirRuntimeHostAbiBuildRequest){&p->conventions, &p->values,
+        &p->cleanup, NULL}, &p->host, &f->d) == SOL_MIR_RUNTIME_HOST_ABI_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(5);
+    built = built && sol_mir_runtime_handler_abi_build(&(SolMirRuntimeHandlerAbiBuildRequest){&p->conventions, &p->values,
+        &p->cleanup, &p->host, NULL}, &p->handlers, &f->d) == SOL_MIR_RUNTIME_HANDLER_ABI_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(6);
+    sol_test_progress_phase_end();
+    sol_test_progress_phase("owner", "build", 1);
+    built = built && sol_mir_runtime_lowered_program_build(&(SolMirRuntimeLoweredProgramBuildRequest){&p->conventions,
+        &p->values, &p->cleanup, &p->host, &p->handlers, NULL}, &p->lowered, &f->d)
+            == SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_SUCCEEDED;
+    if (built) sol_test_progress_completed(1);
+    sol_test_progress_phase_end(); return built;
+}
+static bool build_transport_entry(Fixture *f, Pipeline *p) {
+    return build_transport_roots(f, p, false, false, "virtual://p44f1a/transport.sol");
+}
+static void test_validation_ordinal_wrapper(void) {
+    transport_disable_faults();
+    sol_test_progress_phase("wrapper", "selector", 6);
+    for (size_t selector = 0; selector <= 5; ++selector) {
+        sol_mir_runtime_lowered_program_test_force_validation_scratch_failure_attempt(selector);
+        sol_mir_runtime_lowered_program_test_reset_allocation_attempts();
+        for (size_t k = 1; k <= 4; ++k) {
+            void *buffer = sol_mir_runtime_lowered_program_internal_validation_scratch(1, 8);
+            CHECK((buffer == NULL) == (selector == k)); free(buffer);
+            CHECK(sol_mir_runtime_lowered_program_test_validation_scratch_allocation_attempts() == k
+                && sol_mir_runtime_lowered_program_test_allocation_attempts() == k);
+        }
+        sol_mir_runtime_lowered_program_test_force_validation_scratch_failure_attempt(0);
+        CHECK(sol_mir_runtime_lowered_program_test_validation_scratch_allocation_attempts() == 4);
+        sol_test_progress_completed(selector + 1);
+    }
+    sol_test_progress_phase_end();
+    /* Reset preserves both arms; setters preserve counts and do not disarm each other. */
+    sol_mir_runtime_lowered_program_test_force_validation_scratch_failure_attempt(1);
+    sol_mir_runtime_lowered_program_test_force_validation_scratch_failure(true);
+    sol_mir_runtime_lowered_program_test_reset_allocation_attempts();
+    for (size_t k = 1; k <= 4; ++k)
+        CHECK(sol_mir_runtime_lowered_program_internal_validation_scratch(1, 8) == NULL);
+    CHECK(sol_mir_runtime_lowered_program_test_validation_scratch_allocation_attempts() == 4);
+    sol_mir_runtime_lowered_program_test_force_validation_scratch_failure(false);
+    CHECK(sol_mir_runtime_lowered_program_test_validation_scratch_allocation_attempts() == 4);
+    sol_mir_runtime_lowered_program_test_reset_allocation_attempts();
+    CHECK(sol_mir_runtime_lowered_program_internal_validation_scratch(1, 8) == NULL);
+    void *buffer = sol_mir_runtime_lowered_program_internal_validation_scratch(1, 8);
+    CHECK(buffer != NULL); free(buffer);
+    sol_mir_runtime_lowered_program_test_reset_allocation_attempts();
+    CHECK(sol_mir_runtime_lowered_program_internal_validation_scratch(1, 8) == NULL);
+    transport_disable_faults(); sol_mir_runtime_lowered_program_test_reset_allocation_attempts();
+}
+static const struct { const char *name, *leaf; size_t pairs; } transport_contexts[] = {
+    {"direct", "p44f_site_domains_direct", 1}, {"refined_call", "p44f_site_domains_refined_call", 1},
+    {"ensures_old", "p44_parallel_predicate_transport_ensures_old", 1},
+    {"recursive", "p44_parallel_predicate_transport_recursive", 1},
+    {"bool_unit", "p44_parallel_predicate_transport_bool_unit", 1},
+    {"unit_direct", "p44_parallel_predicate_transport_unit_direct", 1},
+    {"unit_input_result", "p44_parallel_predicate_transport_unit_input_result", 2},
+};
+static void transport_lowered_frozen(Pipeline *p, size_t test, const char *baseline) {
+    /* Retained literal census, not observed Usage. Only one physical source path
+     * changes prefix; the normalized aggregate path is fixed before construction.
+     * Each physical-path byte costs57 in the independent alias walk. */
+    static const struct { SolMirRuntimeLoweredProgramUsage usage; size_t length; const char *hash; } frozen[] = {
+        {{32,9,6,6,6,9,1,0,3,2,2,2,3,4,2,3,0,3,3,18,326,0,0,0,0,0,0,0,3,4,104768,104814,217096,880,143684,1803264,1805760},179398,"fc2c31d6ec917606f45e3c409cf103b86c0667834aa8338229da04f340f96326"},
+        {{36,7,4,4,4,7,1,0,3,2,2,2,3,6,2,3,2,4,4,21,354,0,0,0,0,0,0,0,3,6,113240,113288,234293,942,154679,1930240,1932984},190077,"5bacb83676acf9e6658d131c129055272c3cb49259ef4bdc7ba1fe5eca478f68"},
+        {{57,19,15,15,15,19,3,4,5,2,2,2,5,8,3,4,0,3,3,45,687,0,0,0,0,0,0,0,8,8,219520,219607,466287,1832,283858,3752960,3759264},370831,"037c2d6db48c508332859bc1c711fe01c4afeb5fdcc1eea0394452b58ee0658a"},
+        {{50,13,10,10,10,13,1,0,3,2,2,2,3,6,3,3,0,3,3,28,539,0,0,0,0,0,0,0,4,6,171584,171652,359040,1408,221212,2884608,2889216},283625,"4c5b919adfcb87ed0f1984bbd0bc84ccf76d0a1c97c1f414e5ae051593475a2f"},
+        {{48,12,8,8,8,12,1,1,3,2,2,2,3,5,3,4,0,4,4,22,491,0,0,0,0,0,0,0,2,5,156720,156786,328154,1286,208326,2634752,2638872},261533,"432f5c6132461dc0508585590e2308c4edb8699434093c855becfe962903d1b0"},
+        {{30,9,6,6,6,9,1,3,3,2,2,2,3,3,2,3,0,4,4,19,325,0,0,0,0,0,0,0,2,3,104720,104767,217650,884,145683,1811456,1813968},181424,"4b2f57c6c7f7bb301c169f6b3e46a6d9ee7dcf594242b7ea7adfcfa1697f6c95"},
+        {{58,10,6,6,6,10,1,2,8,8,8,8,8,6,3,4,0,4,4,30,551,0,0,0,0,0,0,0,3,6,176944,177030,373747,1482,235376,3036160,3041064},302087,"7ec484e31d0944e09a9d4fc37a511d57aa669fb575a8975bbd076532f55b5c99"},
+    };
+    CHECK(test < sizeof frozen / sizeof *frozen); if (test >= sizeof frozen / sizeof *frozen) return;
+    SolMirRuntimeLoweredProgramUsage expected = frozen[test].usage;
+    CHECK(p->concrete.program.ir->file_count == 1);
+    CHECK(sol_test_path_work(expected.validation_work - 57 * 29, 57,
+        sizeof SOL_TEST_SOURCE_DIR - 1, &expected.validation_work));
+    SolMirLinkageSha256 sha; SolMirLinkageDigest digest; char hash[65] = {0};
+    sol_mir_linkage_internal_sha256_init(&sha);
+    sol_mir_linkage_internal_sha256_write(&sha, baseline, strlen(baseline));
+    CHECK(sol_mir_linkage_internal_sha256_finish(&sha, &digest));
+    for (size_t i = 0; i < 32; ++i) snprintf(hash + i * 2, 3, "%02x", digest.bytes[i]);
+    CHECK(!memcmp(&p->lowered.usage, &expected, sizeof expected));
+    CHECK(strlen(baseline) == frozen[test].length && !strcmp(hash, frozen[test].hash)
+        && strlen(baseline) <= p->lowered.usage.render_bytes);
+}
+static bool transport_sentinel_rejected(const SolMirRuntimeLoweredProgram *p) {
+    FILE *stream = tmpfile(); if (!stream) return false;
+    bool ok = fwrite("sentinel", 1, 8, stream) == 8;
+    sol_mir_runtime_lowered_program_test_reset_render_write_attempts();
+    ok = ok && !sol_mir_runtime_lowered_program_render(stream, p) && !fflush(stream)
+        && !fseek(stream, 0, SEEK_END) && ftell(stream) == 8
+        && sol_mir_runtime_lowered_program_test_render_write_attempts() == 0;
+    fclose(stream); return ok;
+}
+static void transport_pair(Pipeline *p, size_t pair) {
+    const SolMirOperations *ops = &p->concrete.operations;
+    size_t chosen = SOL_MIR_RUNTIME_NONE, pairs = 0;
+    /* Select the INVOKE first, then this exact failure-edge pair, never the last
+     * INVOKE in a body (the two Unit calls share a body). */
+    for (size_t i = 0; i < p->conventions.call_count; ++i)
+        if (p->conventions.calls[i].owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE)
+            if (pairs++ == pair) chosen = i;
+    CHECK(chosen < p->conventions.call_count); if (chosen >= p->conventions.call_count) return;
+    const SolMirRuntimeCall *call = &p->conventions.calls[chosen];
+    size_t block = ops->predicate_edges[call->failure_edge].target;
+    const SolMirPredicateBlock *pb = &ops->predicate_blocks[block];
+    CHECK(pb->body == call->predicate && pb->terminator.kind == SOL_MIR_PREDICATE_TERM_FAILURE
+        && pb->terminator.failure_kind == SOL_MIR_PREDICATE_FAILURE_CALL);
+    SolMirRuntimeLoweredPredicateTerminator *row = &p->lowered.predicate_terminators[block], saved = *row;
+    size_t ordinary = SOL_MIR_RUNTIME_NONE, step = SOL_MIR_RUNTIME_NONE, invoke = SOL_MIR_RUNTIME_NONE;
+    for (size_t i = 0; i < p->cleanup.event_count; ++i) {
+        const SolMirRuntimeCleanupEvent *e = &p->cleanup.events[i];
+        if (e->kind != SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR || e->owner != pb->body) continue;
+        if (e->block == block && e->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION) {
+            CHECK(ordinary == SOL_MIR_RUNTIME_NONE); ordinary = i;
+        }
+        if (e->block == block && e->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP) {
+            CHECK(step == SOL_MIR_RUNTIME_NONE); step = i;
+        }
+        if (e->block == call->block && e->phase == SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION) {
+            CHECK(invoke == SOL_MIR_RUNTIME_NONE); invoke = i;
+        }
+    }
+    CHECK(ordinary < p->cleanup.event_count && step < p->cleanup.event_count && invoke < p->cleanup.event_count);
+    if (ordinary >= p->cleanup.event_count || step >= p->cleanup.event_count || invoke >= p->cleanup.event_count) return;
+    CHECK(row->state == SOL_MIR_RUNTIME_LOWERED_PRESENT && row->body == pb->body && row->block == block
+        && row->runtime_class == SOL_MIR_RUNTIME_LOWERED_CLASS_EXECUTABLE
+        && row->plan_family == SOL_MIR_RUNTIME_LOWERED_PLAN_CLEANUP && row->cleanup_event == ordinary
+        && row->failure_site == SOL_MIR_RUNTIME_NONE && row->call == SOL_MIR_RUNTIME_NONE
+        && row->step_cleanup_event == step && row->step_failure_site == p->cleanup.events[step].inherited_failure_site
+        && p->cleanup.events[step].producer == SOL_MIR_RUNTIME_CLEANUP_PRODUCER_STEP_METER
+        && p->conventions.failure_sites[row->step_failure_site].origin_kind == SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP
+        && p->conventions.failure_sites[row->step_failure_site].allowed_codes == 32);
+    size_t completed = 0; sol_test_progress_phase("mutation-restore", "mutation", 24);
+#define BAD_ROW(change) do { change; reseal(&p->lowered); \
+    CHECK(!sol_mir_runtime_lowered_program_validate(&p->lowered, NULL) && lowered_render_rejected(&p->lowered) \
+        && transport_sentinel_rejected(&p->lowered)); \
+    *row = saved; reseal(&p->lowered); CHECK(sol_mir_runtime_lowered_program_validate(&p->lowered, NULL)); \
+    sol_test_progress_completed(++completed); } while (0)
+    BAD_ROW(row->cleanup_event = SOL_MIR_RUNTIME_NONE); BAD_ROW(row->cleanup_event = step);
+    BAD_ROW(row->cleanup_event = invoke); BAD_ROW(row->cleanup_event = 0);
+    BAD_ROW(row->step_cleanup_event = ordinary); BAD_ROW(row->step_failure_site = 0);
+    BAD_ROW(row->failure_site = call->failure_site); BAD_ROW(row->call = 0);
+    BAD_ROW(row->body = SOL_MIR_RUNTIME_NONE);
+#undef BAD_ROW
+    size_t event_mirrors = 0, transition_mirrors = 0, action_mirrors = 0;
+    for (size_t i = 0; i < p->lowered.cleanup_failure_count; ++i) {
+        SolMirRuntimeLoweredCleanupFailure *mirror = &p->lowered.cleanup_failures[i], old = *mirror;
+        bool action_mirror = mirror->kind == SOL_MIR_RUNTIME_LOWERED_CLEANUP_ACTION
+            && mirror->record == p->cleanup.events[ordinary].actions.offset
+            && mirror->action == mirror->record;
+        if (!action_mirror && (mirror->kind == SOL_MIR_RUNTIME_LOWERED_CLEANUP_ACTION || mirror->event != ordinary)) continue;
+#define BAD_MIRROR(change) do { change; reseal(&p->lowered); \
+    CHECK(!sol_mir_runtime_lowered_program_validate(&p->lowered, NULL) && lowered_render_rejected(&p->lowered) \
+        && transport_sentinel_rejected(&p->lowered)); \
+    *mirror = old; reseal(&p->lowered); CHECK(sol_mir_runtime_lowered_program_validate(&p->lowered, NULL)); \
+    sol_test_progress_completed(++completed); } while (0)
+        if (mirror->kind == SOL_MIR_RUNTIME_LOWERED_CLEANUP_EVENT) {
+            ++event_mirrors;
+            CHECK(mirror->record == ordinary && mirror->producer == SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL
+                && mirror->owner == pb->body && mirror->block == block && mirror->actions.count == 1);
+            BAD_MIRROR(mirror->producer = SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_ARITHMETIC);
+            BAD_MIRROR(mirror->inherited_failure_site = 0); BAD_MIRROR(mirror->owner = SOL_MIR_RUNTIME_NONE);
+        } else if (mirror->kind == SOL_MIR_RUNTIME_LOWERED_CLEANUP_TRANSITION) {
+            ++transition_mirrors;
+            CHECK(mirror->record == p->cleanup.events[ordinary].transitions.offset
+                && mirror->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING
+                && mirror->failure_site == SOL_MIR_RUNTIME_NONE && mirror->failure_mask == 0
+                && mirror->actions.count == 1 && mirror->primary_failure_wins);
+            BAD_MIRROR(mirror->failure_source = SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE);
+            BAD_MIRROR(mirror->failure_site = 0); BAD_MIRROR(mirror->failure_mask = 64);
+            BAD_MIRROR(mirror->primary_failure_wins = false); BAD_MIRROR(mirror->actions.count = 0);
+        } else if (action_mirror) {
+            ++action_mirrors;
+            CHECK(mirror->action_kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE
+                && mirror->action_flags == SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY
+                && mirror->target == SOL_MIR_RUNTIME_NONE && mirror->recipe == SOL_MIR_RECIPE_NONE
+                && mirror->drop_path == SOL_MIR_RUNTIME_NONE);
+            BAD_MIRROR(mirror->action = SOL_MIR_RUNTIME_NONE); BAD_MIRROR(mirror->record = SOL_MIR_RUNTIME_NONE);
+            BAD_MIRROR(mirror->action_kind = SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE);
+            BAD_MIRROR(mirror->action_flags = 0); BAD_MIRROR(mirror->target = 0);
+            BAD_MIRROR(mirror->recipe = 0); BAD_MIRROR(mirror->drop_path = 0);
+        }
+#undef BAD_MIRROR
+    }
+    CHECK(event_mirrors == 1 && transition_mirrors == 1 && action_mirrors == 1 && completed == 24);
+    sol_test_progress_phase_end();
+}
+static void transport_exact_quota_rebuild(Pipeline *p,
+    const SolMirRuntimeLoweredProgramLimits *limits) {
+    SolMirRuntimeLoweredProgram candidate; sol_mir_runtime_lowered_program_init(&candidate);
+    SolMirRuntimeLoweredProgramBuildOutcome outcome = sol_mir_runtime_lowered_program_build(
+        &(SolMirRuntimeLoweredProgramBuildRequest){&p->conventions, &p->values, &p->cleanup,
+            &p->host, &p->handlers, limits}, &candidate, NULL);
+    CHECK(outcome == SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_SUCCEEDED
+        && !memcmp(&candidate.usage, &p->lowered.usage, sizeof candidate.usage));
+    sol_mir_runtime_lowered_program_free(&candidate);
+}
+static void transport_retained_quota(Pipeline *p,
+    const SolMirRuntimeLoweredProgramLimits *exact,
+    const SolMirRuntimeLoweredProgramLimits *below, const char *field) {
+    /* Retained direct/ensures obligations, selected from the source field BEFORE
+     * observing a result. Do not expand the whole legacy helper per field. */
+    const bool scratch_stage = !strcmp(field, "build_scratch_bytes");
+    const bool work_stage = !strcmp(field, "build_work");
+    const bool validation_work = !strcmp(field, "validation_work");
+    const SolMirRuntimeLoweredProgramBuildOutcome expected =
+        SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_RESOURCE_EXHAUSTED;
+    transport_exact_quota_rebuild(p, exact);
+    if (below) {
+        if (scratch_stage || work_stage) {
+            SolMirRuntimeLoweredProgram candidate; sol_mir_runtime_lowered_program_init(&candidate);
+            sol_mir_runtime_lowered_program_test_reset_allocation_attempts();
+            SolMirRuntimeLoweredProgramBuildOutcome outcome = sol_mir_runtime_lowered_program_build(
+                &(SolMirRuntimeLoweredProgramBuildRequest){&p->conventions, &p->values, &p->cleanup,
+                    &p->host, &p->handlers, below}, &candidate, NULL);
+            CHECK(outcome == expected);
+            CHECK(transport_empty_lowered(&candidate)
+                && sol_mir_runtime_lowered_program_test_persistent_allocation_attempts() == 0);
+            if (scratch_stage)
+                CHECK(sol_mir_runtime_lowered_program_test_build_scratch_allocation_attempts() == 0);
+            sol_mir_runtime_lowered_program_free(&candidate);
+        } else CHECK(!rebuild_lowered(p, below));
+        /* The same case owns failure, immediate exact retry, and preservation. */
+        transport_exact_quota_rebuild(p, exact);
+        SolMirRuntimeLoweredProgram limited = p->lowered; limited.limits = *below; reseal(&limited);
+        CHECK(!sol_mir_runtime_lowered_program_validate(&limited, NULL) && lowered_render_rejected(&limited)
+            && transport_sentinel_rejected(&limited));
+    } else transport_exact_quota_rebuild(p, exact);
+    if (validation_work) {
+        /* Old exact-validation-work repeat plus both allocator-noise Usage checks
+         * live only in this existing key, not in every field/context. */
+        for (size_t i = 0; i < 2; ++i) {
+            void *noise = malloc(97 + i * 131); CHECK(noise != NULL);
+            transport_exact_quota_rebuild(p, exact);
+            free(noise);
+        }
+    }
+}
+static void transport_resource(Pipeline *p, size_t selected, bool mutation, bool retained_resources) {
+    size_t index = 0;
+    SolMirRuntimeLoweredProgramUsage saved = p->lowered.usage;
+    SolMirRuntimeLoweredProgramLimits exact = exact_limits(p);
+    sol_test_progress_phase(mutation ? "usage-mutation-restore" : "quota-retry", "field", 1);
+#define MUTATE(field) do { if (index++ == selected) { if (saved.field) { \
+    --p->lowered.usage.field; reseal(&p->lowered); \
+    CHECK(!sol_mir_runtime_lowered_program_validate(&p->lowered, NULL) && lowered_render_rejected(&p->lowered) \
+        && transport_sentinel_rejected(&p->lowered)); \
+    p->lowered.usage = saved; ++p->lowered.usage.field; reseal(&p->lowered); \
+    CHECK(!sol_mir_runtime_lowered_program_validate(&p->lowered, NULL) && lowered_render_rejected(&p->lowered) \
+        && transport_sentinel_rejected(&p->lowered)); \
+    p->lowered.usage = saved; reseal(&p->lowered); \
+    CHECK(sol_mir_runtime_lowered_program_validate(&p->lowered, NULL)); \
+    } else CHECK(p->lowered.usage.field == 0); } } while (0)
+#define QUOTA(field) do { if (index++ == selected) { \
+    if (retained_resources) { \
+        SolMirRuntimeLoweredProgramLimits below = exact; \
+        if (saved.field) --below.max_##field; \
+        transport_retained_quota(p, &exact, saved.field ? &below : NULL, #field); \
+    } else { \
+    CHECK(rebuild_lowered(p, &exact)); \
+    if (saved.field) { SolMirRuntimeLoweredProgramLimits below = exact; --below.max_##field; \
+        CHECK(!rebuild_lowered(p, &below)); \
+        SolMirRuntimeLoweredProgram limited = p->lowered; limited.limits = below; reseal(&limited); \
+        CHECK(!sol_mir_runtime_lowered_program_validate(&limited, NULL) && lowered_render_rejected(&limited) \
+            && transport_sentinel_rejected(&limited)); } \
+    CHECK(rebuild_lowered(p, &exact)); } } } while (0)
+    if (mutation) {
+#define TABLE(member,type,singular) MUTATE(member);
+        SOL_MIR_RUNTIME_LOWERED_TABLES(TABLE)
+#undef TABLE
+        MUTATE(erased_loops); MUTATE(provenance_records); MUTATE(demanded_semantic_plans);
+        MUTATE(owned_bytes);
+        /* R-AUTH: original resealed build_scratch_bytes/build_work ±1 assertions
+         * remain held in paused source + disposition ledger, NOT passing f1a. */
+        MUTATE(validation_scratch_bytes); MUTATE(validation_work); MUTATE(render_bytes); MUTATE(render_scratch_bytes);
+    } else {
+#define TABLE(member,type,singular) QUOTA(member);
+        SOL_MIR_RUNTIME_LOWERED_TABLES(TABLE)
+#undef TABLE
+        QUOTA(owned_bytes); QUOTA(build_scratch_bytes); QUOTA(build_work);
+        QUOTA(validation_scratch_bytes); QUOTA(validation_work); QUOTA(render_bytes); QUOTA(render_scratch_bytes);
+    }
+#undef QUOTA
+#undef MUTATE
+    CHECK(selected < index); sol_test_progress_completed(1); sol_test_progress_phase_end();
+}
+static void transport_standalone(Pipeline *p, size_t which) {
+    SolDiagnostics d; sol_diagnostics_init(&d);
+    transport_disable_faults();
+    sol_test_progress_phase("standalone-restore", "obligation", 1);
+    if (which == 4) {
+        sol_mir_runtime_lowered_program_test_force_validation_scratch_failure(true);
+        CHECK(!sol_mir_runtime_lowered_program_validate(&p->lowered, NULL));
+        sol_mir_runtime_lowered_program_test_force_validation_scratch_failure(false);
+    } else {
+        size_t ordinal = which % 2 + 1;
+        sol_mir_runtime_lowered_program_test_force_validation_scratch_failure_attempt(ordinal);
+        sol_mir_runtime_lowered_program_test_reset_allocation_attempts();
+        if (which < 2) CHECK(!sol_mir_runtime_lowered_program_validate(&p->lowered, &d));
+        else CHECK(transport_sentinel_rejected(&p->lowered));
+        CHECK(sol_mir_runtime_lowered_program_test_validation_scratch_allocation_attempts() == 2);
+        CHECK(!d.count && !d.allocation_failed);
+        sol_mir_runtime_lowered_program_test_force_validation_scratch_failure_attempt(0);
+    }
+    CHECK(sol_mir_runtime_lowered_program_validate(&p->lowered, NULL));
+    sol_diagnostics_free(&d); sol_test_progress_completed(1); sol_test_progress_phase_end();
+}
+static void transport_context_case(size_t test, size_t mode, size_t item) {
+    Fixture f; Pipeline p; init(&p); TransportSnapshot snapshot = {0};
+    char directory[512]; snprintf(directory, sizeof directory, "%s/tests/conformance/%s", SOL_TEST_SOURCE_DIR, transport_contexts[test].leaf);
+    transport_disable_faults();
+    bool setup_ok = setup_at(&f, directory); CHECK(setup_ok);
+    sol_mir_runtime_lowered_program_test_reset_allocation_attempts();
+    bool built = setup_ok && build_transport_entry(&f, &p);
+    size_t bn = sol_mir_runtime_lowered_program_test_build_scratch_allocation_attempts();
+    size_t pn = sol_mir_runtime_lowered_program_test_persistent_allocation_attempts();
+    size_t vn = sol_mir_runtime_lowered_program_test_validation_scratch_allocation_attempts();
+    size_t n = sol_mir_runtime_lowered_program_test_allocation_attempts();
+    CHECK(built);
+    if (built) {
+        check_build_work(&p);
+        CHECK(bn == (test == 0 || test == 3 ? 20u : 21u) && pn == (test == 0 || test == 3 ? 19u : 20u)
+            && vn == 4 && n == bn + pn + vn);
+        sol_test_progress_phase("oracle", "frozen-render-snapshot", 1);
+        char *baseline = rendered(&p.lowered, NULL); CHECK(baseline != NULL);
+        bool saved = transport_snapshot(&p, &snapshot); CHECK(saved);
+        if (baseline && saved) {
+            transport_lowered_frozen(&p, test, baseline);
+            sol_test_progress_completed(1); sol_test_progress_phase_end();
+            if (mode == 1) transport_pair(&p, item);
+            if (mode == 2) transport_resource(&p, item, false, test == 0 || test == 2);
+            if (mode == 3) transport_resource(&p, item, true, test == 0 || test == 2);
+            if (mode == 4) transport_standalone(&p, item);
+            transport_snapshot_check(&snapshot);
+            char *restored = rendered(&p.lowered, NULL);
+            CHECK(restored && !strcmp(restored, baseline)); free(restored);
+        } else sol_test_progress_phase_end();
+        free(baseline);
+    }
+    sol_test_progress_phase("teardown", "case", 1);
+    transport_disable_faults(); transport_snapshot_free(&snapshot); done(&p); finish(&f);
+    sol_test_progress_completed(1); sol_test_progress_phase_end();
+}
+static void transport_roots_case(size_t test, bool paired, bool relocate) {
+    Fixture fixtures[3]; Pipeline owners[3]; char *bytes[3] = {0}; bool built[3] = {false};
+    const char *path = "virtual://p44f1a/transport.sol";
+    const char *shifted = "virtual://p44f1a/relocation/transport.sol";
+    size_t path_delta = strlen(shifted) - strlen(path);
+    size_t completed_owners = 0;
+    char directory[512]; snprintf(directory, sizeof directory, "%s/tests/conformance/%s", SOL_TEST_SOURCE_DIR, transport_contexts[test].leaf);
+    sol_test_progress_phase("roots-repeat-relocation", "full-owner", 3);
+    for (size_t i = 0; i < 3; ++i) {
+        sol_test_progress_operation_begin("complete-root-owner");
+        init(&owners[i]); bool setup_ok = setup_at(&fixtures[i], directory); CHECK(setup_ok);
+        bool path_ok = setup_ok;
+        if (path_ok && relocate && i == 2) {
+            CHECK(fixtures[i].ir.file_count == 1);
+            size_t length = strlen(fixtures[i].ir.files[0].path);
+            char *moved = length <= SIZE_MAX - 11 ? malloc(length + 11) : NULL;
+            CHECK(moved != NULL); path_ok = moved != NULL;
+            if (moved) { memcpy(moved, fixtures[i].ir.files[0].path, length);
+                memcpy(moved + length, "/relocated", 11); free(fixtures[i].ir.files[0].path); fixtures[i].ir.files[0].path = moved; }
+        }
+        built[i] = path_ok && build_transport_roots(&fixtures[i], &owners[i], paired, i == 1,
+            relocate && i == 2 ? shifted : path);
+        CHECK(built[i]);
+        if (built[i]) {
+            CHECK(owners[i].concrete.program.root_count == (paired ? 2u : 1u) && owners[i].conventions.entry_count == 1);
+            size_t entries = 0, helpers = 0;
+            for (size_t q = 0; q < owners[i].concrete.program.root_count; ++q) {
+                SolMirProgramRoot root = owners[i].concrete.program.roots[q];
+                entries += root.kind == SOL_MIR_PROGRAM_ROOT_ENTRY && !strcmp(fixtures[i].ir.callables[root.callable].name, "launch");
+                helpers += root.kind == SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE && !strcmp(fixtures[i].ir.callables[root.callable].name, "helper");
+            }
+            CHECK(entries == 1 && helpers == (paired ? 1u : 0u));
+            bytes[i] = rendered(&owners[i].lowered, NULL); CHECK(bytes[i] != NULL);
+            if (bytes[i] && i == 0) transport_lowered_frozen(&owners[i], test, bytes[i]);
+            if (i && built[0]) {
+                SolMirRuntimeLoweredProgramUsage expected = owners[0].lowered.usage;
+                if (relocate && i == 2) expected.validation_work += 57 * (path_delta + 10);
+                CHECK(!memcmp(&expected, &owners[i].lowered.usage, sizeof expected));
+                CHECK(bytes[i] && bytes[0] && !strcmp(bytes[0], bytes[i]));
+            }
+        }
+        sol_test_progress_operation_end();
+        if (built[i]) sol_test_progress_completed(++completed_owners);
+    }
+    sol_test_progress_phase_end(); sol_test_progress_phase("teardown", "owner", 3);
+    for (size_t i = 0; i < 3; ++i) { free(bytes[i]); done(&owners[i]); finish(&fixtures[i]); sol_test_progress_completed(i + 1); }
+    sol_test_progress_phase_end();
+}
+static void transport_build_fault(bool ensures, size_t kind, size_t ordinal) {
+    Fixture f; Pipeline p; init(&p);
+    SolMirRuntimeLoweredProgram draft; sol_mir_runtime_lowered_program_init(&draft);
+    SolDiagnostics d; sol_diagnostics_init(&d);
+    TransportSnapshot snapshot = {0}; char *baseline = NULL, *retry = NULL;
+    transport_disable_faults();
+    sol_test_progress_phase("source", "fixture", 1);
+    sol_test_progress_operation_begin("fault-source");
+    bool setup_ok = setup_at(&f, ensures
+        ? SOL_TEST_SOURCE_DIR "/tests/conformance/p44_parallel_predicate_transport_ensures_old"
+        : SOL_TEST_SOURCE_DIR "/tests/conformance/p44f_site_domains_direct");
+    sol_test_progress_operation_end();
+    CHECK(setup_ok); if (setup_ok) sol_test_progress_completed(1);
+    sol_test_progress_phase_end();
+    sol_mir_runtime_lowered_program_test_reset_allocation_attempts();
+    bool built = setup_ok && build_transport_entry(&f, &p);
+    /* Construction window ends here, before rendering, validation or snapshots. */
+    size_t bn = sol_mir_runtime_lowered_program_test_build_scratch_allocation_attempts();
+    size_t pn = sol_mir_runtime_lowered_program_test_persistent_allocation_attempts();
+    size_t vn = sol_mir_runtime_lowered_program_test_validation_scratch_allocation_attempts();
+    size_t n = sol_mir_runtime_lowered_program_test_allocation_attempts();
+    CHECK(built); if (!built) goto teardown;
+    CHECK(bn == (ensures ? 21u : 20u) && pn == (ensures ? 20u : 19u)
+        && vn == 4 && n == (ensures ? 45u : 43u));
+    size_t completed_oracles = 0;
+    sol_test_progress_phase("oracle", "snapshot-render", 2);
+    baseline = rendered(&p.lowered, NULL); CHECK(baseline != NULL);
+    if (baseline) sol_test_progress_completed(++completed_oracles);
+    bool saved = transport_snapshot(&p, &snapshot); CHECK(saved);
+    if (saved) sol_test_progress_completed(++completed_oracles);
+    sol_test_progress_phase_end(); if (!baseline || !saved) goto teardown;
+    SolMirRuntimeLoweredProgramBuildRequest request = {&p.conventions, &p.values, &p.cleanup, &p.host, &p.handlers, NULL};
+    sol_test_progress_phase("fault", "complete-fault-retry", 1);
+    sol_test_progress_ordinal(kind == 0 ? "build" : kind == 1 ? "persistent" : "validation", ordinal,
+        kind == 0 ? bn : kind == 1 ? pn : vn);
+    sol_mir_runtime_lowered_program_test_reset_allocation_attempts();
+    if (kind == 0) sol_mir_runtime_lowered_program_test_fail_build_scratch_allocation_after(ordinal);
+    if (kind == 1) sol_mir_runtime_lowered_program_test_fail_persistent_allocation_after(ordinal);
+    if (kind == 2) sol_mir_runtime_lowered_program_test_force_validation_scratch_failure_attempt(ordinal);
+    SolMirRuntimeLoweredProgramBuildOutcome result = sol_mir_runtime_lowered_program_build(&request, &draft, &d);
+    size_t attempts = sol_mir_runtime_lowered_program_test_validation_scratch_allocation_attempts();
+    size_t build_attempts = sol_mir_runtime_lowered_program_test_build_scratch_allocation_attempts();
+    size_t persistent_attempts = sol_mir_runtime_lowered_program_test_persistent_allocation_attempts();
+    transport_disable_faults();
+    bool measuring = kind == 2 && ordinal <= 2;
+    CHECK(result == (measuring ? SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_INVALID_PREDECESSOR
+        : SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_ALLOCATION_FAILED));
+    CHECK(d.count && !strcmp(d.items[d.count - 1].message, measuring
+        ? "runtime lowered program typed relation is malformed" : "runtime lowered program allocation failed"));
+    CHECK(d.allocation_failed == !measuring);
+    CHECK(transport_empty_lowered(&draft));
+    if (kind == 0) CHECK(build_attempts == ordinal && persistent_attempts == 0 && attempts == 0);
+    if (kind == 1) CHECK(build_attempts == bn && persistent_attempts == ordinal && attempts == 0);
+    if (kind == 2) CHECK(build_attempts == bn && persistent_attempts == pn && attempts == (ordinal <= 2 ? 2u : 4u));
+    fprintf(stderr, "p44f1a-fault stage=%zu ordinal=%zu outcome=%d validation-attempts=%zu\n", kind, ordinal, result, attempts);
+    sol_mir_runtime_lowered_program_free(&draft); sol_mir_runtime_lowered_program_free(&draft);
+    transport_snapshot_check(&snapshot);
+    sol_test_progress_operation_begin("restore:predecessors-and-owner");
+    CHECK(sol_mir_runtime_conventions_validate(&p.conventions, NULL)
+        && sol_mir_runtime_values_validate(&p.values, NULL) && sol_mir_runtime_cleanup_validate(&p.cleanup, NULL)
+        && sol_mir_runtime_host_abi_validate(&p.host, NULL) && sol_mir_runtime_handler_abi_validate(&p.handlers, NULL)
+        && sol_mir_runtime_lowered_program_validate(&p.lowered, NULL));
+    sol_test_progress_operation_end();
+    sol_test_progress_operation_begin("retry:build-render-snapshot");
+    bool retried = sol_mir_runtime_lowered_program_build(&request, &draft, NULL)
+        == SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_SUCCEEDED;
+    CHECK(retried);
+    if (retried) {
+        CHECK(!memcmp(&draft.usage, &p.lowered.usage, sizeof draft.usage));
+        retry = rendered(&draft, NULL); CHECK(retry && !strcmp(retry, baseline));
+    }
+    transport_snapshot_check(&snapshot);
+    sol_test_progress_operation_end();
+    sol_mir_runtime_lowered_program_free(&draft); sol_mir_runtime_lowered_program_free(&draft);
+    sol_test_progress_completed(1); sol_test_progress_phase_end();
+teardown:
+    sol_test_progress_phase("teardown", "case", 1);
+    transport_disable_faults(); free(retry); free(baseline); transport_snapshot_free(&snapshot);
+    sol_mir_runtime_lowered_program_free(&draft); sol_diagnostics_free(&d); done(&p); finish(&f);
+    sol_test_progress_completed(1); sol_test_progress_phase_end();
+}
+static void transport_baseline_work(size_t which) {
+    if (which == 3) { test_long_virtual_path_validation_work(); return; }
+    Fixture f; Pipeline p; init(&p);
+    sol_test_progress_phase("source", "fixture", 1);
+    sol_test_progress_operation_begin("baseline-source");
+    bool setup_ok = which == 0 ? setup(&f) : setup_at(&f, which == 1
+        ? SOL_TEST_SOURCE_DIR "/tests/conformance/p35" : SOL_TEST_SOURCE_DIR "/tests/conformance/p35_reordered");
+    sol_test_progress_operation_end();
+    CHECK(setup_ok); if (setup_ok) sol_test_progress_completed(1);
+    sol_test_progress_phase_end();
+    sol_test_progress_phase("owner", "full-pipeline", 1);
+    bool built = setup_ok && (which == 0 ? build(&f, &p, NULL) : build_handlers(&f, &p));
+    CHECK(built); if (built) sol_test_progress_completed(1);
+    sol_test_progress_phase_end();
+    sol_test_progress_phase("check", "exact-path-work", 1);
+    if (built) {
+        if (which == 0) test_slice_d_e6_usage(&p);
+        else {
+            size_t work = 0;
+            CHECK(sol_test_path_work(which == 1 ? 1269695 : 1271975, 228,
+                sizeof SOL_TEST_SOURCE_DIR - 1, &work));
+            test_slice_d_p35_usage(&p, work);
+        }
+        sol_test_progress_completed(1);
+    }
+    sol_test_progress_phase_end();
+    sol_test_progress_phase("teardown", "case", 1);
+    done(&p); finish(&f); sol_test_progress_completed(1); sol_test_progress_phase_end();
+}
+static int transport_fault_cases(const char *selected, bool list) {
+    bool found = selected == NULL;
+#define CASE(key, call) do { if (list) puts(key); else if (!selected || !strcmp(selected, key)) { \
+    found = true; sol_test_progress_case(key); call; sol_test_progress_case_end(); } } while (0)
+    CASE("lowered.ordinal-wrapper", test_validation_ordinal_wrapper());
+    for (size_t test = 0; test < sizeof transport_contexts / sizeof *transport_contexts; ++test) {
+        char key[160];
+        snprintf(key, sizeof key, "lowered.%s.frozen", transport_contexts[test].name);
+        CASE(key, transport_context_case(test, 0, 0));
+        for (size_t pair = 0; pair < transport_contexts[test].pairs; ++pair) {
+            snprintf(key, sizeof key, "lowered.%s.pair.%zu", transport_contexts[test].name, pair + 1);
+            CASE(key, transport_context_case(test, 1, pair));
+        }
+        static const char *quota_names[] = {
+#define NAME(member,type,singular) #member,
+            SOL_MIR_RUNTIME_LOWERED_TABLES(NAME)
+#undef NAME
+            "owned_bytes", "build_scratch_bytes", "build_work", "validation_scratch_bytes", "validation_work", "render_bytes", "render_scratch_bytes"};
+        static const char *usage_names[] = {
+#define NAME(member,type,singular) #member,
+            SOL_MIR_RUNTIME_LOWERED_TABLES(NAME)
+#undef NAME
+            "erased_loops", "provenance_records", "demanded_semantic_plans", "owned_bytes",
+            "validation_scratch_bytes", "validation_work", "render_bytes", "render_scratch_bytes"};
+        for (size_t item = 0; item < sizeof quota_names / sizeof *quota_names; ++item) {
+            snprintf(key, sizeof key, "lowered.%s.quota.%s", transport_contexts[test].name, quota_names[item]);
+            CASE(key, transport_context_case(test, 2, item));
+        }
+        for (size_t item = 0; item < sizeof usage_names / sizeof *usage_names; ++item) {
+            snprintf(key, sizeof key, "lowered.%s.usage.%s", transport_contexts[test].name, usage_names[item]);
+            CASE(key, transport_context_case(test, 3, item));
+        }
+        static const char *hooks[] = {"standalone.1", "standalone.2", "render.1", "render.2", "boolean"};
+        for (size_t item = 0; item < sizeof hooks / sizeof *hooks; ++item) {
+            snprintf(key, sizeof key, "lowered.%s.%s", transport_contexts[test].name, hooks[item]);
+            CASE(key, transport_context_case(test, 4, item));
+        }
+        if (test == 0 || test == 2) {
+            snprintf(key, sizeof key, "lowered.%s.roots.entry-repeat", transport_contexts[test].name);
+            CASE(key, transport_roots_case(test, false, false));
+            snprintf(key, sizeof key, "lowered.%s.roots.paired-forward-reverse-repeat", transport_contexts[test].name);
+            CASE(key, transport_roots_case(test, true, false));
+            snprintf(key, sizeof key, "lowered.%s.roots.relocation", transport_contexts[test].name);
+            CASE(key, transport_roots_case(test, true, true));
+        }
+    }
+    for (size_t test = 0; test < 3; ++test) {
+        char key[80]; snprintf(key, sizeof key, "baseline.f0.%zu", test + 1);
+        CASE(key, test_site_domains_range(test, test + 1));
+    }
+#undef CASE
+    static const char *baselines[] = {"baseline.e6.work", "baseline.p35.work",
+        "baseline.p35_reordered.work", "baseline.virtual-path.work"};
+    for (size_t i = 0; i < sizeof baselines / sizeof *baselines; ++i) {
+        if (list) { puts(baselines[i]); continue; }
+        if (selected && strcmp(selected, baselines[i])) continue;
+        found = true; sol_test_progress_case(baselines[i]); transport_baseline_work(i); sol_test_progress_case_end();
+    }
+    for (size_t context = 0; context < 2; ++context)
+        for (size_t kind = 0; kind < 3; ++kind) {
+            size_t count = kind == 0 ? (context ? 21 : 20) : kind == 1 ? (context ? 20 : 19) : 4;
+            for (size_t ordinal = 1; ordinal <= count; ++ordinal) {
+                char key[128]; snprintf(key, sizeof key, "lowered.%s.fault.%s.%zu",
+                    context ? "ensures_old" : "direct", kind == 0 ? "build" : kind == 1 ? "persistent" : "validation", ordinal);
+                if (list) { puts(key); continue; }
+                if (selected && strcmp(selected, key)) continue;
+                found = true; sol_test_progress_case(key);
+                transport_build_fault(context != 0, kind, ordinal);
+                sol_test_progress_case_end();
+            }
+        }
+    return found ? (failures ? 1 : 0) : 2;
+}
+int main(int argc, char **argv) {
+    if (argc == 2 && !strcmp(argv[1], "--list-p44f1a-cases")) return transport_fault_cases(NULL, true);
+    if (argc == 3 && !strcmp(argv[1], "--p44f1a-case")) return transport_fault_cases(argv[2], false);
+    if (argc != 1) return 2;
+    (void)transport_fault_cases(NULL, false);
 #define test_site_domains(...) SOL_TEST_RUN(test_site_domains(__VA_ARGS__))
 #define test_vocabulary(...) SOL_TEST_RUN(test_vocabulary(__VA_ARGS__))
 #define check_build_work(...) SOL_TEST_RUN(check_build_work(__VA_ARGS__))
@@ -2766,7 +3631,45 @@ int main(void) {
 #define test_long_virtual_path_validation_work(...) SOL_TEST_RUN(test_long_virtual_path_validation_work(__VA_ARGS__))
 #define test_snapshot_cleanup_mirror(...) SOL_TEST_RUN(test_snapshot_cleanup_mirror(__VA_ARGS__))
     test_site_domains();
-    test_vocabulary();Fixture f;Pipeline p;init(&p);CHECK(setup(&f));bool built=!failures&&build(&f,&p,NULL);if(!built)sol_diagnostics_render_human(stderr,&f.p.source,&f.d);CHECK(built);if(built)check_build_work(&p);CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));check_step_render_identity(&p);test_e6_census_and_missing(&p);test_slice_b_graph_joins(&p);test_executable_plan_event_value_joins(&p);test_slice_c_cleanup_and_host(&p);test_slice_d_raw_owner_preflight(&p);test_slice_d_e6_usage(&p);test_slice_e_render(&p);test_slice_d_resource_limits(&p);test_slice_d_allocation_faults(&p);{ Fixture pre_fixture; CHECK(setup(&pre_fixture)); if(!failures) check_pre_operation_render_stability(&pre_fixture); finish(&pre_fixture); }test_erased_loop_census();test_propagation_value_demand();test_pattern_copy_pipeline();test_nontrivial_copy_demand();test_callback_prerequisite();test_callable_hole_prerequisite();test_callable_hole_exact();test_immediate_method_prerequisite();test_require_never_fallback_pipeline();test_bound_environment_indirect_graph();test_source_backed_p36_graph_keys();test_generic_type_place_keys();test_slice_c_handlers();test_long_virtual_path_validation_work();test_snapshot_cleanup_mirror();FILE*s=tmpfile();CHECK(s&&sol_mir_runtime_lowered_program_render(s,&p.lowered));if(s)fclose(s);uint64_t seal=p.lowered.authentication;p.lowered.authentication^=1;CHECK(!sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));p.lowered.authentication=seal;CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered,NULL));SolMirRuntimeLoweredProgramLimits exact=p.lowered.limits;exact.max_owned_bytes=p.lowered.usage.owned_bytes? p.lowered.usage.owned_bytes-1:1;Pipeline bad;init(&bad);CHECK(!build(&f,&bad,&exact)&&!bad.lowered.image_instructions);done(&bad);done(&p);finish(&f);return failures?1:0;
+    test_vocabulary();
+    Fixture f; Pipeline p; init(&p);
+    bool setup_ok = setup(&f); CHECK(setup_ok);
+    bool built = setup_ok && build(&f, &p, NULL);
+    if (!built) sol_diagnostics_render_human(stderr, &f.p.source, &f.d);
+    CHECK(built);
+    if (built) {
+        check_build_work(&p);
+        CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered, NULL));
+        check_step_render_identity(&p); test_e6_census_and_missing(&p);
+        test_slice_b_graph_joins(&p); test_executable_plan_event_value_joins(&p);
+        test_slice_c_cleanup_and_host(&p); test_slice_d_raw_owner_preflight(&p);
+        test_slice_d_e6_usage(&p); test_slice_e_render(&p);
+        test_slice_d_resource_limits(&p); test_slice_d_allocation_faults(&p);
+    }
+    {
+        Fixture pre_fixture; bool pre_setup = setup(&pre_fixture); CHECK(pre_setup);
+        if (pre_setup) check_pre_operation_render_stability(&pre_fixture);
+        finish(&pre_fixture);
+    }
+    test_erased_loop_census(); test_propagation_value_demand(); test_pattern_copy_pipeline();
+    test_nontrivial_copy_demand(); test_callback_prerequisite(); test_callable_hole_prerequisite();
+    test_callable_hole_exact(); test_immediate_method_prerequisite(); test_require_never_fallback_pipeline();
+    test_bound_environment_indirect_graph(); test_source_backed_p36_graph_keys(); test_generic_type_place_keys();
+    test_slice_c_handlers(); test_long_virtual_path_validation_work(); test_snapshot_cleanup_mirror();
+    if (built) {
+        FILE *s = tmpfile(); CHECK(s && sol_mir_runtime_lowered_program_render(s, &p.lowered));
+        if (s) fclose(s);
+        uint64_t seal = p.lowered.authentication; p.lowered.authentication ^= 1;
+        CHECK(!sol_mir_runtime_lowered_program_validate(&p.lowered, NULL));
+        p.lowered.authentication = seal;
+        CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered, NULL));
+        SolMirRuntimeLoweredProgramLimits exact = p.lowered.limits;
+        exact.max_owned_bytes = p.lowered.usage.owned_bytes ? p.lowered.usage.owned_bytes - 1 : 1;
+        Pipeline bad; init(&bad);
+        CHECK(!build(&f, &bad, &exact) && !bad.lowered.image_instructions);
+        done(&bad);
+    }
+    done(&p); finish(&f); return failures ? 1 : 0;
 }
 #undef main
-SOL_TEST_ENTRY("mir_runtime_lowered_program")
+SOL_TEST_ARGV_ENTRY("mir_runtime_lowered_program")

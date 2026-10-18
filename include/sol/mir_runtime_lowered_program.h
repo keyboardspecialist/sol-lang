@@ -247,6 +247,12 @@ size_t sol_mir_runtime_lowered_program_test_render_write_attempts(void);
 size_t sol_mir_runtime_lowered_program_test_allocation_attempts(void);
 size_t sol_mir_runtime_lowered_program_test_build_scratch_allocation_attempts(void);
 size_t sol_mir_runtime_lowered_program_test_persistent_allocation_attempts(void);
+/* Counts every validation scratch request, including failed attempts. Reset
+ * clears counters only, not the Boolean hook or the one-shot ordinal selector.
+ * Zero disables the selector; a nonzero ordinal fails exactly that request
+ * since the last reset. Setters do not reset counters. */
+size_t sol_mir_runtime_lowered_program_test_validation_scratch_allocation_attempts(void);
+void sol_mir_runtime_lowered_program_test_force_validation_scratch_failure_attempt(size_t attempt);
 void sol_mir_runtime_lowered_program_test_reset_allocation_attempts(void);
 void sol_mir_runtime_lowered_program_test_fail_build_scratch_allocation_after(size_t);
 void sol_mir_runtime_lowered_program_test_fail_persistent_allocation_after(size_t);

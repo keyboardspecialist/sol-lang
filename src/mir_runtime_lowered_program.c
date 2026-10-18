@@ -17,9 +17,12 @@ _Static_assert(sizeof(LoweredRenderLine) == SOL_MIR_RUNTIME_LOWERED_RENDER_LINE_
 static _Thread_local bool fail_build_scratch,fail_persistent,fail_validation,fail_render;
 static _Thread_local size_t allocation_attempts,build_scratch_allocation_attempts,
     persistent_allocation_attempts,fail_build_scratch_after,fail_persistent_after;
+static _Thread_local size_t validation_scratch_allocation_attempts, fail_validation_attempt;
 static _Thread_local size_t render_write_attempts;
 static _Thread_local SolMirRuntimeLoweredProgramTestBuildWork last_build_work;
-void sol_mir_runtime_lowered_program_test_force_build_scratch_allocation_failure(bool x){fail_build_scratch=x;}void sol_mir_runtime_lowered_program_test_force_persistent_allocation_failure(bool x){fail_persistent=x;}void sol_mir_runtime_lowered_program_test_force_validation_scratch_failure(bool x){fail_validation=x;}size_t sol_mir_runtime_lowered_program_test_allocation_attempts(void){return allocation_attempts;}void sol_mir_runtime_lowered_program_test_reset_allocation_attempts(void){allocation_attempts=0;build_scratch_allocation_attempts=0;persistent_allocation_attempts=0;}
+void sol_mir_runtime_lowered_program_test_force_build_scratch_allocation_failure(bool x){fail_build_scratch=x;}void sol_mir_runtime_lowered_program_test_force_persistent_allocation_failure(bool x){fail_persistent=x;}void sol_mir_runtime_lowered_program_test_force_validation_scratch_failure(bool x){fail_validation=x;}size_t sol_mir_runtime_lowered_program_test_allocation_attempts(void){return allocation_attempts;}void sol_mir_runtime_lowered_program_test_reset_allocation_attempts(void){allocation_attempts=0;build_scratch_allocation_attempts=0;persistent_allocation_attempts=0;validation_scratch_allocation_attempts=0;}
+size_t sol_mir_runtime_lowered_program_test_validation_scratch_allocation_attempts(void){return validation_scratch_allocation_attempts;}
+void sol_mir_runtime_lowered_program_test_force_validation_scratch_failure_attempt(size_t attempt){fail_validation_attempt=attempt;}
 void sol_mir_runtime_lowered_program_test_force_render_allocation_failure(bool x){fail_render=x;}
 void sol_mir_runtime_lowered_program_test_reset_render_write_attempts(void){render_write_attempts=0;}
 size_t sol_mir_runtime_lowered_program_test_render_write_attempts(void){return render_write_attempts;}
@@ -60,7 +63,9 @@ static void *allocation(size_t n,size_t z,bool scratch) {
 void *sol_mir_runtime_lowered_program_internal_validation_scratch(size_t n,size_t z) {
 #ifdef SOL_MIR_PLAN_TEST_HOOKS
     ++allocation_attempts;
-    if(fail_validation)return NULL;
+    ++validation_scratch_allocation_attempts;
+    if(fail_validation || (fail_validation_attempt
+        && validation_scratch_allocation_attempts == fail_validation_attempt))return NULL;
 #endif
     return n&&z&&n<=SIZE_MAX/z?calloc(n,z):NULL;
 }

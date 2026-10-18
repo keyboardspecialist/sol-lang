@@ -12,20 +12,21 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 
 ## Execution Cursor
 
-- **Active overall priority: test-suite speed and continuous progress (T1, then T2).**
-  Audit all tests for speed and visible progress; P4.4, its resource prerequisite,
-  and P4.4f1a are paused until this user priority is resolved. P4.4 remains the
-  next unchecked production checkpoint, not the active overall cursor.
+- **Active overall cursor: P4.4 residual predicate-execution planning.** The next
+  bounded task is Sol 6.1 High planning for predicate execution over richer forms;
+  it is not a resource-first prerequisite task. P4.4f1a's metadata checkpoint is
+  independently accepted and review-approved, pending coordinator integration;
+  the broad P4.4 checkbox remains unchecked. See the [versioned handoff](docs/p4.4f1a-handoff.md).
 - T1's bounded observability/audit checkpoint (`6eef9ca`) and T2's independently
   review-approved nine-file cleanup/portability change and audit documentation
   (`5012c62`) are integrated and available on pushed `master` at `35f4027`.
-  The active test worktree is on `master`; the original worktree is on
-  `paused-p44-wip` with its uncommitted working bytes preserved, not committed as
-  a backup.
-  The fresh ALL60 audit is finished: 58 PASS, zero FAIL, two cutoffs,
-  **NOT_ACCEPTANCE**. Speed remains
-  open; no further implementation is active after this documentation handoff
-  without coordinator steering and a new bounded Sol brief.
+  The active P4.4 resume worktree is `sol-lang-p44-resume-master` on
+  `p44-f1a-resume-master`; the original `paused-p44-wip` worktree and its seven
+  source/five-fixture bytes remain preserved and are not represented as a committed
+  backup. The fresh ALL60 audit is finished:
+  58 PASS, zero FAIL, two cutoffs, **NOT_ACCEPTANCE**. Speed goals remain unmet; this
+  cursor change does not resolve them. No P4.4 implementation dispatch is authorized
+  until the bounded planning brief and coordinator steering are complete.
 - M1 is resolved through its infeasibility path: the
   [September 25 report](experiments/m1/README.md) records the missing independent
   governance and protected evaluation boundary.
@@ -34,7 +35,10 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 - One coordinator maintains this single next-overall cursor; parallel tracks do
   not create competing priority lists.
 
-## Test-Suite Speed and Progress Priority
+## Test-Suite Speed and Progress Backlog
+
+The user's resumed P4.4 direction supersedes T1/T2 as the active overall cursor;
+it does not mark the speed backlog complete or accepted.
 
 T1/T2 name the test checkpoints here (called M1/M2 internally in the test brief);
 they are unrelated to the gated maintenance-workflow experiment M1-M5 below.
@@ -65,11 +69,11 @@ they are unrelated to the gated maintenance-workflow experiment M1-M5 below.
   not a complete-suite speed result. Next speed scope requires a new brief using
   the measured residuals; SAN, Windows, Linux/leak, separate stress/fuzz and wider
   matrix acceptance remain unestablished by this audit.
-- **Paused work is retained, not throwaway:** resource-prerequisite WIP spans six
-  paths; main-worktree P4.4f1a WIP spans seven paths and five fixtures. Neither is
-  merged or accepted. Prior Sol review was technical only; the planned coverage
-  extension and coverage acceptance remain pending. Resume only after the test
-  priority is resolved, preserving unrelated WIP and historical acceptance records.
+- **Retained P4.4 work is not throwaway:** the separate resource-prerequisite WIP
+  spans six paths and remains unaccepted with its coverage extension pending. The
+  resumed seven-file/five-fixture P4.4f1a metadata change has since received bounded
+  independent acceptance and is pending coordinator integration, not broad P4.4
+  closure. Preserve the older `paused-p44-wip` bytes and historical records.
 
 ## Completed Foundation Through E6, P1, P2, and P3
 
@@ -178,7 +182,7 @@ deferred until a concrete core API requires their smallest coherent subset.
 
 ## End-to-End and Production Track
 
-E1-E6, P1, P2, and P3 are complete for the frozen E6 profile. P4.1 through P4.3 are complete; P4 remains open. P4.4 is paused and remains the next production checkpoint after the active test-suite speed/progress priority is resolved.
+E1-E6, P1, P2, and P3 are complete for the frozen E6 profile. P4.1 through P4.3 are complete; P4 remains open. The active cursor is bounded planning for residual P4.4 predicate execution; P4.4f1a is a separately accepted metadata slice pending integration, not closure of P4.4.
 Deferred language breadth is not a prerequisite for P2-P5 unless a
 milestone explicitly activates a bounded numbered-task slice. Existing numbered
 capability IDs remain stable; named slices such as `48A` account for completed portions
@@ -203,7 +207,7 @@ access for malformed IR/MIR mutation, phase-corruption assertions, differential
 evaluation, and trusted host-callback coverage.
 
 The production track is underway. P1, P2, and P3 are complete for the frozen E6
-profile; P4.1 through P4.3 are complete; P4 remains open. P4.4 is the next production checkpoint, paused behind the active T1/T2 priority:
+profile; P4.1 through P4.3 are complete; P4 remains open. P4.4 is the active production track; its broad checkpoint remains unchecked:
 
 | Done | Order | Milestone | Dependency and numbered-backlog scope |
 | --- | ---: | --- | --- |
@@ -397,7 +401,7 @@ target logic, access classes, result classes, failure masks, provenance, and exi
 P3 completes static runtime lowering but defines no executor, physical ABI, Wasm,
 adapter, allocator implementation, CLI/build artifact, or tokens. The P3.3 policy
 retains exact inherited P3.1 sites and adds supplemental sites only for uncovered
-allocation/resource producers. P3.W1 remains unperformed historical/optional proposed work and non-cursor; it does not replace the active test priority or the paused P4.4 production checkpoint.
+allocation/resource producers. P3.W1 remains unperformed historical/optional proposed work and non-cursor; it does not replace the active P4.4 planning cursor.
 
 ### P4 - WebAssembly Backend and Host Adapter
 
@@ -418,28 +422,37 @@ P4.4 implementation audit (October 8, 2026; records bounded acceptance evidence,
 | P4.4e1 | Accepted after independent technical and test-sharding review plus final acceptance; committed and pushed as `16f4cf9`. Executes `max_steps` for four base rows, Text, and panic bytes with exact code 6 cleanup in the bounded represented subset. Matching final-source full ON 58/58 and OFF 54/54 passed, as did all 47 native and 47 ASan/UBSan shards covering exactly 3504 fault IDs and 63 controls. The initial native 1500-second timeout was corrected to an explicit 7200-second budget and full ON passed. The historical monolithic ASan 7200-second timeout is superseded for the sanitizer gate by the approved exhaustive shard union; no monolithic ASan, full-project sanitizer, or leak-check pass is claimed. |
 | P4.4e2 | Final Sol 6.1 acceptance approved; committed and pushed as `f9a8432`. Bounded runtime depth is implemented: `uint32_t max_call_depth` accepts 1..64 (default 64), with root depth 1, for supported direct calls, methods, and exact callbacks. Depth decrements before packet inspection, preserves callee failures, and emits code 7 at the call site on exhaustion. Cycles and statically deep graphs are admitted within this supported subset and bounded at runtime; step exhaustion code 6 takes precedence over depth code 7. Pinned corrected-source full ON 58/58 and OFF 54/54 passed, together with all 50 native and 50 ASan/UBSan shards covering exactly 3655 fault IDs and 67 controls. Interruptions affected only unfinished work, which was recovered; the signed-LEB negative-initializer regression is covered. This is exhaustive shard-union sanitizer evidence, not a monolithic ASan, full-project sanitizer, or leak-check pass. |
 | P4.4f0 | Final Sol 6.1 review and Astra scoped-commit readiness approved; accepted and committed/pushed as `bfc6479`. A narrow origin-domain cleanup metadata correction makes the builder and independent validator use exact producer-origin namespaces, preserving authenticated same-image ensures ingress and bounded work. It enables already-supported branch/snapshot/outer-ensures composition with callbacks that was accidentally rejected; true exclusive contract-owner cases still reject upstream in MIR. No schema/emitter changes or predicate executor are added. Final-source full ON 58/58, OFF 54/54, and owner sanitizer 3/3 passed, together with all 50 native and 50 ASan/UBSan shards covering exactly 3779 fault IDs and 69 unique controls; prior IDs are preserved, with strict known-repeat CONTROL accounting and no blanket deduplication. Pinned final-source validation is complete after interruption/harness recoveries, not a test waiver. Sanitizer evidence is the exhaustive shard union, not a full-project sanitizer or leak-check pass. |
-| Residual P4.4 | The bounded gap census is complete (26 probes): richer predicate calls/value operations and guard control remain open, as do exact handler execution, depth/step execution beyond the accepted bounded represented subset, and full cleanup/profile closure. The P4.4f0 committed-baseline dependency is resolved by `bfc6479`. Subsequent resource-prerequisite and P4.4f1a WIP is paused, unmerged, and not accepted; technical review does not satisfy pending coverage acceptance. Each residual needs a bounded brief and independent acceptance evidence after the test priority is resolved; f0 does not close predicate execution or P4.4. |
+| P4.4f1a | Bounded metadata checkpoint independently accepted on 2026-10-18; review-approved, pending coordinator integration. Seven contexts/eight predicate-call pairs, five new fixtures, and the required OFF/ON/SAN sets are accepted as documented in [the handoff](docs/p4.4f1a-handoff.md). This does not admit predicate-call Wasm execution, resolve R-AUTH, or close P4.4; no commit/push hash exists yet. |
+| Residual P4.4 | The bounded gap census is complete (26 probes): richer predicate calls/value operations and guard control remain open, as do exact handler execution, depth/step execution beyond the accepted bounded represented subset, and full cleanup/profile closure. The P4.4f0 committed-baseline dependency is resolved by `bfc6479`; f1a accepts only the metadata slice. Next is a bounded Sol 6.1 High PLANNING brief for predicate execution over richer forms. R-AUTH remains a separate genuine P3.6 resource-authentication defect, not an imposed resource-first dependency; preserve its six-path WIP and unaccepted coverage extension, with held `build_work`/`build_scratch_bytes` resealed ±1 checks unresolved. |
 
-#### Paused development within P4.4
+#### Current P4.4 status and handoff
 
-P4.4 implementation and parallel lanes are paused for the active test-suite
-speed/progress priority, not absent: retain the six-path resource prerequisite and
-seven-path/five-fixture main-worktree P4.4f1a WIP without merging or discarding it.
-Their planned coverage extension and independent coverage acceptance are pending;
-prior Sol technical review is not resource acceptance. P4.4e1 (`16f4cf9`), P4.4e2
-(`f9a8432`), and P4.4f0 (`bfc6479`) retain their historical bounded acceptance above.
-The 26-probe census is complete; richer predicates, guard control, exact handlers,
-and broader profile/full cleanup closure remain open. P4.4 stays unchecked and
-resumes only after the user test priority is resolved and readiness is reviewed.
-P4.5/P5 remain dependency-deferred; no host, P5, or M-track work is authorized.
-The following paused/future lanes do not compete with the T1/T2 cursor:
+The 2026-10-18 P4.4f1a metadata result is review-approved and pending coordinator
+integration (no commit or push has occurred). It covers only the seven-context /
+eight-pair transport metadata and its bounded evidence; the broad P4.4 row stays
+unchecked. The accepted OFF/ON/SAN coverage is not the full default suite, all shards,
+or overall P4.4 acceptance. The prior accepted P4.4e1/e2/f0 records above remain
+historical bounded slices. The 26-probe census is complete; richer predicates, guard
+control, exact handlers, and broader profile/full cleanup closure remain open.
+
+Preserve the older seven-source/five-fixture `paused-p44-wip` bytes and the separate
+six-path resource WIP; neither is to be discarded or described as committed. The
+resource coverage extension remains unaccepted. R-AUTH is the inherited independent
+P3.6 defect: `build_work` and `build_scratch_bytes` are not independently reconstructed
+by the lowered validator; their held resealed ±1 assertions are not passes. This debt
+is recorded separately and does not impose resource-first sequencing on the next
+predicate-execution planning task. P4.5/P5 remain dependency-deferred; no host, P5, or
+M-track work is authorized.
+
+The following are status handoffs, not competing execution cursors:
 
 | Lane / owner | Ready work and exclusive scope | Acceptance handoff |
 | --- | --- | --- |
-| Runtime execution / Sol 6.1 High planning, Luna 6 xhigh implementation | Paused resource-prerequisite and P4.4f1a WIP remains unmerged and unaccepted. The accepted step/depth and f0 commits remain historical bounded baselines, not acceptance of the pending predicate work. | After T1/T2 priority resolution, reconcile retained WIP, the coverage extension, and reviewed failure/cleanup/provenance interfaces before resuming. Preserve accepted step/depth semantics and distinguish exhaustive shard-union sanitizer evidence from unclaimed monolithic/full-project sanitizer or leak-check results. |
-| Independent fixtures / Luna 6 xhigh | Paused; preserve the five existing P4.4f1a fixtures and planned coverage extension. Future demonstrated gaps may use `tests/conformance/p44_parallel_guard_*/` and `tests/conformance/p44_parallel_predicate_*/` only under an approved brief. Establish interpreter expectations first; coordinator integrates shared test drivers and CMake. | Separate Sol 6.1 coverage review of source fixtures and expected results/failure identities, with interpreter validation commands; Wasm acceptance follows implementation. |
-| Interface design / Sol 6.1 High | Paused; census complete (26 probes), f0 accepted as `bfc6479`. Reconcile the resource prerequisite and bounded P4.4f1a work with explicit dependencies before resumption; richer predicates, guard control, and exact handlers remain open. P4.5/P5 remain dependency-deferred. | Reviewed failure/cleanup/provenance contracts, dependencies, module boundaries, and pending coverage before implementation resumes; neither the census, f0 acceptance, nor technical-only review closes resource work or P4.4. |
-| Documentation/status / Luna 6 xhigh; steering / Astra 6 | Update only assigned status documents from reviewed evidence; Astra 6 audits alignment and parallel readiness, and the coordinator owns cursor changes. | Diff/consistency review; distinguish implemented, active, residual, and independently accepted scope. |
+| Predicate execution / Sol 6.1 High planning | **Next bounded planning task:** design residual predicate execution for richer forms. Do not make R-AUTH/resource-first an assumed prerequisite. | Produce a bounded brief with scope, dependencies, interpreter expectations, Wasm admission boundary, tests, and validation; implementation follows only after coordinator dispatch and separate review. |
+| R-AUTH / separate Sol 6.1 High brief | Independent inherited P3.6 resource-authentication defect and preserved six-path resource WIP; coverage extension is pending and unaccepted. | Specify independent exactness reconstruction and truthful coverage; keep held `build_work`/`build_scratch_bytes` ±1 assertions unresolved until evidence exists. |
+| P4.4f1a integration / coordinator | Review-approved bounded metadata checkpoint, pending integration. Existing default selectors and full registrations remain unchanged. | Commit and push only after documentation review/audit; record the actual commit reference in a later status update, never pre-assign a hash. |
+| P4.5/P5 and host | Dependency-deferred; no host adapter, E6 execution, artifact writer, or `sol build` work is authorized by f1a. | Requires its own approved interface and task briefs. |
+| Documentation/status / Luna 6 xhigh; steering / Astra 6 | Update only assigned status documents from reviewed evidence; Astra audits alignment and the coordinator owns cursor changes. | Diff/consistency review; distinguish implemented, active, residual, and independently accepted scope. |
 
 Use isolated worktrees from a reviewed baseline; require Astra 6 readiness audit
 before opening parallel lanes. Each dispatch records dependencies/readiness,

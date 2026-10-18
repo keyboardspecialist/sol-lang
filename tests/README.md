@@ -55,6 +55,33 @@ checks; CTest supplies both and runs the complete support group. Synthetic waits
 are concurrent only within that group (target total <=5s). No full compiler fault
 matrix is run for the failure-continuation check.
 
+## P4.4f1a bounded diagnostic selectors
+
+The three P4.4f1a runners expose test-only case listing and one-key selection. For
+example, with the existing OFF build directory:
+
+```sh
+build-p44-off/sol_mir_runtime_cleanup_tests --list-p44f1a-cases
+python3 tests/support/run_with_progress.py \
+  --name p44f1a:cleanup.bool_unit.frozen-false --timeout 3 -- \
+  build-p44-off/sol_mir_runtime_cleanup_tests \
+  --p44f1a-case cleanup.bool_unit.frozen-false
+```
+
+The corresponding runners are `sol_mir_runtime_lowered_program_tests` and
+`sol_wasm_represented_tests`; use the matching existing `build-p44-off`,
+`build-p44-on`, or sanitizer build directory. The exact keys are source-listed by
+`--list-p44f1a-cases`. These selectors run only the named diagnostic case and are
+not a CTest registration or a replacement for the default run: invoking a runner
+with no arguments still executes all old and new cases. A selected receipt is only
+the bounded case evidence it reports; it does not certify full-suite, full-shard,
+resource-authentication, or P4.4 acceptance. See the [P4.4f1a handoff](../docs/p4.4f1a-handoff.md)
+for the accepted scope and remaining boundaries. The native selected-case policy
+uses a 3-second active timeout. This supervisor option does not provide a 2-second
+reserve or enforce the complete-case 5-second horizon: acceptance separately checks
+the finished case's post-close receipt against that total, leaving the 2-second
+operating reserve. Use the separately approved bounded policy for SAN cases.
+
 ### Records and real progress
 
 Test-owned stderr records start with `SOL_TEST_PROGRESS` and tab-separated
