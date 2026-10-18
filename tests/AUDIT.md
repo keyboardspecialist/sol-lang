@@ -9,19 +9,19 @@ by policy, sampled away or replaced with a shard to obtain these results.
 
 [`TODO.md`](../TODO.md#execution-cursor) is the single execution cursor. Test speed
 and continuous progress remain the active overall priority. T1 observability and
-bounded auditing are independently approved and pushed on `test-speed-progress`
-as `6eef9cadf917b3978278fed9b656b35fc95646ef` (`6eef9ca`), not merged to master.
+bounded auditing are independently approved as
+`6eef9cadf917b3978278fed9b656b35fc95646ef` (`6eef9ca`).
 T2's nine-file cleanup/portability source change is independently review-approved;
-source and audit documentation are committed and pushed as `5012c62` on
-`test-speed-progress`, not master. Approval covers correctness, portability and
-bounded diagnostics,
+source and audit documentation are committed as `5012c62`. Both checkpoints are
+integrated and available on pushed `master` at `35f4027`.
+Approval covers correctness, portability and bounded diagnostics,
 **not full speed acceptance**. After this documentation handoff no new
 implementation is active without coordinator steering and a new Sol task brief.
 P4.4, P4.4f1a and the resource-prerequisite WIPs remain paused and unchanged.
 T1/T2 are not the separate, gated maintenance-experiment M1–M5 track.
 
 The ALL60 evidence predates `5012c62`; its audited code is unchanged in that
-feature-branch commit, which follows T1 `6eef9ca`. Post-audit documentation-only
+source commit, which follows T1 `6eef9ca`. Post-audit documentation-only
 differences mean the receipt does not match `5012c62`'s complete all-source identity.
 Audited cleanup test SHA256:
 `cf4746c2d3471a83ac2ef9d059005c0aabd688e55584e49465cbba441174d5c2`.

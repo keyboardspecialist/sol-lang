@@ -4,9 +4,10 @@ The [October 17 audit](AUDIT.md) records all 60 configured UNIX ON names:
 **58 PASS, zero FAIL, two cutoffs; NOT_ACCEPTANCE**. Observability is accepted for
 its bounded scope; the 1s unit / 5s integration / 60s suite speed goals are not.
 It also records source identity, preserved coverage and unresolved platform gaps.
-Reviewed T2 source and audit documentation are committed and pushed as `5012c62`
-on `test-speed-progress`, not master. Audited code is unchanged; post-audit
-documentation-only differences do not match the receipts' all-source identity.
+Reviewed T2 source and audit documentation (`5012c62`), following T1 (`6eef9ca`),
+are integrated and available on pushed `master` at `35f4027`. Audited code is
+unchanged; post-audit documentation-only differences do not match the receipts'
+all-source identity.
 
 From the repository root:
 
