@@ -1,4 +1,5 @@
 #include "support/native_progress.h"
+#include "support/path_work.h"
 #define main sol_test_body
 #define SOL_MIR_PLAN_TEST_HOOKS 1
 #include "sol/mir_runtime_values.h"
@@ -792,6 +793,9 @@ static void test_inventory(SolMirConcreteProgram *program,
     for (size_t i = 0; i < sizeof(capture_producers) / sizeof(*capture_producers); ++i)
         CHECK(capture_producers[i]);
     CHECK(values->recipe_operation_count == 21);
+    size_t expected_validation_work = 0;
+    CHECK(sol_test_path_work(96030228, 24, sizeof SOL_TEST_SOURCE_DIR - 1,
+        &expected_validation_work));
     CHECK(values->usage.records == 21 && values->usage.allocation_plans == 21
         && values->usage.copy_plans == 21 && values->usage.equality_plans == 21
         && values->usage.host_result_plans == 21
@@ -804,7 +808,7 @@ static void test_inventory(SolMirConcreteProgram *program,
         /* The values validator borrows the concrete/conventions scratch peak;
          * callback provenance grows that authenticated predecessor peak. */
         && values->usage.validation_scratch_bytes == 763171604
-        && values->usage.validation_work == 96030924);
+        && values->usage.validation_work == expected_validation_work);
     test_allocation_plans(values);
     test_host_result_transfer_model(values);
     check_ownership_plans(values);

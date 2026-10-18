@@ -1,4 +1,5 @@
 #include "support/test_progress.h"
+#include "support/path_work.h"
 #define main sol_test_body
 #include "sol/mir_runtime_conventions.h"
 
@@ -623,13 +624,16 @@ static void test_e6(const SolMirConcreteProgram *program,
     const size_t expected_result_classes[] = {15, 3, 0};
     const size_t expected_accesses[] = {14, 4, 1};
     const size_t expected_import_kinds[] = {4, 16, 10, 17, 5, 4};
+    size_t expected_validation_work = 0;
+    CHECK(sol_test_path_work(96025258, 16, sizeof SOL_TEST_SOURCE_DIR - 1,
+        &expected_validation_work));
     const SolMirRuntimeConventionsUsage expected_usage = {
         .signatures = 18, .signature_slots = 19, .calls = 18,
         .operands = 24, .writebacks = 1, .entries = 1, .imports = 56,
         .failure_sites = 713, .owned_bytes = 66480,
         .build_scratch_bytes = 21, .build_work = 12847,
         .validation_scratch_bytes = 763171604,
-        .validation_work = 96025722,
+        .validation_work = expected_validation_work,
     };
     CHECK(memcmp(origins, expected_origins, sizeof(origins)) == 0);
     CHECK(memcmp(targets, expected_targets, sizeof(targets)) == 0);

@@ -280,6 +280,34 @@ bool sol_mir_runtime_cleanup_test_select(const SolMirRuntimeCleanup *,
     const SolMirRuntimeCleanupTraceRequest *, SolMirRuntimeCleanupAction *, size_t,
     SolMirRuntimeCleanupTrace *);
 
+/* Test-support bounds, not production limits. Each call authenticates afresh.
+ * The owner, predecessors, queries and occurrence backing must remain immutable
+ * for this callback-free call. results is a valid, distinct output-pointer slot
+ * (not within owner/query/occurrence storage); it is initialized to NULL.
+ * A valid zero-row envelope still validates the owner and allocates nothing.
+ * false means envelope/owner/OOM failure; rejected requests are processed rows.
+ * On success free(*results); do not move rows: trace.actions points into its row.
+ * No returned value grants permission to skip a future owner validation. */
+#define SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES 4096
+#define SOL_MIR_RUNTIME_CLEANUP_TEST_ACTION_SLOTS 64
+typedef struct {
+    SolMirRuntimeCleanupTraceRequest request;
+    size_t action_capacity;
+    bool copy_actions;
+} SolMirRuntimeCleanupTestTraceQuery;
+typedef struct {
+    bool selected;
+    SolMirRuntimeCleanupTrace trace;
+    SolMirRuntimeCleanupAction actions[SOL_MIR_RUNTIME_CLEANUP_TEST_ACTION_SLOTS];
+} SolMirRuntimeCleanupTestTraceResult;
+bool sol_mir_runtime_cleanup_test_trace_batch(const SolMirRuntimeCleanup *,
+    const SolMirRuntimeCleanupTestTraceQuery *, size_t,
+    SolMirRuntimeCleanupTestTraceResult **results);
+/* Actual entrypoint validator invocations and private selections only; these
+ * counters neither carry trust nor alter existing allocation/fault meters. */
+void sol_mir_runtime_cleanup_test_trace_counts_reset(void);
+void sol_mir_runtime_cleanup_test_trace_counts(size_t *authentications, size_t *selections);
+
 typedef struct {
     SolMirRuntimeCleanupEventId event;
     SolMirRuntimeCleanupEdgeRole edge_role;

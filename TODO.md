@@ -16,10 +16,12 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
   Audit all tests for speed and visible progress; P4.4, its resource prerequisite,
   and P4.4f1a are paused until this user priority is resolved. P4.4 remains the
   next unchecked production checkpoint, not the active overall cursor.
-- T1 is the bounded observability/30-second audit checkpoint, with independent
-  approval for that scope only; commit is pending. T2 follows the T1 commit and
-  addresses the highest-impact cleanup-test bottleneck. Neither checkpoint is
-  full-suite speed acceptance.
+- T1's bounded observability/audit checkpoint is approved and pushed as `6eef9ca`
+  on `test-speed-progress`, not merged to master. T2's nine-file cleanup/portability
+  change is independently review-approved, commit pending. The fresh ALL60 audit
+  is finished: 58 PASS, zero FAIL, two cutoffs, **NOT_ACCEPTANCE**. Speed remains
+  open; no further implementation is active after this documentation handoff
+  without coordinator steering and a new bounded Sol brief.
 - M1 is resolved through its infeasibility path: the
   [September 25 report](experiments/m1/README.md) records the missing independent
   governance and protected evaluation boundary.
@@ -35,19 +37,30 @@ they are unrelated to the gated maintenance-workflow experiment M1-M5 below.
 
 | Checkpoint | Status and bounded scope | Remaining acceptance |
 | --- | --- | --- |
-| T1 - Observability and bounded audit | Active; bounded review approved, commit pending. Shared supervisor, all 31 phase-test executables, verbose CTest, wrapped CLI/integration scripts, and stress/fuzz paths expose continuous progress without hiding child output. The audit uses explicit 30-second cutoffs. | Approval covers observability and the bounded audit only, not speed targets or full-suite acceptance. Preserve the existing 58 ON / 54 OFF tests plus two support tests and the historical exhaustive shard manifest of 3779 fault IDs / 69 controls / 50 shards. |
-| T2 - Cleanup-test speed | Next after the T1 commit: highest-impact cleanup-test optimization through an immutable, callback-free batch test hook. No production runtime changes or cached-trust shortcut. | Preserve all 1059 event checks, 1025 queries, and fault checks; require focused validation and separate review before acceptance. |
+| T1 - Observability and bounded audit | Approved for this bounded scope; pushed `6eef9ca`. Shared supervisor, all 31 phase-test executables, verbose CTest, wrapped CLI/integration scripts, and stress/fuzz paths expose progress/liveness without hiding child output. | Not full speed/platform acceptance. Preserve 58 original UNIX ON / 54 OFF registrations plus two support tests and the historical 3779-fault / 69-control / 50-shard manifest. Metadata preservation is not current execution of every fault. |
+| T2 - Cleanup/portability correctness; speed open | Nine-file source change independently review-approved, commit pending: immutable callback-free batch test hook, portable root-dependent expectations, and retained local requests. Fresh all-name ON audit: 58 PASS, zero FAIL, two ordinary cutoffs. | Whole cleanup correctness PASS (OFF 11.887436s; ON 12.864952s native), but both MISS5. Lowered/full represented correctness and tails remain unknown. No production validation skip, cached trust, compiler-semantic change, or lost original request/check is authorized. |
 
-- **Fresh final-source evidence:** 13 support checks, three integration checks,
-  and the frontend test only. No fresh broad/full-suite pass is established.
-- **Previous-source audit only:** 52 passes, five baseline failures, two cutoffs,
-  and one unrun test. These results do not validate the current final source;
-  historical ON/OFF and shard-union acceptance in the P4.4 audit below is not a
-  fresh speed audit.
+- **Durable current-code evidence:** [test audit](tests/AUDIT.md) records every
+  configured name and final timing/status, the two cutoff boundaries and evidence
+  qualifications. All 60 names actually started over 61 attempts in two bounded
+  cycles; one suite-shortened represented attempt had one eligible retry. No
+  ordinary cutoff was retried or deadline increased. All five previous root-path
+  failures are now green. Code identity is `6eef9ca` plus reviewed T2 changes;
+  this documentation-only delta changes audit source pins and is not retrospectively
+  included in those receipts.
+- **Progress evidence:** fresh maximum delivered gap 1.019882s; heartbeat is
+  liveness, not completed work. T1's 13 support / three integration checks remain
+  code-only support evidence (T2 changed no support implementation); both support
+  registrations also passed the fresh ON audit. Earlier 52 PASS / five FAIL / two
+  cutoffs / one unrun is prior-source history, superseded only for this ON inventory,
+  not an additional fresh matrix pass.
 - **Fast targets, not achieved results:** unit tests at most 1 second, integration
-  tests at most 5 seconds, and the suite at most 60 seconds. Current full-suite
-  timing and target attainment remain unknown; continuous progress alone is not
-  a speed improvement or a passing test result.
+  tests at most 5 seconds, suite at most 60 seconds: **UNMET**. Five completed ON
+  registrations miss 5s (handler, cleanup, host, scalar, values); lowered and full
+  represented are incomplete. Two cycle outer walls were 116.163778s / 45.165681s,
+  not a complete-suite speed result. Next speed scope requires a new brief using
+  the measured residuals; SAN, Windows, Linux/leak, separate stress/fuzz and wider
+  matrix acceptance remain unestablished by this audit.
 - **Paused work is retained, not throwaway:** resource-prerequisite WIP spans six
   paths; main-worktree P4.4f1a WIP spans seven paths and five fixtures. Neither is
   merged or accepted. Prior Sol review was technical only; the planned coverage

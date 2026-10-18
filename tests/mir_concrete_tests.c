@@ -1,4 +1,5 @@
 #include "support/test_progress.h"
+#include "support/path_work.h"
 #define main sol_test_body
 #include "sol/mir_concrete.h"
 
@@ -18,6 +19,40 @@ static int failures;
 } } while (0)
 
 void sol_mir_linkage_test_force_runtime_digest_collision(bool force);
+
+static void check_path_work_arithmetic(void) {
+    size_t out = 17;
+    CHECK(!sol_test_path_work(0, 0, 0, NULL));
+    CHECK(sol_test_path_work(0, 0, 0, &out) && out == 0);
+    CHECK(sol_test_path_work(37, 0, SIZE_MAX, &out) && out == 37);
+    CHECK(sol_test_path_work(SIZE_MAX, SIZE_MAX, 0, &out) && out == SIZE_MAX);
+    CHECK(sol_test_path_work(0, 1, SIZE_MAX, &out) && out == SIZE_MAX);
+    CHECK(sol_test_path_work(1, 1, SIZE_MAX - 1, &out) && out == SIZE_MAX);
+    CHECK(sol_test_path_work(1, 2, (SIZE_MAX - 1) / 2, &out) && out == SIZE_MAX);
+    out = 17;
+    CHECK(!sol_test_path_work(0, 2, SIZE_MAX, &out) && out == 17);
+    CHECK(!sol_test_path_work(1, 1, SIZE_MAX, &out) && out == 17);
+    CHECK(!sol_test_path_work(SIZE_MAX, 1, 1, &out) && out == 17);
+    CHECK(!sol_test_path_work(0, SIZE_MAX, 2, &out) && out == 17);
+    /* The approved matrix's historical P29 literals, not runtime calibration. */
+    const struct { size_t base, coefficient, at29; } rows[] = {
+        {95447935, 4, 95448051}, {95540015, 8, 95540247},
+        {96025258, 16, 96025722}, {96030228, 24, 96030924},
+        {96025258, 16, 96025722}, {96030228, 24, 96030924},
+        {1170581, 4, 1170697}, {15958, 4, 16074},
+        {12666, 4, 12782}, {155255, 4, 155371},
+    };
+    for (size_t i = 0; i < sizeof(rows) / sizeof(*rows); ++i) {
+        size_t at0 = 0, at28 = 0, at29 = 0, at30 = 0, delta = 0;
+        CHECK(sol_test_path_work(rows[i].base, rows[i].coefficient, 0, &at0));
+        CHECK(sol_test_path_work(rows[i].base, rows[i].coefficient, 28, &at28));
+        CHECK(sol_test_path_work(rows[i].base, rows[i].coefficient, 29, &at29));
+        CHECK(sol_test_path_work(rows[i].base, rows[i].coefficient, 30, &at30));
+        CHECK(sol_test_path_work(0, rows[i].coefficient, 2, &delta));
+        CHECK(at0 == rows[i].base && at29 == rows[i].at29);
+        CHECK(at30 >= at28 && at30 - at28 == delta);
+    }
+}
 
 typedef struct {
     SolDiagnostics diagnostics;
@@ -466,6 +501,12 @@ static void check_capability_bound_closure(const SolMirConcreteProgram *p) {
 
 static void check_e6_census_and_closure(const Compilation *c,
     const SolMirConcreteProgram *p) {
+    SolMirOperationsUsage path_operations_usage = expected_operations_usage;
+    SolMirLinkageUsage path_linkage_usage = expected_linkage_usage;
+    CHECK(sol_test_path_work(95447935, 4, sizeof SOL_TEST_SOURCE_DIR - 1,
+        &path_operations_usage.validation_work));
+    CHECK(sol_test_path_work(95540015, 8, sizeof SOL_TEST_SOURCE_DIR - 1,
+        &path_linkage_usage.validation_work));
     const size_t program_counts[] = {p->program.root_count,
         p->program.approved_import_count, p->program.template_count,
         p->program.import_count, p->program.specialization_count,
@@ -566,8 +607,8 @@ static void check_e6_census_and_closure(const Compilation *c,
         && EQ(p->operations.usage, expected_operations_usage, build_work)
         && EQ(p->operations.usage, expected_operations_usage,
             validation_scratch_bytes)
-        && EQ(p->operations.usage, expected_operations_usage,
-            validation_work));
+        && EQ(p->operations.usage, path_operations_usage,
+             validation_work));
 #undef OP_USAGE
 #define LINK_USAGE(member, type, singular) \
     && EQ(p->linkage.usage, expected_linkage_usage, member)
@@ -577,7 +618,7 @@ static void check_e6_census_and_closure(const Compilation *c,
         && EQ(p->linkage.usage, expected_linkage_usage, build_work)
         && EQ(p->linkage.usage, expected_linkage_usage,
             validation_scratch_bytes)
-        && EQ(p->linkage.usage, expected_linkage_usage, validation_work));
+        && EQ(p->linkage.usage, path_linkage_usage, validation_work));
 #undef LINK_USAGE
 #undef EQ
 
@@ -1108,6 +1149,7 @@ static void test_independent_ir_and_collision(Compilation *first,
 }
 
 int main(void) {
+    check_path_work_arithmetic();
     Compilation compilation; CHECK(compile_e6(&compilation));
     E6Request e6; e6_request(&compilation.ir, &e6);
     CHECK(e6.root_count == 5);

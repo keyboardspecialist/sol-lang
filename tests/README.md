@@ -1,5 +1,10 @@
 # Running tests with live output
 
+The [October 17 audit](AUDIT.md) records all 60 configured UNIX ON names:
+**58 PASS, zero FAIL, two cutoffs; NOT_ACCEPTANCE**. Observability is accepted for
+its bounded scope; the 1s unit / 5s integration / 60s suite speed goals are not.
+It also records source identity, preserved coverage and unresolved platform gaps.
+
 From the repository root:
 
 ```sh
@@ -7,6 +12,10 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTING=ON -DSOL_E
 cmake --build build --parallel 2
 ctest --test-dir build --verbose --output-on-failure -j 1
 ```
+
+The last command is the canonical live full CTest invocation, not a bounded speed
+probe: its safety caps are larger than performance goals. For investigations use
+the bounded audit below; do not rerun known ordinary cutoffs without a new brief.
 
 `--verbose` is essential for live output, even with stdout/stderr redirected.
 Bare CTest, `--output-on-failure` alone, and the build's `test` target buffer
@@ -126,9 +135,15 @@ partial/not acceptance, never a pass or skip.
 
 ```sh
 python3 tests/audit_tests.py --build-dir build --per-test-seconds 30 --suite-seconds 120 --names frontend mir_runtime_conventions --output build/audit.json
-# Explicit resume: matching pins only; by default try the previously unrun names.
-python3 tests/audit_tests.py --build-dir build --per-test-seconds 30 --suite-seconds 120 --resume build/audit.json --output build/audit.json
 ```
+
+For explicit bounded resume, see the [frozen-environment example](AUDIT.md#bounded-live-audit-and-resume).
+The entire actual inherited environment is pinned, including volatile values;
+launching later from another shell/tool call need not match. No secret values
+need be printed or stored. With `--names`, the caller must select only authorized
+eligible work: the CLI does not prevent repeating a prior PASS or ordinary cutoff.
+Without `--names`, resume selects previously `NOT_RUN*` names, potentially including
+expensive owners; that is not permission to launch them.
 
 Inventory always comes from actual CTest JSON, never a handwritten fast suite.
 Selection is exact-name, serial diagnostic execution, not reduced acceptance.
@@ -162,9 +177,12 @@ reports any overall budget overrun. Audit output includes argv/cwd, full streame
 raw logs, monotonic delivery/semantic JSONL, bounded recent observations, maximum
 delivery gap, wrapper overhead (not subtracted), and **1s unit /5s integration
 /60s suite goals**. Timeouts cannot establish a goal or expected product outcome.
-Do not launch the represented all-union/full owner until a separately reviewed
-speed plan makes it bounded; explicitly leave that name unrun and use a named
-read-only manifest or an approved <=30s shard probe instead.
+The recorded ALL60 validation separately authorized one suite-budget-shortened
+full-default represented attempt and one eligible full-budget retry; the final ordinary
+cutoff stays incomplete. That finished dispatch is not standing authorization for
+further full-owner runs. Future represented/full-union probes require a new reviewed
+scope with <=30s total bounds; read-only manifests or approved shards never replace
+whole-registration correctness or full fault execution.
 
 ## Stress and CI fuzz
 

@@ -1,4 +1,5 @@
 #include "support/native_progress.h"
+#include "support/path_work.h"
 #define main sol_test_body
 #define SOL_MIR_PLAN_TEST_HOOKS 1
 #include "sol/mir_runtime_cleanup.h"
@@ -16,6 +17,7 @@ static int failures;
 typedef struct { SolDiagnostics diagnostics; SolHirModule hir; SolTypeTable types;
     SolEffectTable effects; SolContractTable contracts; SolIr ir; SolPackage package; } Compilation;
 static char *render_cleanup_text(const SolMirRuntimeCleanup *cleanup);
+static void check_trace_batch_contract(SolMirRuntimeCleanup *cleanup);
 static size_t affine_image(const SolMirConcreteProgram *program,
     SolIrCallableId callable_id);
 static SolIrCallableId callable(const SolIr *ir, const char *name, SolIrCallableKind kind) {
@@ -350,6 +352,7 @@ static void check_zero_supplemental_alias_preflight(void) {
             && cleanup.transition_count != 0 && cleanup.supplemental_site_count == 0
             && cleanup.supplemental_site_capacity == 0 && cleanup.supplemental_sites == NULL
             && sol_mir_runtime_cleanup_validate(&cleanup, NULL));
+        check_trace_batch_contract(&cleanup);
         cleanup.supplemental_sites = (SolMirRuntimeCleanupSupplementalSite *)cleanup.events;
         CHECK(!sol_mir_runtime_cleanup_validate(&cleanup, NULL));
         cleanup.supplemental_sites = NULL;
@@ -639,6 +642,270 @@ static bool occurrence_for_transition(const SolMirRuntimeCleanup *cleanup,
     }
     return false;
 }
+/* Snapshots use known-valid allocated capacities, before any corruption. The
+ * saved addresses/sizes are retained across mutations, never rediscovered from
+ * a hostile header. Includes every cleanup arena and both direct predecessors. */
+typedef struct { const void *address; size_t bytes; unsigned char *copy; } BatchMemory;
+static void batch_memory_save(BatchMemory *memory, size_t *count,
+    const void *address, size_t bytes) {
+    if (!bytes) return;
+    CHECK(*count < 256 && address != NULL);
+    if (*count >= 256 || !address) return;
+    unsigned char *copy = malloc(bytes);
+    CHECK(copy != NULL);
+    if (!copy) return;
+    memcpy(copy, address, bytes);
+    memory[(*count)++] = (BatchMemory){address, bytes, copy};
+}
+static void batch_memory_check(const BatchMemory *memory, size_t count) {
+    for (size_t i = 0; i < count; ++i)
+        CHECK(memcmp(memory[i].address, memory[i].copy, memory[i].bytes) == 0);
+}
+static void check_trace_batch_contract(SolMirRuntimeCleanup *cleanup) {
+    enum { ROWS = 256 };
+    SolMirRuntimeCleanupTestTraceQuery queries[ROWS] = {0};
+    SolMirRuntimeCleanupFailureOccurrence backing[ROWS] = {0};
+    SolMirRuntimeCleanupFailureOccurrence pending = {0};
+    bool have_pending = false;
+    for (size_t i = 0; i < cleanup->transition_count && !have_pending; ++i)
+        have_pending = occurrence_for_transition(cleanup, cleanup->conventions,
+            &cleanup->transitions[i], &pending);
+    CHECK(have_pending);
+    size_t n = 0, normal = SIZE_MAX, producer = SIZE_MAX, success = SIZE_MAX;
+    for (size_t e = 0; e < cleanup->event_count; ++e)
+        for (size_t t = 0; t < cleanup->events[e].transitions.count; ++t) {
+            const SolMirRuntimeCleanupTransition *edge =
+                &cleanup->transitions[cleanup->events[e].transitions.offset + t];
+            CHECK(n < ROWS - 20);
+            if (n >= ROWS - 20) continue; /* failure, never a successful truncated batch */
+            queries[n] = (SolMirRuntimeCleanupTestTraceQuery){
+                {e, edge->edge_role, NULL, NULL, SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE}, 64, true};
+            if (occurrence_for_transition(cleanup, cleanup->conventions, edge, &backing[n])) {
+                queries[n].request.produced = &backing[n];
+                producer = n;
+            } else if (edge->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING
+                || edge->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING) {
+                memcpy(&backing[n], &pending, sizeof(pending));
+                queries[n].request.pending = &backing[n];
+            }
+            if (edge->actions.count) normal = n;
+            if (edge->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE) success = n;
+            ++n;
+        }
+    CHECK(normal != SIZE_MAX && producer != SIZE_MAX && success != SIZE_MAX && have_pending);
+    if (normal == SIZE_MAX || producer == SIZE_MAX || success == SIZE_MAX || !have_pending || n >= ROWS - 20) return;
+    SolMirRuntimeCleanupTestTraceQuery good = queries[normal], producing = queries[producer];
+    size_t original_rows = n;
+    SolMirRuntimeCleanupTestTraceQuery bad = good;
+    bad.request.event = cleanup->event_count;
+    queries[n++] = bad; queries[n++] = good; /* invalid followed by valid */
+    bad = good; bad.request.edge_role = (SolMirRuntimeCleanupEdgeRole)-1; queries[n++] = bad;
+    bad = good; bad.request.liveness = (SolMirRuntimeCleanupDropLiveness)(SOL_MIR_RUNTIME_CLEANUP_DROP_CONDITIONAL + 1);
+    queries[n++] = bad;
+    bad = good; bad.copy_actions = false; bad.action_capacity = 0; queries[n++] = bad; /* metadata */
+    bad.action_capacity = 1; queries[n++] = bad; /* NULL storage + nonzero capacity */
+    bad = good; bad.action_capacity = 0; queries[n++] = bad;
+    size_t actions = 0;
+    const SolMirRuntimeCleanupEvent *event = &cleanup->events[good.request.event];
+    for (size_t t = 0; t < event->transitions.count; ++t)
+        if (cleanup->transitions[event->transitions.offset + t].edge_role == good.request.edge_role)
+            actions = cleanup->transitions[event->transitions.offset + t].actions.count;
+    CHECK(actions > 0 && actions <= 64);
+    bad = good; bad.action_capacity = actions; queries[n++] = bad;
+    bad.action_capacity = actions - 1; queries[n++] = bad;
+    bad = queries[success]; bad.request.pending = &pending; queries[n++] = bad; /* pending on success */
+    bad = producing; bad.request.produced = NULL; queries[n++] = bad; /* neither */
+    bad = producing; bad.request.pending = &pending; queries[n++] = bad; /* both */
+    bad = producing; bad.request.produced = NULL; bad.request.pending = &pending; queries[n++] = bad;
+    /* Final arrays have never moved. Invalid copies have dedicated stable backing. */
+    for (unsigned variant = 0; variant < 3; ++variant) {
+        memcpy(&backing[n], producing.request.produced, sizeof(backing[n]));
+        if (variant == 0) ++backing[n].source.start;
+        if (variant == 1) backing[n].code = SOL_MIR_RUNTIME_FAILURE_NONE;
+        if (variant == 2) backing[n].detail_length = SOL_MIR_RUNTIME_HOST_DETAIL_MAX + 1;
+        bad = producing; bad.request.produced = &backing[n]; queries[n++] = bad;
+    }
+    BatchMemory memory[256]; size_t memory_count = 0;
+#define SAVE_HEADER(p) batch_memory_save(memory, &memory_count, (p), sizeof(*(p)))
+#define SAVE_ARENA(p, member, singular) batch_memory_save(memory, &memory_count, \
+        (p)->member, (p)->singular##_capacity * sizeof(*(p)->member))
+    SAVE_HEADER(cleanup);
+    SAVE_ARENA(cleanup, events, event); SAVE_ARENA(cleanup, actions, action);
+    SAVE_ARENA(cleanup, transitions, transition); SAVE_ARENA(cleanup, supplemental_sites, supplemental_site);
+    SAVE_ARENA(cleanup, drop_paths, drop_path);
+    const SolMirRuntimeValues *v = cleanup->values;
+    SAVE_HEADER(v);
+    SAVE_ARENA(v, recipe_operations, recipe_operation); SAVE_ARENA(v, allocation_plans, allocation_plan);
+    SAVE_ARENA(v, copy_plans, copy_plan); SAVE_ARENA(v, equality_plans, equality_plan);
+    SAVE_ARENA(v, host_result_plans, host_result_plan); SAVE_ARENA(v, host_result_requirements, host_result_requirement);
+    SAVE_ARENA(v, ownership_plans, ownership_plan); SAVE_ARENA(v, ownership_variants, ownership_variant);
+    SAVE_ARENA(v, owned_edges, owned_edge);
+    const SolMirRuntimeConventions *c = cleanup->conventions;
+    SAVE_HEADER(c);
+#define SAVE_CONVENTION(member, type, singular) SAVE_ARENA(c, member, singular);
+    SOL_MIR_RUNTIME_CONVENTIONS_ARENAS(SAVE_CONVENTION)
+#undef SAVE_CONVENTION
+    SAVE_HEADER(c->concrete);
+    const SolMirConcreteProgram *p = c->concrete;
+#define SAVE_COUNT(p_, member, singular) batch_memory_save(memory, &memory_count, \
+        (p_)->member, (p_)->singular##_count * sizeof(*(p_)->member))
+    SAVE_COUNT(&p->program, roots, root); SAVE_COUNT(&p->program, approved_imports, approved_import);
+    SAVE_COUNT(&p->program, templates, template); SAVE_COUNT(&p->program, imports, import);
+    SAVE_COUNT(&p->program, specializations, specialization); SAVE_COUNT(&p->program, references, reference);
+    for (size_t i = 0; i < p->program.template_count; ++i) {
+        const SolMir *m = &p->program.templates[i].mir;
+        SAVE_ARENA(m, blocks, block); SAVE_ARENA(m, instructions, instruction);
+        SAVE_ARENA(m, values, value); SAVE_ARENA(m, parameter_values, parameter_value);
+        SAVE_ARENA(m, edge_values, edge_value); SAVE_ARENA(m, call_arguments, call_argument);
+        SAVE_ARENA(m, loops, loop); SAVE_ARENA(m, construct_operands, construct_operand);
+        SAVE_ARENA(m, temporaries, temporary);
+    }
+#undef SAVE_COUNT
+    const SolMirPlan *plan = &p->plan;
+    SAVE_ARENA(plan, types, type); SAVE_ARENA(plan, type_components, type_component);
+    SAVE_ARENA(plan, type_parameter_accesses, type_parameter_access);
+    SAVE_ARENA(plan, effect_atoms, effect_atom); SAVE_ARENA(plan, effect_rows, effect_row);
+    SAVE_ARENA(plan, effect_row_atoms, effect_row_atom); SAVE_ARENA(plan, instances, instance);
+    SAVE_ARENA(plan, instance_type_ids, instance_type_id); SAVE_ARENA(plan, instance_accesses, instance_access);
+    SAVE_ARENA(plan, dictionary_entries, dictionary_entry); SAVE_ARENA(plan, imports, import);
+    SAVE_ARENA(plan, typed_uses, typed_use); SAVE_ARENA(plan, contexts, context); SAVE_ARENA(plan, demands, demand);
+    const SolMirMaterialization *m = &p->materialization;
+    SAVE_ARENA(m, images, image); SAVE_ARENA(m, types, type); SAVE_ARENA(m, shape_fields, shape_field);
+    SAVE_ARENA(m, shape_variants, shape_variant); SAVE_ARENA(m, type_ids, type_id); SAVE_ARENA(m, accesses, access);
+    SAVE_ARENA(m, overlays, overlay); SAVE_ARENA(m, contexts, context); SAVE_ARENA(m, locals, local);
+    SAVE_ARENA(m, places, place); SAVE_ARENA(m, projections, projection); SAVE_ARENA(m, values, value);
+    SAVE_ARENA(m, instructions, instruction); SAVE_ARENA(m, temporaries, temporary);
+    SAVE_ARENA(m, construct_operands, construct_operand); SAVE_ARENA(m, call_arguments, call_argument);
+    SAVE_ARENA(m, blocks, block); SAVE_ARENA(m, edges, edge); SAVE_ARENA(m, edge_values, edge_value);
+    SAVE_ARENA(m, parameter_values, parameter_value); SAVE_ARENA(m, loops, loop); SAVE_ARENA(m, bindings, binding);
+    SAVE_ARENA(m, semantic_sites, semantic_site); SAVE_ARENA(m, receiver_roots, receiver_root);
+    SAVE_ARENA(m, imports, import); SAVE_ARENA(m, handlers, handler); SAVE_ARENA(m, writebacks, writeback);
+    SAVE_ARENA(m, effect_rows, effect_row); SAVE_ARENA(m, effect_atoms, effect_atom);
+    SAVE_ARENA(m, effect_row_atoms, effect_row_atom); SAVE_ARENA(m, effect_names, effect_name);
+    SAVE_ARENA(m, literal_bytes, literal_byte);
+    const SolMirRepresentation *rep = &p->representation;
+    SAVE_ARENA(rep, recipes, recipe); SAVE_ARENA(rep, fields, field); SAVE_ARENA(rep, variants, variant);
+    SAVE_ARENA(rep, recipe_ids, recipe_id); SAVE_ARENA(rep, accesses, access);
+    SAVE_ARENA(rep, receiver_roots, receiver_root); SAVE_ARENA(rep, callable_producers, callable_producer);
+    SAVE_ARENA(&p->layout, types, type); SAVE_ARENA(&p->layout, fields, field);
+    SAVE_ARENA(&p->layout, variants, variant); SAVE_ARENA(&p->layout, projections, projection);
+#define SAVE_OPERATION(member, type, singular) SAVE_ARENA(&p->operations, member, singular);
+    SOL_MIR_OPERATIONS_ARENAS(SAVE_OPERATION)
+#undef SAVE_OPERATION
+#define SAVE_LINKAGE(member, type, singular) SAVE_ARENA(&p->linkage, member, singular);
+    SOL_MIR_LINKAGE_ARENAS(SAVE_LINKAGE)
+#undef SAVE_LINKAGE
+    batch_memory_save(memory, &memory_count, queries, sizeof(queries));
+    batch_memory_save(memory, &memory_count, backing, sizeof(backing));
+    SAVE_HEADER(&pending);
+#undef SAVE_ARENA
+#undef SAVE_HEADER
+    bool selected[ROWS] = {0};
+    SolMirRuntimeCleanupTrace traces[ROWS] = {0};
+    SolMirRuntimeCleanupAction actions_copy[ROWS][64];
+    sol_mir_runtime_cleanup_test_trace_counts_reset();
+    for (size_t i = 0; i < n; ++i)
+        selected[i] = sol_mir_runtime_cleanup_test_select(cleanup, &queries[i].request,
+            queries[i].copy_actions ? actions_copy[i] : NULL, queries[i].action_capacity, &traces[i]);
+    CHECK(selected[normal] && selected[producer] && selected[success]);
+    CHECK(!selected[original_rows] && selected[original_rows + 1]);
+    CHECK(selected[original_rows + 4] && !selected[original_rows + 5]
+        && !selected[original_rows + 6] && selected[original_rows + 7]
+        && !selected[original_rows + 8] && !selected[original_rows + 9]);
+    size_t transported = 0;
+    for (size_t i = 0; i < original_rows; ++i)
+        if (selected[i] && queries[i].request.pending) {
+            CHECK(traces[i].has_primary
+                && memcmp(&traces[i].primary, queries[i].request.pending, sizeof(traces[i].primary)) == 0);
+            ++transported;
+        }
+    CHECK(transported != 0);
+    size_t auth, selections;
+    sol_mir_runtime_cleanup_test_trace_counts(&auth, &selections);
+    CHECK(auth == n && selections == n);
+    batch_memory_check(memory, memory_count);
+    sol_mir_runtime_cleanup_test_trace_counts_reset();
+    SolMirRuntimeCleanupTestTraceResult *results = NULL;
+    CHECK(sol_mir_runtime_cleanup_test_trace_batch(cleanup, queries, n, &results));
+    CHECK(results != NULL);
+    sol_mir_runtime_cleanup_test_trace_counts(&auth, &selections);
+    CHECK(auth == 1 && selections == n);
+    fprintf(stderr, "cleanup-small-differential queries=%zu single-auth=%zu batch-auth=%zu selections=%zu pending-transports=%zu\n",
+        n, n, auth, selections, transported);
+    if (results) for (size_t i = 0; i < n; ++i) {
+        CHECK(results[i].selected == selected[i]);
+        if (!selected[i] || !results[i].selected) continue;
+        const SolMirRuntimeCleanupTrace *a = &traces[i], *b = &results[i].trace;
+        CHECK(a->event == b->event && a->edge_role == b->edge_role && a->outcome == b->outcome
+            && a->liveness == b->liveness && a->has_primary == b->has_primary
+            && a->action_count == b->action_count);
+        if (a->has_primary) CHECK(memcmp(&a->primary, &b->primary, sizeof(a->primary)) == 0);
+        CHECK(b->actions == (queries[i].copy_actions ? results[i].actions : NULL));
+        if (a->actions && b->actions) CHECK(memcmp(a->actions, b->actions,
+            a->action_count * sizeof(*a->actions)) == 0);
+    }
+    batch_memory_check(memory, memory_count);
+    free(results); results = NULL;
+    CHECK(sol_mir_runtime_cleanup_test_trace_batch(cleanup, NULL, 0, &results) && results == NULL);
+    CHECK(!sol_mir_runtime_cleanup_test_trace_batch(cleanup, queries, n, NULL));
+    CHECK(!sol_mir_runtime_cleanup_test_trace_batch(cleanup, NULL, 1, &results) && results == NULL);
+    CHECK(!sol_mir_runtime_cleanup_test_trace_batch(cleanup, queries, SIZE_MAX, &results) && results == NULL);
+    CHECK(!sol_mir_runtime_cleanup_test_trace_batch(cleanup, queries, 4097, &results) && results == NULL);
+    bad = good; bad.action_capacity = 65;
+    CHECK(!sol_mir_runtime_cleanup_test_trace_batch(cleanup, &bad, 1, &results) && results == NULL);
+    bad.action_capacity = SIZE_MAX;
+    CHECK(!sol_mir_runtime_cleanup_test_trace_batch(cleanup, &bad, 1, &results) && results == NULL);
+    SolMirRuntimeCleanupTestTraceQuery *maximum = calloc(
+        SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES, sizeof(*maximum));
+    CHECK(maximum != NULL);
+    if (maximum) {
+        for (size_t i = 0; i < SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES; ++i) {
+            maximum[i] = good;
+            maximum[i].copy_actions = false; maximum[i].action_capacity = 0;
+        }
+        sol_mir_runtime_cleanup_test_trace_counts_reset();
+        CHECK(sol_mir_runtime_cleanup_test_trace_batch(cleanup, maximum,
+            SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES, &results));
+        CHECK(results != NULL);
+        if (results) for (size_t i = 0; i < SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES; ++i)
+            CHECK(results[i].selected && results[i].trace.actions == NULL);
+        sol_mir_runtime_cleanup_test_trace_counts(&auth, &selections);
+        CHECK(auth == 1 && selections == SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES);
+        free(results); results = NULL; free(maximum);
+    }
+    /* Each separate mutation follows an accepted batch, rejecting on BOTH
+     * public paths and zero rows, then restores and freshly authenticates. */
+#define BATCH_MUTATION(object, field, replacement) do { \
+        (object)->field = (replacement); \
+        CHECK(!sol_mir_runtime_cleanup_test_select(cleanup, &good.request, NULL, 0, &traces[0])); \
+        CHECK(!sol_mir_runtime_cleanup_test_trace_batch(cleanup, &good, 1, &results) && results == NULL); \
+        CHECK(!sol_mir_runtime_cleanup_test_trace_batch(cleanup, NULL, 0, &results) && results == NULL); \
+    } while (0)
+    SolMirRuntimeCleanupUsage saved_usage = cleanup->usage;
+    BATCH_MUTATION(cleanup, usage.validation_work, saved_usage.validation_work + 1);
+    cleanup->usage = saved_usage;
+#define BATCH_RESTORED() do { \
+        CHECK(sol_mir_runtime_cleanup_validate(cleanup, NULL)); \
+        CHECK(sol_mir_runtime_cleanup_test_select(cleanup, &good.request, NULL, 0, &traces[0])); \
+        CHECK(sol_mir_runtime_cleanup_test_trace_batch(cleanup, &good, 1, &results)); \
+        CHECK(results && results[0].selected); free(results); results = NULL; \
+    } while (0)
+    BATCH_RESTORED();
+    size_t saved_count = cleanup->event_count;
+    BATCH_MUTATION(cleanup, event_count, cleanup->event_capacity + 1);
+    cleanup->event_count = saved_count; BATCH_RESTORED();
+    SolMirRuntimeSlice saved_slice = cleanup->events[0].transitions;
+    BATCH_MUTATION(&cleanup->events[0], transitions.offset, cleanup->transition_count);
+    cleanup->events[0].transitions = saved_slice; BATCH_RESTORED();
+    SolMirRuntimeConventions *borrowed = (SolMirRuntimeConventions *)cleanup->conventions;
+    SolMirRuntimeConventionsUsage saved_borrowed = borrowed->usage;
+    BATCH_MUTATION(borrowed, usage.validation_work, saved_borrowed.validation_work + 1);
+    borrowed->usage = saved_borrowed; BATCH_RESTORED();
+#undef BATCH_MUTATION
+#undef BATCH_RESTORED
+    batch_memory_check(memory, memory_count);
+    for (size_t i = 0; i < memory_count; ++i) free(memory[i].copy);
+}
 /* Predicate propagation has no source spelling.  Keep its P3.3 edge schema
  * covered with a bounded P2-shaped terminator instead of inventing a source
  * fixture or extending the language contract. */
@@ -684,6 +951,37 @@ static bool step_key_collisions(const SolMirRuntimeCleanup *cleanup,
     free(events);free(ready);free(failure);free(text);return ok;
 }
 static bool cleanup_render_rejected(const SolMirRuntimeCleanup *cleanup){FILE*stream=tmpfile();if(!stream)return false;bool rejected=!sol_mir_runtime_cleanup_render(stream,cleanup)&&fflush(stream)==0&&fseek(stream,0,SEEK_END)==0&&ftell(stream)==0;fclose(stream);return rejected;}
+typedef enum {
+    LOCAL_PRODUCED, LOCAL_PENDING, LOCAL_BAD_START, LOCAL_BAD_SITE,
+    LOCAL_BAD_CODE, LOCAL_BAD_DETAIL, LOCAL_BOTH, LOCAL_NEITHER,
+    LOCAL_BAD_PRODUCED, LOCAL_NORMAL, LOCAL_EXCLUDED, LOCAL_CLASS,
+    LOCAL_RESUME, LOCAL_QUERY_KINDS,
+} LocalQueryKind;
+typedef struct {
+    SolMirRuntimeCleanupFailureOccurrence produced, pending;
+    LocalQueryKind kind;
+} LocalQueryBacking;
+/* Preparation never selects or predicts a selector result. Each original call
+ * contributes a row, including every rejected request. The final allocations
+ * never move, and memcpy preserves occurrence identity bytes including padding. */
+static bool local_query_append(SolMirRuntimeCleanupTestTraceQuery *queries,
+    LocalQueryBacking *backing, size_t *count, size_t kinds[LOCAL_QUERY_KINDS],
+    const SolMirRuntimeCleanupTraceRequest *request, LocalQueryKind kind) {
+    if (*count >= SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES) return false;
+    size_t row = (*count)++;
+    queries[row] = (SolMirRuntimeCleanupTestTraceQuery){*request, 0, false};
+    backing[row].kind = kind;
+    if (request->produced) {
+        memcpy(&backing[row].produced, request->produced, sizeof(backing[row].produced));
+        queries[row].request.produced = &backing[row].produced;
+    }
+    if (request->pending) {
+        memcpy(&backing[row].pending, request->pending, sizeof(backing[row].pending));
+        queries[row].request.pending = &backing[row].pending;
+    }
+    ++kinds[kind];
+    return true;
+}
 static void check_local_or_pending(const SolMirRuntimeCleanup *cleanup,
     const SolMirRuntimeConventions *conventions, const SolMirConcreteProgram *program) {
     size_t event_id=SOL_MIR_RUNTIME_NONE; const SolMirRuntimeCleanupTransition *local=NULL;
@@ -693,24 +991,78 @@ static void check_local_or_pending(const SolMirRuntimeCleanup *cleanup,
     CHECK(event->kind==SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR&&local->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_FAILURE&&local->failure_site<conventions->call_count&&local->failure_site==event->inherited_failure_site&&local->failure_mask==(UINT32_C(1)<<(SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT-1))&&local->actions.count==0);
     const SolMirRuntimeCall*call=&conventions->calls[local->failure_site];
     CHECK(call->target_kind==SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL&&call->failure_site==local->failure_site&&call->failure_edge==local->continuation&&program->materialization.blocks[event->block].terminator.kind==SOL_MIR_TERM_INVOKE);
+    sol_test_progress_phase("local-canonical-renders", "render", 2);
     char *first_render=render_cleanup_text(cleanup),*second_render=render_cleanup_text(cleanup);CHECK(first_render&&second_render&&!strcmp(first_render,second_render));if(first_render){char *line=strstr(first_render,"failure-source=local-or-pending failure-site-key=");CHECK(line!=NULL&&strstr(line,"failure-site-key=none")==NULL);}free(first_render);free(second_render);
+    sol_test_progress_completed(2); sol_test_progress_phase_end();
+    SolMirRuntimeCleanupTestTraceQuery *queries = calloc(SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES, sizeof(*queries));
+    LocalQueryBacking *backing = calloc(SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES, sizeof(*backing));
+    CHECK(queries != NULL && backing != NULL);
+    if (!queries || !backing) { free(queries); free(backing); return; }
+    size_t planned = 0, kinds[LOCAL_QUERY_KINDS] = {0};
+    sol_test_progress_phase("local-query-plan", "query", 0);
     SolMirRuntimeCleanupFailureOccurrence produced={SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31,local->failure_site,SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT,SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE,0,{0},conventions->failure_sites[local->failure_site].source};
-    SolMirRuntimeCleanupTrace trace; SolMirRuntimeCleanupTraceRequest request={event_id,local->edge_role,&produced,NULL,SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};
-    CHECK(sol_mir_runtime_cleanup_test_select(cleanup,&request,NULL,0,&trace)&&!memcmp(&trace.primary,&produced,sizeof produced));
+    SolMirRuntimeCleanupTraceRequest request={event_id,local->edge_role,&produced,NULL,SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};
+    CHECK(local_query_append(queries,backing,&planned,kinds,&request,LOCAL_PRODUCED));
     SolMirRuntimeFailureRecord record={SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT,produced.source,SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE,NULL,0}; SolMirRuntimeCleanupDetail detail;
+    sol_test_progress_completed(planned); sol_test_progress_phase_end();
+    sol_test_progress_phase("local-public-detail-positive", "capture", 1);
     CHECK(sol_mir_runtime_cleanup_capture_detail(cleanup,event_id,local->edge_role,&record,&detail));
-    SolMirRuntimeCleanupFailureOccurrence pending=produced; pending.code=SOL_MIR_RUNTIME_FAILURE_INTEGER_OVERFLOW; pending.site=SOL_MIR_RUNTIME_NONE;
+    sol_test_progress_completed(1); sol_test_progress_phase_end();
+    sol_test_progress_phase("local-query-plan", "query", 0);
+    SolMirRuntimeCleanupFailureOccurrence pending; memcpy(&pending,&produced,sizeof pending); pending.code=SOL_MIR_RUNTIME_FAILURE_INTEGER_OVERFLOW; pending.site=SOL_MIR_RUNTIME_NONE;
     for(size_t i=0;i<conventions->failure_site_count;i++)if((conventions->failure_sites[i].allowed_codes&(UINT32_C(1)<<(SOL_MIR_RUNTIME_FAILURE_INTEGER_OVERFLOW-1)))!=0){pending.site=i;pending.source=conventions->failure_sites[i].source;break;}
-    CHECK(pending.site!=SOL_MIR_RUNTIME_NONE); request.produced=NULL;request.pending=&pending;CHECK(sol_mir_runtime_cleanup_test_select(cleanup,&request,NULL,0,&trace)&&!memcmp(&trace.primary,&pending,sizeof pending));
-    SolMirRuntimeCleanupFailureOccurrence malformed=pending; ++malformed.source.start;request.pending=&malformed;CHECK(!sol_mir_runtime_cleanup_test_select(cleanup,&request,NULL,0,&trace));malformed=pending;malformed.site=SOL_MIR_RUNTIME_NONE;request.pending=&malformed;CHECK(!sol_mir_runtime_cleanup_test_select(cleanup,&request,NULL,0,&trace));malformed=pending;malformed.code=SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT;request.pending=&malformed;CHECK(!sol_mir_runtime_cleanup_test_select(cleanup,&request,NULL,0,&trace));malformed=pending;malformed.detail_length=1;request.pending=&malformed;CHECK(!sol_mir_runtime_cleanup_test_select(cleanup,&request,NULL,0,&trace));request.pending=&pending;
+    CHECK(pending.site!=SOL_MIR_RUNTIME_NONE); request.produced=NULL;request.pending=&pending;CHECK(local_query_append(queries,backing,&planned,kinds,&request,LOCAL_PENDING));
+    SolMirRuntimeCleanupFailureOccurrence malformed=pending; ++malformed.source.start;request.pending=&malformed;CHECK(local_query_append(queries,backing,&planned,kinds,&request,LOCAL_BAD_START));malformed=pending;malformed.site=SOL_MIR_RUNTIME_NONE;request.pending=&malformed;CHECK(local_query_append(queries,backing,&planned,kinds,&request,LOCAL_BAD_SITE));malformed=pending;malformed.code=SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT;request.pending=&malformed;CHECK(local_query_append(queries,backing,&planned,kinds,&request,LOCAL_BAD_CODE));malformed=pending;malformed.detail_length=1;request.pending=&malformed;CHECK(local_query_append(queries,backing,&planned,kinds,&request,LOCAL_BAD_DETAIL));request.pending=&pending;
+    sol_test_progress_completed(planned); sol_test_progress_phase_end();
+    sol_test_progress_phase("local-public-detail-negative", "capture", 1);
     record.code=SOL_MIR_RUNTIME_FAILURE_INTEGER_OVERFLOW;record.source=pending.source;CHECK(!sol_mir_runtime_cleanup_capture_detail(cleanup,event_id,local->edge_role,&record,&detail));
-    request.produced=&produced;CHECK(!sol_mir_runtime_cleanup_test_select(cleanup,&request,NULL,0,&trace));request.pending=NULL;request.produced=NULL;CHECK(!sol_mir_runtime_cleanup_test_select(cleanup,&request,NULL,0,&trace));
-    SolMirRuntimeCleanupFailureOccurrence bad=produced;bad.code=SOL_MIR_RUNTIME_FAILURE_INTEGER_OVERFLOW;request.produced=&bad;CHECK(!sol_mir_runtime_cleanup_test_select(cleanup,&request,NULL,0,&trace));
-    for(size_t j=0;j<event->transitions.count;j++){const SolMirRuntimeCleanupTransition*t=&cleanup->transitions[event->transitions.offset+j];if(t->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_NORMAL){SolMirRuntimeCleanupTraceRequest normal={event_id,t->edge_role,NULL,&pending,SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};CHECK(!sol_mir_runtime_cleanup_test_select(cleanup,&normal,NULL,0,&trace));}}
-    bool excluded=false;for(size_t i=0;i<cleanup->event_count&&!excluded;i++)for(size_t j=0;j<cleanup->events[i].transitions.count;j++){const SolMirRuntimeCleanupTransition*t=&cleanup->transitions[cleanup->events[i].transitions.offset+j];if(t->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_FAILURE&&t->failure_source==SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31){SolMirRuntimeCleanupTraceRequest x={i,t->edge_role,NULL,&pending,SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};CHECK(!sol_mir_runtime_cleanup_test_select(cleanup,&x,NULL,0,&trace));excluded=true;break;}}CHECK(excluded);
-    size_t direct_host=0,indirect=0,predicate=0;for(size_t i=0;i<cleanup->event_count;i++){const SolMirRuntimeCleanupEvent*e=&cleanup->events[i];if(e->inherited_failure_site>=conventions->call_count)continue;const SolMirRuntimeCall*c=&conventions->calls[e->inherited_failure_site];for(size_t j=0;j<e->transitions.count;j++){const SolMirRuntimeCleanupTransition*t=&cleanup->transitions[e->transitions.offset+j];if(t->edge_role!=SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_FAILURE)continue;bool excluded_class=c->owner_kind==SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE||c->target_kind!=SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL;if(excluded_class){CHECK(t->failure_source==SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31);SolMirRuntimeCleanupTraceRequest x={i,t->edge_role,NULL,&pending,SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};CHECK(!sol_mir_runtime_cleanup_test_select(cleanup,&x,NULL,0,&trace));if(c->owner_kind==SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE)++predicate;else if(c->target_kind==SOL_MIR_RUNTIME_TARGET_DIRECT_HOST)++direct_host;else ++indirect;}}}CHECK(direct_host>0);CHECK(indirect==0&&predicate==0);
-    size_t resume=program->materialization.edges[local->continuation].block;bool resumed=false;for(size_t i=0;i<cleanup->event_count;i++)if(cleanup->events[i].block==resume)for(size_t j=0;j<cleanup->events[i].transitions.count;j++){const SolMirRuntimeCleanupTransition*t=&cleanup->transitions[cleanup->events[i].transitions.offset+j];if(t->failure_source==SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING){SolMirRuntimeCleanupTraceRequest r={i,t->edge_role,NULL,&pending,SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};CHECK(sol_mir_runtime_cleanup_test_select(cleanup,&r,NULL,0,&trace)&&!memcmp(&trace.primary,&pending,sizeof pending));resumed=true;}}CHECK(resumed);
+    sol_test_progress_completed(1); sol_test_progress_phase_end();
+    sol_test_progress_phase("local-query-plan", "query", 0);
+    request.produced=&produced;CHECK(local_query_append(queries,backing,&planned,kinds,&request,LOCAL_BOTH));request.pending=NULL;request.produced=NULL;CHECK(local_query_append(queries,backing,&planned,kinds,&request,LOCAL_NEITHER));
+    SolMirRuntimeCleanupFailureOccurrence bad=produced;bad.code=SOL_MIR_RUNTIME_FAILURE_INTEGER_OVERFLOW;request.produced=&bad;CHECK(local_query_append(queries,backing,&planned,kinds,&request,LOCAL_BAD_PRODUCED));
+    for(size_t j=0;j<event->transitions.count;j++){const SolMirRuntimeCleanupTransition*t=&cleanup->transitions[event->transitions.offset+j];if(t->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_NORMAL){SolMirRuntimeCleanupTraceRequest normal={event_id,t->edge_role,NULL,&pending,SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};CHECK(local_query_append(queries,backing,&planned,kinds,&normal,LOCAL_NORMAL));}}
+    bool excluded=false;for(size_t i=0;i<cleanup->event_count&&!excluded;i++)for(size_t j=0;j<cleanup->events[i].transitions.count;j++){const SolMirRuntimeCleanupTransition*t=&cleanup->transitions[cleanup->events[i].transitions.offset+j];if(t->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_FAILURE&&t->failure_source==SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31){SolMirRuntimeCleanupTraceRequest x={i,t->edge_role,NULL,&pending,SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};CHECK(local_query_append(queries,backing,&planned,kinds,&x,LOCAL_EXCLUDED));excluded=true;break;}}CHECK(excluded);
+    size_t direct_host=0,indirect=0,predicate=0;for(size_t i=0;i<cleanup->event_count;i++){const SolMirRuntimeCleanupEvent*e=&cleanup->events[i];if(e->inherited_failure_site>=conventions->call_count)continue;const SolMirRuntimeCall*c=&conventions->calls[e->inherited_failure_site];for(size_t j=0;j<e->transitions.count;j++){const SolMirRuntimeCleanupTransition*t=&cleanup->transitions[e->transitions.offset+j];if(t->edge_role!=SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_FAILURE)continue;bool excluded_class=c->owner_kind==SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE||c->target_kind!=SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL;if(excluded_class){CHECK(t->failure_source==SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31);SolMirRuntimeCleanupTraceRequest x={i,t->edge_role,NULL,&pending,SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};CHECK(local_query_append(queries,backing,&planned,kinds,&x,LOCAL_CLASS));if(c->owner_kind==SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE)++predicate;else if(c->target_kind==SOL_MIR_RUNTIME_TARGET_DIRECT_HOST)++direct_host;else ++indirect;}}}CHECK(direct_host>0);CHECK(indirect==0&&predicate==0);
+    size_t resume=program->materialization.edges[local->continuation].block;bool resumed=false;for(size_t i=0;i<cleanup->event_count;i++)if(cleanup->events[i].block==resume)for(size_t j=0;j<cleanup->events[i].transitions.count;j++){const SolMirRuntimeCleanupTransition*t=&cleanup->transitions[cleanup->events[i].transitions.offset+j];if(t->failure_source==SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING){SolMirRuntimeCleanupTraceRequest r={i,t->edge_role,NULL,&pending,SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};CHECK(local_query_append(queries,backing,&planned,kinds,&r,LOCAL_RESUME));resumed=true;}}CHECK(resumed);
+    CHECK(kinds[LOCAL_CLASS] == direct_host + indirect + predicate);
+    for (size_t kind = LOCAL_PRODUCED; kind <= LOCAL_BAD_PRODUCED; ++kind) CHECK(kinds[kind] == 1);
+    CHECK(kinds[LOCAL_EXCLUDED] == 1 && kinds[LOCAL_NORMAL] > 0 && kinds[LOCAL_RESUME] > 0);
+    size_t counted = 0;
+    for (size_t kind = 0; kind < LOCAL_QUERY_KINDS; ++kind) counted += kinds[kind];
+    CHECK(counted == planned);
+    sol_test_progress_completed(planned); sol_test_progress_phase_end();
+    sol_test_progress_phase("local-immutable-selection", "query", planned);
+    SolMirRuntimeCleanupTestTraceResult *results = NULL;
+    sol_mir_runtime_cleanup_test_trace_counts_reset();
+    bool evaluated = sol_mir_runtime_cleanup_test_trace_batch(cleanup, queries, planned, &results);
+    CHECK(evaluated && results != NULL);
+    size_t authentications, selections;
+    sol_mir_runtime_cleanup_test_trace_counts(&authentications, &selections);
+    CHECK(authentications == 1 && selections == planned);
+    fprintf(stderr, "cleanup-batch local queries=%zu authentications=%zu selections=%zu\n", planned, authentications, selections);
+    for (size_t kind = 0; kind < LOCAL_QUERY_KINDS; ++kind)
+        fprintf(stderr, "cleanup-local-kind kind=%zu rows=%zu\n", kind, kinds[kind]);
+    if (evaluated) sol_test_progress_completed(planned);
+    sol_test_progress_phase_end();
+    sol_test_progress_phase("local-row-assertions", "query", planned);
+    size_t cursor = 0, checked_kinds[LOCAL_QUERY_KINDS] = {0};
+    if (results) for (; cursor < planned; ++cursor) {
+        LocalQueryKind kind = backing[cursor].kind;
+        if (kind == LOCAL_PRODUCED)
+            CHECK(results[cursor].selected && !memcmp(&results[cursor].trace.primary,&produced,sizeof produced));
+        else if (kind == LOCAL_PENDING || kind == LOCAL_RESUME)
+            CHECK(results[cursor].selected && !memcmp(&results[cursor].trace.primary,&pending,sizeof pending));
+        else CHECK(!results[cursor].selected);
+        ++checked_kinds[kind];
+        sol_test_progress_completed(cursor + 1);
+    }
+    CHECK(cursor == planned && counted == planned);
+    CHECK(memcmp(kinds,checked_kinds,sizeof kinds) == 0);
+    sol_test_progress_phase_end();
+    free(results); free(backing); free(queries);
+    sol_test_progress_phase("local-mutation-restoration", "validation", 4);
     SolMirRuntimeCleanupTransition *mutable_local=(SolMirRuntimeCleanupTransition *)local;SolMirRuntimeCleanupFailureSource source=mutable_local->failure_source;size_t site=mutable_local->failure_site;uint32_t mask=mutable_local->failure_mask;mutable_local->failure_source=SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31;CHECK(!sol_mir_runtime_cleanup_validate(cleanup,NULL));mutable_local->failure_source=source;mutable_local->failure_site=SOL_MIR_RUNTIME_NONE;CHECK(!sol_mir_runtime_cleanup_validate(cleanup,NULL));mutable_local->failure_site=site;mutable_local->failure_mask=0;CHECK(!sol_mir_runtime_cleanup_validate(cleanup,NULL));mutable_local->failure_mask=mask;CHECK(sol_mir_runtime_cleanup_validate(cleanup,NULL));
+    sol_test_progress_completed(4); sol_test_progress_phase_end();
 }
 
 /* Source-backed local callback selector: code 6 is local, arbitrary already
@@ -1002,6 +1354,7 @@ static void check_graph_inherited_capability_calls(
  * future executor. */
 static void check_eight_fixture_groups(const SolMirRuntimeCleanup *cleanup,
     const SolMirConcreteProgram *program) {
+    sol_test_progress_phase("static-eight-fixture-sweep", "sweep", 1);
     bool e6 = false, formals = false, holes = false, contracts = false;
     bool refinement = false, implicit = false, exits = false, precedence = false;
     bool call_failure = false, contract_failure = false;
@@ -1062,14 +1415,169 @@ static void check_eight_fixture_groups(const SolMirRuntimeCleanup *cleanup,
     CHECK(e6 && formals && contracts && refinement && implicit && exits && precedence
         && call_failure && contract_failure);
     (void)holes;
+    sol_test_progress_completed(1); sol_test_progress_phase_end();
+}
+/* Each original sweep predicate emits one row in event/transition/if order.
+ * Occurrences live in a final allocation before any request points into it. */
+static void check_immutable_occurrence_sweep(const SolMirRuntimeCleanup *cleanup,
+    const SolMirRuntimeConventions *conventions,
+    const SolMirRuntimeCleanupFailureOccurrence *pending_occurrence) {
+    SolMirRuntimeCleanupFailureOccurrence trace_occurrence;
+    memcpy(&trace_occurrence, pending_occurrence, sizeof(trace_occurrence));
+    size_t planned = 0, contract_rows = 0, pending_rows = 0, reject_rows = 0;
+    sol_test_progress_phase("immutable-occurrence-plan", "transition", cleanup->transition_count);
+    for (size_t i = 0; i < cleanup->event_count; ++i) {
+        const SolMirRuntimeCleanupEvent *event = &cleanup->events[i];
+        for (size_t j = 0; j < event->transitions.count; ++j) {
+            const SolMirRuntimeCleanupTransition *transition =
+                &cleanup->transitions[event->transitions.offset + j];
+            SolMirRuntimeCleanupFailureOccurrence occurrence;
+            if (transition->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_VIOLATION
+                && occurrence_for_transition(cleanup, conventions, transition, &occurrence)) ++contract_rows;
+            if (transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING) ++pending_rows;
+            if (transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE) ++reject_rows;
+        }
+    }
+    /* Each count is bounded by the real transition count; addition is checked
+     * against the API bound before allocation, never truncated to fit. */
+    bool bounded = contract_rows <= SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES
+        && pending_rows <= SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES - contract_rows
+        && reject_rows <= SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES - contract_rows - pending_rows;
+    CHECK(bounded);
+    if (bounded) planned = contract_rows + pending_rows + reject_rows;
+    SolMirRuntimeCleanupTestTraceQuery *queries = bounded ? calloc(planned, sizeof(*queries)) : NULL;
+    SolMirRuntimeCleanupFailureOccurrence *backing = bounded ? calloc(planned, sizeof(*backing)) : NULL;
+    CHECK(queries != NULL && backing != NULL);
+    size_t prepared = 0;
+    if (queries && backing) for (size_t i = 0; i < cleanup->event_count; ++i) {
+        const SolMirRuntimeCleanupEvent *event = &cleanup->events[i];
+        for (size_t j = 0; j < event->transitions.count; ++j) {
+            const SolMirRuntimeCleanupTransition *transition =
+                &cleanup->transitions[event->transitions.offset + j];
+            SolMirRuntimeCleanupFailureOccurrence occurrence;
+            if (transition->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_VIOLATION
+                && occurrence_for_transition(cleanup, conventions, transition, &occurrence)) {
+                memcpy(&backing[prepared], &occurrence, sizeof(occurrence));
+                queries[prepared] = (SolMirRuntimeCleanupTestTraceQuery){
+                    {i, transition->edge_role, &backing[prepared], NULL,
+                        SOL_MIR_RUNTIME_CLEANUP_DROP_CONDITIONAL}, 64, true};
+                ++prepared;
+            }
+            if (transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING) {
+                memcpy(&backing[prepared], &trace_occurrence, sizeof(trace_occurrence));
+                queries[prepared] = (SolMirRuntimeCleanupTestTraceQuery){
+                    {i, transition->edge_role, NULL, &backing[prepared],
+                        SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE}, 64, true};
+                ++prepared;
+            }
+            if (transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE) {
+                memcpy(&backing[prepared], &trace_occurrence, sizeof(trace_occurrence));
+                queries[prepared] = (SolMirRuntimeCleanupTestTraceQuery){
+                    {i, transition->edge_role, NULL, &backing[prepared],
+                        SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE}, 64, true};
+                ++prepared;
+            }
+        }
+    }
+    CHECK(prepared == planned);
+    if (queries && backing) sol_test_progress_completed(cleanup->transition_count);
+    sol_test_progress_phase_end();
+    sol_test_progress_phase("immutable-occurrence-authenticate-select-batch", "query", planned);
+    SolMirRuntimeCleanupTestTraceResult *results = NULL;
+    sol_mir_runtime_cleanup_test_trace_counts_reset();
+    bool evaluated = queries && backing
+        && sol_mir_runtime_cleanup_test_trace_batch(cleanup, queries, planned, &results);
+    CHECK(evaluated && results != NULL);
+    size_t authentications, selections;
+    sol_mir_runtime_cleanup_test_trace_counts(&authentications, &selections);
+    CHECK(authentications == 1 && selections == planned);
+    fprintf(stderr, "cleanup-batch immutable-occurrence queries=%zu contract=%zu pending=%zu rejected-success=%zu authentications=%zu selections=%zu\n",
+        planned, contract_rows, pending_rows, reject_rows, authentications, selections);
+    if (evaluated) sol_test_progress_completed(planned);
+    sol_test_progress_phase_end();
+    bool saw_contract_result = false, saw_resume = false, saw_success_reject_pending = false;
+    size_t cursor = 0;
+    sol_test_progress_phase("immutable-occurrence-assertions", "query", planned);
+    for (size_t i = 0; i < cleanup->event_count; ++i) {
+        const SolMirRuntimeCleanupEvent *event = &cleanup->events[i];
+        for (size_t j = 0; j < event->transitions.count; ++j) {
+            const SolMirRuntimeCleanupTransition *transition =
+                &cleanup->transitions[event->transitions.offset + j];
+            SolMirRuntimeCleanupFailureOccurrence occurrence;
+            if (transition->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_VIOLATION
+                && occurrence_for_transition(cleanup, conventions, transition, &occurrence)) {
+                CHECK(results != NULL && cursor < planned && results[cursor].selected);
+                if (results && cursor < planned && results[cursor].selected) {
+                    SolMirRuntimeCleanupTrace trace = results[cursor].trace;
+                    CHECK(trace.primary.failure_source
+                        == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31);
+                }
+                ++cursor;
+                saw_contract_result = true;
+            }
+            if (transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING) {
+                CHECK(results != NULL && cursor < planned && results[cursor].selected);
+                if (results && cursor < planned && results[cursor].selected) {
+                    SolMirRuntimeCleanupTrace trace = results[cursor].trace;
+                    CHECK(memcmp(&trace.primary, &trace_occurrence, sizeof(trace.primary)) == 0);
+                }
+                ++cursor;
+                saw_resume = true;
+            }
+            if (transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE) {
+                CHECK(results != NULL && cursor < planned && !results[cursor].selected);
+                ++cursor;
+                saw_success_reject_pending = true;
+            }
+            sol_test_progress_completed(cursor);
+        }
+    }
+    CHECK(saw_contract_result && saw_resume && saw_success_reject_pending);
+    CHECK(cursor == planned && prepared == planned);
+    sol_test_progress_phase_end();
+    free(results); free(backing); free(queries);
 }
 /* Focused owner-policy assertions over the E6 materialization: this checks
  * local-kind classification rather than relying on an executor or source text. */
 static void check_owner_snapshot_contract_and_selector(const SolMirRuntimeCleanup *cleanup,
     const SolMirConcreteProgram *program, const SolMirRuntimeConventions *conventions) {
     bool saw_owned_formal = false, saw_snapshot = false, saw_violation = false;
-    SolMirRuntimeCleanupAction trace_actions[64];
     sol_test_progress_fixture("e6-all-roots");
+    sol_test_progress_phase("owner-snapshot-trace-plan", "query", 1025);
+    size_t planned = 0;
+    for (size_t i = 0; i < cleanup->event_count; ++i)
+        for (size_t a = 0; a < cleanup->events[i].transitions.count; ++a)
+            planned += cleanup->transitions[cleanup->events[i].transitions.offset + a].outcome
+                == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL;
+    CHECK(planned == 1025);
+    CHECK(planned <= SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES);
+    SolMirRuntimeCleanupTestTraceQuery *queries = planned <= SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES
+        ? calloc(planned, sizeof(*queries)) : NULL;
+    CHECK(queries != NULL);
+    size_t prepared = 0;
+    if (queries) for (size_t i = 0; i < cleanup->event_count; ++i)
+        for (size_t a = 0; a < cleanup->events[i].transitions.count; ++a) {
+            const SolMirRuntimeCleanupTransition *left =
+                &cleanup->transitions[cleanup->events[i].transitions.offset + a];
+            if (left->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL)
+                queries[prepared++] = (SolMirRuntimeCleanupTestTraceQuery){
+                    {i, left->edge_role, NULL, NULL, SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE}, 64, true};
+        }
+    CHECK(prepared == planned);
+    sol_test_progress_completed(prepared); sol_test_progress_phase_end();
+    sol_test_progress_phase("owner-snapshot-authenticate-select-batch", "query", planned);
+    SolMirRuntimeCleanupTestTraceResult *results = NULL;
+    sol_mir_runtime_cleanup_test_trace_counts_reset();
+    bool evaluated = queries && sol_mir_runtime_cleanup_test_trace_batch(cleanup, queries, planned, &results);
+    CHECK(evaluated && results != NULL);
+    size_t authentications, selections;
+    sol_mir_runtime_cleanup_test_trace_counts(&authentications, &selections);
+    CHECK(authentications == 1 && selections == planned);
+    fprintf(stderr, "cleanup-batch owner-snapshot queries=%zu authentications=%zu selections=%zu\n",
+        planned, authentications, selections);
+    if (evaluated) sol_test_progress_completed(planned);
+    sol_test_progress_phase_end();
+    size_t cursor = 0;
     sol_test_progress_phase("owner-snapshot-event-traces", "event", cleanup->event_count);
     for (size_t i = 0; i < cleanup->event_count; ++i) {
         /* All earlier events completed, including their original continue paths. */
@@ -1081,11 +1589,8 @@ static void check_owner_snapshot_contract_and_selector(const SolMirRuntimeCleanu
             for (size_t b = a + 1; b < event->transitions.count; ++b)
                 CHECK(left->edge_role != cleanup->transitions[event->transitions.offset + b].edge_role);
             if (left->outcome == SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL) {
-                SolMirRuntimeCleanupTrace trace;
-                SolMirRuntimeCleanupTraceRequest request = {i, left->edge_role,
-                    NULL, NULL, SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};
-                CHECK(sol_mir_runtime_cleanup_test_trace(cleanup, &request,
-                    trace_actions, 64, &trace));
+                CHECK(results != NULL && cursor < planned && results[cursor].selected);
+                ++cursor;
             }
             for (size_t k = 0; k < left->actions.count; ++k) {
                 const SolMirRuntimeCleanupAction *action = &cleanup->actions[left->actions.offset + k];
@@ -1137,6 +1642,8 @@ static void check_owner_snapshot_contract_and_selector(const SolMirRuntimeCleanu
     }
     sol_test_progress_phase_end();
     CHECK(saw_owned_formal && saw_snapshot && saw_violation);
+    CHECK(cursor == planned && cursor == 1025);
+    free(results); free(queries);
 }
 
 /* This fixture is deliberately source-level rather than a forged MIR graph:
@@ -1231,6 +1738,7 @@ static void check_scope_aware_implicit_unwind(SolMirRuntimeCleanup *cleanup,
 
 static void check_failure_propagation_is_final(const SolMirRuntimeCleanup *cleanup,
     const SolMirConcreteProgram *program) {
+    sol_test_progress_phase("static-failure-propagation-sweep", "sweep", 1);
     bool saw_implicit = false, saw_terminal = false, saw_panic_capture = false;
     for (size_t e = 0; e < cleanup->event_count; ++e) {
         const SolMirRuntimeCleanupEvent *event = &cleanup->events[e];
@@ -1267,6 +1775,7 @@ static void check_failure_propagation_is_final(const SolMirRuntimeCleanup *clean
         }
     }
     CHECK(saw_implicit && saw_terminal && saw_panic_capture);
+    sol_test_progress_completed(1); sol_test_progress_phase_end();
 }
 
 static size_t affine_image(const SolMirConcreteProgram *program, SolIrCallableId callable_id) {
@@ -1709,6 +2218,10 @@ int main(void) {
         && conventions.call_count == 18 && conventions.operand_count == 24
         && conventions.writeback_count == 1 && conventions.entry_count == 1
         && conventions.import_count == 56 && conventions.failure_site_count == 713);
+    size_t expected_conventions_work = 0, expected_values_work = 0, expected_cleanup_work = 0;
+    CHECK(sol_test_path_work(96025258, 16, sizeof SOL_TEST_SOURCE_DIR - 1, &expected_conventions_work));
+    CHECK(sol_test_path_work(96030228, 24, sizeof SOL_TEST_SOURCE_DIR - 1, &expected_values_work));
+    CHECK(sol_test_path_work(1170581, 4, sizeof SOL_TEST_SOURCE_DIR - 1, &expected_cleanup_work));
     CHECK(conventions.usage.signatures == 18 && conventions.usage.signature_slots == 19
         && conventions.usage.calls == 18 && conventions.usage.operands == 24
         && conventions.usage.writebacks == 1 && conventions.usage.entries == 1
@@ -1717,7 +2230,7 @@ int main(void) {
         && conventions.usage.build_scratch_bytes == 21
         && conventions.usage.build_work == 12847
         && conventions.usage.validation_scratch_bytes == 763171604
-        && conventions.usage.validation_work == 96025722);
+        && conventions.usage.validation_work == expected_conventions_work);
     CHECK(values.recipe_operation_count == 21 && values.allocation_plan_count == 21
         && values.copy_plan_count == 21 && values.equality_plan_count == 21
         && values.host_result_plan_count == 21 && values.host_result_requirement_count == 4
@@ -1730,7 +2243,7 @@ int main(void) {
         && values.usage.owned_edges == 17 && values.usage.owned_bytes == 4592
         && values.usage.build_scratch_bytes == 98 && values.usage.build_work == 410
         && values.usage.validation_scratch_bytes == 763171604
-        && values.usage.validation_work == 96030924);
+        && values.usage.validation_work == expected_values_work);
     /* Final P3.3 E6 all-roots cleanup-policy census and exact metering. */
     CHECK(cleanup.event_count == 1059 && cleanup.action_count == 4242
         && cleanup.transition_count == 1835 && cleanup.supplemental_site_count == 51
@@ -1740,7 +2253,7 @@ int main(void) {
         && cleanup.usage.drop_paths == 1683 && cleanup.usage.owned_bytes == 538752
         && cleanup.usage.build_scratch_bytes == 246744 && cleanup.usage.build_work == 1746303
         && cleanup.usage.validation_scratch_bytes == 246744
-        && cleanup.usage.validation_work == 1170697);
+        && cleanup.usage.validation_work == expected_cleanup_work);
     CHECK(sol_mir_runtime_cleanup_validate(&cleanup,NULL));
     StepKeyCollisions step_key_collision_count={0};size_t step_key_classes[4]={0};
     CHECK(step_key_collisions(&cleanup,&step_key_collision_count,step_key_classes));
@@ -1904,12 +2417,22 @@ int main(void) {
             + program.operations.predicate_instruction_count
             + program.operations.predicate_block_count
         && first_pre != SOL_MIR_RUNTIME_NONE);
+    sol_test_progress_phase("main-same-span-search", "event", cleanup.event_count);
     size_t same_span_step[2]={SOL_MIR_RUNTIME_NONE,SOL_MIR_RUNTIME_NONE};
     for(size_t i=0;i<cleanup.event_count&&same_span_step[0]==SOL_MIR_RUNTIME_NONE;++i){const SolMirRuntimeCleanupEvent*left=&cleanup.events[i];if(left->phase!=SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP)continue;for(size_t q=i+1;q<cleanup.event_count;++q){const SolMirRuntimeCleanupEvent*right=&cleanup.events[q];if(right->phase==SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP&&right->kind==left->kind&&right->source.file==left->source.file&&right->source.start==left->source.start&&right->source.end==left->source.end){same_span_step[0]=i;same_span_step[1]=q;break;}}}
     CHECK(same_span_step[0]!=SOL_MIR_RUNTIME_NONE&&same_span_step[1]!=SOL_MIR_RUNTIME_NONE);
-    if(same_span_step[0]!=SOL_MIR_RUNTIME_NONE&&same_span_step[1]!=SOL_MIR_RUNTIME_NONE){SolMirRuntimeCleanupEvent*left=&cleanup.events[same_span_step[0]];SolMirRuntimeCleanupEvent*right=&cleanup.events[same_span_step[1]];CHECK(left->inherited_failure_site<conventions.failure_site_count&&right->inherited_failure_site<conventions.failure_site_count&&left->inherited_failure_site!=right->inherited_failure_site);if(left->inherited_failure_site<conventions.failure_site_count&&right->inherited_failure_site<conventions.failure_site_count){SolMirRuntimeFailureSite*site=&conventions.failure_sites[left->inherited_failure_site];size_t occurrence=site->occurrence;CHECK(occurrence!=conventions.failure_sites[right->inherited_failure_site].occurrence);site->occurrence=conventions.failure_sites[right->inherited_failure_site].occurrence;CHECK(!sol_mir_runtime_conventions_validate(&conventions,NULL)&&!sol_mir_runtime_cleanup_validate(&cleanup,NULL)&&cleanup_render_rejected(&cleanup));site->occurrence=occurrence;CHECK(sol_mir_runtime_conventions_validate(&conventions,NULL)&&sol_mir_runtime_cleanup_validate(&cleanup,NULL));size_t inherited=left->inherited_failure_site;left->inherited_failure_site=right->inherited_failure_site;CHECK(!sol_mir_runtime_cleanup_validate(&cleanup,NULL)&&cleanup_render_rejected(&cleanup));left->inherited_failure_site=inherited;CHECK(sol_mir_runtime_cleanup_validate(&cleanup,NULL));}}
+    sol_test_progress_phase_end();
+    if(same_span_step[0]!=SOL_MIR_RUNTIME_NONE&&same_span_step[1]!=SOL_MIR_RUNTIME_NONE){SolMirRuntimeCleanupEvent*left=&cleanup.events[same_span_step[0]];SolMirRuntimeCleanupEvent*right=&cleanup.events[same_span_step[1]];CHECK(left->inherited_failure_site<conventions.failure_site_count&&right->inherited_failure_site<conventions.failure_site_count&&left->inherited_failure_site!=right->inherited_failure_site);if(left->inherited_failure_site<conventions.failure_site_count&&right->inherited_failure_site<conventions.failure_site_count){
+        sol_test_progress_phase("main-same-span-occurrence-mutation-restoration", "check", 2);
+        SolMirRuntimeFailureSite*site=&conventions.failure_sites[left->inherited_failure_site];size_t occurrence=site->occurrence;CHECK(occurrence!=conventions.failure_sites[right->inherited_failure_site].occurrence);site->occurrence=conventions.failure_sites[right->inherited_failure_site].occurrence;CHECK(!sol_mir_runtime_conventions_validate(&conventions,NULL)&&!sol_mir_runtime_cleanup_validate(&cleanup,NULL)&&cleanup_render_rejected(&cleanup));site->occurrence=occurrence;CHECK(sol_mir_runtime_conventions_validate(&conventions,NULL)&&sol_mir_runtime_cleanup_validate(&cleanup,NULL));
+        sol_test_progress_completed(2); sol_test_progress_phase_end();
+        sol_test_progress_phase("main-same-span-inherited-site-mutation-restoration", "check", 2);
+        size_t inherited=left->inherited_failure_site;left->inherited_failure_site=right->inherited_failure_site;CHECK(!sol_mir_runtime_cleanup_validate(&cleanup,NULL)&&cleanup_render_rejected(&cleanup));left->inherited_failure_site=inherited;CHECK(sol_mir_runtime_cleanup_validate(&cleanup,NULL));
+        sol_test_progress_completed(2); sol_test_progress_phase_end();
+    }}
     /* Prediction is address-independent: a deliberately overlapping synthetic
      * placement cannot alter the successful-disjoint alias-work census. */
+    sol_test_progress_phase("main-alias-work-prediction", "prediction", 2);
     size_t alias_work=0, overlapped_alias_work=0;
     CHECK(sol_mir_runtime_cleanup_test_alias_work(&cleanup,&alias_work));
     SolMirRuntimeCleanupEvent *saved_alias_events=cleanup.events;
@@ -1917,6 +2440,7 @@ int main(void) {
     CHECK(sol_mir_runtime_cleanup_test_alias_work(&cleanup,&overlapped_alias_work)
         && alias_work==overlapped_alias_work);
     cleanup.events=saved_alias_events;
+    sol_test_progress_completed(2); sol_test_progress_phase_end();
     check_failure_propagation_is_final(&cleanup, &program);
     check_eight_fixture_groups(&cleanup, &program);
     check_owner_snapshot_contract_and_selector(&cleanup, &program, &conventions);
@@ -2196,41 +2720,7 @@ int main(void) {
     /* The focused P3.3 fixture below owns the positive suppression proof. */
     first.occurrence = arbitrary;
     CHECK(!sol_mir_runtime_cleanup_test_precedence(&cleanup, &first, NULL, &primary));
-    bool saw_contract_result = false, saw_resume = false, saw_success_reject_pending = false;
-    for (size_t i = 0; i < cleanup.event_count; ++i) {
-        const SolMirRuntimeCleanupEvent *event = &cleanup.events[i];
-        for (size_t j = 0; j < event->transitions.count; ++j) {
-            const SolMirRuntimeCleanupTransition *transition =
-                &cleanup.transitions[event->transitions.offset + j];
-            SolMirRuntimeCleanupFailureOccurrence occurrence;
-            if (transition->edge_role == SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_VIOLATION
-                && occurrence_for_transition(&cleanup, &conventions, transition, &occurrence)) {
-                SolMirRuntimeCleanupTraceRequest request = {i, transition->edge_role,
-                    &occurrence, NULL, SOL_MIR_RUNTIME_CLEANUP_DROP_CONDITIONAL};
-                CHECK(sol_mir_runtime_cleanup_test_select(&cleanup, &request,
-                    trace_actions, 64, &trace));
-                CHECK(trace.primary.failure_source
-                    == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31);
-                saw_contract_result = true;
-            }
-            if (transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING) {
-                SolMirRuntimeCleanupTraceRequest request = {i, transition->edge_role,
-                    NULL, &trace_occurrence, SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};
-                CHECK(sol_mir_runtime_cleanup_test_select(&cleanup, &request,
-                    trace_actions, 64, &trace));
-                CHECK(memcmp(&trace.primary, &trace_occurrence, sizeof(trace.primary)) == 0);
-                saw_resume = true;
-            }
-            if (transition->failure_source == SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE) {
-                SolMirRuntimeCleanupTraceRequest request = {i, transition->edge_role,
-                    NULL, &trace_occurrence, SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};
-                CHECK(!sol_mir_runtime_cleanup_test_select(&cleanup, &request,
-                    trace_actions, 64, &trace));
-                saw_success_reject_pending = true;
-            }
-        }
-    }
-    CHECK(saw_contract_result && saw_resume && saw_success_reject_pending);
+    check_immutable_occurrence_sweep(&cleanup, &conventions, &trace_occurrence);
     bool saw_precedence_transport = false;
     for (size_t source_event = 0; source_event < cleanup.event_count
             && !saw_precedence_transport; ++source_event) {

@@ -1839,10 +1839,23 @@ static bool occurrence_for_event_transition(const SolMirRuntimeCleanup *c,
         && cleanup_detail_shape(occurrence->detail_kind, occurrence->code,
             occurrence->detail_length);
 }
-bool sol_mir_runtime_cleanup_test_select(const SolMirRuntimeCleanup*c,
+static size_t test_trace_authentications, test_trace_selections;
+void sol_mir_runtime_cleanup_test_trace_counts_reset(void) {
+    test_trace_authentications = 0;
+    test_trace_selections = 0;
+}
+void sol_mir_runtime_cleanup_test_trace_counts(size_t *authentications, size_t *selections) {
+    if (authentications) *authentications = test_trace_authentications;
+    if (selections) *selections = test_trace_selections;
+}
+/* Private, reachable only immediately after complete owner authentication.
+ * No callback or caller-writable batch storage can mutate the owner between
+ * authentication and selection. Single-call storage semantics remain intact. */
+static bool test_select_authenticated_owner(const SolMirRuntimeCleanup*c,
     const SolMirRuntimeCleanupTraceRequest *request, SolMirRuntimeCleanupAction *storage,
     size_t count, SolMirRuntimeCleanupTrace *trace) {
-    if (!sol_mir_runtime_cleanup_validate(c, NULL) || !request || !trace
+    ++test_trace_selections;
+    if (!request || !trace
         || request->event >= c->event_count || (count && !storage)
         || request->liveness > SOL_MIR_RUNTIME_CLEANUP_DROP_CONDITIONAL) return false;
     const SolMirRuntimeCleanupEvent *event = &c->events[request->event];
@@ -1883,6 +1896,37 @@ bool sol_mir_runtime_cleanup_test_select(const SolMirRuntimeCleanup*c,
     if (primary) memcpy(&out.primary, primary, sizeof(out.primary));
     out.action_count = selected->actions.count; out.actions = storage;
     *trace = out;
+    return true;
+}
+bool sol_mir_runtime_cleanup_test_select(const SolMirRuntimeCleanup*c,
+    const SolMirRuntimeCleanupTraceRequest *request, SolMirRuntimeCleanupAction *storage,
+    size_t count, SolMirRuntimeCleanupTrace *trace) {
+    ++test_trace_authentications;
+    if (!sol_mir_runtime_cleanup_validate(c, NULL)) return false;
+    return test_select_authenticated_owner(c, request, storage, count, trace);
+}
+bool sol_mir_runtime_cleanup_test_trace_batch(const SolMirRuntimeCleanup *c,
+    const SolMirRuntimeCleanupTestTraceQuery *queries, size_t query_count,
+    SolMirRuntimeCleanupTestTraceResult **results) {
+    if (!results) return false;
+    *results = NULL;
+    if (query_count > SOL_MIR_RUNTIME_CLEANUP_TEST_MAX_QUERIES
+        || query_count > SIZE_MAX / sizeof(*queries)
+        || query_count > SIZE_MAX / sizeof(**results)
+        || (query_count && !queries)) return false;
+    for (size_t i = 0; i < query_count; ++i)
+        if (queries[i].action_capacity > SOL_MIR_RUNTIME_CLEANUP_TEST_ACTION_SLOTS)
+            return false;
+    ++test_trace_authentications;
+    if (!sol_mir_runtime_cleanup_validate(c, NULL)) return false;
+    if (!query_count) return true;
+    SolMirRuntimeCleanupTestTraceResult *rows = calloc(query_count, sizeof(*rows));
+    if (!rows) return false;
+    for (size_t i = 0; i < query_count; ++i)
+        rows[i].selected = test_select_authenticated_owner(c, &queries[i].request,
+            queries[i].copy_actions ? rows[i].actions : NULL,
+            queries[i].action_capacity, &rows[i].trace);
+    *results = rows;
     return true;
 }
 bool sol_mir_runtime_cleanup_test_trace(const SolMirRuntimeCleanup*c,
