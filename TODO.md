@@ -18,8 +18,10 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
   next unchecked production checkpoint, not the active overall cursor.
 - T1's bounded observability/audit checkpoint is approved and pushed as `6eef9ca`
   on `test-speed-progress`, not merged to master. T2's nine-file cleanup/portability
-  change is independently review-approved, commit pending. The fresh ALL60 audit
-  is finished: 58 PASS, zero FAIL, two cutoffs, **NOT_ACCEPTANCE**. Speed remains
+  change and audit documentation are committed and pushed as `5012c62` on that
+  feature branch, not master; the source change is independently review-approved.
+  The fresh ALL60 audit is finished: 58 PASS, zero FAIL, two cutoffs,
+  **NOT_ACCEPTANCE**. Speed remains
   open; no further implementation is active after this documentation handoff
   without coordinator steering and a new bounded Sol brief.
 - M1 is resolved through its infeasibility path: the
@@ -38,16 +40,16 @@ they are unrelated to the gated maintenance-workflow experiment M1-M5 below.
 | Checkpoint | Status and bounded scope | Remaining acceptance |
 | --- | --- | --- |
 | T1 - Observability and bounded audit | Approved for this bounded scope; pushed `6eef9ca`. Shared supervisor, all 31 phase-test executables, verbose CTest, wrapped CLI/integration scripts, and stress/fuzz paths expose progress/liveness without hiding child output. | Not full speed/platform acceptance. Preserve 58 original UNIX ON / 54 OFF registrations plus two support tests and the historical 3779-fault / 69-control / 50-shard manifest. Metadata preservation is not current execution of every fault. |
-| T2 - Cleanup/portability correctness; speed open | Nine-file source change independently review-approved, commit pending: immutable callback-free batch test hook, portable root-dependent expectations, and retained local requests. Fresh all-name ON audit: 58 PASS, zero FAIL, two ordinary cutoffs. | Whole cleanup correctness PASS (OFF 11.887436s; ON 12.864952s native), but both MISS5. Lowered/full represented correctness and tails remain unknown. No production validation skip, cached trust, compiler-semantic change, or lost original request/check is authorized. |
+| T2 - Cleanup/portability correctness; speed open | Nine-file source change independently review-approved; source and audit documentation committed and pushed as `5012c62` on `test-speed-progress`, not master: immutable callback-free batch test hook, portable root-dependent expectations, and retained local requests. Fresh all-name ON audit: 58 PASS, zero FAIL, two ordinary cutoffs. | Whole cleanup correctness PASS (OFF 11.887436s; ON 12.864952s native), but both MISS5. Lowered/full represented correctness and tails remain unknown. No production validation skip, cached trust, compiler-semantic change, or lost original request/check is authorized. |
 
 - **Durable current-code evidence:** [test audit](tests/AUDIT.md) records every
   configured name and final timing/status, the two cutoff boundaries and evidence
   qualifications. All 60 names actually started over 61 attempts in two bounded
   cycles; one suite-shortened represented attempt had one eligible retry. No
   ordinary cutoff was retried or deadline increased. All five previous root-path
-  failures are now green. Code identity is `6eef9ca` plus reviewed T2 changes;
-  this documentation-only delta changes audit source pins and is not retrospectively
-  included in those receipts.
+  failures are now green. Audited code is unchanged in `5012c62`; post-audit
+  documentation-only differences mean that commit's all-source identity (and later
+  documentation revisions) is not retrospectively included in those receipts.
 - **Progress evidence:** fresh maximum delivered gap 1.019882s; heartbeat is
   liveness, not completed work. T1's 13 support / three integration checks remain
   code-only support evidence (T2 changed no support implementation); both support

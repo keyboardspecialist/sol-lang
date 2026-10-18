@@ -11,15 +11,19 @@ by policy, sampled away or replaced with a shard to obtain these results.
 and continuous progress remain the active overall priority. T1 observability and
 bounded auditing are independently approved and pushed on `test-speed-progress`
 as `6eef9cadf917b3978278fed9b656b35fc95646ef` (`6eef9ca`), not merged to master.
-T2's nine-file cleanup/portability source change is independently review-approved,
-commit pending. Approval covers correctness, portability and bounded diagnostics,
+T2's nine-file cleanup/portability source change is independently review-approved;
+source and audit documentation are committed and pushed as `5012c62` on
+`test-speed-progress`, not master. Approval covers correctness, portability and
+bounded diagnostics,
 **not full speed acceptance**. After this documentation handoff no new
 implementation is active without coordinator steering and a new Sol task brief.
 P4.4, P4.4f1a and the resource-prerequisite WIPs remain paused and unchanged.
 T1/T2 are not the separate, gated maintenance-experiment M1–M5 track.
 
-The ALL60 evidence is for `6eef9ca` **plus the reviewed uncommitted T2 changes**,
-not bare HEAD. Audited cleanup test SHA256:
+The ALL60 evidence predates `5012c62`; its audited code is unchanged in that
+feature-branch commit, which follows T1 `6eef9ca`. Post-audit documentation-only
+differences mean the receipt does not match `5012c62`'s complete all-source identity.
+Audited cleanup test SHA256:
 `cf4746c2d3471a83ac2ef9d059005c0aabd688e55584e49465cbba441174d5c2`.
 Guarded engine/header SHA256, respectively:
 `b84fef3c48e1479348f98cf7fd980030a4ceab46b945a9647019db69781e1c8a` /
@@ -33,9 +37,10 @@ handoff's `validation-report.md`, `all60-status-table.md` and
 `cutoff-boundaries.json`; its detailed raw receipts remain local coordinator
 evidence, not portable repository links. It also qualifies earlier T2 batch and
 completion evidence rather than treating it as fresh whole-suite validation.
-**These documentation edits change the audit's all-source hashes.** Audited code
-is unchanged, but old receipts cannot be relabeled as matching this later docs-only
-source state; any new source-pinned run needs a new receipt.
+**Post-audit documentation edits change the audit's all-source hashes.** Audited
+code is unchanged at `5012c62`, but old receipts cannot be relabeled as matching
+that commit or later documentation-only source states; any new source-pinned run
+needs a new receipt.
 
 ## What actually ran
 
