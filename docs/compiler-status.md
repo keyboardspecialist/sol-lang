@@ -14,14 +14,35 @@ P4.4 was the next production checkpoint. The baseline hash above remains the
 historical September 9 snapshot; no post-baseline commit hash is asserted here. M1
 completed as infeasible and M2-M5 remain gated unless it is reopened feasibly.
 
-**Current status addendum, October 18, 2026:** The bounded P4.4f1a metadata
+**Prior status addendum, October 18, 2026:** The bounded P4.4f1a metadata
 checkpoint is independently accepted and review-approved, committed as `5c9c056`,
 fast-forwarded onto `master`, and pushed to `origin/master`; it does not close P4.4.
-P4.4 remains open and unchecked. The sole live cursor is bounded planning for
+P4.4 remained open and unchecked. At that prior snapshot, the sole live cursor was bounded planning for
 residual predicate execution over richer forms; the test-speed goals remain unmet,
 not resolved. Publication does not refresh or extend the handoff's accepted test
 receipts. See [TODO.md](../TODO.md#execution-cursor) for execution order and the
 [P4.4f1a handoff](p4.4f1a-handoff.md) for evidence and remaining boundaries.
+
+**Current status addendum, October 19, 2026 (P4.4f1b accepted slice):** The active
+worktree is
+`/Users/jsobotka/code/sol-lang-test-speed` on `master` at
+`df97d7385e7aead65c78d2bba08a2e756cc9ab8c`; its f1b implementation is uncommitted.
+The bounded leaf-predicate milestone received independent technical and evidence
+acceptance. Per mode, the original 372 ON/SAN selectors (349 f1b +23 f1a) are
+accepted at their frozen pins; two ordinary identity keys additionally passed on
+the final ON/SAN binaries. This is a 374-obligation semantic/configuration union per
+mode, not a fresh 374-case run of the final runners. The current list is 351 f1b +23
+f1a. Coordinator integration, documentation review, Astra steering, commit/push,
+and publication verification are pending. The supported addition is one pure direct
+source-call leaf (`owned Int64 -> Bool`) in an INSTANCE-owned ALWAYS `requires`
+predicate, with whole-target scalar/dead-block restrictions; it does not add a
+public ABI, host adapter, E6 execution, or broad P4.4 completion. The P4.4 checkbox
+remains unchecked. R-AUTH remains open; the fast/full-suite goals remain unmet, and
+P4.5/P5 remain deferred. See the [P4.4f1b handoff](p4.4f1b-handoff.md) and
+[TODO.md](../TODO.md#execution-cursor) for current evidence boundaries and the sole
+execution cursor. After f1b publication, the next cursor is Sol 6.1 High planning to
+lift the ordinary callee-leaf restriction, including recursive-call graph/depth/step
+and primary-failure rules; that planning does not authorize implementation.
 
 Use the [README](../README.md) for onboarding and runnable examples, and
 [project analysis](project-analysis.md) for the dated product assessment. The
@@ -1141,7 +1162,10 @@ artifacts, and interpreter/Wasm differential execution remain later tracks. No
 internal census is an empirical maintenance advantage, user-facing performance
 guarantee, or proof of application behavior. The proposed M experiment is not
 implemented by these compiler owners. P4.1 through P4.3 are complete; P4 remains
-open and P4.4 remains unchecked. The bounded f1a metadata checkpoint does not close
-it; see the [handoff](p4.4f1a-handoff.md) and [live cursor](../TODO.md#execution-cursor).
+open and P4.4 remains unchecked. The bounded f1a metadata checkpoint and accepted
+f1b leaf-execution slice do not close it; f1b remains unpublished pending coordinator
+integration. See the [f1a handoff](p4.4f1a-handoff.md),
+[f1b handoff](p4.4f1b-handoff.md), and
+[live cursor](../TODO.md#execution-cursor).
 Consult [TODO.md](../TODO.md#execution-cursor) for the single active cursor and
 [the analysis](project-analysis.md) for the experiment rationale.

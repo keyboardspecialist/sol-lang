@@ -1,10 +1,69 @@
 #include "sol/ir.h"
 #include "sol/ownership.h"
 
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+#include "ir_test_internal.h"
+#endif
+
 #include <errno.h>
 #include <stdlib.h>
 #include "resource_internal.h"
 #include <string.h>
+
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+static _Thread_local SolIrTestAllocationCapture *sol_ir_test_active_capture;
+
+static void sol_ir_test_allocation_capture_record(const void *base, size_t bytes) {
+    SolIrTestAllocationCapture *capture = sol_ir_test_active_capture;
+    if (capture == NULL) return;
+    if (base == NULL || bytes == 0 || (uintptr_t)base > UINTPTR_MAX - bytes) {
+        capture->invalid = true;
+        return;
+    }
+    if (capture->count >= capture->capacity) {
+        capture->overflow = true;
+        return;
+    }
+    capture->requests[capture->count++] = (SolIrTestAllocationRequest){base, bytes};
+}
+
+bool sol_ir_test_allocation_capture_begin(SolIrTestAllocationCapture *capture,
+    SolIrTestAllocationRequest *requests, size_t capacity) {
+    if (sol_ir_test_active_capture != NULL) {
+        sol_ir_test_active_capture->invalid = true;
+        if (capture != NULL && capture != sol_ir_test_active_capture)
+            capture->invalid = true;
+        return false;
+    }
+    if (capture == NULL) return false;
+    memset(capture, 0, sizeof *capture);
+    if (requests == NULL || capacity == 0) {
+        capture->invalid = true;
+        return false;
+    }
+    capture->requests = requests;
+    capture->capacity = capacity;
+    capture->active = true;
+    sol_ir_test_active_capture = capture;
+    return true;
+}
+
+void sol_ir_test_allocation_capture_end(SolIrTestAllocationCapture *capture) {
+    if (capture == NULL) {
+        if (sol_ir_test_active_capture != NULL)
+            sol_ir_test_active_capture->invalid = true;
+        return;
+    }
+    if (sol_ir_test_active_capture != capture) {
+        capture->invalid = true;
+        if (sol_ir_test_active_capture != NULL)
+            sol_ir_test_active_capture->invalid = true;
+        return;
+    }
+    capture->active = false;
+    sol_ir_test_active_capture = NULL;
+}
+#endif
 
 typedef struct {
     const SolSource *source;
@@ -172,8 +231,14 @@ static bool sol_ir_region_label_valid(const SolIr *ir,
 
 static char *sol_ir_copy_text(const char *text, size_t length) {
     if (length == SIZE_MAX) return NULL;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
     char *copy = malloc(length + 1);
     if (copy == NULL) return NULL;
+    sol_ir_test_allocation_capture_record(copy, length + 1);
+#else
+    char *copy = malloc(length + 1);
+    if (copy == NULL) return NULL;
+#endif
     memcpy(copy, text, length);
     copy[length] = '\0';
     return copy;
@@ -183,7 +248,13 @@ static void *sol_ir_allocate(size_t count, size_t size, bool zeroed) {
     if (count == 0) return NULL;
     if (size == 0 || count > SIZE_MAX / size) return NULL;
     if (!sol_resource_charge_arena(count)) return NULL;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+    void *allocation = zeroed ? calloc(count, size) : malloc(count * size);
+    if (allocation != NULL) sol_ir_test_allocation_capture_record(allocation, count * size);
+    return allocation;
+#else
     return zeroed ? calloc(count, size) : malloc(count * size);
+#endif
 }
 
 static char *sol_ir_copy_span(const SolSource *source, SolSpan span) {
@@ -220,6 +291,9 @@ static bool sol_ir_grow(
         if (!sol_resource_charge_arena(grown_capacity - *capacity)) return false;
         void *grown = realloc(*items, grown_capacity * size);
         if (grown == NULL) return false;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+        sol_ir_test_allocation_capture_record(grown, grown_capacity * size);
+#endif
         *items = grown;
         *capacity = grown_capacity;
     }

@@ -167,6 +167,74 @@ typedef struct {
 } SolWasmRepresentedTestRefinementIndexStats;
 
 typedef enum {
+    SOL_WASM_REPRESENTED_TEST_ALLOC_CATALOG_CALLS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_CATALOG_CALLBACKS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_CATALOG_RESUME,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_KAHN_INDEGREE,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_KAHN_DEPTH,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_KAHN_QUEUE,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_ORDER_CALLABLES,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_ORDER_ENTRIES,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_PROVENANCE_RECORDS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_PROVENANCE_FAILURE_MAP,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_PROVENANCE_SUPPLEMENTAL_MAP,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_PROVENANCE_BYTES,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_LITERALS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_STATIC_DATA,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_QUALIFIED_IMAGES,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_QUALIFIED_BODIES,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_QUALIFIED_FLAGS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_IMAGE_EDGE_VALUES,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_IMAGE_EDGE_DESTINATIONS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_PREDICATE_EDGE_VALUES,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_PREDICATE_EDGE_DESTINATIONS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_CALL_ARGUMENTS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_INDIRECT_PARAMETER_TYPES,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_FUNCTION_LOCALS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_FUNCTION_PARAMETERS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_WIRE_PROVENANCE_ENTRIES,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_WIRE_PROVENANCE_SLOTS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_WIRE_EXPORT_NAMES,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_WIRE_EXPORT_COUNTS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_TABLE_FUNCTIONS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_NODE_GROW,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_SITE_COUNT,
+} SolWasmRepresentedTestAllocationSite;
+
+typedef enum {
+    SOL_WASM_REPRESENTED_TEST_ALLOC_PHASE_CATALOG,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_PHASE_ORDER,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_PHASE_PROVENANCE,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_PHASE_EMISSION,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_PHASE_WIRE_PROVENANCE,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_PHASE_WIRE_EXPORTS,
+    SOL_WASM_REPRESENTED_TEST_ALLOC_PHASE_COUNT,
+} SolWasmRepresentedTestAllocationPhase;
+
+typedef struct {
+    size_t ordinal;
+    SolWasmRepresentedTestAllocationSite site;
+    SolWasmRepresentedTestAllocationPhase phase;
+    const char *function;
+    size_t line;
+    size_t count;
+    size_t item_size;
+    size_t old_count;
+    size_t new_count;
+    bool is_grow;
+} SolWasmRepresentedTestAllocationRecord;
+
+typedef struct {
+    bool enabled;
+    size_t capacity;
+    size_t record_count;
+    size_t requests_seen;
+    size_t captured_builds;
+    bool overflow;
+    bool invalid;
+} SolWasmRepresentedTestAllocationRecordStatus;
+
+typedef enum {
     SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_INVALID,
     SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_EVENTLESS,
     SOL_WASM_REPRESENTED_TEST_CLEANUP_MARKER_ACTION,
@@ -182,6 +250,14 @@ bool sol_wasm_represented_test_call_catalog_operand(const SolWasmRepresentedBuil
     size_t call, size_t ordinal, SolMirMaterializedTemporaryId *temporary);
 void sol_wasm_represented_test_fail_allocation_after(size_t attempt);
 size_t sol_wasm_represented_test_allocation_attempts(void);
+/* Fixed-storage site recorder. Begin/end do not arm faults or reset the backend
+ * allocation counter. Records are copy-out only and readable only after end. */
+bool sol_wasm_represented_test_allocation_record_begin(size_t capacity);
+void sol_wasm_represented_test_allocation_record_end(void);
+SolWasmRepresentedTestAllocationRecordStatus
+sol_wasm_represented_test_allocation_record_status(void);
+bool sol_wasm_represented_test_allocation_record_copy(size_t index,
+    SolWasmRepresentedTestAllocationRecord *record);
 /* Number of qualified Result image certifications since the latest full-build
  * reset. A request-local index certifies each image at most once. */
 size_t sol_wasm_represented_test_qualified_certifications(void);

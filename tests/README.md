@@ -82,6 +82,50 @@ reserve or enforce the complete-case 5-second horizon: acceptance separately che
 the finished case's post-close receipt against that total, leaving the 2-second
 operating reserve. Use the separately approved bounded policy for SAN cases.
 
+## P4.4f1b leaf-call selectors and accepted evidence
+
+The represented runner exposes a source-listed f1b selector set. List it and
+select one exact key with an existing matching build:
+
+```sh
+build-p44f1b-on/sol_wasm_represented_tests --list-p44f1b-cases
+python3 tests/support/run_with_progress.py \
+  --name p44f1b:represented.predicate-leaf.ordinary-direct-identity \
+  --timeout 3 -- build-p44f1b-on/sol_wasm_represented_tests \
+  --p44f1b-case represented.predicate-leaf.ordinary-direct-identity
+
+build-p44f1b-san/sol_wasm_represented_tests --list-p44f1b-cases
+ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+  python3 tests/support/run_with_progress.py \
+  --name p44f1b:represented.predicate-leaf.ordinary-recursive-identity \
+  --timeout 27 -- build-p44f1b-san/sol_wasm_represented_tests \
+  --p44f1b-case represented.predicate-leaf.ordinary-recursive-identity
+```
+
+The accepted current f1b list contains 351 keys; the f1a list retains 23. Per mode,
+372 original keys (349 f1b +23 f1a) passed at their frozen pins, and two ordinary
+direct/recursive identity keys passed on final ON/SAN binaries. Thus the accepted
+union is 374 obligations per mode, **not** a fresh 374-case run of the final runner.
+The two ordinary sources return 7 and 42 respectively; the recursive case is an
+ordinary call profile at depth 64, not recursive predicate-call admission.
+
+These selectors add no CTest/CMake registrations and do not filter the default
+runner. The source-reviewed manifest remains 72 controls /4091 fault IDs /50 shards;
+all 297 new faults and legacy D1/2 passed in the accepted selected matrix, but this
+does not claim all 4091 faults, all shards, or the full default suite were run. The
+historical combined SAN 120-second cutoff remains UNKNOWN; the separately supervised
+per-selector evidence is described in the [P4.4f1b handoff](../docs/p4.4f1b-handoff.md).
+
+The example `--timeout` values enforce active work only: native 3s / SAN 27s. The
+accepted protocol also measures complete wall after capture, log, primary-receipt,
+and post-close-witness close, under 5s / under 30s with the 2/3-second cleanup
+reserve. A bare selector command is
+not by itself that full acceptance supervisor. The ten reviewed negative CLI
+controls return status 2 with empty stdout and no case execution for unknown,
+missing, duplicate, mixed, and focus-conflicting requests. Current registrations
+remain ON 60 / OFF 56. The backend-OFF configuration compiled the two owner targets
+and inspected registrations, but did not execute either owner or any OFF CTest test.
+
 ### Records and real progress
 
 Test-owned stderr records start with `SOL_TEST_PROGRESS` and tab-separated
