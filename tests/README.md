@@ -162,8 +162,9 @@ pure scalar ordinary chains and ordinary recursive SCCs, while nested predicate
 invocation, mixed cycles, and unsupported transitive targets still reject.
 
 The exact 506-key union in each mode and its supplementary obligations are complete;
-independent final review accepts the bounded f1c technical/evidence scope. Coordinator
-integration and feature publication remain pending. Accounting
+independent final review accepts the bounded f1c technical/evidence scope. The feature
+was published to `origin/master` as `24e2d16`; coordinator integration and documentation
+review are complete. Accounting
 distinguishes **139 ON current-binary executions +367 historical carries** (356
 old-fresh +11 reviewed reuse) and **495 SAN current-binary executions +11 historical
 carries**. Each mode includes eight reviewed current-pin targets; ON then has 131/131

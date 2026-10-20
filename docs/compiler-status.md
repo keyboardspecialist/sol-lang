@@ -42,11 +42,16 @@ predicate, with whole-target scalar/dead-block restrictions. That historical f1b
 boundary does not describe the wider transitive callee admission in f1c below. See
 the [P4.4f1b handoff](p4.4f1b-handoff.md) for its pinned evidence.
 
-**Current status addendum, October 20, 2026 (P4.4f1c; bounded technical/evidence
-acceptance approved):** The independent final review found no blocking technical or
-evidence findings. This approves the bounded implementation and its exact evidence,
-not publication, broad P4.4 closure, R-AUTH closure, a full suite, or project-speed
-success. Coordinator alignment, integration, and scoped publication remain pending.
+**Current status addendum, October 20, 2026 (P4.4f1c; accepted and published):**
+Independent final technical/evidence review and documentation review are approved.
+The bounded implementation and its exact evidence were published as
+`24e2d16f6047dd390900c36b2b9c7cb583ba985a` (`Execute ordinary scalar callee chains
+in predicates`), pushed to `origin/master`. Read-only verification found HEAD and
+`origin/master` equal to that commit; the worktree was clean at publication
+verification. Astra readiness, coordinator integration, three corrected-binary
+smokes, and preserved-WIP checks are complete. This accepts the bounded f1c slice,
+not broad P4.4 closure, R-AUTH closure, a full suite, or project-speed success. The
+status-only documentation refresh is uncommitted and has no follow-up hash.
 
 Under the unchanged f1b predicate shape, f1c admits pure ordinary scalar callee
 chains and ordinary recursive SCCs. The predicate remains exactly one direct
@@ -99,6 +104,12 @@ CLI negatives behaved as specified: exit 2, empty stdout, and no fixture/backend
 work. Q/R digests `172cc966…` and `8a47dee2…` are allocation-inventory digests, not
 module hashes. D96/T203 line-only bridges and unchanged backend-gated OFF compile/
 dependency evidence are conditionally reused; no OFF build or owner test was run.
+
+Coordinator smoke verification used the accepted ON executable
+`8af1edb75efdc6dfc04583a3d618b97073c0a3d379e27b4dd58325bf107beeae`: recursive
+preflight PASS (0.228s), retained-nonleaf traced PASS (0.172s), and full R164 fault
+PASS (0.991s), all under their strict caps. These checks close the integration gate;
+they do not replace the exact validation ledger above.
 
 Every selected case stayed within active/full caps of native 3s/<5s and SAN 27s/<30s,
 including receipt/witness closure. SAN used
