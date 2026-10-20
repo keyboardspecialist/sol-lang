@@ -5247,7 +5247,8 @@ static bool represented_predicate_leaf_scalar_target(const SolMirConcreteProgram
         for (size_t b = body->blocks.offset; b < body->blocks.offset + body->blocks.count; ++b) {
             const SolMirPredicateBlock *block = &o->predicate_blocks[b];
             if (block->body != body_id || !represented_predicate_leaf_range(block->instructions.offset,
-                    block->instructions.count, o->predicate_instruction_count)) return false;
+                    block->instructions.count, o->predicate_instruction_count)
+                || block->terminator.kind == SOL_MIR_PREDICATE_TERM_INVOKE) return false;
             for (size_t i = block->instructions.offset;
                 i < block->instructions.offset + block->instructions.count; ++i) {
                 const SolMirPredicateInstruction *instruction = &o->predicate_instructions[i];
@@ -5577,18 +5578,17 @@ static bool represented_predicate_call_exact(const SolWasmRepresentedBuildReques
         || propagate->target != SOL_MIR_RUNTIME_NONE || propagate->recipe != SOL_MIR_RECIPE_NONE
         || propagate->drop_path != SOL_MIR_RUNTIME_NONE) return false;
 
-    /* A predicate target is admitted only when no reachable or dead-block call
-     * in its entire image (including any owned contract body) can recurse. */
+    /* Keep the original immediate owned-predicate-call barrier. Ordinary image
+     * calls are checked as a transitive scalar closure after the complete call
+     * catalog has authenticated every row. */
     for (size_t i = 0; i < conventions->call_count; ++i) {
         const SolMirRuntimeCall *outgoing = &conventions->calls[i];
-        if (outgoing->owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_IMAGE) {
-            if (outgoing->image == callee->instance) return false;
-        } else if (outgoing->owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE) {
+        if (outgoing->owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE) {
             if (outgoing->predicate >= o->predicate_body_count) return false;
             const SolMirPredicateBody *outgoing_body = &o->predicate_bodies[outgoing->predicate];
             if (outgoing_body->owner_kind == SOL_MIR_PREDICATE_OWNER_INSTANCE
                 && outgoing_body->instance == callee->instance) return false;
-        } else return false;
+        } else if (outgoing->owner_kind != SOL_MIR_RUNTIME_CALL_OWNER_IMAGE) return false;
     }
     size_t callers = 0, calling = SOL_MIR_RUNTIME_NONE;
     for (size_t i = 0; i < linkage->callable_count; ++i)
@@ -5598,6 +5598,169 @@ static bool represented_predicate_call_exact(const SolWasmRepresentedBuildReques
     if (caller_callable != NULL) *caller_callable = calling;
     if (callee_callable != NULL) *callee_callable = target;
     (void)qualified_index;
+    return true;
+}
+
+/* Every ordinary function below a predicate edge has the same deliberately
+ * small signature: one owned Int64 parameter and a plain scalar Int64 or Bool
+ * value result. This checks the callable's authenticated INTERNAL signature,
+ * rather than a source name or a shape inferred from one call site. */
+static bool represented_predicate_target_signature_exact(
+    const SolWasmRepresentedBuildRequest *request, size_t callable_id) {
+    const SolMirRuntimeLoweredProgram *owner = request->program;
+    const SolMirRuntimeConventions *conventions = owner->conventions;
+    const SolMirConcreteProgram *concrete = conventions->concrete;
+    const SolMirMaterialization *m = &concrete->materialization;
+    const SolMirLinkage *linkage = &concrete->linkage;
+    const SolMirRepresentation *representation = &concrete->representation;
+    if (callable_id >= linkage->callable_count) return false;
+    const SolMirLinkageCallable *callable = &linkage->callables[callable_id];
+    if (callable->instance >= m->image_count
+        || m->images[callable->instance].source_callable >= concrete->program.ir->callable_count)
+        return false;
+    const SolMirRuntimeSignature *signature = signature_for(conventions, callable_id);
+    if (signature == NULL || signature->origin != SOL_MIR_RUNTIME_SIGNATURE_INTERNAL
+        || signature->internal != callable_id || signature->result_class != SOL_MIR_RUNTIME_RESULT_VALUE
+        || signature->slots.count != 1 || signature->slots.offset > conventions->signature_slot_count
+        || signature->slots.count > conventions->signature_slot_count - signature->slots.offset
+        || signature->effects != m->images[callable->instance].effects
+        || !represented_pure_effect_row(m, signature->effects)) return false;
+    const SolMirRuntimeSignatureSlot *slot = &conventions->signature_slots[signature->slots.offset];
+    if (slot->role != SOL_MIR_RUNTIME_SLOT_PARAMETER || slot->formal != 0
+        || slot->access != SOL_ACCESS_OWNED || slot->recipe >= representation->recipe_count
+        || representation->recipes[slot->recipe].kind != SOL_MIR_RECIPE_INT64
+        || representation->recipes[slot->recipe].storage != SOL_MIR_STORAGE_SCALAR
+        || signature->result >= representation->recipe_count) return false;
+    const SolMirRecipe *result = &representation->recipes[signature->result];
+    if (result->storage != SOL_MIR_STORAGE_SCALAR
+        || (result->kind != SOL_MIR_RECIPE_INT64 && result->kind != SOL_MIR_RECIPE_BOOL)) return false;
+    const SolMirMaterializedImage *image = &m->images[callable->instance];
+    const SolIrCallable *source = &concrete->program.ir->callables[image->source_callable];
+    return source->kind == SOL_IR_CALLABLE_FUNCTION
+        && callable->symbol.bytes[0] != '\0'
+        && symbol_for_image(concrete, callable->instance) != NULL
+        && strcmp(callable->symbol.bytes, symbol_for_image(concrete, callable->instance)) == 0;
+}
+
+/* Validate the union of all predicate-call targets using catalog-owned scratch.
+ * The worklist is bounded by the actual authenticated callable count (including
+ * the catalog test accessor, which intentionally has no 256-function wire cap).
+ * Each callable is enqueued once; each pop scans the finite catalog once and
+ * then scans its validated image, predicate, snapshot and cleanup slices. */
+static bool represented_predicate_callee_closure(
+    const SolWasmRepresentedBuildRequest *request, const RepresentedCallCatalogGraph *graph,
+    size_t *seen, size_t *queue, size_t capacity) {
+    const SolMirRuntimeLoweredProgram *owner = request->program;
+    const SolMirRuntimeConventions *conventions = owner->conventions;
+    const SolMirConcreteProgram *concrete = conventions->concrete;
+    const SolMirMaterialization *m = &concrete->materialization;
+    const SolMirOperations *o = &concrete->operations;
+    const SolMirLinkage *linkage = &concrete->linkage;
+    if (capacity != linkage->callable_count || (capacity != 0 && (seen == NULL || queue == NULL)))
+        return false;
+    if (capacity != 0) memset(seen, 0, capacity * sizeof *seen);
+    size_t head = 0, tail = 0;
+    for (size_t i = 0; i < graph->count; ++i) {
+        const RepresentedCallCatalog *edge = &graph->calls[i];
+        if (edge->caller_image != SOL_MIR_RUNTIME_NONE) continue;
+        if (edge->callee_callable >= capacity) return false;
+        if (!seen[edge->callee_callable]) {
+            if (tail >= capacity) return false;
+            seen[edge->callee_callable] = 1;
+            queue[tail++] = edge->callee_callable;
+        }
+    }
+    while (head < tail) {
+        size_t callable_id = queue[head++];
+        if (callable_id >= capacity || !represented_predicate_target_signature_exact(request, callable_id))
+            return false;
+        const SolMirLinkageCallable *callable = &linkage->callables[callable_id];
+        size_t image_id = callable->instance;
+        if (!represented_predicate_leaf_scalar_target(concrete, owner->cleanup, image_id)) return false;
+
+        for (size_t i = 0; i < graph->count; ++i) {
+            const RepresentedCallCatalog *edge = &graph->calls[i];
+            if (edge->caller_callable != callable_id) continue;
+            /* Predicate-owned rows identify the callable in caller_callable,
+             * but have no image namespace. Any such row below this image is a
+             * nested predicate invocation and is deliberately not traversed. */
+            if (edge->caller_image == SOL_MIR_RUNTIME_NONE) return false;
+            if (edge->caller_image != image_id || edge->call >= conventions->call_count
+                || edge->caller_block >= m->block_count || edge->callee_callable >= capacity)
+                return false;
+            const SolMirRuntimeCall *call = &conventions->calls[edge->call];
+            const SolMirMaterializedTerminator *term = &m->blocks[edge->caller_block].terminator;
+            if (call->owner_kind != SOL_MIR_RUNTIME_CALL_OWNER_IMAGE || call->image != image_id
+                || call->block != edge->caller_block || call->call_kind != SOL_IR_CALL_FUNCTION
+                || call->target_kind != SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL
+                || call->internal != edge->callee_callable || call->host != SOL_MIR_LINKAGE_NONE
+                || call->table != SOL_MIR_LINKAGE_NONE || call->callee.kind != SOL_MIR_RUNTIME_VALUE_NONE
+                || call->callee.id != SOL_MIR_RUNTIME_NONE || call->writebacks.count != 0
+                || call->writebacks.offset > conventions->writeback_count
+                || call->signature != edge->signature || call->signature >= conventions->signature_count
+                || term->kind != SOL_MIR_TERM_INVOKE || term->call_kind != SOL_IR_CALL_FUNCTION
+                || term->callee != SOL_MIR_MATERIALIZED_NONE
+                || term->receiver.source_expression != SOL_IR_NONE || term->writebacks.count != 0
+                || term->arguments.count != 1 || term->arguments.offset > m->call_argument_count
+                || term->arguments.count > m->call_argument_count - term->arguments.offset)
+                return false;
+            const SolMirRuntimeSignature *signature = &conventions->signatures[call->signature];
+            if (signature_for(conventions, edge->callee_callable) != signature
+                || signature->origin != SOL_MIR_RUNTIME_SIGNATURE_INTERNAL
+                || signature->internal != edge->callee_callable
+                || signature->result_class != SOL_MIR_RUNTIME_RESULT_VALUE
+                || signature->slots.count != 1
+                || signature->slots.offset > conventions->signature_slot_count
+                || signature->slots.count > conventions->signature_slot_count - signature->slots.offset
+                || term->effects >= m->effect_row_count || signature->effects != term->effects
+                || !represented_pure_effect_row(m, term->effects)) return false;
+            const SolMirRuntimeSignatureSlot *slot = &conventions->signature_slots[signature->slots.offset];
+            const SolMirRuntimeOperand *operand = NULL;
+            if (call->operands.count != 1 || call->operands.offset > conventions->operand_count
+                || call->operands.count > conventions->operand_count - call->operands.offset)
+                return false;
+            operand = &conventions->operands[call->operands.offset];
+            const SolMirMaterializedCallArgument *argument = &m->call_arguments[term->arguments.offset];
+            if (slot->role != SOL_MIR_RUNTIME_SLOT_PARAMETER || slot->formal != 0
+                || slot->access != SOL_ACCESS_OWNED || slot->recipe >= concrete->representation.recipe_count
+                || concrete->representation.recipes[slot->recipe].kind != SOL_MIR_RECIPE_INT64
+                || concrete->representation.recipes[slot->recipe].storage != SOL_MIR_STORAGE_SCALAR
+                || argument->formal != 0 || argument->access != SOL_ACCESS_OWNED
+                || argument->temporary >= m->temporary_count
+                || argument->temporary < m->images[image_id].temporaries.offset
+                || argument->temporary - m->images[image_id].temporaries.offset
+                    >= m->images[image_id].temporaries.count
+                || argument->type >= concrete->layout.type_count
+                || concrete->layout.types[argument->type].recipe != slot->recipe
+                || m->temporaries[argument->temporary].type != argument->type
+                || operand->signature_slot != signature->slots.offset
+                || operand->value.kind != SOL_MIR_RUNTIME_VALUE_MATERIALIZED_TEMPORARY
+                || operand->value.id != argument->temporary
+                || call->result.kind != SOL_MIR_RUNTIME_VALUE_MATERIALIZED_VALUE
+                || edge->result_class != SOL_MIR_RUNTIME_RESULT_VALUE
+                || edge->result != term->result || edge->normal_edge != term->normal_edge
+                || edge->failure_edge != term->failure_edge || edge->failure_site != call->failure_site)
+                return false;
+            if (!seen[edge->callee_callable]) {
+                if (tail >= capacity) return false;
+                seen[edge->callee_callable] = 1;
+                queue[tail++] = edge->callee_callable;
+            }
+        }
+        /* No predicate invoke may be hidden in an owned predicate whose call
+         * row uses the same source callable but a separate block namespace. */
+        for (size_t body_id = 0; body_id < o->predicate_body_count; ++body_id) {
+            const SolMirPredicateBody *body = &o->predicate_bodies[body_id];
+            if (body->owner_kind != SOL_MIR_PREDICATE_OWNER_INSTANCE || body->instance != image_id)
+                continue;
+            if (body->blocks.offset > o->predicate_block_count
+                || body->blocks.count > o->predicate_block_count - body->blocks.offset) return false;
+            for (size_t b = body->blocks.offset; b < body->blocks.offset + body->blocks.count; ++b)
+                if (o->predicate_blocks[b].body != body_id
+                    || o->predicate_blocks[b].terminator.kind == SOL_MIR_PREDICATE_TERM_INVOKE)
+                    return false;
+        }
+    }
     return true;
 }
 
@@ -5892,7 +6055,10 @@ static RepresentedCatalogResult represented_call_catalog(const SolWasmRepresente
             edge->chain_depth = graph->has_cycle ? 0 : depth[edge->callee_callable];
         }
         if (graph->has_cycle) graph->longest_chain = 0;
+        bool predicate_closure_ok = represented_predicate_callee_closure(request, graph,
+            indegree, queue, linkage->callable_count);
         deallocate(indegree); deallocate(depth); deallocate(queue);
+        if (!predicate_closure_ok) goto invalid;
     }
     return REPRESENTED_CATALOG_VALID;
 invalid:

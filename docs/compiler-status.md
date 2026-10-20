@@ -23,32 +23,94 @@ not resolved. Publication does not refresh or extend the handoff's accepted test
 receipts. See [TODO.md](../TODO.md#execution-cursor) for execution order and the
 [P4.4f1a handoff](p4.4f1a-handoff.md) for evidence and remaining boundaries.
 
-**Current status addendum, October 19, 2026 (P4.4f1b published slice):** The bounded
-leaf-predicate milestone received independent technical and evidence acceptance and
-was committed on `master` as `ca18c6d37c6c464836be01f02b06713319d0d069`
-(`Execute scalar leaf calls in requires predicates`), then pushed successfully to
-`origin/master`. The implementation/validation source baseline remains
+**P4.4f1b published-slice record, October 19, 2026:** The bounded leaf-predicate
+milestone received independent technical and evidence acceptance and was committed
+as `ca18c6d37c6c464836be01f02b06713319d0d069` (`Execute scalar leaf calls in requires
+predicates`) and pushed to `origin/master`. The subsequent status-only history
+checkpoint is `aacd482`. The implementation/validation source baseline remains
 `df97d7385e7aead65c78d2bba08a2e756cc9ab8c`; publication does not refresh its test
-receipts. Local `HEAD`, `origin/master`, and the live remote `master` were verified
-to match the publication commit; the checkout was clean at that point. The coordinator's
-final three native smoke checks passed at 0.223, 0.287, and 2.140 seconds under their
-strict caps. Documentation review, Astra steering, and final coordinator integration
-gates are closed; protected original-main and resource-WIP hashes/status/diffs were
-verified unchanged against the pre-publication inventory. This documentation-only
-status refresh is uncommitted and does not create a second commit.
+receipts.
 
 Per mode, the original 372 ON/SAN selectors (349 f1b +23 f1a) are accepted at their
-frozen pins; two ordinary identity keys additionally passed on the final ON/SAN
-binaries. This is a 374-obligation semantic/configuration union per mode, not a fresh
-374-case run of the final runners. The current list is 351 f1b +23 f1a. The supported
-addition is one pure direct source-call leaf (`owned Int64 -> Bool`) in an
-INSTANCE-owned ALWAYS `requires` predicate, with whole-target scalar/dead-block
-restrictions; it does not add a public ABI, host adapter, E6 execution, or broad P4.4
-completion. The P4.4 checkbox remains unchecked. R-AUTH remains open; the fast/full-
-suite goals remain unmet, and P4.5/P5 remain deferred. The active cursor is Sol 6.1
-High planning for P4.4f1c ordinary-callee-chain/recursion extension; planning does
-not authorize implementation before a reviewed bounded brief. See the
-[P4.4f1b handoff](p4.4f1b-handoff.md) and [TODO.md](../TODO.md#execution-cursor).
+frozen pins; two ordinary identity keys additionally passed on final ON/SAN binaries.
+This is a 374-obligation semantic/configuration union per mode, not a fresh
+374-case run of the final runners. At the f1b publication snapshot, the list was
+351 f1b +23 f1a and the next cursor was f1c planning; that cursor has since advanced
+through implementation and correction review. The f1b addition was one pure direct
+source-call leaf (`owned Int64 -> Bool`) in an INSTANCE-owned ALWAYS `requires`
+predicate, with whole-target scalar/dead-block restrictions. That historical f1b
+boundary does not describe the wider transitive callee admission in f1c below. See
+the [P4.4f1b handoff](p4.4f1b-handoff.md) for its pinned evidence.
+
+**Current status addendum, October 20, 2026 (P4.4f1c; bounded technical/evidence
+acceptance approved):** The independent final review found no blocking technical or
+evidence findings. This approves the bounded implementation and its exact evidence,
+not publication, broad P4.4 closure, R-AUTH closure, a full suite, or project-speed
+success. Coordinator alignment, integration, and scoped publication remain pending.
+
+Under the unchanged f1b predicate shape, f1c admits pure ordinary scalar callee
+chains and ordinary recursive SCCs. The predicate remains exactly one direct
+FUNCTION call in an INSTANCE-owned, non-refinement ALWAYS `requires`, with one owned
+plain `Int64` argument and a plain `Bool` result. Each reachable ordinary callee has
+one owned plain `Int64` parameter and a plain `Int64` or `Bool` VALUE result. Whole
+reachable image, owned-predicate, snapshot/projection and cleanup checks remain
+plain `Int64`/`Bool`/`Unit` and include dead blocks. Nested owned-predicate `INVOKE`,
+mixed image/predicate cycles, unsupported signatures, and rich/dead-Text targets
+reject. Ordinary SCCs are admitted; predicate-call recursion is not. Existing
+catalog authentication and Kahn/SCC metadata are reused; the closure walk is bounded
+by actual authenticated V/C, not a universal 256-function catalog limit. No emitter,
+public ABI, header/schema, IR observer, or allocation request changed. Ordinary calls
+retain real frames, inline predicates add none, step code 6 precedes depth code 7,
+and pending callee failures remain primary.
+
+The reviewed fault-only test correction replaces three intermediate full snapshot
+renders with complete byte comparisons: five seven-owner render sets become two per
+fault. Complete root/header/capacity/requested-extent byte checks remain at every
+build boundary. A complete source/input/context proof supports only inferred
+intermediate rendered-content equality; initial/final fresh renders, authentication,
+validators, witnesses, cleanup, snapshots, canonical identities, full artifact bytes,
+and all-15-`Usage` comparisons remain. There is no trust cache/seal shortcut and no
+change to shared f1b snapshot defaults. The source/binary pins are recorded in the
+[f1c handoff](p4.4f1c-handoff.md).
+
+The exact semantic/configuration union is **506 keys per mode =457 f1c +49 named
+old** (23 f1a +19 mutations +6 resources +1 `launch.traced` reset/semantic key).
+Original classification was 492 fresh +14 reviewed reuse; overlapping targeted
+replacements count once. Final current-binary accounting is **ON 139 executions
++367 historical carries** (356 old-fresh +11 reviewed reuse) and **SAN 495 executions
++11 historical carries**. Each mode has eight already-reviewed current-pin targets
+(five originally fresh and three reuse), followed by ON 131/131 and SAN 487/487
+continuation passes. All 506 unique keys are now evidenced in each mode; historical
+carries retain their original source/binary pins and timing, and are not current
+fresh runs. There is no native-to-SAN inference.
+
+Both modes account for all **424 new fault IDs**: Q registered IDs 1–127 map to
+physical allocations 3–129; R IDs 1–297 map to 1–297. The two legacy Q physical
+allocations 1–2 retain their original f1a identities and failure semantics; after
+the preserved two-attempt failure, the unarmed retry succeeds with 129 requests,
+three catalog rows, and result 4. The 74-control /4,515-fault /50-shard manifest
+preserves all 4,204 old ordered tuples and multiplicity. It is an inventory, not a
+claim that all 4,515 faults or all shards ran.
+
+The two supplementary ordinary selectors also passed per mode against the retained
+f1b reference: direct result 7 (4,001 bytes) and recursive result 42 (8,944 bytes),
+with full module bytes, all 15 `Usage` fields, and typed catalog identities. All 20
+CLI negatives behaved as specified: exit 2, empty stdout, and no fixture/backend
+work. Q/R digests `172cc966…` and `8a47dee2…` are allocation-inventory digests, not
+module hashes. D96/T203 line-only bridges and unchanged backend-gated OFF compile/
+dependency evidence are conditionally reused; no OFF build or owner test was run.
+
+Every selected case stayed within active/full caps of native 3s/<5s and SAN 27s/<30s,
+including receipt/witness closure. SAN used
+`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1` and `UBSAN_OPTIONS=halt_on_error=1`;
+leak detection was disabled. Preserve the historical native R discovery TIMEOUT/124
+at 3.006150583s, old-pin R164 TIMEOUT/124 at 3.025444458s, and six old false-baseline
+fault FAILs; none is relabeled or retried unchanged. No default/full-suite, all-fault
+execution, leak, platform, or broad performance claim follows. P4.4 remains unchecked;
+R-AUTH and held `build_work`/`build_scratch_bytes` ±1 checks remain open; speed goals
+are unmet. P4.5, host/E6, and P5 remain deferred.
+See the [P4.4f1c handoff](p4.4f1c-handoff.md) and
+[TODO.md](../TODO.md#execution-cursor) for the cursor.
 
 Use the [README](../README.md) for onboarding and runnable examples, and
 [project analysis](project-analysis.md) for the dated product assessment. The

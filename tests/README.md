@@ -126,6 +126,76 @@ missing, duplicate, mixed, and focus-conflicting requests. Current registrations
 remain ON 60 / OFF 56. The backend-OFF configuration compiled the two owner targets
 and inspected registrations, but did not execute either owner or any OFF CTest test.
 
+## P4.4f1c ordinary-callee-chain selectors
+
+The represented runner also exposes the source-listed f1c selector set. These are
+examples of the list/read/dispatch CLI, not claims that these commands were run:
+
+```sh
+build-p44f1c-on/sol_wasm_represented_tests --list-p44f1a-cases
+build-p44f1c-on/sol_wasm_represented_tests --list-p44f1b-cases
+build-p44f1c-on/sol_wasm_represented_tests --list-p44f1c-cases
+
+python3 tests/support/run_with_progress.py \
+  --name p44f1c:represented.predicate-callees.launch.traced --timeout 3 -- \
+  build-p44f1c-on/sol_wasm_represented_tests \
+  --p44f1c-case represented.predicate-callees.launch.traced
+
+ASAN_OPTIONS=detect_leaks=0:halt_on_error=1 UBSAN_OPTIONS=halt_on_error=1 \
+  python3 tests/support/run_with_progress.py \
+  --name p44f1c:represented.predicate-callees.fault.predicate-callee-recursive-tail.0127 \
+  --timeout 27 -- build-p44f1c-san/sol_wasm_represented_tests \
+  --p44f1c-case represented.predicate-callees.fault.predicate-callee-recursive-tail.0127
+```
+
+The current source lists 23 f1a, 351 f1b, and 457 f1c keys; the f1c set is 33
+nonfault cases plus 424 new fault IDs. The exact semantic/configuration union is
+**506 keys per mode =457 f1c +49 named old keys** (originally 492 fresh +14 reuse).
+The coordinator-amended old49 dispatch is 23 f1a +19 mutations +6 resources +one
+`launch.traced` reset/semantic key; it is not an expanded retest gate. The
+source-reviewed manifest is 74 controls /4,515 faults /50 shards. The f1c selector
+uses the same source-listed case dispatcher for explicit selection and the default
+runner, adds no CTest registration, and does not change the no-argument full-run
+behavior. Its predicate-call boundary remains one owned plain `Int64` argument to a
+`Bool` predicate in an INSTANCE-owned ALWAYS `requires`; below that edge it admits
+pure scalar ordinary chains and ordinary recursive SCCs, while nested predicate
+invocation, mixed cycles, and unsupported transitive targets still reject.
+
+The exact 506-key union in each mode and its supplementary obligations are complete;
+independent final review accepts the bounded f1c technical/evidence scope. Coordinator
+integration and feature publication remain pending. Accounting
+distinguishes **139 ON current-binary executions +367 historical carries** (356
+old-fresh +11 reviewed reuse) and **495 SAN current-binary executions +11 historical
+carries**. Each mode includes eight reviewed current-pin targets; ON then has 131/131
+and SAN 487/487 continuation passes. These are 506 unique evidenced keys, not 506
+fresh current-binary runs. Historical PASS/reuse records retain their original source
+and binary pins and timings; no native result is carried to SAN. The old native R
+discovery and R164 timeouts remain UNKNOWN, and six earlier false-baseline fault
+FAILs remain failures rather than retrospective passes.
+
+The 424 new fault IDs per mode are Q 1–127 (physical allocations 3–129) and R 1–297
+(physical allocations 1–297); the legacy Q physical 1/2 identities retain their
+original f1a semantics. The two supplementary ordinary identity selectors passed in
+each mode against the retained f1b reference (direct result 7 /4,001 bytes; recursive
+result 42 /8,944 bytes), matching full module bytes, all-15-`Usage`, and typed catalog
+identity. All ten CLI negative controls per mode behaved as specified: exit 2, empty
+stdout, and no fixture/backend work. These 24 supplementary checks are outside the
+506-key union.
+
+Bounded f1c technical/evidence acceptance is not broad P4.4 or full-suite acceptance.
+The 74-control /4,515-fault /50-shard manifest is an inventory; it does not mean all
+faults or shards ran. No default/full-suite, leak-check, or platform-matrix pass is
+claimed. See the [P4.4f1c handoff](../docs/p4.4f1c-handoff.md) for evidence pins,
+historical outcomes, and remaining project-level boundaries.
+
+The wrapper timeouts above are active-work ceilings only: native 3s / SAN 27s. The
+reviewed protocol measures complete time after capture/log close, primary-receipt
+close, and post-close-witness close, under 5s / under 30s. The examples are not that
+complete acceptance supervisor by themselves; do not use the old 5s/30s values as
+active-work timeouts. See the
+[P4.4f1c handoff](../docs/p4.4f1c-handoff.md) for the accepted scope, pins, and
+preserved historical outcomes.
+
 ### Records and real progress
 
 Test-owned stderr records start with `SOL_TEST_PROGRESS` and tab-separated
