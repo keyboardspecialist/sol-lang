@@ -123,8 +123,8 @@ are unmet. P4.5, host/E6, and P5 remain deferred.
 See the [P4.4f1c handoff](p4.4f1c-handoff.md) and
 [TODO.md](../TODO.md#execution-cursor) for the cursor.
 
-**Current status addendum, October 20, 2026 (P4.4f1d; technical/evidence accepted,
-publication pending):** The accepted slice is one direct pure predicate call from a
+**Current status addendum, October 20, 2026 (P4.4f1d; technical/evidence accepted
+and feature published):** The accepted slice is one direct pure predicate call from a
 type-owned refinement: `type T = refined Int64 where helper(self)`. It requires the
 exact refinement context and SELF binding, a plain owned `Int64` backing, and a
 direct `Int64 -> Bool` call. Existing pure ordinary scalar callee chains and
@@ -144,8 +144,10 @@ independently approved.** Frozen inputs are test
 `24a3e83c5496082bc7cf9759befa837ff18eb42bb82ec1e17fc16bdc19416cd5`, ON binary
 `9de1615caaf81b485cdf589de81245019f3693ae68dd27ad6a30a67cbadbfb5f`, and SAN
 binary `fc5897fe894f8a5c8a1b6e46bf43b3017f0308c88a74c728a7c570a0c1081fd6`.
-HEAD remains `7d19435e8474ef8343fe304d60ed3c6f3ab07d6c`; f1d is not committed or
-published. This is not broad P4/P4.4 or speed acceptance.
+The feature `Execute direct refinement predicate calls` was committed as `42fd4cd`
+and pushed to `origin/master` (`7d19435..42fd4cd`). This publication does not refresh
+the accepted source/binary evidence pins or timings. It is not broad P4/P4.4 or speed
+acceptance.
 
 Each mode resolves **486 selected obligations = 412 f1d (45 nonfault + 367 new
 faults) + 74 compatibility**, with zero pending validation keys:
@@ -217,13 +219,16 @@ seal-failure semantics, byte-safe original-token restoration, and sticky blockin
 described in the handoff. Existing OFF reuse is compile/build-graph-only; no OFF
 runtime result is claimed.
 
-Technical/evidence acceptance is closed. Separate final documentation review,
-Astra/coordinator integration and publication-readiness checks, coordinator smokes
-and preserved-WIP checks, integration, commit/push, and publication verification
-remain pending. Broad P4.4 remains unchecked; R-AUTH and held `build_work` /
+Final Sol review and the documentation audit are approved; Astra aligned, the three
+current-binary coordinator smokes passed (0.243s, 0.452s, 1.863s) within strict caps,
+and protected original/resource WIPs were verified unchanged. Coordinator integration
+and publication checks are closed. This status-only refresh adds no evidence or
+timing. Broad P4.4 remains unchecked; R-AUTH and held `build_work` /
 `build_scratch_bytes` ±1 checks remain open; speed goals remain unmet. P4.5,
-host/E6, and P5 remain deferred. After publication, the next cursor is Sol planning
-for remaining predicate contexts/signatures only, not implementation authorization.
+host/E6, and P5 remain deferred. The sole next cursor is P4.4f1e bounded Sol 6.1 High
+planning to analyze remaining predicate-call contexts/signatures and choose a
+technical priority. No form is preselected for implementation: require a separate
+bounded brief and review first.
 See the [P4.4f1d handoff](p4.4f1d-handoff.md) and
 [TODO.md](../TODO.md#execution-cursor).
 

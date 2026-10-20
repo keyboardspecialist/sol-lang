@@ -2,8 +2,8 @@
 
 This list is the sole live authority for work status and execution order. The
 foundation was audited September 9, 2026 against baseline `6ec4ba9`; live status
-and the cursor were refreshed October 20, 2026 for the current f1d publication
-handoff. The broader language and toolchain phases remain documented in the
+and the cursor were refreshed October 20, 2026 after P4.4f1d publication. The
+broader language and toolchain phases remain documented in the
 [README](README.md#roadmap).
 [Project analysis](docs/project-analysis.md) is an analysis snapshot;
 [Compiler status](docs/compiler-status.md) is the detailed implementation snapshot
@@ -13,12 +13,14 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 
 ## Execution Cursor
 
-- **Active overall cursor: P4.4f1d coordinator publication.** Bounded technical and
-  evidence acceptance is independently closed for all 486 selected key obligations
-  per mode, with zero pending validation keys. All current bounded implementation
-  source, including corrected CORE, U/V allocation helpers, and nonfault safety fixes,
-  is approved. Separate documentation review, Astra/coordinator integration checks,
-  and publication remain pending; f1d is not yet committed or pushed.
+- **Active overall cursor: P4.4f1e bounded planning.** P4.4f1d's bounded technical
+  and evidence acceptance is closed for all 486 selected key obligations per mode,
+  with zero pending validation keys. The feature `Execute direct refinement
+  predicate calls` was committed as `42fd4cd` and successfully pushed to
+  `origin/master` (`7d19435..42fd4cd`). Final Sol review, documentation audit, Astra
+  alignment, coordinator checks, and publication gates are closed. Plan only the
+  remaining predicate-call contexts/signatures with Sol 6.1 High; implementation
+  requires a separate bounded brief and review.
   P4.4f1b's bounded leaf-predicate milestone was accepted and published as
   `ca18c6d37c6c464836be01f02b06713319d0d069`; the subsequent status-only history
   checkpoint is `aacd482`. Its validation remains pinned to
@@ -52,7 +54,7 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
   ALL60 audit is finished:
   58 PASS, zero FAIL, two cutoffs, **NOT_ACCEPTANCE**. Speed goals remain unmet; this
   cursor change does not resolve them. P4.4f1b and bounded f1c are accepted and
-  published; the active cursor is P4.4f1d coordinator publication, as recorded
+  published; the active cursor is P4.4f1e bounded planning, as recorded
   below.
 - M1 is resolved through its infeasibility path: the
   [September 25 report](experiments/m1/README.md) records the missing independent
@@ -527,18 +529,22 @@ approved, including the core, allocation helpers, and nonfault safety correction
 Two independent captures establish U=98 and V=272 allocation requests; the U tail
 has 95 requests and the new fault set is M=367. These are measured inventory
 dimensions, not semantic or resource-exactness goldens. Legacy IDs3/4/5 remain at
-physical1/2/3 with attempts1/3/3. Final technical/evidence acceptance is approved:
-each mode has 486 selected obligations (412 f1d +74 compatibility), zero pending.
-Final-batch fresh/carry counts are ON 111/375 and SAN 318/168; each carry total
-includes eight earlier matching-d03 mutation receipts, so carries are not all
-historical and these are not 486 fresh executions. Including those eight,
-current-binary semantic observations are ON 119 / SAN 326. Older source-equivalent
-fault evidence is ON 367 / SAN 160; the remaining 207 SAN V faults passed fresh.
-The historical 19-ON/55-SAN authority deviation remains explicit and is not
-retrospectively authorized. Separate docs
-review, Astra/coordinator checks, and publication remain pending; f1d is uncommitted
-and unpublished. After publication, the next cursor is Sol planning for remaining
-predicate contexts/signatures only—not implementation authorization. See the
+physical1/2/3 with attempts1/3/3. Technical/evidence acceptance and publication are
+complete at `42fd4cd` (`7d19435..42fd4cd`, `Execute direct refinement predicate
+calls`). The accepted union remains 486 selected obligations per mode (412 f1d +74
+compatibility), zero pending. Final-batch fresh/carry counts remain ON 111/375 and
+SAN 318/168; carries include eight earlier matching-d03 mutation receipts per mode.
+Including those, current-binary semantic observations are ON 119 / SAN 326; older
+source-equivalent fault evidence is ON 367 / SAN 160. The 207 SAN V faults passed
+fresh. The historical 19-ON/55-SAN authority deviation remains explicit and is not
+retrospectively authorized. Publication did not refresh evidence: source/binary pins,
+coverage, and timings remain those in the accepted final report. Three native
+current-binary coordinator smokes passed at 0.243s, 0.452s, and 1.863s within their
+strict caps; protected original/resource WIPs were verified unchanged. Final Sol
+review, documentation audit, Astra alignment, coordinator checks, and publication
+gates are closed. The sole next cursor is P4.4f1e bounded Sol 6.1 High planning for
+remaining predicate-call contexts/signatures; no form is selected for implementation
+before technical analysis, an approved brief, and review. See the
 [P4.4f1d handoff](docs/p4.4f1d-handoff.md).
 
 Preserve the older seven-source/five-fixture `paused-p44-wip` bytes and the separate
@@ -554,7 +560,7 @@ The following are status handoffs, not competing execution cursors:
 
 | Lane / owner | Ready work and exclusive scope | Acceptance handoff |
 | --- | --- | --- |
-| P4.4f1d coordinator publication | **Active:** technical/evidence acceptance is closed; final documentation review, Astra/coordinator integration checks, and publication remain. | 486 selected obligations per mode =412 f1d +74 compatibility, zero pending. Fresh/carry is ON111/375 and SAN318/168; carries include eight matching-d03 mutation receipts per mode. SAN's 207 V faults (V64–135, V137–271) passed fresh; old V64 interruption remains historical. The 19/55-slot execution-authority deviation remains explicit. See the [P4.4f1d handoff](docs/p4.4f1d-handoff.md). |
+| P4.4f1d published / P4.4f1e planning | f1d bounded technical/evidence acceptance and feature publication are complete at `42fd4cd`; its source/binary evidence pins and timings remain unchanged. | Sole next cursor: Sol 6.1 High planning to analyze remaining predicate-call contexts/signatures and select a bounded priority. No implementation until a separate approved brief and review. See the [P4.4f1d handoff](docs/p4.4f1d-handoff.md). |
 | R-AUTH / separate Sol 6.1 High brief | Independent inherited P3.6 resource-authentication defect and preserved six-path resource WIP; coverage extension is pending and unaccepted. | Specify independent exactness reconstruction and truthful coverage; keep held `build_work`/`build_scratch_bytes` ±1 assertions unresolved until evidence exists. |
 | P4.4f1a integration / coordinator | Bounded metadata checkpoint committed as `5c9c056`, fast-forwarded to `master`, and pushed to `origin/master`; existing default selectors and full registrations remain unchanged. | Integration complete. This publication update does not refresh or extend the accepted test receipts. |
 | P4.5/P5 and host | Dependency-deferred; f1c adds no host adapter, E6 execution, artifact writer, or `sol build` work. | Requires its own approved interface and task briefs. |

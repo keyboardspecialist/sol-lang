@@ -197,7 +197,7 @@ active-work timeouts. See the
 [P4.4f1c handoff](../docs/p4.4f1c-handoff.md) for the accepted scope, pins, and
 preserved historical outcomes.
 
-## P4.4f1d refinement-call selectors — technical/evidence accepted, publication pending
+## P4.4f1d refinement-call selectors — accepted and published
 
 The approved f1d core adds one direct pure type-owned refinement call,
 `type T = refined Int64 where helper(self)`, with an owned plain `Int64 -> Bool`
@@ -206,9 +206,9 @@ available below it. This does not admit wrappers or computed `self`, nested
 predicate calls/mixed cycles, ensures calls, Bool/Unit signatures, refined or Text
 callee interiors, PanicText, or the existing guard-call case. All bounded f1d
 source, including the corrected core, allocation helpers, and nonfault-safety fixes,
-is independently approved. Final technical/evidence acceptance is closed; separate
-documentation review and coordinator publication checks remain pending. The bounded
-f1d work is not yet committed or published, and this does not close broad P4.4.
+is independently approved. Final technical/evidence acceptance and feature
+publication are closed at `42fd4cd` (`7d19435..42fd4cd`). This status-only refresh
+adds no validation evidence or timing and does not close broad P4.4.
 
 The represented runner's f1d list/selection syntax and the approved core key are:
 
@@ -263,8 +263,11 @@ failure and raw receipt remain unchanged; read-only reconciliation confirms the
 expected nonzero behavior without rerun. The prior f1c 506-key mixed-pin accounting
 (ON 139 current-binary executions +367 carries; SAN 495 +11) remains historical,
 not f1d evidence. The earlier 19-ON/55-SAN authority deviation remains explicit,
-not retroactively authorized. See the [P4.4f1d handoff](../docs/p4.4f1d-handoff.md)
-for exact pins, carry provenance, preserved failures, and publication gates.
+not retroactively authorized. Final Sol review, documentation audit, Astra
+alignment, coordinator checks, and publication gates are closed; three native
+current-binary smokes passed within strict caps and protected original/resource WIPs
+were verified unchanged. See the [P4.4f1d handoff](../docs/p4.4f1d-handoff.md) for
+exact pins, carry provenance, preserved failures, and the P4.4f1e planning cursor.
 
 ### Records and real progress
 
