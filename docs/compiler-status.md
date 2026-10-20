@@ -51,7 +51,7 @@ in predicates`), pushed to `origin/master`. Read-only verification found HEAD an
 verification. Astra readiness, coordinator integration, three corrected-binary
 smokes, and preserved-WIP checks are complete. This accepts the bounded f1c slice,
 not broad P4.4 closure, R-AUTH closure, a full suite, or project-speed success. The
-status-only documentation refresh is uncommitted and has no follow-up hash.
+status-only documentation refresh was published as `7d19435`.
 
 Under the unchanged f1b predicate shape, f1c admits pure ordinary scalar callee
 chains and ordinary recursive SCCs. The predicate remains exactly one direct
@@ -122,6 +122,110 @@ R-AUTH and held `build_work`/`build_scratch_bytes` ±1 checks remain open; speed
 are unmet. P4.5, host/E6, and P5 remain deferred.
 See the [P4.4f1c handoff](p4.4f1c-handoff.md) and
 [TODO.md](../TODO.md#execution-cursor) for the cursor.
+
+**Current status addendum, October 20, 2026 (P4.4f1d; technical/evidence accepted,
+publication pending):** The accepted slice is one direct pure predicate call from a
+type-owned refinement: `type T = refined Int64 where helper(self)`. It requires the
+exact refinement context and SELF binding, a plain owned `Int64` backing, and a
+direct `Int64 -> Bool` call. Existing pure ordinary scalar callee chains and
+recursive SCCs remain beneath that call, subject to prior plain-image restrictions
+and call-free target-owned predicates. Wrappers/computed SELF, nested calls or mixed
+cycles, ensures, Bool/Unit signatures, refined or Text target interiors, PanicText,
+and the existing guard-call case remain excluded. Full indexed refinement-body and
+`CHECK_REFINED` preflight remain required; the NULL-index failure-preflight caller
+gets no fallback scan, cache, or authentication bypass. No emitter, ABI, schema/header,
+IR, observer, or allocation-interface change is part of this slice.
+
+**All bounded f1d source and the final dependency-based semantic evidence union are
+independently approved.** Frozen inputs are test
+`d03cd55767bdc831f9a3086a2658dc4ab9e8c796a5d4599574802b71fe8c27f8`, production
+`8ed0b9a6b2c2a877d12270b2f70714a7681741790bb3bd1823ffe581d403eca2`, header
+`6c10e20828b9e0e0fb7ed0cae4c16a7f48385b61240723bb1288b6de36a4b3c7`, fixture
+`24a3e83c5496082bc7cf9759befa837ff18eb42bb82ec1e17fc16bdc19416cd5`, ON binary
+`9de1615caaf81b485cdf589de81245019f3693ae68dd27ad6a30a67cbadbfb5f`, and SAN
+binary `fc5897fe894f8a5c8a1b6e46bf43b3017f0308c88a74c728a7c570a0c1081fd6`.
+HEAD remains `7d19435e8474ef8343fe304d60ed3c6f3ab07d6c`; f1d is not committed or
+published. This is not broad P4/P4.4 or speed acceptance.
+
+Each mode resolves **486 selected obligations = 412 f1d (45 nonfault + 367 new
+faults) + 74 compatibility**, with zero pending validation keys:
+
+| Mode | Fresh final-batch PASS | Reused/carry PASS | Total selected | Pending |
+| --- | ---: | ---: | ---: | ---: |
+| ON | 111 | 375 | 486 | 0 |
+| SAN | 318 | 168 | 486 | 0 |
+
+The carry columns include eight earlier matching-d03 mutation receipts per mode;
+they are not all historical carries. Thus current-binary semantic observations are
+119 ON / 326 SAN, not fresh launches. Older source-equivalent new-fault evidence is
+367 ON / 160 SAN; SAN freshly executed the remaining 207 V faults, V64–135 and
+V137–271. All 367 new fault IDs have evidence in both modes, and legacy IDs 3/4/5
+(physical 1/2/3, attempts 1/3/3) were freshly run in both modes. The ON final batch
+ran no new native U/V fault sweep. Compatibility is exactly 23 f1a (including the
+three legacy faults), 22 f1b, and 29 f1c. Per-key evidence preserves original pins
+and timings; carry timing is never presented as current-binary timing.
+
+U=98 and V=272 are independently captured allocation inventories;
+`M=(98-3)+272=367`, comprising the U tail 95 at physical 4–98 plus V physical 1–272.
+Inventory digests are distinct from module hashes; module sizes are 9,433 and 63,357 bytes.
+Full records, module bytes, all 15 Usage fields, and witnesses were compared. These
+are measured inventory identities, not semantic or resource-exactness goldens. The
+old execution-authority deviation (19 ON /55 SAN slots) remains explicit and was
+not retrospectively authorized; historical observations are credited only under
+the coordinator's source-equivalence disposition and reviewed per-key ledger.
+
+Runtime metadata certification passed pre/post in both modes: lists 23/351/457/412,
+the old three lists byte-identical, all 50 shard names unchanged, and all six outputs
+byte-identical across pre/post and ON/SAN captures. The 4,999-row manifest has 76
+unique controls, 117 control rows, and 4,882 distinct faults; removing only the two
+new controls and 367 f1d faults reproduces the 4,630 old ordered tuples exactly,
+including order, multiplicity, and ownership. This is not execution of all 4,882
+faults or the full default suite. The exact 74-key compatibility checks compared full
+Wasm bytes, all 15 Usage fields, typed catalog identity, and full typed identity
+records against eligible `df97d73` references: direct result 7/4,001 bytes, recursive
+result 42/8,944 bytes, and plain module 3,707 bytes. These are compatibility
+comparisons, not new compiler-output golden files.
+
+The 44 frozen negative-argv cases (22 per mode) returned status 2 with empty stdout
+and no semantic progress; only the unconditional wrapper startup pair occurred.
+The original ON missing-value runner-classification FAIL and raw receipt remain
+unchanged; read-only reconciliation classifies its actual behavior as
+`PASS_EXPECTED_NONZERO`, without rerun or receipt replacement. The original SUP
+pre-summary FAIL remains distinct. Both assigned SUP slots were used: 8.558700s
+pre/reconciliation and 1.957007s post; the disclosed 138.732016s coordinator idle
+was excluded from charged runner time, and the slot was not renewed.
+
+Fresh-case maxima were ON active2.562463s /complete2.577694s and SAN active
+11.601809s /complete11.646119s, within unchanged active<=3s/full<5s and
+active<=27s/full<30s limits. Receipt closure remains raw stream/result, primary
+receipt, then post-close witness before the complete-time sample. SAN used
+`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1` and `UBSAN_OPTIONS=halt_on_error=1`;
+there is no leak, full-suite, host/platform, or whole-suite speed claim. Preserve
+historical V64 INTERRUPTED, earlier failures/unknowns, original pins and times; the
+fresh authorized V64 pass discharges its obligation without relabeling that history.
+
+The corrected core closes CR1–CR3 and CCR1–CCR2; allocation AR1/AR2 and nonfault
+NF1/NF2/NF1-R1/NF2-R1 are also approved. `CHECK_REFINED` consumes pending
+representation ownership while physical scalar backing remains available to SELF;
+success alone clears backing initialization and publishes the nominal result.
+False/pending failure preserves backing without an invented scope-exit drop;
+zero-action route markers and source/P2/P3 joins remain authenticated. The D/T/Q/R
+22-anchor inverse line bridge remains strict except for cross-version line
+coordinates; same-pin record and raw comparisons retain actual lines. The NF2
+hostile-owner cases retain the selected-scalar mutation, expected-delta fences,
+seal-failure semantics, byte-safe original-token restoration, and sticky blocking
+described in the handoff. Existing OFF reuse is compile/build-graph-only; no OFF
+runtime result is claimed.
+
+Technical/evidence acceptance is closed. Separate final documentation review,
+Astra/coordinator integration and publication-readiness checks, coordinator smokes
+and preserved-WIP checks, integration, commit/push, and publication verification
+remain pending. Broad P4.4 remains unchecked; R-AUTH and held `build_work` /
+`build_scratch_bytes` ±1 checks remain open; speed goals remain unmet. P4.5,
+host/E6, and P5 remain deferred. After publication, the next cursor is Sol planning
+for remaining predicate contexts/signatures only, not implementation authorization.
+See the [P4.4f1d handoff](p4.4f1d-handoff.md) and
+[TODO.md](../TODO.md#execution-cursor).
 
 Use the [README](../README.md) for onboarding and runnable examples, and
 [project analysis](project-analysis.md) for the dated product assessment. The

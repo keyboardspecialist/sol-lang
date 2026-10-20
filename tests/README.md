@@ -197,6 +197,75 @@ active-work timeouts. See the
 [P4.4f1c handoff](../docs/p4.4f1c-handoff.md) for the accepted scope, pins, and
 preserved historical outcomes.
 
+## P4.4f1d refinement-call selectors — technical/evidence accepted, publication pending
+
+The approved f1d core adds one direct pure type-owned refinement call,
+`type T = refined Int64 where helper(self)`, with an owned plain `Int64 -> Bool`
+predicate call. Existing ordinary scalar callee chains and recursive SCCs remain
+available below it. This does not admit wrappers or computed `self`, nested
+predicate calls/mixed cycles, ensures calls, Bool/Unit signatures, refined or Text
+callee interiors, PanicText, or the existing guard-call case. All bounded f1d
+source, including the corrected core, allocation helpers, and nonfault-safety fixes,
+is independently approved. Final technical/evidence acceptance is closed; separate
+documentation review and coordinator publication checks remain pending. The bounded
+f1d work is not yet committed or published, and this does not close broad P4.4.
+
+The represented runner's f1d list/selection syntax and the approved core key are:
+
+```sh
+build-p44f1c-on/sol_wasm_represented_tests --list-p44f1d-cases
+python3 tests/support/run_with_progress.py \
+  --name p44f1d:represented.refinement-calls.launch.traced --timeout 3 -- \
+  build-p44f1c-on/sol_wasm_represented_tests \
+  --p44f1d-case represented.refinement-calls.launch.traced
+```
+
+These commands illustrate selector syntax, not the final acceptance evidence; a
+single selected case remains focused evidence only. The final report records
+**486 selected obligations per mode = 412 f1d (45 nonfault + 367 new faults) + 74
+compatibility**, with zero pending. Fresh final-batch PASS counts are ON 111 and
+SAN 318; carry/reuse counts are ON 375 and SAN 168. Each carry count includes eight
+earlier matching-d03 mutation receipts, so these are not all historical carries or
+486 fresh launches. Including those eight, current-binary semantic observations are
+119 ON / 326 SAN. The remaining older source-equivalent fault evidence is 367 ON /
+160 SAN; SAN freshly passed the 207 V faults V64–135 and V137–271. All 367 new fault
+IDs have evidence in both modes, and legacy IDs 3/4/5 were freshly run in both modes.
+The ON final batch ran no new native U/V fault sweep. The original audited 370 ON /
+161 SAN PASS observations remain historical and are eligible only under the
+coordinator's source-equivalence disposition; source-equivalent carries retain their
+old pins/timings and are not current-binary timing. Original V64 remains an
+INTERRUPTED history record; its separate newly authorized fresh pass discharges the
+key without rewriting the interruption.
+
+Native active/full limits remain <=3s/<5s and SAN <=27s/<30s after closure. The
+fresh-batch maxima were 2.562463s active / 2.577694s complete ON and 11.601809s /
+11.646119s SAN. Complete-time measurement follows raw/log and Result closure,
+primary-receipt closure, and post-close-witness closure. SAN uses
+`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1` and
+`UBSAN_OPTIONS=halt_on_error=1`; leak detection is disabled. There is no suite-speed
+or leak-coverage claim.
+
+Two independent captures establish U=98 and V=272 allocation requests. The new
+fault set is `M=(98-3)+272=367`: U-tail requests map to physical 4–98, and V covers
+physical 1–272. Inventory digests differ from module hashes; 9,433/63,357 are module
+byte counts. Full ordered records, module bytes, all 15 Usage fields, and witnesses
+were compared. These are measured inventory identities, not semantic or
+resource-exactness goldens. Legacy IDs3/4/5 remain physical1/2/3 with initial
+failed attempts1/3/3.
+
+Runtime inventory certification passed pre/post in both modes: lists 23/351/457/412,
+old lists byte-identical, all 50 shard names unchanged, and the 4,999-row manifest
+preserves the 4,630 old ordered tuples exactly. It records 76 controls, 117 control
+rows, and 4,882 fault IDs; this does not mean all 4,882 faults or the full default
+suite ran. All 44 frozen negative-argv cases (22 per mode) returned status 2 with
+empty stdout and no semantic progress. The original ON missing-value classification
+failure and raw receipt remain unchanged; read-only reconciliation confirms the
+expected nonzero behavior without rerun. The prior f1c 506-key mixed-pin accounting
+(ON 139 current-binary executions +367 carries; SAN 495 +11) remains historical,
+not f1d evidence. The earlier 19-ON/55-SAN authority deviation remains explicit,
+not retroactively authorized. See the [P4.4f1d handoff](../docs/p4.4f1d-handoff.md)
+for exact pins, carry provenance, preserved failures, and publication gates.
+
 ### Records and real progress
 
 Test-owned stderr records start with `SOL_TEST_PROGRESS` and tab-separated

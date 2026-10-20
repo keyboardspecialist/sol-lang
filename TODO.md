@@ -2,8 +2,9 @@
 
 This list is the sole live authority for work status and execution order. The
 foundation was audited September 9, 2026 against baseline `6ec4ba9`; live status
-and the cursor were revised October 19, 2026 for the current worktree. The
-broader language and toolchain phases remain documented in the [README](README.md#roadmap).
+and the cursor were refreshed October 20, 2026 for the current f1d publication
+handoff. The broader language and toolchain phases remain documented in the
+[README](README.md#roadmap).
 [Project analysis](docs/project-analysis.md) is an analysis snapshot;
 [Compiler status](docs/compiler-status.md) is the detailed implementation snapshot
 with a current-worktree addendum, not a competing queue. Impact and complexity
@@ -12,7 +13,12 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 
 ## Execution Cursor
 
-- **Active overall cursor: Sol 6.1 High planning for the next bounded P4.4f1d predicate-call slice.**
+- **Active overall cursor: P4.4f1d coordinator publication.** Bounded technical and
+  evidence acceptance is independently closed for all 486 selected key obligations
+  per mode, with zero pending validation keys. All current bounded implementation
+  source, including corrected CORE, U/V allocation helpers, and nonfault safety fixes,
+  is approved. Separate documentation review, Astra/coordinator integration checks,
+  and publication remain pending; f1d is not yet committed or pushed.
   P4.4f1b's bounded leaf-predicate milestone was accepted and published as
   `ca18c6d37c6c464836be01f02b06713319d0d069`; the subsequent status-only history
   checkpoint is `aacd482`. Its validation remains pinned to
@@ -27,9 +33,9 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
   as 139 ON current-binary executions +367 historical carries and 495 SAN
   current-binary executions +11 carries; carries are not fresh timings. Documentation
   review, Astra readiness, coordinator smokes, preserved-WIP checks, integration,
-  commit, and push gates are complete. This status-only documentation refresh is
-  uncommitted and has no follow-up hash. P4.4 remains unchecked; f1c acceptance is not
-  broad P4.4 closure, full-suite acceptance, R-AUTH closure, or speed success. The
+  commit, and push gates are complete. The status-only documentation refresh was
+  published as `7d19435`. P4.4 remains unchecked; f1c acceptance is not broad P4.4
+  closure, full-suite acceptance, R-AUTH closure, or speed success. The
   user's standing commit/push-and-continue direction needs no renewed permission
   stop. P4.4f1a
   remains the prior accepted metadata checkpoint, published as `5c9c056`. See the
@@ -46,7 +52,8 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
   ALL60 audit is finished:
   58 PASS, zero FAIL, two cutoffs, **NOT_ACCEPTANCE**. Speed goals remain unmet; this
   cursor change does not resolve them. P4.4f1b and bounded f1c are accepted and
-  published; the next cursor is P4.4f1d planning, as recorded below.
+  published; the active cursor is P4.4f1d coordinator publication, as recorded
+  below.
 - M1 is resolved through its infeasibility path: the
   [September 25 report](experiments/m1/README.md) records the missing independent
   governance and protected evaluation boundary.
@@ -421,7 +428,9 @@ target logic, access classes, result classes, failure masks, provenance, and exi
 P3 completes static runtime lowering but defines no executor, physical ABI, Wasm,
 adapter, allocator implementation, CLI/build artifact, or tokens. The P3.3 policy
 retains exact inherited P3.1 sites and adds supplemental sites only for uncovered
-allocation/resource producers. P3.W1 remains unperformed historical/optional proposed work and non-cursor; it does not replace the active P4.4f1d planning cursor.
+allocation/resource producers. P3.W1 remains unperformed historical/optional
+proposed work and non-cursor; it does not replace the active P4.4f1d coordinator
+publication cursor.
 
 ### P4 - WebAssembly Backend and Host Adapter
 
@@ -509,12 +518,28 @@ fault/shard, a default/full suite, leak check, or platform matrix ran. Q/R diges
 technical/evidence acceptance and publication are complete at `24e2d16`. Final
 documentation review, Astra readiness, three coordinator smokes, preserved-WIP checks,
 integration, and push verification are complete. The source commit is published to
-`origin/master`; this status-only documentation refresh is uncommitted and has no
-follow-up hash. P4.4 stays unchecked, R-AUTH and its held ±1 resource checks remain
-open, and project speed goals are unmet. The next cursor is Sol 6.1 High planning for
-P4.4f1d: audit and prioritize a bounded next predicate-call context/signature. This
-is planning only; no additional form is admitted and implementation is not authorized
-until the bounded brief is reviewed.
+`origin/master`; the status-only documentation refresh was published as `7d19435`.
+P4.4 stays unchecked, R-AUTH and its held ±1 resource checks remain open, and project
+speed goals are unmet. The approved P4.4f1d slice admits one direct pure type-owned
+refinement call, `type T = refined Int64 where helper(self)`, with the existing
+ordinary scalar callee-chain/SCC closure. All bounded f1d source is now independently
+approved, including the core, allocation helpers, and nonfault safety corrections.
+Two independent captures establish U=98 and V=272 allocation requests; the U tail
+has 95 requests and the new fault set is M=367. These are measured inventory
+dimensions, not semantic or resource-exactness goldens. Legacy IDs3/4/5 remain at
+physical1/2/3 with attempts1/3/3. Final technical/evidence acceptance is approved:
+each mode has 486 selected obligations (412 f1d +74 compatibility), zero pending.
+Final-batch fresh/carry counts are ON 111/375 and SAN 318/168; each carry total
+includes eight earlier matching-d03 mutation receipts, so carries are not all
+historical and these are not 486 fresh executions. Including those eight,
+current-binary semantic observations are ON 119 / SAN 326. Older source-equivalent
+fault evidence is ON 367 / SAN 160; the remaining 207 SAN V faults passed fresh.
+The historical 19-ON/55-SAN authority deviation remains explicit and is not
+retrospectively authorized. Separate docs
+review, Astra/coordinator checks, and publication remain pending; f1d is uncommitted
+and unpublished. After publication, the next cursor is Sol planning for remaining
+predicate contexts/signatures only—not implementation authorization. See the
+[P4.4f1d handoff](docs/p4.4f1d-handoff.md).
 
 Preserve the older seven-source/five-fixture `paused-p44-wip` bytes and the separate
 six-path resource WIP; neither is to be discarded or described as committed. The
@@ -529,7 +554,7 @@ The following are status handoffs, not competing execution cursors:
 
 | Lane / owner | Ready work and exclusive scope | Acceptance handoff |
 | --- | --- | --- |
-| Predicate execution / Sol 6.1 High | **Current bounded work:** plan P4.4f1d by auditing and prioritizing the next bounded predicate-call context/signature; implementation awaits its reviewed brief. | P4.4f1c is accepted and published as `24e2d16`; its 506/506-per-mode union and supplementary checks are complete. ON is 139 current-binary executions +367 historical carries; SAN is 495 +11. All integration/publication gates are closed; historical carries remain pinned, not fresh timings. |
+| P4.4f1d coordinator publication | **Active:** technical/evidence acceptance is closed; final documentation review, Astra/coordinator integration checks, and publication remain. | 486 selected obligations per mode =412 f1d +74 compatibility, zero pending. Fresh/carry is ON111/375 and SAN318/168; carries include eight matching-d03 mutation receipts per mode. SAN's 207 V faults (V64–135, V137–271) passed fresh; old V64 interruption remains historical. The 19/55-slot execution-authority deviation remains explicit. See the [P4.4f1d handoff](docs/p4.4f1d-handoff.md). |
 | R-AUTH / separate Sol 6.1 High brief | Independent inherited P3.6 resource-authentication defect and preserved six-path resource WIP; coverage extension is pending and unaccepted. | Specify independent exactness reconstruction and truthful coverage; keep held `build_work`/`build_scratch_bytes` ±1 assertions unresolved until evidence exists. |
 | P4.4f1a integration / coordinator | Bounded metadata checkpoint committed as `5c9c056`, fast-forwarded to `master`, and pushed to `origin/master`; existing default selectors and full registrations remain unchanged. | Integration complete. This publication update does not refresh or extend the accepted test receipts. |
 | P4.5/P5 and host | Dependency-deferred; f1c adds no host adapter, E6 execution, artifact writer, or `sol build` work. | Requires its own approved interface and task briefs. |

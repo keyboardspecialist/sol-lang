@@ -5366,14 +5366,13 @@ static bool represented_predicate_call_exact(const SolWasmRepresentedBuildReques
     const SolIr *ir = concrete->program.ir;
     if (context->obligation >= ir->obligation_count) return false;
     const SolIrObligation *obligation = &ir->obligations[context->obligation];
+    bool refinement = body->refinement_self_recipe != SOL_MIR_RECIPE_NONE;
     if (body->owner_kind != SOL_MIR_PREDICATE_OWNER_INSTANCE
         || body->instance >= m->image_count || body->import != SOL_MIR_MATERIALIZED_NONE
         || body->blocks.offset > o->predicate_block_count
         || body->blocks.count > o->predicate_block_count - body->blocks.offset
         || body->phase != SOL_CONTRACT_REQUIRES || body->outcome != SOL_CONTRACT_OUTCOME_ALWAYS
-        || body->refinement_self_recipe != SOL_MIR_RECIPE_NONE
         || body->context >= m->context_count || block->body != body_id
-        || context->kind != SOL_MIR_PLAN_CONTEXT_CONTRACT
         || context->target_kind != SOL_MIR_PLAN_TARGET_INSTANCE
         || context->instance != body->instance || obligation->kind != SOL_CONTRACT_REQUIRES
         || obligation->outcome != SOL_CONTRACT_OUTCOME_ALWAYS
@@ -5405,6 +5404,11 @@ static bool represented_predicate_call_exact(const SolWasmRepresentedBuildReques
         || m->images[callee->instance].effects != term->effects
         || !represented_pure_effect_row(m, m->images[callee->instance].effects)
         || !represented_pure_effect_row(m, signature->effects)) return false;
+    if (!refinement && (context->kind != SOL_MIR_PLAN_CONTEXT_CONTRACT
+        || body->inputs.offset > o->predicate_input_count
+        || body->inputs.count > o->predicate_input_count - body->inputs.offset)) {
+        return false;
+    }
     const SolMirRuntimeSignatureSlot *slot = &conventions->signature_slots[signature->slots.offset];
     const SolMirRuntimeOperand *operand = &conventions->operands[call->operands.offset];
     const SolMirPredicateOperand *predicate_operand = &o->predicate_operands[
@@ -5427,6 +5431,43 @@ static bool represented_predicate_call_exact(const SolWasmRepresentedBuildReques
         || operand->value.kind != SOL_MIR_RUNTIME_VALUE_PREDICATE_VALUE
         || operand->value.id != predicate_operand->value || call->result.kind != SOL_MIR_RUNTIME_VALUE_PREDICATE_VALUE
         || call->result.id != term->result) return false;
+    if (refinement) {
+        if (context->kind != SOL_MIR_PLAN_CONTEXT_REFINEMENT
+            || context->definition >= ir->definition_count
+            || context->refinement_type >= m->type_count
+            || obligation->owner_kind != SOL_CONTRACT_OWNER_TYPE
+            || obligation->owner != context->definition
+            || obligation->snapshots.count != 0 || obligation->result_available
+            || obligation->result_type != SOL_IR_NONE
+            || body->inputs.count != 1 || body->inputs.offset > o->predicate_input_count
+            || body->inputs.count > o->predicate_input_count - body->inputs.offset
+            || body->refinement_self_recipe >= concrete->representation.recipe_count
+            || concrete->representation.recipes[body->refinement_self_recipe].kind
+                != SOL_MIR_RECIPE_INT64
+            || concrete->representation.recipes[body->refinement_self_recipe].storage
+                != SOL_MIR_STORAGE_SCALAR) return false;
+        const SolIrDefinition *definition = &ir->definitions[context->definition];
+        const SolMirMaterializedType *refinement_type = &m->types[context->refinement_type];
+        if (definition->kind != SOL_IR_DEFINITION_REFINED
+            || definition->representation >= ir->type_count
+            || ir->types[definition->representation].kind != SOL_IR_TYPE_INT64
+            || ir->types[definition->representation].definition != SOL_IR_NONE
+            || refinement_type->kind != SOL_IR_TYPE_NOMINAL
+            || refinement_type->nominal_category != SOL_MIR_MATERIALIZED_NOMINAL_REFINED
+            || refinement_type->definition != context->definition
+            || refinement_type->backing >= m->type_count
+            || m->types[refinement_type->backing].kind != SOL_IR_TYPE_INT64
+            || m->types[refinement_type->backing].definition != SOL_IR_NONE
+            || m->types[refinement_type->backing].is_copy != refinement_type->is_copy)
+            return false;
+        const SolMirPredicateInput *self_input = &o->predicate_inputs[body->inputs.offset];
+        if (self_input->kind != SOL_MIR_PREDICATE_INPUT_REFINEMENT_SELF
+            || self_input->ordinal != 0 || self_input->access != SOL_ACCESS_OWNED
+            || self_input->recipe != body->refinement_self_recipe
+            || slot->recipe != body->refinement_self_recipe
+            || argument->kind != SOL_MIR_PREDICATE_VALUE_INPUT
+            || argument->definition != body->inputs.offset) return false;
+    }
 
     size_t linkage_matches = 0;
     for (size_t i = 0; i < linkage->binding_count; ++i) {
@@ -5445,6 +5486,13 @@ static bool represented_predicate_call_exact(const SolWasmRepresentedBuildReques
         || source_call->as.call.operands.count > concrete->program.ir->operand_count
             - source_call->as.call.operands.offset
         || !represented_predicate_leaf_scalar_target(concrete, cleanup, callee->instance)) return false;
+    if (refinement) {
+        const SolIrOperand *source_operand = &ir->operands[source_call->as.call.operands.offset];
+        if (source_operand->formal != 0 || source_operand->access != SOL_ACCESS_OWNED
+            || source_operand->value >= ir->expression_count
+            || ir->expressions[source_operand->value].kind != SOL_IR_EXPR_REFINEMENT_SELF)
+            return false;
+    }
     size_t body_invokes = 0;
     for (size_t b = body->blocks.offset; b < body->blocks.offset + body->blocks.count; ++b) {
         if (b >= o->predicate_block_count || o->predicate_blocks[b].body != body_id) return false;
