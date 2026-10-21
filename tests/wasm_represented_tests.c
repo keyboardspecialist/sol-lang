@@ -34531,8 +34531,8 @@ static bool p44f1d_allocation_fault_one(bool traced,size_t registered_ordinal,
     return baseline_ok&&failure_ok&&retry_ok&&!preservation_failed;
 }
 
-#define P44F1E_W_ALLOCATION_COUNT 0u
-#define P44F1E_X_ALLOCATION_COUNT 0u
+#define P44F1E_W_ALLOCATION_COUNT 257u
+#define P44F1E_X_ALLOCATION_COUNT 344u
 
 typedef enum {
     P44F1E_ALLOCATION_UNPINNED_DISCOVERY,
@@ -34651,8 +34651,14 @@ typedef struct {
 
 static bool p44f1e_allocation_inventory_pin(bool traced,
     const P44f1bAllocationCapture *capture,uint8_t digest[32]) {
-    static const uint8_t w_digest[32]={0};
-    static const uint8_t x_digest[32]={0};
+    static const uint8_t w_digest[32]={0xde,0xfb,0x27,0xc2,0x72,0x04,0xea,0x4d,
+        0xdb,0x0d,0x51,0xcc,0xc0,0x88,0xd2,0x02,
+        0xa3,0xed,0x94,0xae,0x46,0x27,0x21,0x30,
+        0x57,0x86,0x8c,0xea,0x20,0x9d,0x1c,0x1d};
+    static const uint8_t x_digest[32]={0x78,0xc3,0x1c,0x56,0xe9,0x44,0x7e,0xa9,
+        0x65,0x4d,0x43,0x45,0xb7,0x87,0x4d,0xa1,
+        0x67,0xa5,0xd2,0xcb,0x39,0xfd,0x92,0x6b,
+        0x80,0xe7,0xcc,0xbe,0xb4,0xcb,0x26,0x1a};
     size_t expected=traced?P44F1E_X_ALLOCATION_COUNT:P44F1E_W_ALLOCATION_COUNT;
     const uint8_t *pinned=traced?x_digest:w_digest;
     P44f1eAllocationPinMode mode=p44f1e_allocation_pin_mode_values(
@@ -42161,6 +42167,7 @@ static int p44f1e_dispatch(const char *selected,bool list) {
     P44F1E_CASE("represented.ensures-calls.reject.qualified-success",p44f1e_reject_case(3));
     P44F1E_CASE("represented.ensures-calls.reject.target-refinement",p44f1e_reject_case(6));
     P44F1E_CASE("represented.ensures-calls.reject.target-dead-text",p44f1e_reject_case(7));
+    P44F1E_CASE("represented.ensures-calls.discovery.plain",p44f1e_allocation_discovery(false));
     P44F1E_CASE("represented.ensures-calls.discovery.traced",p44f1e_allocation_discovery(true));
 #undef P44F1E_CASE
     return found?(failures?1:0):2;

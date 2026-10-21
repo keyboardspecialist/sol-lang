@@ -270,15 +270,22 @@ were verified unchanged. See the [P4.4f1d handoff](../docs/p4.4f1d-handoff.md) f
 exact pins, carry provenance, and preserved failures. The current f1e execution
 status is recorded below and in the [interim handoff](../docs/p4.4f1e-handoff.md).
 
-## P4.4f1e direct ensures-call — CORE/S1 accepted; publication commit/push pending
+## P4.4f1e direct ensures-call — historical S1 prepublication snapshot
+
+**Historical status at this S1 prepublication snapshot (October 21, 2026):** The
+statements below record the state before S1 publication and before S2 evidence
+acceptance; they do not describe the current cursor. S1 is now published, and S2
+technical inventory acceptance is complete with publication as the only active item.
+See the current [S2 handoff](../docs/p4.4f1e-handoff.md) and [execution cursor](../TODO.md#execution-cursor).
+Historical receipts, timings, pins, failures and errata below remain unchanged.
 
 The bounded f1e CORE source and its nine-key-per-mode validation are independently
 accepted; E1 is closed for those 18 fresh runs only. Separately, the original
 950/49a/cdae S1 technical evidence and the extracted candidate's bounded source/evidence
-are independently accepted for S1. The five-step ledger has exactly one active step:
-final S1 documentation/tree checks, commit and verified push. An earlier controller
-setup interruption is historical, not the latest S1 disposition. Full f1e remains
-incomplete and unpublished. The accepted CORE
+are independently accepted for S1. At that prepublication snapshot, the five-step
+ledger had exactly one active step: final S1 documentation/tree checks, commit and
+verified push. An earlier controller setup interruption is historical, not the latest
+S1 disposition. Full f1e remains incomplete. The accepted CORE
 selectors were:
 `represented.ensures-calls.launch.traced`,
 `represented.ensures-calls.retained.traced`,
@@ -350,27 +357,32 @@ The CORE 9 ON + 9 SAN checkpoint remains accepted at its own pins; the evidence 
 approves only bounded historical continuity for S1, not automatic pin migration or
 byte identity to the unavailable full `695e01…` test snapshot.
 
-Historical X at `6e10fdfe…` remains UNKNOWN cutoff (active 3.004135583s / outer
-3.079325s); there was no unchanged-source retry or deadline increase. Historical W at
+At this historical S1 prepublication snapshot, X at `6e10fdfe…` was an UNKNOWN cutoff
+(active 3.004135583s / outer 3.079325s); there was no unchanged-source retry or deadline increase. Historical W at
 `46e16a9d…` / binary `f8ee4a1302c2b75e21a66e3f6264ac2fc20458d9f6d23f98776b3273a6b8fb17`
 passed at 2.405744s / 2.468456s with two owners and 257 provisional rows. These do
-not establish accepted `N_W`; `N_W`, `N_X`, and `M` remain unknown, and no W carry is
-claimed. Digests remain unknown; prior failures, unknown timings, pins, and receipts
-remain unchanged.
+not establish the current S2 `N_W`; at this historical snapshot `N_W`, `N_X`, and `M`
+and their digests were still unknown, and no W carry was claimed. S2 has since accepted
+`N_W=257`, `N_X=344`, `M=601` arithmetic, and both actual-line digests; see the current
+S2 handoff above. Prior failures, unknown timings, pins, and receipts remain unchanged.
 
-Only S1 publication is active: separate documentation review, Astra/coordinator
-staged-tree and preservation checks, commit, and verified push remain. S2 (independent
-W/X ON/SAN capture and pin freeze) is blocked until verified S1 push; S3 is blocked on
-S2; S4 on S3; S5 on S1–S4.
+At this S1 prepublication snapshot, only S1 publication was active: separate
+documentation review, Astra/coordinator staged-tree and preservation checks, commit,
+and verified push remained. S2 (independent W/X ON/SAN capture and pin freeze) was
+blocked until verified S1 push; S3 was blocked on S2; S4 on S3; S5 on S1–S4. The
+current post-publication cursor appears below.
 
-The candidate lists/defaults exactly nine real E keys (eight CORE plus the single
-traced-X discovery key) and adds only `contracts.ensures-call-core-s1`. It registers no
-new fault selector/coverage, W/plain discovery, or future49 obligation; omitted keys
-return2, not false PASS. Its static inventory is 77 unique controls /118 expanded
+At S1 publication, the candidate listed exactly nine real E keys (eight CORE plus the
+single traced-X discovery key) and added only `contracts.ensures-call-core-s1`. It
+registered no new fault selector/coverage, W/plain discovery, or future49 obligation;
+omitted keys returned2, not false PASS. Its static inventory was 77 unique controls /118 expanded
 control tuples /4,882 unchanged old fault IDs /29 sweeps /24 runners /50 shards /5,000
 ordered tuples (baseline 4,999 plus one new control). X344 is observed native evidence,
-not frozen `N_X`; `N_W`, `N_X`, `M` and digests remain unknown, not zero pins. One X
-discovery is not a two-capture inventory freeze or fault coverage. The old 78-control /
+not frozen `N_X`; `N_W`, `N_X`, `M` and digests remain unknown, not zero pins. That X
+selector launch already included two independent owners and within-mode equality; it is
+not fault coverage or the required W/SAN, source-classification, cross-mode, and reviewed
+pin freeze. No second identical native-X launch or duplicate dumped inventory is
+requested. The old 78-control /
 `(4,882+M)` plan is original-monolith planning only and must be reconciled against the
 published 77-control/5,000-tuple S1 base before S2/S3 additions; do not infer 79 or
 guess pins. The original 12-launch unit is historical accounting, not current
@@ -536,7 +548,7 @@ are retained. Only libFuzzer's real iteration/status lines establish iteration
 progress. The heartbeat names configured runs but does not invent a completed
 count. Local macOS support proofs do not establish Linux CI, leak or Windows safety.
 
-## S1 publication candidate — source/evidence accepted; publication pending
+## S1 publication candidate — accepted prepublication evidence snapshot
 
 Candidate path `/Users/jsobotka/code/sol-lang-p44f1e-s1-publication`, branch
 `p44-f1e-s1-publication`, base `dfceed6b3e6630271cdc6ba02cb011314f1b31f1`. Candidate
@@ -551,7 +563,66 @@ Independent source and evidence reviews approve this exact candidate for the bou
 S1 checkpoint. One configure/build, two native semantic cases (discovery X and
 retained-traced), and 13 metadata invocations passed at candidate pins. This does not
 claim more than those two fresh candidate-native semantic cases; no candidate SAN,
-full-default execution, or fresh 9×2 CORE replay occurred. S1 publication remains the
-sole active step, with separate documentation review, final staged-tree/preservation
-checks, commit and verified push pending. S2 remains blocked until verified push. The
-original seven-path WIP and external preservation receipt remain untouched.
+full-default execution, or fresh 9×2 CORE replay occurred. At this prepublication
+snapshot, S1 publication was pending and S2 was blocked. S1 has since been published;
+the current cursor and S2 technical-acceptance status follow. The original seven-path WIP and
+external preservation receipt remain untouched.
+
+## P4.4f1e S2 — technical inventory accepted; publication pending
+
+S1 is COMPLETE and published as
+`e93d375e2e9f59d9a819ad470770e741a1511f4a`; `origin/master` was verified at that
+commit. Independent final evidence review accepts S2 technical inventory freeze.
+**Only S2 publication is active:** documentation/staged-tree review and Astra
+alignment precede the coordinator's commit, push, and remote verification. S2 has not
+yet been committed or pushed. S3 is blocked on verified S2 publication and helper
+review; S4 is blocked on S3; S5 is blocked on S1–S4. See the [sole cursor](../TODO.md#execution-cursor)
+and [f1e handoff](../docs/p4.4f1e-handoff.md).
+
+The post-pin validation source was
+`dce792c20186e86a098f52360ce9de454afa8bcb20491574758f746c3b869872`; production was
+`49a241484fcc5a31de2b7512704c803d44c5c86add69a84df5b049d3b02cc988`, and fixture was
+`cdaef751298f9cda6147868952d7e00d1cb061a6879064c5aaa921c290f47db9`. The accepted
+counts are **N_W=257**, **N_X=344**, and **M=601** (arithmetic only, not a new
+registration). Digests preserve actual source lines; there is no normalized-line
+digest:
+
+| Profile | Actual-line digest | Module length / SHA-256 |
+| --- | --- | --- |
+| W | `defb27c27204ea4ddb0d51ccc088d202a3ed94ae4627213057868cea209d1c1d` | 27,789 / `9a455f12439190a2ea41116907c24967d3490988c16fefd9c0f4f743be79cb87` |
+| X | `78c31c56e9447ea9654d4345b7874da167a5d2cb39fd926b80e7ccbeb4cb261a` | 75,850 / `352897de96bbe643b71e0625be6119dae0393517cd3948f48bb8f5127cf5f3a9` |
+
+The reviewed initial evidence is three fresh captures (ON/W, SAN/W, SAN/X) plus the
+approved S1 candidate ON/X carry (test `fbb0806…`, binary `e2734001…`). The post-pin
+phase then passed exactly four fresh repeats, with no retries or configure commands:
+
+| Fresh selector | Active (s) | Complete after witness close (s) | Distinct outer (s) |
+| --- | ---: | ---: | ---: |
+| ON/W | 2.075130 | 2.127275 | 2.148134 |
+| ON/X | 2.439430 | 2.455822 | 2.476123 |
+| SAN/W | 8.606935 | 8.655070 | 8.700591 |
+| SAN/X | 10.889483 | 10.935070 | 10.979267 |
+
+Each selected launch asserted two-owner full ordered records and complete module-byte
+equality, all 15 `Usage` fields, complete witnesses, four actual seven-render sets,
+and both closes. All 1,202 post-pin ordered rows match their initial profile rows and
+the cross-mode row identities; the source classifier covers all 601 requests. Full
+module-byte equality is asserted within each launch; cross-mode module identity is
+length+SHA-256 because cross-mode raw module blobs were not retained. The full arrays
+remain in the frozen inventory/report rather than being duplicated here. Exact Usage
+vectors are documented in the handoff and final evidence review.
+
+This is not acceptance of S3 faults or later f1e groups. The 10 current E source-listed
+keys (eight CORE plus W/plain and X/traced) and static counts—77 unique controls, 118
+expanded control tuples, 4,882 old fault tuples, 5,000 ordered tuples, 24 runners, 50
+shards, and 29 sweeps—remain unchanged; the single S1 checkpoint control remains the
+only added control. The historical 78-control /`(4,882+M)` plan must reconcile to this
+77-control /5,000-tuple base with the future 49 nonfault obligations and M=601
+arithmetic; do not infer a final 79. The old four lists are source-identical, but
+no fresh default, metadata/list CLI, manifest, or sweep was run for S2. No new fault
+registration was made. Source-classified would-fail paths are not injected failures;
+`W1..257` and `X1..344` fault ordinals in both modes remain unlaunched, and helpers are
+not accepted/published. SAN used ASan/UBSan halt-on-error with leak detection disabled;
+no leak-checking claim is made. The original 950/49a/cdae S1 timing, FAIL receipts,
+historical cutoff, old-source provisional W observation, and prior non-approvals remain
+unchanged and are not replaced by candidate or S2 timings.

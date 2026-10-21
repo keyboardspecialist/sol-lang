@@ -233,8 +233,8 @@ below. This historical paragraph does not describe current f1e execution status.
 See the [P4.4f1d handoff](p4.4f1d-handoff.md) and
 [TODO.md](../TODO.md#execution-cursor).
 
-**Current status addendum, October 21, 2026 (P4.4f1e; bounded CORE and S1
-technical/candidate source+evidence accepted; S1 commit/push active):** The design, retained-entry
+**Historical status snapshot, October 21, 2026 (P4.4f1e; bounded CORE and S1
+technical/candidate source+evidence accepted; S1 commit/push then active):** The design, retained-entry
 amendment, CORE source and bounded evidence have independent approval. Frozen CORE
 source pins
 are test `695e01d09b15d511ce99d7c51bc72c4067306d40809b05cb6e84628686cebd9d`,
@@ -247,8 +247,10 @@ The unchanged F1D fixture is
 CORE ON/SAN binaries were `82923e3fb25c02d77e57f4653eb6f1e812383057ef83b2768fffda7fa713c61e`
 and `ded8a8dc5769ca1a9c872ebaf364d3f194adbfb429b7e4e94a7abe626dbafb1d`; they are
 historical identities for the approved CORE checkpoint, **not** a current allocator
-test hash. The f1d feature remains published at `42fd4cd`; full f1e remains
-incomplete, uncommitted, and unpublished.
+test hash. The f1d feature remains published at `42fd4cd`; at this earlier
+prepublication snapshot, full f1e remained incomplete and unpublished. S1 has since
+been published; the current cursor is recorded at the end of this document and in
+`TODO.md`.
 
 The admitted slice is one direct pure plain `ALWAYS` ensures `FUNCTION` call, with
 one owned plain `Int64` input from the enclosing complete `result` or `old` of the
@@ -315,8 +317,10 @@ metadata invocations. This is the evidence-review interpretation; immutable raw
 validation reports and receipts are not rewritten. Historical CORE evidence remains
 at its own pins with only review-approved bounded continuity; there is no fresh
 candidate SAN or nine-case replay. Original 950 evidence is separately attributed.
-Final documentation review, staged-tree/preservation review, commit, and verified
-push remain pending; S2 remains blocked until verified push. The original seven-path
+At this prepublication snapshot, final documentation review, staged-tree/preservation
+review, commit, and verified push remained pending, with S2 blocked until verified
+push. S1 was subsequently published and S2 technical acceptance has since closed;
+the later dated status addendum below supersedes status only. The original seven-path
 WIP remains preserved and untouched.
 
 The original finite allocator unit described 12 launches per mode (eight profile
@@ -333,14 +337,16 @@ preparation before interpreter/backend/capture; the sequence stopped after two o
 four planned selectors with no retry, and SAN was unlaunched. These are closed
 historical dispositions for that discovery only, not outcomes of the current S1
 source or a carry into it.
-`N_W`, `N_X`, and `M=N_W+N_X` plus their digests remain unknown; no old or current W
-carry is claimed.
+At this pre-freeze snapshot, `N_W`, `N_X`, and `M=N_W+N_X` plus their digests were
+unknown; no old or current W carry was claimed. The later S2 pin freeze uses its own
+fresh source-pinned captures and does not adopt this old W observation.
 
 The historical ON traced-X result at test `6e10fdfe…` is UNKNOWN cutoff: active
 3.004135583s against 3s and outer 3.079325s, not PASS. No unchanged-source retry or
 deadline increase is claimed. The scanner change was source-approved at test snapshot
 `950d5b50abe9293f15660e29aa9f08e656fea1fa0dd8fc7adfab989290175e2b`; the later
-independent evidence review accepted the one ON build / one X run only at those source,
+independent evidence review accepted the one ON build / one X selector launch (which
+contains two prepared owners and within-mode equality) only at those source,
 production, fixture, and binary pins. This acceptance does not transfer to the distinct
 publication candidate described above.
 
@@ -352,31 +358,35 @@ build, two semantic cases, and metadata evidence are separately accepted as desc
 above; no candidate validation is running now. Prior
 historical W at `46e16a9d…` / binary `f8ee4a13…` passed at active 2.405744s / outer
 2.468456s with two owners and 257 provisional rows; this is not accepted `N_W` and
-is not carried to current W. `N_W`, `N_X`, and `M` remain unknown; stored zero pins
-are placeholders, not measured zero.
+is not carried to current W. At that historical pre-freeze snapshot, `N_W`, `N_X`,
+and `M` were unknown; stored zero pins were placeholders, not measured zero. The later
+S2 review freezes the current pins separately.
 
 | State | Step | Boundary |
 | --- | --- | --- |
 | COMPLETED | Bounded CORE | Test `695e01…`; 9 ON + 9 SAN accepted, E1 closed for those runs only. Reopen only for an actually affected dependency. |
-| COMPLETED technical and candidate source/evidence / **ACTIVE publication** | **S1 — final checks, commit and verified push** | Original 950 technical evidence and candidate fbb0806 bounded source/evidence are independently accepted. Final documentation review, Astra/coordinator staged-tree and preservation checks, commit, and verified push remain pending. |
-| BLOCKED on verified S1 push | S2 — W/X ON/SAN captures and pins | Establish two agreeing complete captures per profile/mode, classify and independently accept N/digests/repeats. |
+| COMPLETED | S1 — published native ensures-call discovery checkpoint | Commit `e93d375e2e9f59d9a819ad470770e741a1511f4a`; `origin/master` verified at the same commit. This does not close full f1e. |
+| **ACTIVE at this earlier snapshot** | **S2 — initial W/X captures, cross-mode comparison, and pin freeze** | Before the authorized captures and final review, source review had approved the W/plain expression and S1 native-X carry; `N_W`, `N_X`, `M`, and digests were still unknown. The final S2 acceptance and current publication-only cursor are recorded in the later dated addendum below. |
 | BLOCKED on S2 | S3 — helpers and every new fault ordinal | Review complete helpers first; then accept every ordinal in finite ON/SAN batches. |
 | BLOCKED on S3 | S4 — behavior/compatibility groups | Future 4a–4d small groups; no group is active or parallel. |
 | BLOCKED on S1–S4 | S5 — integration/publication | Final evidence/diff review and affected checks; earlier accepted, independently publishable milestones need not wait. |
 
-Technical acceptance and publishability are distinct. Candidate source/evidence
-acceptance is closed for bounded S1; final documentation/staged-tree/preservation
-checks and verified publication remain. Do not stage the original mixed WIP wholesale.
-The candidate lists/defaults nine real E keys (eight CORE plus traced-X discovery), adds
-only `contracts.ensures-call-core-s1`, and registers no new fault, W/plain discovery,
-or future49 obligation. Static inventory is 77 unique controls /118 expanded control
-tuples /4,882 old fault IDs /29 sweeps /24 runners /50 shards /5,000 total ordered
-tuples; removing only the new control tuple returns the 4,999-tuple baseline. The
-single X discovery is not fault coverage or a two-capture inventory freeze. X344 is
-observed, not `N_X`; `N_W`, `N_X`, and `M` and digests remain unknown (zero placeholders
-are not pins). The original 78-control /`(4,882+M)` plan is historical monolith
-accounting and must be reconciled against the published S1 inventory before future
-S2/S3 additions; do not infer 79 or guess pins. R-AUTH/held resealed ±1 checks remain OPEN;
+Technical acceptance and publishability are distinct. In this earlier pre-acceptance
+snapshot, S1 was published and S2 evidence/pin review remained open. Do not stage the
+original mixed WIP wholesale. At the S1
+publication snapshot the candidate listed nine real E keys and added only
+`contracts.ensures-call-core-s1`; S2 source now adds one W/plain selector, for ten
+current E keys (eight CORE plus W and X). No new fault/default/sweep registration is
+added. Static inventory remains 77 unique controls /118 expanded control tuples /4,882
+old fault IDs /29 sweeps /24 runners /50 shards /5,000 total ordered tuples; the full
+manifest and old A–D lists remain source-identical to S1. This static inventory is not
+new CLI output or runtime evidence. At this pre-freeze snapshot, S1 X=344 was observed
+but not yet frozen as `N_X`; W had no current-source runtime observation and `N_W`,
+`N_X`, `M`, and digests were unknown placeholders. The later S2 review freezes the
+values recorded below without changing that historical attribution. The original
+78-control /`(4,882+M)` plan is historical monolith accounting; reconcile future fault
+registration against the published S1 inventory and do not infer 79 or guess pins.
+R-AUTH/held resealed ±1 checks remain OPEN;
 whole-suite speed UNMET; broad P4/P4.4 OPEN; host/E6/P4.5/P5 deferred. These are not
 added S1 gates. See `TODO.md` for the sole cursor and the [interim handoff](p4.4f1e-handoff.md)
 for step exits, historical evidence and publication conditions.
@@ -391,10 +401,12 @@ compatibility. No full incremental diff from `46e16a9d…` to later cleanup snap
 is claimed.
 
 W is genuine ENTRY `launch` only with three probes OFF; X is ENTRY `launch` plus
-`old_callee_arithmetic` INTERNAL_FIXTURE with three probes ON. The intended measured
-profiles require two independent full captures/modules, all 15 `Usage` fields and
-complete witnesses before counts can be frozen. `M=N_W+N_X`, with no legacy-tail
-subtraction; old `ensures_old` IDs 6/7 remain unsupported.
+`old_callee_arithmetic` INTERNAL_FIXTURE with three probes ON. Each selected-case launch
+prepares two independent owners/captures and requires full ordered-record and complete
+module-byte equality, all 15 `Usage` fields, complete witnesses, and both closes. This
+is a within-mode assertion, not a requirement for two separate launches or duplicate
+dumped inventories. `M=N_W+N_X`, with no legacy-tail subtraction; old `ensures_old`
+IDs 6/7 remain unsupported.
 
 The six-profile runtime bridge and controls remain unaccepted: D96/T203/Q129/R297
 line-only inverse-map to accepted f1c anchors; U98/V272 map to accepted f1d anchors.
@@ -411,8 +423,8 @@ OFF evidence is compile/build-graph-only, not a fresh OFF runtime result.
 
 The earlier four-path DRAFT review approved the prior draft with one nonblocking
 stale cursor phrase at `TODO.md:439`; the coordinator corrected it, and this refresh
-preserves that correction. This updated DRAFT still requires separate final
-documentation review. R-AUTH/held resource checks remain open, speed goals unmet,
+preserves that correction. At this prepublication snapshot, separate final
+documentation review remained. R-AUTH/held resource checks remain open, speed goals unmet,
 broad P4.4 unchecked, and P4.5/host/E6/P5 deferred. `TODO.md` remains the sole live
 cursor. See the [f1e interim handoff](p4.4f1e-handoff.md) and
 [TODO.md](../TODO.md#execution-cursor).
@@ -1581,19 +1593,125 @@ the immutable chronology: configure/build first, then a no-child pre-semantic
 bytecode correction with no rebuild, then the semantic and metadata invocations. Raw
 validation report/receipts are not rewritten.
 
-The candidate lists/defaults nine real E selectors (eight CORE and traced-X
-discovery) and adds only `contracts.ensures-call-core-s1`. Its static inventory is 77
+At the S1 publication snapshot, the candidate listed/defaulted nine real E selectors
+(eight CORE and traced-X discovery) and added only `contracts.ensures-call-core-s1`.
+Its static inventory was 77
 unique controls / 118 expanded control tuples / 4,882 unchanged old fault IDs / 29
 sweeps / 24 runners / 50 shards / 5,000 ordered tuples (baseline 4,999 plus one new
-control). No new fault coverage, W/plain discovery, or future49 obligation is
-registered. X=344 is observed native evidence, not frozen `N_X`; `N_W`, `N_X`, `M`,
-and digests remain unknown, not zero pins. Reconcile future S2/S3 additions against
+control). No new fault coverage, W/plain discovery, or future49 obligation was
+registered in that snapshot. At that time X=344 was observed native evidence, not
+frozen `N_X`; `N_W`, `N_X`, `M`, and digests remained unknown, not zero pins. Reconcile future S2/S3 additions against
 the published 77-control/5,000-tuple base; do not infer 79 or guess pins. The original
 seven-path WIP remains preserved by the receipt above.
 
-**S1 is the sole ACTIVE step, at final documentation/tree review, then commit and
-verified push.** Final Sol documentation review and Astra/coordinator staged-tree and
-preservation checks remain pending. S2 is blocked until verified S1 push. Full f1e
-remains incomplete and unpublished; R-AUTH is OPEN, broad speed goals remain UNMET,
-broad P4/P4.4 remains open, and host/E6/P4.5/P5 remain deferred. See the
-[P4.4f1e handoff](p4.4f1e-handoff.md) and [sole cursor](../TODO.md#execution-cursor).
+**Historical S2 source-only preparation — October 21, 2026:** S1 is COMPLETE and published as
+`e93d375e2e9f59d9a819ad470770e741a1511f4a`; `origin/master` was verified at the same
+commit. At this source-only snapshot, S2 was the sole active step for initial captures,
+source classification, cross-mode comparison, and pin freeze. This worktree change added
+only the W/plain expression before the existing X expression and left the count/digest
+pins at zero. No W runtime observation existed yet. The exact fresh initial set was
+ON/W plus SAN/W and SAN/X; the S1 candidate native-X observation was an approved carry.
+That status snapshot is superseded by the accepted S2 evidence below; historical receipts
+and reviews remain unchanged.
+Current E is ten source-listed keys (eight CORE, W, X); the static registration
+inventory remains 77 unique controls /118 expanded controls /4,882 fault tuples /5,000
+ordered tuples /24 runners /50 shards /29 sweeps. No metadata/default/fault/sweep
+runtime or new CLI output was claimed in that source-only preparation. No S2 configure,
+build, semantic case, or runtime was performed in that earlier phase. See the current
+S2 status below for the later authorized evidence and publication boundary.
+
+## Current status addendum — October 21, 2026 (S2 technical acceptance; publication pending)
+
+S1 is complete and published as
+`e93d375e2e9f59d9a819ad470770e741a1511f4a`; `origin/master` was verified at that
+commit. CORE remains accepted at its own test pin `695e01…` for exactly 9 ON + 9 SAN
+runs, not as a fresh candidate-wide replay. S2's technical inventory-freeze exit is
+independently accepted by
+`/Users/jsobotka/code/sol-lang/.git/agent-handoffs/p44-f1e/s2-inventories/final-evidence-review.md`
+(SHA-256 `07b210d5a602734f8d920fcaabaef2b86bad0b765b0d86c9777c18c707564ecf`). The
+sole ACTIVE item is now S2 publication—separate documentation/staged-tree review,
+Astra alignment, coordinator commit, push, and verification. No S2 publication commit
+or push is yet claimed. The execution cursor in [TODO.md](../TODO.md#execution-cursor)
+remains authoritative; S3 is blocked until verified S2 push and an approved helper
+brief/review, S4 is blocked on S3, and S5 remains blocked on S1–S4. Do not predeclare
+S3 active.
+
+### Frozen S2 source and inventory identities
+
+The four fresh post-pin captures used test source SHA-256
+`dce792c20186e86a098f52360ce9de454afa8bcb20491574758f746c3b869872`, unchanged
+production SHA-256
+`49a241484fcc5a31de2b7512704c803d44c5c86add69a84df5b049d3b02cc988`, and fixture
+`cdaef751298f9cda6147868952d7e00d1cb061a6879064c5aaa921c290f47db9`. The frozen
+inventory is `s2-inventories/pin-implementation/frozen-inventory.json`; the final
+review independently approves it. No normalized-line digest is used: the row
+serialization preserves actual current source lines.
+
+| Profile | N | Actual-current-line SHA-256 | Module length / SHA-256 |
+| --- | ---: | --- | --- |
+| W | 257 | `defb27c27204ea4ddb0d51ccc088d202a3ed94ae4627213057868cea209d1c1d` | 27,789 / `9a455f12439190a2ea41116907c24967d3490988c16fefd9c0f4f743be79cb87` |
+| X | 344 | `78c31c56e9447ea9654d4345b7874da167a5d2cb39fd926b80e7ccbeb4cb261a` | 75,850 / `352897de96bbe643b71e0625be6119dae0393517cd3948f48bb8f5127cf5f3a9` |
+
+`M=601` is only the arithmetic sum of W and X; no M registration or fault coverage
+was added. The independent review parsed all 1,202 initial and 1,202 post-pin ordered
+ten-field observations, found each list exactly `1..N`, and recomputed canonical
+actual-line digests. Each fresh list equals its accepted initial profile list and
+the other mode. The source classifier independently covers every physical request,
+group, prefix and sibling suffix. The retained frozen inventory contains the full
+ordered rows; they are referenced rather than duplicated here.
+
+| Profile | All 15 `Usage` fields (emitted order) |
+| --- | --- |
+| W | `[8,38,30,46,103,3010,0,0,0,0,160,71601,34445,38029,27789]` |
+| X | `[10,53,41,59,130,17836,0,0,0,0,214,92940,45736,86090,75850]` |
+
+Each selected-case launch asserted two independent owners, full ordered-record and
+complete module-byte equality within that launch, `Usage` equality, complete source and
+witness equality, four actual seven-render sets, and both real closes. The initial
+fresh captures were ON/W, SAN/W, and SAN/X; initial ON/X was the approved S1 candidate
+carry from test `fbb0806…`, binary `e2734001…`, with its own two-owner within-mode
+assertions. Post-pin validation then used exactly four fresh repeats: ON/W, ON/X,
+SAN/W, SAN/X. Cross-mode module identity is length+SHA-256, not raw-byte equality
+(cross-mode raw module blobs were not retained); within-mode full byte equality is
+assertion-backed.
+
+### Actual bounded build and capture timings
+
+Seconds below are the accepted final-review table values (rounded to six decimals),
+not caps or estimates. Active direct limits were 3s native / 27s SAN; complete limits
+were strictly under 5s / 30s after closure.
+
+| Fresh selector | Active | Complete after witness close | Distinct outer |
+| --- | ---: | ---: | ---: |
+| ON/W | 2.075130 | 2.127275 | 2.148134 |
+| ON/X | 2.439430 | 2.455822 | 2.476123 |
+| SAN/W | 8.606935 | 8.655070 | 8.700591 |
+| SAN/X | 10.889483 | 10.935070 | 10.979267 |
+
+The two fresh target builds passed (zero configure commands in the post-pin phase):
+ON inner-complete 2.369486s / distinct parent outer 2.476360s; SAN inner-complete
+6.971162s / parent outer 7.180182s. The separate initial capture phase used one SAN
+configure, two target builds, and three fresh selectors plus the approved ON/X carry.
+Across the post-pin phase there were zero retries, zero configure, two builds, and four
+fresh semantic children. SAN used ASan/UBSan halt-on-error with
+`detect_leaks=0`; leak detection was disabled and no leak-checking claim follows.
+
+The source-listed E set is ten keys (eight CORE, W/plain, X/traced). Static source
+inventory remains 77 unique controls / 118 expanded control tuples / 4,882 old fault
+tuples / 5,000 ordered tuples / 24 runners / 50 shards / 29 sweeps. The four historical
+A–D lists are unchanged by source proof. These are not fresh default/list/manifest CLI
+results: no default run, metadata/list invocation, or old fault sweep ran in S2, and
+no new fault registration was made. S3's `W1..257` and `X1..344` ordinals in both
+modes remain unlaunched; helpers are not yet accepted. Source-classified would-fail
+paths are not injected failures. The historical 78-control /`(4,882+M)` plan and
+future 49 nonfault obligations must be reconciled against the current checkpoint;
+do not infer a final 79-control count.
+
+The prior 950 source's 2.839310250s native-X active timing and candidate S1's
+2.670197250s timing remain separate historical observations. Original 950 slot/outer
+FAIL receipts, the `6e10fdfe…` cutoff, old-source W=257 provisional observation,
+initial evidence, citation erratum (catalog rows 1–2 producer return is line 6007;
+6203 is the Kahn return), and all prior non-approvals remain immutable; none is
+rewritten by the later frozen inventory. Broad P4/P4.4 stays open, whole-suite speed
+remains unmet, R-AUTH and held resource ±1 checks remain open, and host/E6/P4.5/P5
+remain deferred. Full f1e and S3–S5 are not accepted.
