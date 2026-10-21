@@ -2,9 +2,11 @@
 
 This list is the sole live authority for work status and execution order. The
 foundation was audited September 9, 2026 against baseline `6ec4ba9`; live status
-and the cursor were refreshed October 20, 2026 after P4.4f1d publication. The
-broader language and toolchain phases remain documented in the
-[README](README.md#roadmap).
+and the cursor were refreshed October 21, 2026 after bounded P4.4f1e CORE and S1
+technical/candidate evidence acceptance. An earlier S1 setup interruption is retained
+below as history; S1 commit/push is the sole active step, and no validation is running.
+The broader language and
+toolchain phases remain documented in the [README](README.md#roadmap).
 [Project analysis](docs/project-analysis.md) is an analysis snapshot;
 [Compiler status](docs/compiler-status.md) is the detailed implementation snapshot
 with a current-worktree addendum, not a competing queue. Impact and complexity
@@ -13,14 +15,49 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
 
 ## Execution Cursor
 
-- **Active overall cursor: P4.4f1e bounded planning.** P4.4f1d's bounded technical
-  and evidence acceptance is closed for all 486 selected key obligations per mode,
-  with zero pending validation keys. The feature `Execute direct refinement
-  predicate calls` was committed as `42fd4cd` and successfully pushed to
-  `origin/master` (`7d19435..42fd4cd`). Final Sol review, documentation audit, Astra
-  alignment, coordinator checks, and publication gates are closed. Plan only the
-  remaining predicate-call contexts/signatures with Sol 6.1 High; implementation
-  requires a separate bounded brief and review.
+- **Exactly one ACTIVE step: S1 publication — final documentation/tree checks, then
+  commit and verified push.** S1 technical acceptance and the bounded candidate
+  source/evidence acceptance are closed. The candidate is
+  `/Users/jsobotka/code/sol-lang-p44f1e-s1-publication` at test
+  `fbb0806bc0cd52cdb15f5ea0abf031478c2e4939b8cfa4457b821b9f526c6ceb`, production
+  `49a241484fcc5a31de2b7512704c803d44c5c86add69a84df5b049d3b02cc988`, fixture
+  `cdaef751298f9cda6147868952d7e00d1cb061a6879064c5aaa921c290f47db9`. Independent
+  review accepted one fresh configure/build, two native semantic cases and 13 metadata
+  invocations. X discovery: 2.670197s active / 2.714859s complete / 2.733557s outer;
+  retained-traced: 1.061953s / 1.076694s / 1.095858s. Candidate executable/object
+  pins are `e2734001…` / `3726447a…`. The candidate's 344-row X is observed evidence,
+  not frozen `N_X`; `N_W`, `N_X`, and `M` remain unknown. Candidate evidence is
+  bounded/native-only; CORE's 9 ON + 9 SAN acceptance remains at its own pins with
+  reviewed continuity, not fresh candidate SAN or a 9×2 replay. Final documentation
+  review, Astra/coordinator staged-tree and preservation checks, commit and verified
+  push remain. S2 is blocked until that push is verified. The original seven-path WIP
+  remains preserved and untouched.
+
+| State | Bounded step | Exit / publication boundary |
+| --- | --- | --- |
+| COMPLETED | CORE at its own pins | Test `695e01…`; 9 ON + 9 SAN accepted, E1 closed for these observations only. Reopen only if an actual changed dependency affects CORE; this is not acceptance of the dirty combined tree. |
+| **ACTIVE** | **S1 publication — final checks, commit/push** | Original 950 technical evidence and candidate fbb0806 source/evidence are independently accepted for this bounded checkpoint. Only separate documentation review, Astra/coordinator final staged-tree and preservation checks, commit and verified push remain. Candidate X344 is observed, not a pin; `N_W`, `N_X`, and `M` remain unknown. |
+| BLOCKED on verified S1 push | S2 — independent W/X ON/SAN captures and pin freeze | Two complete independent captures per profile/mode agree on classified inventory, bytes, all 15 Usage fields and witnesses; reviewed N/digest pins and finite repeats pass. `N_W`, `N_X`, `M` and digests remain unknown; stored zeros are placeholders. |
+| BLOCKED on S2 | S3 — review helpers, then every new fault ordinal | Review complete helpers/mappings first; preserve the per-ordinal baseline/injection/fence/failure/retry/witness/close chain, then accept every W/X ordinal in ON and SAN across finite batches with no missing/duplicate identities. |
+| BLOCKED on S3 | S4 — remaining behavior/compatibility | Future small groups only: 4a routes/bounds; 4b rejection/canonical/mutations; 4c resources/metadata; 4d compatibility. Each group needs exact frozen keys, its source-specific exit, and independent evidence review; no parallel activation. |
+| BLOCKED on S1–S4 | S5 — integration/final review/docs/publication | Reconcile final pins/evidence and run only affected integration checks; independent final review accepts the scope. Commit/push each independently accepted **and verified publishable** milestone under standing direction; S5 does not hold earlier publishable work. |
+| OPEN / deferred from this sequence | Separate debt | R-AUTH and held resealed ±1 checks OPEN; whole-suite speed UNMET; broad P4/P4.4 OPEN. Host/E6/P4.5/P5 execution remains deferred; none is an added S1 prerequisite. |
+
+For any step, technical acceptance and independent publishability are separate. The
+candidate source and bounded evidence have been independently accepted; final
+documentation/staged-tree/preservation review and verified publication are still
+required. Never stage the combined original dirty test file wholesale. Do not
+predeclare S2/S3 or all f1e as S1 publication prerequisites.
+
+CORE source and bounded evidence are independently approved: both frozen CORE target
+builds and all nine selected cases per mode passed, closing E1 for those 18 fresh
+runs only. Full f1e remains incomplete, not milestone-accepted, uncommitted, and
+unpublished. Do not treat CORE binaries as current allocator binaries or cumulative
+ON18/SAN13 as 18/13 all-PASS unique cases. P4.4f1d remains the accepted published
+checkpoint: its 486 selected obligations per mode had ON 111 fresh /375 carry and
+SAN 318 fresh /168 carry; each carry includes eight earlier matching-pin mutation
+receipts. Current-binary observations were ON 119 / SAN 326, not 486 fresh runs.
+Publication did not refresh those pins or timings. See the [f1e interim handoff](docs/p4.4f1e-handoff.md).
   P4.4f1b's bounded leaf-predicate milestone was accepted and published as
   `ca18c6d37c6c464836be01f02b06713319d0d069`; the subsequent status-only history
   checkpoint is `aacd482`. Its validation remains pinned to
@@ -54,8 +91,12 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
   ALL60 audit is finished:
   58 PASS, zero FAIL, two cutoffs, **NOT_ACCEPTANCE**. Speed goals remain unmet; this
   cursor change does not resolve them. P4.4f1b and bounded f1c are accepted and
-  published; the active cursor is P4.4f1e bounded planning, as recorded
-  below.
+  published; f1e has one five-step cursor above: CORE and S1 technical acceptance are
+  complete, bounded candidate source/evidence is independently accepted, S1 final
+  publication checks and commit/push are active, and the earlier setup interruption is
+  history. Candidate evidence is limited to its reviewed build, two native semantic
+  cases and 13 metadata invocations; the f1d counts remain historical mixed
+  fresh/carry accounting, not new f1e results.
 - M1 is resolved through its infeasibility path: the
   [September 25 report](experiments/m1/README.md) records the missing independent
   governance and protected evaluation boundary.
@@ -431,8 +472,8 @@ P3 completes static runtime lowering but defines no executor, physical ABI, Wasm
 adapter, allocator implementation, CLI/build artifact, or tokens. The P3.3 policy
 retains exact inherited P3.1 sites and adds supplemental sites only for uncovered
 allocation/resource producers. P3.W1 remains unperformed historical/optional
-proposed work and non-cursor; it does not replace the active P4.4f1d coordinator
-publication cursor.
+proposed work and non-cursor; it does not replace the active P4.4f1e S1 publication
+readiness/extraction cursor (final documentation/tree checks, commit and verified push).
 
 ### P4 - WebAssembly Backend and Host Adapter
 
@@ -534,18 +575,71 @@ complete at `42fd4cd` (`7d19435..42fd4cd`, `Execute direct refinement predicate
 calls`). The accepted union remains 486 selected obligations per mode (412 f1d +74
 compatibility), zero pending. Final-batch fresh/carry counts remain ON 111/375 and
 SAN 318/168; carries include eight earlier matching-d03 mutation receipts per mode.
-Including those, current-binary semantic observations are ON 119 / SAN 326; older
-source-equivalent fault evidence is ON 367 / SAN 160. The 207 SAN V faults passed
+Including those, current-binary semantic observations are ON 119 / SAN 326; these
+are f1d history, not f1e fresh evidence. Older source-equivalent fault evidence is
+ON 367 / SAN 160. The 207 SAN V faults passed
 fresh. The historical 19-ON/55-SAN authority deviation remains explicit and is not
 retrospectively authorized. Publication did not refresh evidence: source/binary pins,
 coverage, and timings remain those in the accepted final report. Three native
 current-binary coordinator smokes passed at 0.243s, 0.452s, and 1.863s within their
 strict caps; protected original/resource WIPs were verified unchanged. Final Sol
 review, documentation audit, Astra alignment, coordinator checks, and publication
-gates are closed. The sole next cursor is P4.4f1e bounded Sol 6.1 High planning for
-remaining predicate-call contexts/signatures; no form is selected for implementation
-before technical analysis, an approved brief, and review. See the
-[P4.4f1d handoff](docs/p4.4f1d-handoff.md).
+gates for f1d are closed. f1e CORE source and bounded evidence are independently
+approved: the frozen target builds and all nine selected cases per mode passed,
+closing E1 for these 18 fresh executions. Timings use active limits 3s/27s and
+distinct post-witness outer samples below 5s/30s. The four older semantic PASS
+results retain their original pins and durable-close timing UNKNOWN; no historical
+receipt or prior FAIL was repaired or relabeled. Historical ON9/SAN4 focused counts
+plus nine new PASSes per mode produce cumulative ON18/SAN13 accounting, not 18/13
+all-PASS unique cases. CORE build hashes belong only to that accepted checkpoint.
+
+Historical X at test `6e10fdfe…` remains UNKNOWN at active 3.004135583s / outer
+3.079325s, without same-source retry or deadline increase. Historical W at test
+`46e16a9d…` / ON binary `f8ee4a13…` remains a PASS at 2.405744s / 2.468456s with
+two owners and 257 provisional rows, not accepted `N_W`. Separately, the reviewed S1
+run used source `950d5b50…`, production `49a241…`, and fixture `cdaef7…`: one strict
+ON target build and one exact traced-X discovery completed at active 2.839310s,
+durable-complete 2.859487s, and distinct outer 2.882960s. Its raw inventory had 344
+physical rows numbered 1..344; this is observed evidence, not frozen `N_X`. The
+original controller slot and outer receipts remain FAIL. The review accepts the
+ordinal-base and duplicate-observer-delivery erratum; it does not rewrite those
+receipts or authorize a same-source retry. Scan completion is the largest required
+END 12485 with all 23 rows, not physical-file EOF. `N_W`, `N_X`, and `M` remain
+unknown; zero pins are placeholders. The original 950 S1 source's evidence remains
+separate from the extracted-candidate results below. No current W carry is claimed.
+The original 12-launch unit is historical accounting, not current allowance; old pins,
+failures, and receipts remain unchanged.
+
+The exact candidate source `fbb0806bc0cd52cdb15f5ea0abf031478c2e4939b8cfa4457b821b9f526c6ceb`
+with production `49a241…` and fixture `cdaef7…` is SOURCE + bounded EVIDENCE APPROVED
+by the independent S1 publication review; approval is limited to this S1 checkpoint.
+It used one fresh configure/build, two fresh native semantic cases, and 13 metadata
+invocations. Candidate traced-X discovery passed at 2.670197250s active / 2.714858500s
+complete / 2.733556625s outer; retained-traced passed at 1.061952667s / 1.076693625s /
+1.095858458s. Binary/object SHA-256 are `e2734001faf16002ddbc59f79b40fd2ecfbd318bbecafd5f35d867dc11d551e8` /
+`3726447a8ab7fd90eff8211416649899b615807aa1bd78af57b0267331f542d1`. No candidate
+SAN or nine-case replay was performed. CORE's accepted 9 ON + 9 SAN observations
+remain at their own pins; only the review-approved bounded historical continuity is
+used, without claiming exact byte identity to the unavailable complete `695e01…`
+test snapshot.
+
+The accepted candidate has exactly nine real E selectors (eight CORE keys plus the
+single traced-X discovery key), and adds only
+`contracts.ensures-call-core-s1`. Static inventory is 77 unique controls / 118 expanded
+control tuples / 4,882 unchanged old fault IDs / 29 sweeps / 24 runners / 50 shards /
+5,000 total ordered tuples (baseline 4,999 plus the one control). Removing only the
+new control tuple recovers the baseline sequence. New fault keys, W/plain discovery,
+and future49 obligations are unregistered; omitted CLI keys return2, not false PASS.
+Candidate X's 344 rows are observed native evidence, not `N_X`; `N_W`, `N_X`, `M` and
+their digests remain unknown, not frozen zero placeholders. A single X discovery is
+not fault coverage or a two-capture inventory freeze. The former 78-control /
+`(4,882+M)` plan describes the original monolith and is not the current inventory;
+reconcile future S2/S3 additions against the published 77-control/5,000-tuple base,
+without inferring79 or guessing pins. The remaining49 obligations, M faults,
+compatibility/resources, and later S2–S5 remain pending. Full f1e is not accepted.
+No old-486, full-4,882, SAN replay, or broad CORE replay gate is added to S1. See the
+[f1e interim handoff](docs/p4.4f1e-handoff.md) and
+[f1d handoff](docs/p4.4f1d-handoff.md).
 
 Preserve the older seven-source/five-fixture `paused-p44-wip` bytes and the separate
 six-path resource WIP; neither is to be discarded or described as committed. The
@@ -560,7 +654,7 @@ The following are status handoffs, not competing execution cursors:
 
 | Lane / owner | Ready work and exclusive scope | Acceptance handoff |
 | --- | --- | --- |
-| P4.4f1d published / P4.4f1e planning | f1d bounded technical/evidence acceptance and feature publication are complete at `42fd4cd`; its source/binary evidence pins and timings remain unchanged. | Sole next cursor: Sol 6.1 High planning to analyze remaining predicate-call contexts/signatures and select a bounded priority. No implementation until a separate approved brief and review. See the [P4.4f1d handoff](docs/p4.4f1d-handoff.md). |
+| P4.4f1d published / P4.4f1e | f1d publication remains historical. For f1e, consult the single cursor above: CORE and S1 technical acceptance are closed; S1 publication is active; S2–S5 remain blocked in sequence. | This handoff table is not a second cursor; see [f1e interim handoff](docs/p4.4f1e-handoff.md) for candidate status, evidence attribution, and the separate technical-acceptance/publication boundary. |
 | R-AUTH / separate Sol 6.1 High brief | Independent inherited P3.6 resource-authentication defect and preserved six-path resource WIP; coverage extension is pending and unaccepted. | Specify independent exactness reconstruction and truthful coverage; keep held `build_work`/`build_scratch_bytes` ±1 assertions unresolved until evidence exists. |
 | P4.4f1a integration / coordinator | Bounded metadata checkpoint committed as `5c9c056`, fast-forwarded to `master`, and pushed to `origin/master`; existing default selectors and full registrations remain unchanged. | Integration complete. This publication update does not refresh or extend the accepted test receipts. |
 | P4.5/P5 and host | Dependency-deferred; f1c adds no host adapter, E6 execution, artifact writer, or `sol build` work. | Requires its own approved interface and task briefs. |

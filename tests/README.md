@@ -267,7 +267,131 @@ not retroactively authorized. Final Sol review, documentation audit, Astra
 alignment, coordinator checks, and publication gates are closed; three native
 current-binary smokes passed within strict caps and protected original/resource WIPs
 were verified unchanged. See the [P4.4f1d handoff](../docs/p4.4f1d-handoff.md) for
-exact pins, carry provenance, preserved failures, and the P4.4f1e planning cursor.
+exact pins, carry provenance, and preserved failures. The current f1e execution
+status is recorded below and in the [interim handoff](../docs/p4.4f1e-handoff.md).
+
+## P4.4f1e direct ensures-call — CORE/S1 accepted; publication commit/push pending
+
+The bounded f1e CORE source and its nine-key-per-mode validation are independently
+accepted; E1 is closed for those 18 fresh runs only. Separately, the original
+950/49a/cdae S1 technical evidence and the extracted candidate's bounded source/evidence
+are independently accepted for S1. The five-step ledger has exactly one active step:
+final S1 documentation/tree checks, commit and verified push. An earlier controller
+setup interruption is historical, not the latest S1 disposition. Full f1e remains
+incomplete and unpublished. The accepted CORE
+selectors were:
+`represented.ensures-calls.launch.traced`,
+`represented.ensures-calls.retained.traced`,
+`represented.ensures-calls.caller_false.traced`,
+`represented.ensures-calls.callee_arithmetic.traced`,
+`represented.ensures-calls.reject.wrapper`,
+`represented.ensures-calls.reject.qualified-success`,
+`represented.ensures-calls.reject.target-refinement`,
+`represented.ensures-calls.reject.target-dead-text`, and the retained old identity
+`represented.refinement-calls.reject.ensures-call` (now a paired-root positive).
+All nine passed in both ON and SAN. Native maximum active/outer times were
+1.211297s/1.252686s; SAN maximum active/outer times were 4.968905s/5.044370s.
+Outer sampling followed raw/Result close, primary receipt fsync/close and post-close
+witness fsync/close; active limits were 3s/27s and full limits <5s/<30s. SAN leak
+detection is disabled. This does not accept the complete 49 nonfault keys or any
+W/X allocation-fault inventory. These results bind the frozen CORE checkpoint, not
+later allocator test-C revisions.
+
+The scope is one direct pure plain `ALWAYS` ensures `FUNCTION` call, with one owned
+plain `Int64` argument from `result` or `old` of the whole owned plain `Int64`
+parameter and a `Bool` result. The accepted requires/refinement-call behavior and
+ordinary scalar callee/SCC closure remain unchanged. The retained case uses the
+unchanged genuine old F1D `launch` ENTRY plus private `ensures_root` as an
+`INTERNAL_FIXTURE`; it invokes only the private raw alias twice for value 4. Its
+static companion closure does not claim that ENTRY/refinement ran, and its trace
+reset clears only `TRACE_COUNT` after the first complete ledger is authenticated.
+
+The earlier four semantic PASS results remain historical at their original pins.
+Their active limits were 5s/30s rather than 3s/27s, and their saved outer elapsed
+fields copy primary receipt samples rather than sampling after durable witness
+closure. Keep those results as semantic PASS with historical full timing UNKNOWN;
+they are not runtime FAILs and were not repaired or relabeled. No leak or suite-speed
+claim follows from the fresh CORE validation; the accepted CORE pin does not validate
+the later allocator test-C revisions.
+
+The S1 source test pin `950d5b50abe9293f15660e29aa9f08e656fea1fa0dd8fc7adfab989290175e2b`,
+production `49a241484fcc5a31de2b7512704c803d44c5c86add69a84df5b049d3b02cc988`, and
+fixture `cdaef751298f9cda6147868952d7e00d1cb061a6879064c5aaa921c290f47db9` were used
+for one strict native ON target build and the exact traced-X discovery. Active was
+2.839310s, durable complete 2.859487s, and distinct outer 2.882960s. The review accepts
+the source-enforced checks, including 23 anchor rows through largest required END
+12485, two independent owners, full bytes/15 Usage, four actual seven-render sets and
+both closes. X344 rows numbered 1..344 are observed evidence, not frozen `N_X`.
+Original slot and outer receipts remain FAIL; their ordinal-base and duplicate-observer
+false negatives are reviewed errata, not rewritten receipts or a reason to rerun. The
+four older PASS records retain historical full-timing UNKNOWN.
+
+The 950 source snapshot is the accepted original S1 execution source, not the extracted
+candidate. The controller setup stopped with `AttributeError` before a frozen plan or
+selector; that partial setup audit is a preserved historical failed attempt, not a
+validation receipt. The separate candidate test pin is
+`fbb0806bc0cd52cdb15f5ea0abf031478c2e4939b8cfa4457b821b9f526c6ceb` (production
+`49a241…`, fixture `cdaef7…`). Independent source and evidence reviews accept this
+exact candidate for bounded S1 publication, pending documentation/final-tree review
+and commit/push.
+
+The candidate had one fresh native configure/build, followed by a no-child
+pre-semantic bytecode correction (no rebuild), two native semantic cases, and 13
+metadata invocations. Discovery X passed at 2.670197250s active / 2.714858500s
+complete / 2.733556625s outer; retained-traced passed at 1.061952667s /
+1.076693625s / 1.095858458s. Candidate binary/object SHA-256 are
+`e2734001faf16002ddbc59f79b40fd2ecfbd318bbecafd5f35d867dc11d551e8` /
+`3726447a8ab7fd90eff8211416649899b615807aa1bd78af57b0267331f542d1`. Metadata had
+seven successful output invocations (manifest plus six lists) and six expected
+empty-output rc2 negatives. This chronology/count correction is attributed to the
+independent evidence review; do not edit the immutable validation report or receipts.
+Candidate results are native only: no fresh candidate SAN or nine-case CORE replay.
+The CORE 9 ON + 9 SAN checkpoint remains accepted at its own pins; the evidence review
+approves only bounded historical continuity for S1, not automatic pin migration or
+byte identity to the unavailable full `695e01…` test snapshot.
+
+Historical X at `6e10fdfe…` remains UNKNOWN cutoff (active 3.004135583s / outer
+3.079325s); there was no unchanged-source retry or deadline increase. Historical W at
+`46e16a9d…` / binary `f8ee4a1302c2b75e21a66e3f6264ac2fc20458d9f6d23f98776b3273a6b8fb17`
+passed at 2.405744s / 2.468456s with two owners and 257 provisional rows. These do
+not establish accepted `N_W`; `N_W`, `N_X`, and `M` remain unknown, and no W carry is
+claimed. Digests remain unknown; prior failures, unknown timings, pins, and receipts
+remain unchanged.
+
+Only S1 publication is active: separate documentation review, Astra/coordinator
+staged-tree and preservation checks, commit, and verified push remain. S2 (independent
+W/X ON/SAN capture and pin freeze) is blocked until verified S1 push; S3 is blocked on
+S2; S4 on S3; S5 on S1–S4.
+
+The candidate lists/defaults exactly nine real E keys (eight CORE plus the single
+traced-X discovery key) and adds only `contracts.ensures-call-core-s1`. It registers no
+new fault selector/coverage, W/plain discovery, or future49 obligation; omitted keys
+return2, not false PASS. Its static inventory is 77 unique controls /118 expanded
+control tuples /4,882 unchanged old fault IDs /29 sweeps /24 runners /50 shards /5,000
+ordered tuples (baseline 4,999 plus one new control). X344 is observed native evidence,
+not frozen `N_X`; `N_W`, `N_X`, `M` and digests remain unknown, not zero pins. One X
+discovery is not a two-capture inventory freeze or fault coverage. The old 78-control /
+`(4,882+M)` plan is original-monolith planning only and must be reconciled against the
+published 77-control/5,000-tuple S1 base before S2/S3 additions; do not infer 79 or
+guess pins. The original 12-launch unit is historical accounting, not current
+allowance. No old-486, full-4,882, SAN replay, or broad CORE replay gate is added to S1.
+
+The accepted f1d inventory remains 76 controls /4,882 fault IDs /50 shards and its
+old lists 23/351/457/412. The 486 selected obligations per mode remain mixed
+fresh/carry history (ON 111/375; SAN 318/168); each carry includes eight earlier
+matching-pin mutation receipts. ON119/SAN326 are current-binary semantic
+observations, not fresh f1e runs. The accepted S1 candidate adds one control to that
+baseline: 77 unique controls, 118 expanded control tuples, 4,882 old fault IDs and
+5,000 ordered tuples. Future M/fault additions and the 49 nonfault keys remain
+unknown/pending, not registered as false tests or claimed complete.
+The six-profile runtime bridge, remaining 49 nonfaults, all M faults, bounds/resources,
+mutations/canonical controls, full default/selector inventory, metadata/CLI,
+compatibility, independent reviews and milestone publication remain pending. R-AUTH
+and held resource checks remain open, speed goals unmet, broad P4.4 unchecked, and
+host/E6, P4.5 and P5 deferred. Preserve the active 3s/27s limits and complete
+<5s/<30s durable-close limits for any future authorized discovery. See the
+[interim f1e handoff](../docs/p4.4f1e-handoff.md) and
+[TODO cursor](../TODO.md#execution-cursor).
 
 ### Records and real progress
 
@@ -411,3 +535,23 @@ seeds, corpus/dictionary arguments, run counts, max lengths and per-input timeou
 are retained. Only libFuzzer's real iteration/status lines establish iteration
 progress. The heartbeat names configured runs but does not invent a completed
 count. Local macOS support proofs do not establish Linux CI, leak or Windows safety.
+
+## S1 publication candidate — source/evidence accepted; publication pending
+
+Candidate path `/Users/jsobotka/code/sol-lang-p44f1e-s1-publication`, branch
+`p44-f1e-s1-publication`, base `dfceed6b3e6630271cdc6ba02cb011314f1b31f1`. Candidate
+test SHA-256 is `fbb0806bc0cd52cdb15f5ea0abf031478c2e4939b8cfa4457b821b9f526c6ceb`; exact
+production/fixture pins are `49a241…` / `cdaef7…`. The test is reconstructed from
+baseline with the accepted 950 dependency closure, a bounded nine-key dispatcher, and
+one new control. It preserves historical definitions/assertions, the converted legacy
+F1D selector, 29 old sweeps and 4,882 old fault IDs. No new fault arm or E fault
+registration is present.
+
+Independent source and evidence reviews approve this exact candidate for the bounded
+S1 checkpoint. One configure/build, two native semantic cases (discovery X and
+retained-traced), and 13 metadata invocations passed at candidate pins. This does not
+claim more than those two fresh candidate-native semantic cases; no candidate SAN,
+full-default execution, or fresh 9×2 CORE replay occurred. S1 publication remains the
+sole active step, with separate documentation review, final staged-tree/preservation
+checks, commit and verified push pending. S2 remains blocked until verified push. The
+original seven-path WIP and external preservation receipt remain untouched.

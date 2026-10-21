@@ -5310,6 +5310,15 @@ static bool represented_predicate_leaf_scalar_target(const SolMirConcreteProgram
     return true;
 }
 
+static bool represented_source_plain_int64(const SolIr *ir, size_t type) {
+    if (type >= ir->type_count) return false;
+    const SolIrType *item = &ir->types[type];
+    return item->kind == SOL_IR_TYPE_INT64 && item->definition == SOL_IR_NONE
+        && item->argument_count == 0 && item->parameter_count == 0
+        && item->result == SOL_IR_NONE && item->effects.count == 0
+        && item->effect_parameter == SOL_IR_NONE;
+}
+
 /* The first predicate-call join is intentionally private and scalar.  Keep
  * owner/body/block namespaces explicit here: a predicate block number is not
  * an image block number, and its result ID is not a materialized image value. */
@@ -5367,16 +5376,19 @@ static bool represented_predicate_call_exact(const SolWasmRepresentedBuildReques
     if (context->obligation >= ir->obligation_count) return false;
     const SolIrObligation *obligation = &ir->obligations[context->obligation];
     bool refinement = body->refinement_self_recipe != SOL_MIR_RECIPE_NONE;
+    bool ensures_call = !refinement && body->phase == SOL_CONTRACT_ENSURES
+        && body->outcome == SOL_CONTRACT_OUTCOME_ALWAYS;
     if (body->owner_kind != SOL_MIR_PREDICATE_OWNER_INSTANCE
         || body->instance >= m->image_count || body->import != SOL_MIR_MATERIALIZED_NONE
         || body->blocks.offset > o->predicate_block_count
         || body->blocks.count > o->predicate_block_count - body->blocks.offset
-        || body->phase != SOL_CONTRACT_REQUIRES || body->outcome != SOL_CONTRACT_OUTCOME_ALWAYS
+        || (body->phase != SOL_CONTRACT_REQUIRES && !ensures_call)
+        || body->outcome != SOL_CONTRACT_OUTCOME_ALWAYS
         || body->context >= m->context_count || block->body != body_id
         || context->target_kind != SOL_MIR_PLAN_TARGET_INSTANCE
-        || context->instance != body->instance || obligation->kind != SOL_CONTRACT_REQUIRES
+        || context->instance != body->instance
         || obligation->outcome != SOL_CONTRACT_OUTCOME_ALWAYS
-        || obligation->predicate != binding->source.expression
+        || obligation->kind != body->phase || obligation->predicate != binding->source.expression
         || lowered_term->state != SOL_MIR_RUNTIME_LOWERED_PRESENT
         || lowered_term->body != body_id || lowered_term->block != block_id
         || lowered_term->kind != SOL_MIR_PREDICATE_TERM_INVOKE
@@ -5492,6 +5504,144 @@ static bool represented_predicate_call_exact(const SolWasmRepresentedBuildReques
             || source_operand->value >= ir->expression_count
             || ir->expressions[source_operand->value].kind != SOL_IR_EXPR_REFINEMENT_SELF)
             return false;
+    }
+    if (ensures_call) {
+        const SolMirOperationPredicatePlan *plan = represented_plan_for_body(request,
+            qualified_index, body->instance, body_id);
+        if (plan == NULL || plan < o->predicates || plan >= o->predicates + o->predicate_count)
+            return false;
+        size_t plan_id = (size_t)(plan - o->predicates);
+        const SolMirMaterializedImage *caller_image_row = &m->images[body->instance];
+        SolIrCallableId source_callable_id = caller_image_row->source_callable;
+        if (source_callable_id >= ir->callable_count
+            || caller_image_row->values.offset > m->value_count
+            || caller_image_row->values.count > m->value_count - caller_image_row->values.offset
+            || caller_image_row->blocks.offset > m->block_count
+            || caller_image_row->blocks.count > m->block_count - caller_image_row->blocks.offset
+            || body->inputs.count != 1 || body->inputs.offset >= o->predicate_input_count
+            || body->values.offset > o->predicate_value_count
+            || body->values.count > o->predicate_value_count - body->values.offset
+            || plan->kind != SOL_MIR_OPERATION_PREDICATE_CONTRACT
+            || plan->image != body->instance || plan->body != body_id
+            || plan->context != body->context || plan->block >= m->block_count
+            || plan->block < caller_image_row->blocks.offset
+            || plan->block - caller_image_row->blocks.offset >= caller_image_row->blocks.count
+            || plan->contract_phase != SOL_CONTRACT_ENSURES
+            || plan->contract_outcome != SOL_CONTRACT_OUTCOME_ALWAYS
+            || plan->representation != SOL_MIR_MATERIALIZED_NONE
+            || plan->input_recipe != SOL_MIR_RECIPE_NONE
+            || plan->output_recipe != body->output_recipe
+            || plan->provenance >= o->provenance_count
+            || plan->result >= m->value_count
+            || plan->result < caller_image_row->values.offset
+            || plan->result - caller_image_row->values.offset >= caller_image_row->values.count)
+            return false;
+        const SolIrCallable *source_callable = &ir->callables[source_callable_id];
+        const SolMirMaterializedTerminator *check = &m->blocks[plan->block].terminator;
+        const SolMirPredicateInput *input = &o->predicate_inputs[body->inputs.offset];
+        const SolIrOperand *source_call_argument = &ir->operands[source_call->as.call.operands.offset];
+        if (source_call_argument->formal != 0 || source_call_argument->access != SOL_ACCESS_OWNED
+            || source_call_argument->value >= ir->expression_count) return false;
+        if (predicate_operand->value < body->values.offset
+            || predicate_operand->value - body->values.offset >= body->values.count
+            || argument == NULL || argument->kind != SOL_MIR_PREDICATE_VALUE_INPUT
+            || argument->definition != body->inputs.offset) return false;
+        const SolIrExpression *source_argument = &ir->expressions[source_call_argument->value];
+        const SolIrType *caller_result_type = source_callable->result < ir->type_count
+            ? &ir->types[source_callable->result] : NULL;
+        const SolIrType *obligation_result_type = obligation->result_type < ir->type_count
+            ? &ir->types[obligation->result_type] : NULL;
+        const SolIrType *argument_type = source_argument->type < ir->type_count
+            ? &ir->types[source_argument->type] : NULL;
+        const SolMirOperationProvenance *provenance = &o->provenance[plan->provenance];
+        size_t source_caller_callable = SOL_MIR_RUNTIME_NONE, caller_matches = 0;
+        for (size_t i = 0; i < linkage->callable_count; ++i)
+            if (linkage->callables[i].instance == body->instance) {
+                source_caller_callable = i;
+                ++caller_matches;
+            }
+        const SolMirRuntimeSignature *caller_signature = caller_matches == 1
+            ? signature_for(conventions, source_caller_callable) : NULL;
+        if (source_callable->kind != SOL_IR_CALLABLE_FUNCTION
+            || source_callable->owner != obligation->owner
+            || obligation->owner_kind != SOL_CONTRACT_OWNER_ITEM
+            || !obligation->result_available
+            || caller_result_type == NULL || obligation_result_type == NULL
+            || !represented_source_plain_int64(ir, source_callable->result)
+            || !represented_source_plain_int64(ir, obligation->result_type)
+            || check->kind != SOL_MIR_TERM_CHECK_CONTRACT
+            || check->source_obligation != context->obligation
+            || check->contract_phase != SOL_CONTRACT_ENSURES
+            || check->contract_outcome != SOL_CONTRACT_OUTCOME_ALWAYS
+            || check->result != plan->result
+            || caller_signature == NULL
+            || caller_signature->result_class != SOL_MIR_RUNTIME_RESULT_VALUE
+            || caller_signature->result != plan->result_recipe
+            || plan->result_recipe >= concrete->representation.recipe_count
+            || concrete->representation.recipes[plan->result_recipe].kind != SOL_MIR_RECIPE_INT64
+            || concrete->representation.recipes[plan->result_recipe].storage != SOL_MIR_STORAGE_SCALAR
+            || m->values[plan->result].type != plan->result_recipe
+            || source_callable->result != obligation->result_type
+            || !represented_source_plain_int64(ir, source_argument->type)
+            || source_argument->type != source_callable->result)
+            return false;
+        if (argument_type == NULL || !represented_source_plain_int64(ir, source_argument->type)
+            || input->access != SOL_ACCESS_OWNED || input->recipe != slot->recipe
+            || input->recipe >= concrete->representation.recipe_count
+            || concrete->representation.recipes[input->recipe].kind != SOL_MIR_RECIPE_INT64
+            || concrete->representation.recipes[input->recipe].storage != SOL_MIR_STORAGE_SCALAR)
+            return false;
+        if (provenance->kind != SOL_MIR_OPERATION_PROVENANCE_PREDICATE
+            || provenance->executable != plan_id
+            || check->source_expression != SOL_IR_NONE
+            || provenance->source_expression != check->source_expression
+            || context->source.expression != obligation->predicate
+            || binding->source.expression != obligation->predicate
+            || provenance->source_obligation != context->obligation
+            || provenance->source_definition != SOL_IR_NONE
+            || provenance->source_snapshot != SOL_IR_NONE) return false;
+        if (source_argument->kind == SOL_IR_EXPR_RESULT) {
+            if (input->kind != SOL_MIR_PREDICATE_INPUT_COMPLETE_RESULT
+                || input->ordinal != 0 || obligation->snapshots.count != 0) return false;
+        } else if (source_argument->kind == SOL_IR_EXPR_SNAPSHOT_READ) {
+            size_t snapshot_plan_id = SOL_MIR_OPERATION_NONE;
+            if (input->kind != SOL_MIR_PREDICATE_INPUT_SNAPSHOT
+                || obligation->snapshots.count != 1
+                || source_argument->as.snapshot >= ir->snapshot_count
+                || ir->snapshots[source_argument->as.snapshot].obligation != context->obligation
+                || ir->snapshots[source_argument->as.snapshot].read
+                    != ir->operands[source_call->as.call.operands.offset].value
+                || represented_snapshot_for_predicate_input(request, body_id, input,
+                    &snapshot_plan_id) == NULL
+                || snapshot_plan_id >= o->snapshot_count
+                || o->snapshots[snapshot_plan_id].instruction >= m->instruction_count
+                || m->instructions[o->snapshots[snapshot_plan_id].instruction].source_snapshot
+                    != source_argument->as.snapshot
+                || o->snapshots[snapshot_plan_id].recipe != input->recipe
+                || ir->snapshots[source_argument->as.snapshot].type != source_argument->type
+                || input->recipe >= concrete->representation.recipe_count
+                || concrete->representation.recipes[input->recipe].kind != SOL_MIR_RECIPE_INT64
+                || concrete->representation.recipes[input->recipe].storage != SOL_MIR_STORAGE_SCALAR)
+                return false;
+        } else return false;
+        if (check->satisfied_edge >= m->edge_count || check->violation_edge >= m->edge_count
+            || check->failure_edge >= m->edge_count) return false;
+        const SolMirMaterializedEdge *satisfied = &m->edges[check->satisfied_edge];
+        const SolMirMaterializedEdge *violation = &m->edges[check->violation_edge];
+        const SolMirMaterializedEdge *failure_edge = &m->edges[check->failure_edge];
+        if (satisfied->arguments.count != 1
+            || satisfied->arguments.offset > m->edge_value_count
+            || satisfied->arguments.count > m->edge_value_count - satisfied->arguments.offset
+            || m->edge_values[satisfied->arguments.offset] != plan->result
+            || violation->arguments.count != 0 || failure_edge->arguments.count != 0
+            || satisfied->block >= m->block_count
+            || m->blocks[satisfied->block].parameters.count != 1
+            || m->blocks[satisfied->block].parameters.offset > m->parameter_value_count
+            || m->blocks[satisfied->block].parameters.count
+                > m->parameter_value_count - m->blocks[satisfied->block].parameters.offset)
+            return false;
+        size_t carried = m->parameter_values[m->blocks[satisfied->block].parameters.offset];
+        if (carried >= m->value_count || m->values[carried].type != plan->result_recipe) return false;
     }
     size_t body_invokes = 0;
     for (size_t b = body->blocks.offset; b < body->blocks.offset + body->blocks.count; ++b) {
@@ -9013,6 +9163,54 @@ static BinaryenExpressionRef represented_refinement_trace_emit(
 #endif
 }
 
+/* The historical refinement-route sentinel is also the private ordered route
+ * witness for the narrowly admitted nonqualified direct ENSURES CALL.  Only
+ * authenticated bodies reach this emitter; the probe-only check below keeps
+ * legacy profiles and untraced builds from gaining even a Nop push. */
+static bool represented_contract_ensures_call_probe(const RepresentedFunction *function,
+    const SolMirOperationPredicatePlan *plan, bool *has_call) {
+    const SolMirRuntimeLoweredProgram *owner = function->request->program;
+    const SolMirRuntimeConventions *conventions = owner->conventions;
+    const SolMirConcreteProgram *concrete = conventions->concrete;
+    const SolMirOperations *operations = &concrete->operations;
+    *has_call = false;
+    if (plan->contract_phase != SOL_CONTRACT_ENSURES
+        || plan->contract_outcome != SOL_CONTRACT_OUTCOME_ALWAYS
+        || plan->body >= operations->predicate_body_count) return false;
+    const SolMirPredicateBody *body = &operations->predicate_bodies[plan->body];
+    if (body->owner_kind != SOL_MIR_PREDICATE_OWNER_INSTANCE
+        || body->instance != function->image_id
+        || body->phase != SOL_CONTRACT_ENSURES
+        || body->outcome != SOL_CONTRACT_OUTCOME_ALWAYS
+        || body->blocks.offset > operations->predicate_block_count
+        || body->blocks.count > operations->predicate_block_count - body->blocks.offset)
+        return false;
+    size_t invokes = 0;
+    for (size_t i = 0; i < body->blocks.count; ++i) {
+        size_t block_id = body->blocks.offset + i;
+        const SolMirPredicateBlock *block = &operations->predicate_blocks[block_id];
+        if (block->body != plan->body) return false;
+        if (block->terminator.kind != SOL_MIR_PREDICATE_TERM_INVOKE) continue;
+        if (++invokes != 1) return false;
+        size_t matching_calls = 0;
+        for (size_t call_id = 0; call_id < conventions->call_count; ++call_id) {
+            const SolMirRuntimeCall *call = &conventions->calls[call_id];
+            if (call->owner_kind != SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE
+                || call->predicate != plan->body || call->block != block_id) continue;
+            size_t caller_image = SOL_MIR_RUNTIME_NONE, caller = SOL_MIR_RUNTIME_NONE;
+            if (!represented_predicate_call_exact(function->request, function->qualified,
+                    call_id, plan->body, block_id, &caller_image, &caller, NULL)
+                || caller_image != function->image_id || caller >= concrete->linkage.callable_count
+                || concrete->linkage.callables[caller].instance != function->image_id)
+                return false;
+            ++matching_calls;
+        }
+        if (matching_calls != 1) return false;
+    }
+    *has_call = invokes == 1;
+    return true;
+}
+
 static bool represented_cleanup_emit(const RepresentedFunction *function,
     const SolMirRuntimeCleanupAction *action, RepresentedNodes *nodes) {
     const SolMirConcreteProgram *concrete = function->request->program->conventions->concrete;
@@ -10717,9 +10915,17 @@ static bool represented_contract_emit(const RepresentedFunction *function, size_
     if (violation_site->origin_kind != SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT
         || violation_site->owner != plan->body || violation_site->allowed_codes != violation_mask)
         return false;
+    bool ensures_call_marker = false;
+    if (!qualified && plan->contract_phase == SOL_CONTRACT_ENSURES
+        && plan->contract_outcome == SOL_CONTRACT_OUTCOME_ALWAYS
+        && represented_refinement_trace_enabled()
+        && !represented_contract_ensures_call_probe(function, plan, &ensures_call_marker))
+        return false;
     if (!qualified) {
         RepresentedNodes yes = {0}, no = {0}, failed = {0}; size_t record = 0;
         bool ok = represented_predicate_emit(function, plan->body, nodes)
+            && (!ensures_call_marker || represented_nodes_push(&yes,
+                represented_refinement_trace_emit(function, event, satisfied)))
             && represented_cleanup_actions_emit_traced(function, event, satisfied, &yes)
             && represented_edge(function, term->satisfied_edge, &yes)
             && represented_failure_record_index(function->provenance, violation->failure_site,
@@ -10728,8 +10934,12 @@ static bool represented_contract_emit(const RepresentedFunction *function, size_
                 BinaryenConst(function->module, BinaryenLiteralInt32((int32_t)violation_code))))
             && represented_nodes_push(&no, BinaryenGlobalSet(function->module, P43_SITE,
                 BinaryenConst(function->module, BinaryenLiteralInt32((int32_t)record))))
+            && (!ensures_call_marker || represented_nodes_push(&no,
+                represented_refinement_trace_emit(function, event, violation)))
             && represented_cleanup_actions_emit_traced(function, event, violation, &no)
             && represented_edge(function, term->violation_edge, &no)
+            && (!ensures_call_marker || represented_nodes_push(&failed,
+                represented_refinement_trace_emit(function, event, failure)))
             && represented_cleanup_actions_emit_traced(function, event, failure, &failed)
             && represented_edge(function, term->failure_edge, &failed);
         BinaryenExpressionRef y = ok ? BinaryenBlock(function->module, NULL, yes.items,

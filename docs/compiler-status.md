@@ -225,11 +225,196 @@ and protected original/resource WIPs were verified unchanged. Coordinator integr
 and publication checks are closed. This status-only refresh adds no evidence or
 timing. Broad P4.4 remains unchecked; R-AUTH and held `build_work` /
 `build_scratch_bytes` ±1 checks remain open; speed goals remain unmet. P4.5,
-host/E6, and P5 remain deferred. The sole next cursor is P4.4f1e bounded Sol 6.1 High
-planning to analyze remaining predicate-call contexts/signatures and choose a
-technical priority. No form is preselected for implementation: require a separate
-bounded brief and review first.
+host/E6, and P5 remain deferred. At the f1d publication snapshot, the sole next
+cursor was P4.4f1e bounded Sol 6.1 High planning to analyze remaining predicate-call
+contexts/signatures and choose a technical priority. That planning cursor
+has since advanced under a separately approved brief; see the current f1e addendum
+below. This historical paragraph does not describe current f1e execution status.
 See the [P4.4f1d handoff](p4.4f1d-handoff.md) and
+[TODO.md](../TODO.md#execution-cursor).
+
+**Current status addendum, October 21, 2026 (P4.4f1e; bounded CORE and S1
+technical/candidate source+evidence accepted; S1 commit/push active):** The design, retained-entry
+amendment, CORE source and bounded evidence have independent approval. Frozen CORE
+source pins
+are test `695e01d09b15d511ce99d7c51bc72c4067306d40809b05cb6e84628686cebd9d`,
+production `49a241484fcc5a31de2b7512704c803d44c5c86add69a84df5b049d3b02cc988`,
+runtime-conventions header
+`f946b024ce91ba5844b7a69a7de93fe50b032d570540e62e4305f5640b684935`, and F1E
+fixture `cdaef751298f9cda6147868952d7e00d1cb061a6879064c5aaa921c290f47db9`.
+The unchanged F1D fixture is
+`24a3e83c5496082bc7cf9759befa837ff18eb42bb82ec1e17fc16bdc19416cd5`. The accepted
+CORE ON/SAN binaries were `82923e3fb25c02d77e57f4653eb6f1e812383057ef83b2768fffda7fa713c61e`
+and `ded8a8dc5769ca1a9c872ebaf364d3f194adbfb429b7e4e94a7abe626dbafb1d`; they are
+historical identities for the approved CORE checkpoint, **not** a current allocator
+test hash. The f1d feature remains published at `42fd4cd`; full f1e remains
+incomplete, uncommitted, and unpublished.
+
+The admitted slice is one direct pure plain `ALWAYS` ensures `FUNCTION` call, with
+one owned plain `Int64` input from the enclosing complete `result` or `old` of the
+whole owned plain `Int64` parameter, returning `Bool` in a plain `Int64` result
+function. Existing requires/refinement-call admission and pure ordinary scalar
+callee/SCC behavior remain unchanged. Wrappers/computed or direct-parameter ensures,
+qualified ensures, Bool/Unit widening, refined/Text targets, nested predicate calls,
+mixed cycles, PanicText and richer interiors remain excluded. The narrow route-marker
+exception is probe-ON only for the new ensures route, including zero-action failure;
+old profiles and probe-OFF emit no marker/NOP. The retained positive pairs the real
+unchanged F1D `launch` ENTRY with private `ensures_root` INTERNAL_FIXTURE. Only the
+raw alias runs twice for value 4; only `TRACE_COUNT` is reset after authenticating
+the first trace. The ENTRY/refinement companion is static census, not executed.
+
+The separate CORE evidence review accepted both frozen target builds and all nine
+selectors in each mode, closing E1 for these **18 fresh runs only**. Maximum ON
+active/outer was 1.211297s /1.252686s; maximum SAN active/outer was 4.968905s /
+5.044370s. The distinct outer clock sample followed raw/Result closure, primary
+receipt fsync/close and post-close witness fsync/close. Active limits were 3s/27s;
+complete limits were <5s/<30s. SAN used ASan/UBSan halt-on-error with leak detection
+disabled; no leak or full-suite claim follows. The four older semantic PASS results
+remain at their original pins with full durable-close timing **UNKNOWN**: their
+5s/30s active limits and duplicate primary/witness elapsed values are not repaired.
+Prior failures likewise remain at original pins and are not retroactively passes.
+The per-key timings and full closure evidence are in the
+[interim handoff](p4.4f1e-handoff.md).
+
+The separate S1 native-performance review accepted one strict native ON target build
+and one exact traced-X discovery at source test `950d5b50abe9293f15660e29aa9f08e656fea1fa0dd8fc7adfab989290175e2b`, production
+`49a241484fcc5a31de2b7512704c803d44c5c86add69a84df5b049d3b02cc988`, and fixture
+`cdaef751298f9cda6147868952d7e00d1cb061a6879064c5aaa921c290f47db9`. The selected
+X measured 2.839310250s active, 2.859486750s driver durable-complete, and
+2.882960292s distinct outer, within the unchanged 3s / <5s limits. Source checks
+covered two independent owners, the 23-row anchor bridge through largest required
+END 12485, full captured bytes and all 15 Usage fields, four actual seven-render
+sets, fences/use gates, and both real closes. The 344 physical rows 1..344 are
+observed S1 X evidence, **not frozen N_X**. The original slot and outer receipts
+remain FAIL; the independent review accepts the 1-based ordinal and duplicate
+observer-delivery erratum without changing those receipts or authorizing a retry.
+The earlier four semantic PASS results retain their pins and historical durable-close
+timing UNKNOWN; all other historical failures remain unchanged. No W, SAN, M, full-49,
+or broad-matrix acceptance follows.
+
+The separate extracted candidate at
+`/Users/jsobotka/code/sol-lang-p44f1e-s1-publication` (`p44-f1e-s1-publication`) has
+test SHA-256
+`fbb0806bc0cd52cdb15f5ea0abf031478c2e4939b8cfa4457b821b9f526c6ceb`, production
+`49a241484fcc5a31de2b7512704c803d44c5c86add69a84df5b049d3b02cc988`, and fixture
+`cdaef751298f9cda6147868952d7e00d1cb061a6879064c5aaa921c290f47db9`. The independent
+S1 publication review approves this exact candidate source plus bounded evidence.
+One fresh configure/build passed; two fresh native semantic cases passed:
+
+| Candidate selector | Active | Complete | Distinct outer |
+| --- | ---: | ---: | ---: |
+| `represented.ensures-calls.discovery.traced` | 2.670197250s | 2.714858500s | 2.733556625s |
+| `represented.ensures-calls.retained.traced` | 1.061952667s | 1.076693625s | 1.095858458s |
+
+Candidate executable/object SHA-256 are `e2734001faf16002ddbc59f79b40fd2ecfbd318bbecafd5f35d867dc11d551e8` /
+`3726447a8ab7fd90eff8211416649899b615807aa1bd78af57b0267331f542d1`. Thirteen metadata
+invocations passed: manifest, six list outputs (shards, old A–D, new E), and six
+expected CLI negatives. The correction chronology is configure/build, a no-child
+pre-semantic bytecode correction (no rebuild), then the two semantic and thirteen
+metadata invocations. This is the evidence-review interpretation; immutable raw
+validation reports and receipts are not rewritten. Historical CORE evidence remains
+at its own pins with only review-approved bounded continuity; there is no fresh
+candidate SAN or nine-case replay. Original 950 evidence is separately attributed.
+Final documentation review, staged-tree/preservation review, commit, and verified
+push remain pending; S2 remains blocked until verified push. The original seven-path
+WIP remains preserved and untouched.
+
+The original finite allocator unit described 12 launches per mode (eight profile
+controls spanning W, X, D, T, Q, R, U and V, plus four fault endpoints), ON2/SAN3/SUP0
+120-second windows, and at most two target builds per mode. That unit is historical
+accounting, not current live allowance.
+
+The historical corrected-source discovery observations are from test pin
+`46e16a9d3c249331438880496ced647591d332ecc5916c259f29dbb9aac192f9`: ON plain W
+passed with the historical ON binary `f8ee4a1302c2b75e21a66e3f6264ac2fc20458d9f6d23f98776b3273a6b8fb17`
+(active 2.405744s / outer 2.468456s; two owners, 257 rows, both closes). 257 remains
+provisional, not accepted `N_W`. ON traced X failed during test-side source
+preparation before interpreter/backend/capture; the sequence stopped after two of
+four planned selectors with no retry, and SAN was unlaunched. These are closed
+historical dispositions for that discovery only, not outcomes of the current S1
+source or a carry into it.
+`N_W`, `N_X`, and `M=N_W+N_X` plus their digests remain unknown; no old or current W
+carry is claimed.
+
+The historical ON traced-X result at test `6e10fdfe…` is UNKNOWN cutoff: active
+3.004135583s against 3s and outer 3.079325s, not PASS. No unchanged-source retry or
+deadline increase is claimed. The scanner change was source-approved at test snapshot
+`950d5b50abe9293f15660e29aa9f08e656fea1fa0dd8fc7adfab989290175e2b`; the later
+independent evidence review accepted the one ON build / one X run only at those source,
+production, fixture, and binary pins. This acceptance does not transfer to the distinct
+publication candidate described above.
+
+The controller `AttributeError` before a frozen plan/build/selector is a preserved
+historical setup interruption: **zero launches, no owned jobs, no runtime result** for
+that attempt. It was superseded by the accepted original one-build/one-X S1 evidence
+above; the original failure/slot receipts were not rewritten. Candidate configure,
+build, two semantic cases, and metadata evidence are separately accepted as described
+above; no candidate validation is running now. Prior
+historical W at `46e16a9d…` / binary `f8ee4a13…` passed at active 2.405744s / outer
+2.468456s with two owners and 257 provisional rows; this is not accepted `N_W` and
+is not carried to current W. `N_W`, `N_X`, and `M` remain unknown; stored zero pins
+are placeholders, not measured zero.
+
+| State | Step | Boundary |
+| --- | --- | --- |
+| COMPLETED | Bounded CORE | Test `695e01…`; 9 ON + 9 SAN accepted, E1 closed for those runs only. Reopen only for an actually affected dependency. |
+| COMPLETED technical and candidate source/evidence / **ACTIVE publication** | **S1 — final checks, commit and verified push** | Original 950 technical evidence and candidate fbb0806 bounded source/evidence are independently accepted. Final documentation review, Astra/coordinator staged-tree and preservation checks, commit, and verified push remain pending. |
+| BLOCKED on verified S1 push | S2 — W/X ON/SAN captures and pins | Establish two agreeing complete captures per profile/mode, classify and independently accept N/digests/repeats. |
+| BLOCKED on S2 | S3 — helpers and every new fault ordinal | Review complete helpers first; then accept every ordinal in finite ON/SAN batches. |
+| BLOCKED on S3 | S4 — behavior/compatibility groups | Future 4a–4d small groups; no group is active or parallel. |
+| BLOCKED on S1–S4 | S5 — integration/publication | Final evidence/diff review and affected checks; earlier accepted, independently publishable milestones need not wait. |
+
+Technical acceptance and publishability are distinct. Candidate source/evidence
+acceptance is closed for bounded S1; final documentation/staged-tree/preservation
+checks and verified publication remain. Do not stage the original mixed WIP wholesale.
+The candidate lists/defaults nine real E keys (eight CORE plus traced-X discovery), adds
+only `contracts.ensures-call-core-s1`, and registers no new fault, W/plain discovery,
+or future49 obligation. Static inventory is 77 unique controls /118 expanded control
+tuples /4,882 old fault IDs /29 sweeps /24 runners /50 shards /5,000 total ordered
+tuples; removing only the new control tuple returns the 4,999-tuple baseline. The
+single X discovery is not fault coverage or a two-capture inventory freeze. X344 is
+observed, not `N_X`; `N_W`, `N_X`, and `M` and digests remain unknown (zero placeholders
+are not pins). The original 78-control /`(4,882+M)` plan is historical monolith
+accounting and must be reconciled against the published S1 inventory before future
+S2/S3 additions; do not infer 79 or guess pins. R-AUTH/held resealed ±1 checks remain OPEN;
+whole-suite speed UNMET; broad P4/P4.4 OPEN; host/E6/P4.5/P5 deferred. These are not
+added S1 gates. See `TODO.md` for the sole cursor and the [interim handoff](p4.4f1e-handoff.md)
+for step exits, historical evidence and publication conditions.
+
+Earlier source reviews remain snapshot-specific: `7c1fb217…` had R1–R5 request
+changes, `de3c6fb1…` was intermediate F1–F3 request changes, and `2fb9ae2c…` was a
+separate source approval. The currently scoped S1 source approval is `950d5b50…`;
+none of these approvals is runtime evidence. Prior allocator helper/accounting reviews
+(`allocation-source-review.md:242–280`, `allocation-followup-review.md:242–280`,
+`allocation-size-review.md:228–327`) do not establish six-profile runtime
+compatibility. No full incremental diff from `46e16a9d…` to later cleanup snapshots
+is claimed.
+
+W is genuine ENTRY `launch` only with three probes OFF; X is ENTRY `launch` plus
+`old_callee_arithmetic` INTERNAL_FIXTURE with three probes ON. The intended measured
+profiles require two independent full captures/modules, all 15 `Usage` fields and
+complete witnesses before counts can be frozen. `M=N_W+N_X`, with no legacy-tail
+subtraction; old `ensures_old` IDs 6/7 remain unsupported.
+
+The six-profile runtime bridge and controls remain unaccepted: D96/T203/Q129/R297
+line-only inverse-map to accepted f1c anchors; U98/V272 map to accepted f1d anchors.
+All non-line fields/order/dimensions/bytes/`Usage` remain strict, and old-profile
+marker/probe-OFF invariants still require runtime evidence. The accepted f1d inventory
+remains 76 controls /4,882 fault IDs /50 shards and lists 23/351/457/412. Its
+486-per-mode count is mixed history: ON 111 fresh /375 carry, SAN 318 fresh /168
+carry; each carry includes eight matching-pin mutation receipts, and ON119/SAN326
+are not fresh f1e runs. The accepted S1 candidate adds one control to that historical
+baseline: 77 unique controls, 118 expanded control tuples, 4,882 old fault IDs and
+5,000 total ordered tuples. Future M/fault additions and the 49 nonfault obligations
+remain unknown or pending, not registered as false tests or claimed complete. Existing
+OFF evidence is compile/build-graph-only, not a fresh OFF runtime result.
+
+The earlier four-path DRAFT review approved the prior draft with one nonblocking
+stale cursor phrase at `TODO.md:439`; the coordinator corrected it, and this refresh
+preserves that correction. This updated DRAFT still requires separate final
+documentation review. R-AUTH/held resource checks remain open, speed goals unmet,
+broad P4.4 unchecked, and P4.5/host/E6/P5 deferred. `TODO.md` remains the sole live
+cursor. See the [f1e interim handoff](p4.4f1e-handoff.md) and
 [TODO.md](../TODO.md#execution-cursor).
 
 Use the [README](../README.md) for onboarding and runnable examples, and
@@ -1356,3 +1541,59 @@ published f1b leaf-execution slice do not close it. See the [f1a handoff](p4.4f1
 [live cursor](../TODO.md#execution-cursor).
 Consult [TODO.md](../TODO.md#execution-cursor) for the single active cursor and
 [the analysis](project-analysis.md) for the experiment rationale.
+
+## S1 publication candidate and bounded evidence — October 21, 2026
+
+The original WIP remains in `/Users/jsobotka/code/sol-lang-test-speed` and is preserved
+by the external receipt at
+`/Users/jsobotka/code/sol-lang/.git/agent-handoffs/p44-f1e/s1-publication/preservation/`
+(receipt SHA-256 `f38bd6f0f91c24e127f18f2af4821cf084ae055f21aa50354cd445d64a3dfc26`). The
+separate candidate is based on `dfceed6b3e6630271cdc6ba02cb011314f1b31f1` at
+`/Users/jsobotka/code/sol-lang-p44f1e-s1-publication`, branch
+`p44-f1e-s1-publication`. Candidate test SHA-256 is
+`fbb0806bc0cd52cdb15f5ea0abf031478c2e4939b8cfa4457b821b9f526c6ceb`; exact production
+and fixture pins are `49a241484fcc5a31de2b7512704c803d44c5c86add69a84df5b049d3b02cc988`
+and `cdaef751298f9cda6147868952d7e00d1cb061a6879064c5aaa921c290f47db9`. It is
+ledger-assembled from the baseline plus the approved selected source closure; it is
+not the full 950 or 695 test snapshot. The 215 selected new 950 functions are retained,
+with a bounded dispatch replacement; eight unaccepted WIP implementations are
+excluded. This candidate's results are separately attributed and do not inherit the
+original 950 run or claim exact byte identity to the unavailable full `695e01…`
+snapshot. CORE's 9 ON + 9 SAN results remain accepted at their own pins, with only
+review-approved bounded continuity used here; no fresh candidate SAN or nine-case
+replay is claimed.
+
+Independent S1 source and evidence reviews approve this exact candidate for the
+bounded S1 checkpoint. One fresh configure/build passed, followed by the two authorized
+native semantic cases:
+
+| Candidate selector | Active | Complete | Distinct outer |
+| --- | ---: | ---: | ---: |
+| `represented.ensures-calls.discovery.traced` | 2.670197250s | 2.714858500s | 2.733556625s |
+| `represented.ensures-calls.retained.traced` | 1.061952667s | 1.076693625s | 1.095858458s |
+
+Each passed once within active ≤3s and complete/outer <5s. Candidate executable/object
+SHA-256 are `e2734001faf16002ddbc59f79b40fd2ecfbd318bbecafd5f35d867dc11d551e8` /
+`3726447a8ab7fd90eff8211416649899b615807aa1bd78af57b0267331f542d1`. Thirteen metadata
+invocations passed: seven output successes (manifest plus six lists: shards, old
+A–D, new E) and six expected rc2/empty-output negatives. Evidence review clarifies
+the immutable chronology: configure/build first, then a no-child pre-semantic
+bytecode correction with no rebuild, then the semantic and metadata invocations. Raw
+validation report/receipts are not rewritten.
+
+The candidate lists/defaults nine real E selectors (eight CORE and traced-X
+discovery) and adds only `contracts.ensures-call-core-s1`. Its static inventory is 77
+unique controls / 118 expanded control tuples / 4,882 unchanged old fault IDs / 29
+sweeps / 24 runners / 50 shards / 5,000 ordered tuples (baseline 4,999 plus one new
+control). No new fault coverage, W/plain discovery, or future49 obligation is
+registered. X=344 is observed native evidence, not frozen `N_X`; `N_W`, `N_X`, `M`,
+and digests remain unknown, not zero pins. Reconcile future S2/S3 additions against
+the published 77-control/5,000-tuple base; do not infer 79 or guess pins. The original
+seven-path WIP remains preserved by the receipt above.
+
+**S1 is the sole ACTIVE step, at final documentation/tree review, then commit and
+verified push.** Final Sol documentation review and Astra/coordinator staged-tree and
+preservation checks remain pending. S2 is blocked until verified S1 push. Full f1e
+remains incomplete and unpublished; R-AUTH is OPEN, broad speed goals remain UNMET,
+broad P4/P4.4 remains open, and host/E6/P4.5/P5 remain deferred. See the
+[P4.4f1e handoff](p4.4f1e-handoff.md) and [sole cursor](../TODO.md#execution-cursor).
