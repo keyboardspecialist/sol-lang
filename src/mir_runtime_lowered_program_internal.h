@@ -8,4 +8,9 @@ SolMirRuntimeLoweredProgramBuildOutcome sol_mir_runtime_lowered_program_internal
 uint64_t sol_mir_runtime_lowered_program_internal_seal(
     const SolMirRuntimeLoweredProgram *, SolMirRuntimeLoweredWorkMeter *);
 void *sol_mir_runtime_lowered_program_internal_validation_scratch(size_t,size_t);
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+/* Full fresh validation and the original uncached key computation/row emitter. */
+bool sol_mir_runtime_lowered_program_test_render_reference(
+    FILE *, const SolMirRuntimeLoweredProgram *);
+#endif
 #endif

@@ -997,11 +997,60 @@ bool sol_mir_runtime_lowered_program_validate(const SolMirRuntimeLoweredProgram*
  * the local join rows.  In particular, no key below is made from a row's
  * representation, padding, owner coordinate, or address. */
 typedef struct { char *data; size_t count, capacity; bool failed; } LoweredRenderBuffer;
+/* Byte cells need no alignment: state, followed by a complete 65-byte key.
+ * This is pure computation storage, never authentication or owner state. */
+typedef struct { unsigned char *data; size_t count, bytes; } LoweredRenderKeys;
+typedef struct { LoweredRenderKeys bodies, failures, events; } LoweredRenderWorkspace;
 typedef struct { const SolMirRuntimeLoweredProgram *owner; LoweredRenderLine *lines;
-    size_t count, capacity; bool failed; } LoweredRenderContext;
+    size_t count, capacity; bool failed; LoweredRenderWorkspace workspace; } LoweredRenderContext;
 
 static bool lowered_render_add(size_t *left, size_t right) {
     return right <= SIZE_MAX - *left && ((*left += right), true);
+}
+
+static bool lowered_render_workspace(LoweredRenderWorkspace *workspace,
+    unsigned char *data, size_t capacity, size_t used,
+    size_t bodies, size_t failures, size_t events) {
+    size_t counts[3] = {bodies, failures, events}, bytes[3], total = 0;
+    *workspace = (LoweredRenderWorkspace){0};
+    for (size_t i = 0; i < 3; ++i) {
+        if (counts[i] > SIZE_MAX / 66) return false;
+        bytes[i] = counts[i] * 66;
+        if (!lowered_render_add(&total, bytes[i])) return false;
+    }
+    if (!data || used > capacity || total > capacity - used) return false;
+    LoweredRenderKeys *domains[3] = {&workspace->bodies, &workspace->failures, &workspace->events};
+    for (size_t i = 0; i < 3; ++i) {
+        if (used > capacity || bytes[i] > capacity - used) {
+            *workspace = (LoweredRenderWorkspace){0}; return false;
+        }
+        *domains[i] = (LoweredRenderKeys){data + used, counts[i], bytes[i]};
+        memset(data + used, 0, bytes[i]);
+        used += bytes[i];
+    }
+    return true;
+}
+
+typedef bool (*LoweredRenderCompute)(const LoweredRenderContext *, size_t, char[65]);
+static bool lowered_render_cached(const LoweredRenderContext *context,
+    const LoweredRenderKeys *keys, size_t ordinal, size_t count,
+    LoweredRenderCompute compute, char out[65]) {
+    /* NONE and out-of-range retain each original function's exact behavior. */
+    if (ordinal >= count || !keys->data) return compute(context, ordinal, out);
+    if (keys->count != count || ordinal > SIZE_MAX / 66) return false;
+    size_t offset = ordinal * 66;
+    if (offset > keys->bytes || 66 > keys->bytes - offset) return false;
+    unsigned char *cell = keys->data + offset;
+    if (cell[0] == 2) { memcpy(out, cell + 1, 65); return true; }
+    if (cell[0] != 0) return false; /* computing/corrupt state fails closed */
+    cell[0] = 1;
+    char key[65] = {0};
+    if (!compute(context, ordinal, key)) {
+        memset(cell, 0, 66); return false;
+    }
+    memcpy(cell + 1, key, 65);
+    cell[0] = 2; /* publish only after successful, complete computation */
+    memcpy(out, key, 65); return true;
 }
 
 static void lowered_render_put(LoweredRenderBuffer *buffer, const char *text) {
@@ -1148,7 +1197,7 @@ static bool lowered_render_image_coordinate(const LoweredRenderContext *context,
     }
     return lowered_render_key(out, kind, detail);
 }
-static bool lowered_render_predicate_body_key(const LoweredRenderContext *context, size_t body,
+static bool lowered_render_predicate_body_compute(const LoweredRenderContext *context, size_t body,
     char out[65]) {
     const SolMirOperations *o = &context->owner->conventions->concrete->operations;
     const SolMirPlan *plan = &context->owner->conventions->concrete->plan;
@@ -1189,6 +1238,12 @@ static bool lowered_render_predicate_body_key(const LoweredRenderContext *contex
             owner, context_key, (unsigned)p->phase, (unsigned)p->outcome);
     }
     return lowered_render_key(out, "predicate-body", detail);
+}
+static bool lowered_render_predicate_body_key(const LoweredRenderContext *context, size_t body,
+    char out[65]) {
+    return lowered_render_cached(context, &context->workspace.bodies, body,
+        context->owner->conventions->concrete->operations.predicate_body_count,
+        lowered_render_predicate_body_compute, out);
 }
 static bool lowered_render_predicate_coordinate(const LoweredRenderContext *context, size_t body,
     size_t block, size_t instruction, const char *kind, char out[65]) {
@@ -1296,7 +1351,7 @@ static bool lowered_render_place_key(const LoweredRenderContext *c, size_t place
 bool sol_mir_runtime_lowered_program_test_place_key(const SolMirRuntimeLoweredProgram *owner,
     size_t place, char out[65]) {
     if (!owner || !out || !sol_mir_runtime_lowered_program_validate(owner, NULL)) return false;
-    return lowered_render_place_key(&(LoweredRenderContext){owner, NULL, 0, 0, false}, place, out);
+    return lowered_render_place_key(&(LoweredRenderContext){.owner=owner}, place, out);
 }
 #endif
 static bool lowered_render_image_edge_key(const LoweredRenderContext *c, size_t edge,char out[65]) {
@@ -1317,7 +1372,7 @@ static bool lowered_render_predicate_edge_key(const LoweredRenderContext *c,size
     (void)snprintf(detail,sizeof detail,"source=%s:target=%s:E=%zu",source,target,r->ordinal);
     return lowered_render_key(out,"predicate-edge",detail);
 }
-static bool lowered_render_failure_key(const LoweredRenderContext *c,size_t failure,char out[65]) {
+static bool lowered_render_failure_compute(const LoweredRenderContext *c,size_t failure,char out[65]) {
     const SolMirRuntimeConventions *q=c->owner->conventions; char owner[65],detail[256];
     if(failure==SOL_MIR_RUNTIME_LOWERED_NONE){strcpy(out,"none");return true;}
     if(failure>=q->failure_site_count)return false;
@@ -1334,8 +1389,12 @@ static bool lowered_render_failure_key(const LoweredRenderContext *c,size_t fail
     (void)snprintf(detail,sizeof detail,"origin=%u:owner=%s:occurrence=%zu:codes=%08x",(unsigned)f->origin_kind,owner,f->occurrence,f->allowed_codes);
     return lowered_render_key(out,"failure-site",detail);
 }
+static bool lowered_render_failure_key(const LoweredRenderContext *c,size_t failure,char out[65]) {
+    return lowered_render_cached(c, &c->workspace.failures, failure,
+        c->owner->conventions->failure_site_count, lowered_render_failure_compute, out);
+}
 static bool lowered_render_semantic_key(const LoweredRenderContext *, size_t, char out[65]);
-static bool lowered_render_cleanup_event_key(const LoweredRenderContext*c,size_t event,char out[65]){
+static bool lowered_render_cleanup_event_compute(const LoweredRenderContext*c,size_t event,char out[65]){
     const SolMirRuntimeCleanup *q=c->owner->cleanup;char owner[65],semantic[65],step_site[65],detail[512];
     if(event==SOL_MIR_RUNTIME_LOWERED_NONE){strcpy(out,"none");return true;}
     if(event>=q->event_count)return false;const SolMirRuntimeCleanupEvent*e=&q->events[event];
@@ -1353,6 +1412,10 @@ static bool lowered_render_cleanup_event_key(const LoweredRenderContext*c,size_t
     if(e->producer==SOL_MIR_RUNTIME_CLEANUP_PRODUCER_STEP_METER){const SolMirRuntimeConventions*conventions=c->owner->conventions;if(e->phase!=SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP||e->origin!=SOL_MIR_RUNTIME_CLEANUP_ORIGIN_IMPLICIT||e->semantic_site!=SOL_MIR_RUNTIME_NONE||e->supplemental_site!=SOL_MIR_RUNTIME_NONE||e->inherited_failure_site>=conventions->failure_site_count)return false;const SolMirRuntimeFailureSite*site=&conventions->failure_sites[e->inherited_failure_site];bool predicate=e->kind==SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION||e->kind==SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR;if((!predicate&&e->kind!=SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION&&e->kind!=SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR)||site->origin_kind!=(predicate?SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP:SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP)||site->owner!=e->owner||site->block!=e->block||site->instruction!=e->operation||site->source.file!=e->source.file||site->source.start!=e->source.start||site->source.end!=e->source.end||site->allowed_codes!=(UINT32_C(1)<<(SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT-1))||!lowered_render_failure_key(c,e->inherited_failure_site,step_site))return false;(void)snprintf(detail,sizeof detail,"owner=%s:phase=%u:semantic=%s:producer=%u:origin=%u:step-site=%s",owner,(unsigned)e->phase,semantic,(unsigned)e->producer,(unsigned)e->origin,step_site);}
     else (void)snprintf(detail,sizeof detail,"owner=%s:phase=%u:semantic=%s:producer=%u:origin=%u",owner,(unsigned)e->phase,semantic,(unsigned)e->producer,(unsigned)e->origin);
     return lowered_render_key(out,"cleanup-event",detail);
+}
+static bool lowered_render_cleanup_event_key(const LoweredRenderContext*c,size_t event,char out[65]) {
+    return lowered_render_cached(c, &c->workspace.events, event,
+        c->owner->cleanup->event_count, lowered_render_cleanup_event_compute, out);
 }
 static bool lowered_render_value_key(const LoweredRenderContext*c,
     SolMirRuntimeCallOwnerKind owner_kind, size_t body, SolMirRuntimeValueRef value,char out[65]){
@@ -1740,8 +1803,8 @@ static bool lowered_render_rows(LoweredRenderContext *c) {
     return true;
 }
 
-bool sol_mir_runtime_lowered_program_render(FILE *stream,
-    const SolMirRuntimeLoweredProgram *owner) {
+static bool lowered_render_program(FILE *stream,
+    const SolMirRuntimeLoweredProgram *owner, bool workspace_enabled) {
     size_t rows = 0;
     LoweredRenderBuffer output = {0};
     LoweredRenderLine *lines = NULL;
@@ -1761,7 +1824,7 @@ bool sol_mir_runtime_lowered_program_render(FILE *stream,
     lines = rows ? calloc(rows, sizeof *lines) : NULL;
     if (!output.data || (rows && !lines)) { free(output.data); free(lines); return false; }
     output.capacity = owner->usage.render_bytes;
-    context = (LoweredRenderContext){owner, lines, 0, rows, false};
+    context = (LoweredRenderContext){.owner=owner, .lines=lines, .capacity=rows};
     lowered_render_put(&output, "mir_runtime_lowered_program\n");
     lowered_render_put(&output, "declaration.kind=runtime-lowered static=true backend-independent=true runtime-execution=false physical-abi=false canonical-relations=true typed-keys=true\n");
     {
@@ -1771,7 +1834,13 @@ bool sol_mir_runtime_lowered_program_render(FILE *stream,
         if (written < 0 || (size_t)written >= sizeof erased) output.failed = true;
         else lowered_render_put(&output, erased);
     }
+    if (workspace_enabled)
+        (void)lowered_render_workspace(&context.workspace, (unsigned char *)output.data,
+            output.capacity, output.count,
+            owner->conventions->concrete->operations.predicate_body_count,
+            owner->conventions->failure_site_count, owner->cleanup->event_count);
     if (!lowered_render_rows(&context) || context.count != rows) { free(output.data); free(lines); return false; }
+    context.workspace = (LoweredRenderWorkspace){0};
     /* Table census is a semantic inventory, not a resource meter. */
 #define CENSUS(member,type,singular) do { size_t present_count=0, demanded_count=0, erased_count=0; for(size_t i=0;i<owner->singular##_count;++i){SolMirRuntimeLoweredState state=owner->member[i].state; if(state==SOL_MIR_RUNTIME_LOWERED_PRESENT)++present_count; else if(state==SOL_MIR_RUNTIME_LOWERED_NOT_DEMANDED)++demanded_count; else if(state==SOL_MIR_RUNTIME_LOWERED_ERASED)++erased_count; else { output.failed=true; }} char census[192]; int n=snprintf(census,sizeof census,"table=%s present=%zu not-demanded=%zu erased=%zu\n",#member,present_count,demanded_count,erased_count); if(n<0||(size_t)n>=sizeof census)output.failed=true;else lowered_render_put(&output,census); } while(0);
     SOL_MIR_RUNTIME_LOWERED_TABLES(CENSUS)
@@ -1793,3 +1862,108 @@ bool sol_mir_runtime_lowered_program_render(FILE *stream,
     free(output.data); free(lines);
     return written;
 }
+
+bool sol_mir_runtime_lowered_program_render(FILE *stream,
+    const SolMirRuntimeLoweredProgram *owner) {
+    return lowered_render_program(stream, owner, true);
+}
+
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+/* Deliberate corruption uses only these private facts, never a borrowed owner.
+ * The reference entry runs this actual slicer/wrapper regression in the selected
+ * relocation child; no separate selector, allocation or authentication mock. */
+static bool lowered_render_workspace_regression(void) {
+    unsigned char bytes[201]; char key[65], reference[65];
+    SolMirMaterializedImage image = {.blocks={0,1}};
+    SolMirLinkageCallable callable = {.instance=0};
+    SolMirPlanContext plan = {.target_kind=SOL_MIR_PLAN_TARGET_INSTANCE, .instance=0};
+    SolMirPredicateBody body = {.context=0, .owner_kind=SOL_MIR_PREDICATE_OWNER_INSTANCE,
+        .instance=0, .blocks={0,1}};
+    SolMirRuntimeFailureSite failure = {.origin_kind=SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP,
+        .owner=0, .block=0, .instruction=SOL_MIR_RUNTIME_LOWERED_NONE};
+    SolMirRuntimeCleanupEvent event = {.kind=SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR,
+        .owner=0, .block=0, .operation=SOL_MIR_RUNTIME_LOWERED_NONE,
+        .semantic_site=SOL_MIR_RUNTIME_NONE};
+    SolMirConcreteProgram concrete = {0};
+    concrete.materialization.images=&image; concrete.materialization.image_count=1;
+    concrete.linkage.callables=&callable; concrete.linkage.callable_count=1;
+    concrete.plan.contexts=&plan; concrete.plan.context_count=1;
+    concrete.operations.predicate_bodies=&body; concrete.operations.predicate_body_count=1;
+    SolMirRuntimeConventions conventions = {.concrete=&concrete,
+        .failure_sites=&failure, .failure_site_count=1};
+    SolMirRuntimeCleanup cleanup = {.events=&event, .event_count=1};
+    SolMirRuntimeLoweredProgram owner = {.conventions=&conventions, .cleanup=&cleanup};
+    LoweredRenderContext context = {.owner=&owner};
+    memset(bytes, 0xa5, sizeof bytes);
+    if (!lowered_render_workspace(&context.workspace,bytes,sizeof bytes,3,1,1,1)
+        || bytes[2]!=0xa5 || context.workspace.events.data+66!=bytes+sizeof bytes)
+        return false;
+    LoweredRenderCompute wrappers[3] = {lowered_render_predicate_body_key,
+        lowered_render_failure_key, lowered_render_cleanup_event_key};
+    LoweredRenderCompute computes[3] = {lowered_render_predicate_body_compute,
+        lowered_render_failure_compute, lowered_render_cleanup_event_compute};
+    LoweredRenderKeys *domains[3] = {&context.workspace.bodies,
+        &context.workspace.failures, &context.workspace.events};
+    for (size_t i=0;i<3;++i) {
+        if (!computes[i](&context,0,reference) || !wrappers[i](&context,0,key)
+            || memcmp(key,reference,65) || domains[i]->data[0]!=2
+            || !wrappers[i](&context,0,key) || memcmp(key,reference,65)
+            || wrappers[i](&context,1,key)) return false;
+        bool none=wrappers[i](&context,SOL_MIR_RUNTIME_LOWERED_NONE,key);
+        if (none!=(i!=0) || (none && strcmp(key,"none"))) return false;
+    }
+    if (!memcmp(domains[0]->data+1,domains[1]->data+1,65)
+        || !memcmp(domains[1]->data+1,domains[2]->data+1,65)
+        || !memcmp(domains[0]->data+1,domains[2]->data+1,65)) return false;
+    /* A failed first computation publishes neither partial bytes nor readiness. */
+    for (size_t i=0;i<3;++i) {
+        memset(domains[i]->data,0,66);
+        size_t saved= i==0?body.context : i==1?failure.owner : event.owner;
+        if(i==0)body.context=1;else if(i==1)failure.owner=1;else event.owner=1;
+        memset(key,0x5a,65);
+        if(wrappers[i](&context,0,key)||domains[i]->data[0]!=0||key[0]!=0x5a)return false;
+        for(size_t j=1;j<66;++j)if(domains[i]->data[j]!=0)return false;
+        if(i==0)body.context=saved;else if(i==1)failure.owner=saved;else event.owner=saved;
+        memset(domains[i]->data+1,0x5a,65); /* deliberately partial/unpublished */
+        domains[i]->data[0]=1;
+        if(wrappers[i](&context,0,key)||key[0]!=0x5a)return false;
+        domains[i]->data[0]=3;
+        if(wrappers[i](&context,0,key))return false;
+        domains[i]->data[0]=0;domains[i]->bytes=65;
+        if(wrappers[i](&context,0,key))return false;
+        domains[i]->bytes=66;domains[i]->count=0;
+        if(wrappers[i](&context,0,key))return false;
+        domains[i]->count=1;
+        if(!wrappers[i](&context,0,key)||!computes[i](&context,0,reference)
+            ||memcmp(key,reference,65)||domains[i]->data[0]!=2)return false;
+    }
+    /* Exact end, one-byte short, offset overflow, multiply and sum overflow. */
+    if(lowered_render_workspace(&context.workspace,bytes,200,3,1,1,1)
+        || context.workspace.bodies.data || context.workspace.failures.data || context.workspace.events.data)
+        return false;
+    for(size_t i=0;i<3;++i)
+        if(!wrappers[i](&context,0,key)||!computes[i](&context,0,reference)
+            ||memcmp(key,reference,65))return false; /* real uncached fallback */
+    if(lowered_render_workspace(&context.workspace,bytes,sizeof bytes,SIZE_MAX,1,1,1)
+        ||lowered_render_workspace(&context.workspace,bytes,sizeof bytes,0,SIZE_MAX,0,0)
+        ||lowered_render_workspace(&context.workspace,bytes,sizeof bytes,0,SIZE_MAX/66,SIZE_MAX/66,0)
+        ||lowered_render_workspace(&context.workspace,NULL,0,0,0,0,0))return false;
+    if(!lowered_render_workspace(&context.workspace,bytes,sizeof bytes,3,1,1,1))return false;
+    if(!lowered_render_predicate_body_key(&context,0,key))return false;
+    char previous[65];memcpy(previous,key,65);
+    plan.kind=plan.kind==SOL_MIR_PLAN_CONTEXT_BODY?SOL_MIR_PLAN_CONTEXT_CONTRACT:SOL_MIR_PLAN_CONTEXT_BODY;
+    /* Same buffer/address, new invocation: no ready state survives. */
+    if(!lowered_render_workspace(&context.workspace,bytes,sizeof bytes,3,1,1,1)
+        ||context.workspace.bodies.data[0]!=0
+        ||!lowered_render_predicate_body_key(&context,0,key)
+        ||!lowered_render_predicate_body_compute(&context,0,reference)
+        ||memcmp(key,reference,65)||!memcmp(key,previous,65))return false;
+    return true;
+}
+
+bool sol_mir_runtime_lowered_program_test_render_reference(FILE *stream,
+    const SolMirRuntimeLoweredProgram *owner) {
+    if(!lowered_render_workspace_regression())return false;
+    return lowered_render_program(stream, owner, false);
+}
+#endif

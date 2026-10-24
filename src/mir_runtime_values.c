@@ -866,10 +866,74 @@ static void format(Buffer *buffer, const char *pattern, ...) {
     buffer->length += (size_t)count;
 }
 
+static void render_hex_byte(Buffer *buffer, uint8_t value) {
+    if (buffer->failed) return;
+    if ((size_t)2 > SIZE_MAX - buffer->length - 1) {
+        buffer->failed = true; return;
+    }
+    size_t needed = buffer->length + (size_t)2 + 1;
+    if (needed > buffer->capacity) {
+        size_t capacity = buffer->capacity == 0 ? 4096 : buffer->capacity;
+        while (capacity < needed) {
+            if (capacity > SIZE_MAX / 2) { capacity = needed; break; }
+            capacity *= 2;
+        }
+        char *grown = realloc(buffer->data, capacity);
+        if (grown == NULL) { buffer->failed = true; return; }
+        buffer->data = grown; buffer->capacity = capacity;
+    }
+    static const char hex[] = "0123456789abcdef";
+    buffer->data[buffer->length] = hex[value >> 4];
+    buffer->data[buffer->length + 1] = hex[value & 15];
+    buffer->data[buffer->length + 2] = '\0';
+    buffer->length += (size_t)2;
+}
+
 static void render_digest(Buffer *buffer, const SolMirLinkageDigest *digest) {
     for (size_t i = 0; i < SOL_MIR_LINKAGE_DIGEST_BYTES; ++i)
-        format(buffer, "%02x", digest->bytes[i]);
+        render_hex_byte(buffer, digest->bytes[i]);
 }
+
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+bool sol_mir_runtime_values_test_hex_regression(void) {
+    static const size_t capacities[]={0,1,2,3,63,64,65};
+    for(size_t scenario=0;scenario<sizeof capacities/sizeof *capacities;++scenario) {
+        Buffer actual={.capacity=capacities[scenario]}, reference=actual;
+        if(actual.capacity) {
+            actual.data=calloc(actual.capacity,1);reference.data=calloc(reference.capacity,1);
+            if(actual.data==NULL||reference.data==NULL){free(actual.data);free(reference.data);return false;}
+        }
+        bool ok=true;
+        for(size_t i=0;i<256;++i) {
+            render_hex_byte(&actual,(uint8_t)i);format(&reference,"%02x",(unsigned)(uint8_t)i);
+            if(actual.failed!=reference.failed||actual.failed||actual.length!=reference.length
+                ||actual.capacity!=reference.capacity||memcmp(actual.data,reference.data,actual.length+1)!=0){ok=false;break;}
+        }
+        free(actual.data);free(reference.data);if(!ok)return false;
+    }
+    Buffer actual={0},reference={0};SolMirLinkageDigest digest={{0}};
+    for(size_t i=0;i<sizeof digest.bytes;++i)digest.bytes[i]=(uint8_t)(255-i*7);
+    format(&actual,"prefix:%s","text");format(&reference,"prefix:%s","text");
+    for(size_t i=0;i<sizeof digest.bytes;++i) {
+        render_hex_byte(&actual,digest.bytes[i]);format(&reference,"%02x",(unsigned)digest.bytes[i]);
+        if(actual.failed||reference.failed||actual.length!=reference.length||actual.capacity!=reference.capacity
+            ||memcmp(actual.data,reference.data,actual.length+1)!=0){free(actual.data);free(reference.data);return false;}
+    }
+    format(&actual,"/suffix");format(&reference,"/suffix");
+    bool ok=!actual.failed&&!reference.failed&&actual.length==reference.length&&actual.capacity==reference.capacity
+        &&memcmp(actual.data,reference.data,actual.length+1)==0;
+    free(actual.data);free(reference.data);
+    for(size_t scenario=0;scenario<2;++scenario) {
+        actual=(Buffer){.length=SIZE_MAX-1,.failed=scenario==0};reference=actual;
+        for(size_t i=0;i<32;++i) {
+            render_hex_byte(&actual,(uint8_t)i);format(&reference,"%02x",(unsigned)i);
+            if(!actual.failed||!reference.failed||actual.data!=NULL||reference.data!=NULL
+                ||actual.length!=reference.length||actual.capacity!=reference.capacity)return false;
+        }
+    }
+    return ok;
+}
+#endif
 
 static void producer_u64(SolMirLinkageSha256 *sha, const char *label,
     uint64_t value) {

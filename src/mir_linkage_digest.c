@@ -35,11 +35,12 @@ static const uint32_t sha256_k[64] = {
     0x90befffau, 0xa4506cebu, 0xbef9a3f7u, 0xc67178f2u,
 };
 
-static uint32_t rotate_right(uint32_t value, unsigned amount) {
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+static uint32_t sha256_reference_rotate_right(uint32_t value, unsigned amount) {
     return (value >> amount) | (value << (32u - amount));
 }
 
-static void sha256_transform(Sha256 *sha, const uint8_t block[64]) {
+static void sha256_reference_transform(Sha256 *sha, const uint8_t block[64]) {
     if (!sol_mir_linkage_internal_work_tick(sha->work, 128)) {
         sha->valid = false; return;
     }
@@ -52,20 +53,20 @@ static void sha256_transform(Sha256 *sha, const uint8_t block[64]) {
     }
     for (size_t i = 16; i < 64; ++i) {
         uint32_t a = words[i - 15], b = words[i - 2];
-        uint32_t s0 = rotate_right(a, 7) ^ rotate_right(a, 18) ^ (a >> 3);
-        uint32_t s1 = rotate_right(b, 17) ^ rotate_right(b, 19) ^ (b >> 10);
+        uint32_t s0 = sha256_reference_rotate_right(a, 7) ^ sha256_reference_rotate_right(a, 18) ^ (a >> 3);
+        uint32_t s1 = sha256_reference_rotate_right(b, 17) ^ sha256_reference_rotate_right(b, 19) ^ (b >> 10);
         words[i] = words[i - 16] + s0 + words[i - 7] + s1;
     }
     uint32_t a = sha->state[0], b = sha->state[1], c = sha->state[2];
     uint32_t d = sha->state[3], e = sha->state[4], f = sha->state[5];
     uint32_t g = sha->state[6], h = sha->state[7];
     for (size_t i = 0; i < 64; ++i) {
-        uint32_t s1 = rotate_right(e, 6) ^ rotate_right(e, 11)
-            ^ rotate_right(e, 25);
+        uint32_t s1 = sha256_reference_rotate_right(e, 6) ^ sha256_reference_rotate_right(e, 11)
+            ^ sha256_reference_rotate_right(e, 25);
         uint32_t choice = (e & f) ^ (~e & g);
         uint32_t t1 = h + s1 + choice + sha256_k[i] + words[i];
-        uint32_t s0 = rotate_right(a, 2) ^ rotate_right(a, 13)
-            ^ rotate_right(a, 22);
+        uint32_t s0 = sha256_reference_rotate_right(a, 2) ^ sha256_reference_rotate_right(a, 13)
+            ^ sha256_reference_rotate_right(a, 22);
         uint32_t majority = (a & b) ^ (a & c) ^ (b & c);
         uint32_t t2 = s0 + majority;
         h = g; g = f; f = e; e = d + t1;
@@ -75,6 +76,95 @@ static void sha256_transform(Sha256 *sha, const uint8_t block[64]) {
     sha->state[3] += d; sha->state[4] += e; sha->state[5] += f;
     sha->state[6] += g; sha->state[7] += h;
 }
+
+#endif
+
+static void sha256_transform(Sha256 *sha, const uint8_t block[64]) {
+    if (!sol_mir_linkage_internal_work_tick(sha->work, 128)) {
+        sha->valid = false; return;
+    }
+    uint32_t words[64];
+    for (size_t i = 0; i < 16; ++i) {
+        words[i] = (uint32_t)block[i * 4] << 24
+            | (uint32_t)block[i * 4 + 1] << 16
+            | (uint32_t)block[i * 4 + 2] << 8
+            | (uint32_t)block[i * 4 + 3];
+    }
+#define SHA256_ROR(value, amount) (((value) >> (amount)) | ((value) << (32u - (amount))))
+    for (size_t i = 16; i < 64; ++i) {
+        uint32_t a = words[i - 15], b = words[i - 2];
+        uint32_t s0 = SHA256_ROR(a, 7) ^ SHA256_ROR(a, 18) ^ (a >> 3);
+        uint32_t s1 = SHA256_ROR(b, 17) ^ SHA256_ROR(b, 19) ^ (b >> 10);
+        words[i] = words[i - 16] + s0 + words[i - 7] + s1;
+    }
+    uint32_t a = sha->state[0], b = sha->state[1], c = sha->state[2];
+    uint32_t d = sha->state[3], e = sha->state[4], f = sha->state[5];
+    uint32_t g = sha->state[6], h = sha->state[7];
+#define SHA256_ROUND(a,b,c,d,e,f,g,h,index) do { \
+    uint32_t s1 = SHA256_ROR(e,6) ^ SHA256_ROR(e,11) ^ SHA256_ROR(e,25); \
+    uint32_t choice = ((e) & (f)) ^ (~(e) & (g)); \
+    uint32_t t1 = (h) + s1 + choice + sha256_k[index] + words[index]; \
+    uint32_t s0 = SHA256_ROR(a,2) ^ SHA256_ROR(a,13) ^ SHA256_ROR(a,22); \
+    uint32_t majority = ((a) & (b)) ^ ((a) & (c)) ^ ((b) & (c)); \
+    uint32_t t2 = s0 + majority; \
+    (d) += t1; (h) = t1 + t2; \
+} while (0)
+    for (size_t i = 0; i < 64; i += 8) {
+        SHA256_ROUND(a,b,c,d,e,f,g,h,i);
+        SHA256_ROUND(h,a,b,c,d,e,f,g,i+1);
+        SHA256_ROUND(g,h,a,b,c,d,e,f,i+2);
+        SHA256_ROUND(f,g,h,a,b,c,d,e,i+3);
+        SHA256_ROUND(e,f,g,h,a,b,c,d,i+4);
+        SHA256_ROUND(d,e,f,g,h,a,b,c,i+5);
+        SHA256_ROUND(c,d,e,f,g,h,a,b,i+6);
+        SHA256_ROUND(b,c,d,e,f,g,h,a,i+7);
+    }
+#undef SHA256_ROUND
+#undef SHA256_ROR
+    sha->state[0] += a; sha->state[1] += b; sha->state[2] += c;
+    sha->state[3] += d; sha->state[4] += e; sha->state[5] += f;
+    sha->state[6] += g; sha->state[7] += h;
+}
+
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+static bool sha256_padding_regression(void);
+
+bool sol_mir_linkage_test_compression_regression(void) {
+    static const size_t used[] = {0,0,0,9,9,SIZE_MAX-64,3};
+    static const size_t limits[] = {SIZE_MAX,128,127,137,136,SIZE_MAX,256};
+    for (size_t pattern = 0; pattern < 3; ++pattern) {
+        uint8_t block[64];
+        for (size_t i = 0; i < sizeof block; ++i)
+            block[i] = pattern == 0 ? 0 : pattern == 1 ? 255 : (uint8_t)(i*37+11);
+        for (size_t initial = 0; initial < 2; ++initial) {
+            for (size_t setting = 0; setting < 8; ++setting) {
+                SolMirLinkageWorkMeter left = {0}, right = {0};
+                if (setting < 7) {
+                    left.used=right.used=used[setting];left.limit=right.limit=limits[setting];
+                    left.exhausted=right.exhausted=setting==6;
+                }
+                Sha256 actual={.bits=UINT64_C(0x123456789),.used=17,.valid=true}, expected=actual;
+                static const uint32_t standard[8]={0x6a09e667u,0xbb67ae85u,0x3c6ef372u,0xa54ff53au,
+                    0x510e527fu,0x9b05688cu,0x1f83d9abu,0x5be0cd19u};
+                for(size_t i=0;i<8;++i)actual.state[i]=expected.state[i]=initial?((uint32_t)i*0x1020304u+7u):standard[i];
+                memcpy(actual.block,block,sizeof block);memcpy(expected.block,block,sizeof block);
+                actual.work=setting==7?NULL:&left;expected.work=setting==7?NULL:&right;
+                for(size_t chain=0;chain<3;++chain) {
+                    uint32_t previous[8];memcpy(previous,actual.state,sizeof previous);
+                    size_t before=left.used;
+                    sha256_transform(&actual,block);sha256_reference_transform(&expected,block);
+                    if(memcmp(actual.state,expected.state,sizeof actual.state)!=0
+                        ||actual.bits!=expected.bits||actual.used!=expected.used||actual.valid!=expected.valid
+                        ||memcmp(actual.block,expected.block,sizeof actual.block)!=0
+                        ||left.used!=right.used||left.limit!=right.limit||left.exhausted!=right.exhausted)return false;
+                    if(!actual.valid&&(left.used!=before||memcmp(previous,actual.state,sizeof previous)!=0))return false;
+                }
+            }
+        }
+    }
+    return sha256_padding_regression();
+}
+#endif
 
 static void sha256_init(Sha256 *sha) {
     *sha = (Sha256){
@@ -113,6 +203,33 @@ static bool sha256_finish(Sha256 *sha, SolMirLinkageDigest *digest) {
     if (!sha->valid) return false;
     uint8_t zero = 0;
     while (sha->used != 56) {
+        if (sha->used < sizeof(sha->block)) {
+            size_t n = sha->used < 56 ? 56 - sha->used
+                : sizeof(sha->block) - sha->used;
+            bool admitted = sha->valid && n <= (UINT64_MAX - sha->bits) / 8u;
+            if (admitted && sha->work != NULL) {
+                uintptr_t state_start = (uintptr_t)sha;
+                uintptr_t work_start = (uintptr_t)sha->work;
+                admitted = state_start <= UINTPTR_MAX - sizeof(*sha)
+                    && work_start <= UINTPTR_MAX - sizeof(*sha->work)
+                    && (state_start + sizeof(*sha) <= work_start
+                        || work_start + sizeof(*sha->work) <= state_start);
+                if (admitted)
+                    admitted = sha->work->used <= sha->work->limit
+                        && n <= sha->work->limit - sha->work->used;
+            }
+            if (admitted && sol_mir_linkage_internal_work_tick(sha->work, n)) {
+                sha->bits += (uint64_t)n * 8u;
+                memset(sha->block + sha->used, 0, n);
+                sha->used += n;
+                if (sha->used == sizeof(sha->block)) {
+                    sha256_transform(sha, sha->block);
+                    sha->used = 0;
+                    if (!sha->valid) return false;
+                }
+                continue;
+            }
+        }
         sha256_write(sha, &zero, 1);
         if (!sha->valid) return false;
     }
@@ -129,6 +246,143 @@ static bool sha256_finish(Sha256 *sha, SolMirLinkageDigest *digest) {
     }
     return true;
 }
+
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+static void sha256_tail_reference_write(Sha256 *sha, const void *data, size_t length) {
+    if (!sha->valid || length > (UINT64_MAX - sha->bits) / 8u
+        || !sol_mir_linkage_internal_work_tick(sha->work, length)) {
+        sha->valid = false; return;
+    }
+    sha->bits += (uint64_t)length * 8u;
+    const uint8_t *bytes = data;
+    while (length != 0) {
+        size_t available = sizeof(sha->block) - sha->used;
+        size_t take = length < available ? length : available;
+        memcpy(sha->block + sha->used, bytes, take);
+        sha->used += take; bytes += take; length -= take;
+        if (sha->used == sizeof(sha->block)) {
+            sha256_transform(sha, sha->block);
+            sha->used = 0;
+            if (!sha->valid) return;
+        }
+    }
+}
+
+static bool sha256_tail_reference_finish(Sha256 *sha, SolMirLinkageDigest *digest) {
+    if (!sha->valid || !sol_mir_linkage_internal_work_tick(sha->work,
+            SOL_MIR_LINKAGE_DIGEST_BYTES))
+        return false;
+    uint64_t bits = sha->bits;
+    uint8_t marker = 0x80; sha256_tail_reference_write(sha, &marker, 1);
+    if (!sha->valid) return false;
+    uint8_t zero = 0;
+    while (sha->used != 56) {
+        sha256_tail_reference_write(sha, &zero, 1);
+        if (!sha->valid) return false;
+    }
+    uint8_t length[8];
+    for (size_t i = 0; i < 8; ++i)
+        length[7 - i] = (uint8_t)(bits >> (i * 8));
+    sha256_tail_reference_write(sha, length, sizeof(length));
+    if (!sha->valid || sha->used != 0) return false;
+    for (size_t i = 0; i < 8; ++i) {
+        digest->bytes[i * 4] = (uint8_t)(sha->state[i] >> 24);
+        digest->bytes[i * 4 + 1] = (uint8_t)(sha->state[i] >> 16);
+        digest->bytes[i * 4 + 2] = (uint8_t)(sha->state[i] >> 8);
+        digest->bytes[i * 4 + 3] = (uint8_t)sha->state[i];
+    }
+    return true;
+}
+
+static bool sha256_padding_state_equal(const Sha256 *actual, const Sha256 *reference,
+    const SolMirLinkageDigest *output, const SolMirLinkageDigest *expected) {
+    if (memcmp(actual->state, reference->state, sizeof(actual->state)) != 0
+        || actual->bits != reference->bits || actual->used != reference->used
+        || actual->valid != reference->valid
+        || memcmp(actual->block, reference->block, sizeof(actual->block)) != 0
+        || memcmp(output->bytes, expected->bytes, sizeof(output->bytes)) != 0
+        || (actual->work == NULL) != (reference->work == NULL)) return false;
+    return actual->work == NULL
+        || (actual->work->used == reference->work->used
+            && actual->work->limit == reference->work->limit
+            && actual->work->exhausted == reference->work->exhausted);
+}
+
+static bool sha256_padding_regression(void) {
+    static const struct { size_t count, chunks[9]; } sequences[] = {
+        {1,{0}}, {9,{0,1,7,55,56,63,64,65,0}}, {5,{63,1,64,0,65}},
+    };
+    uint8_t input[65];
+    for (size_t i=0;i<sizeof(input);++i) input[i]=(uint8_t)(i*37+137);
+    for (size_t residue=0;residue<=64;++residue) {
+        bool sweep=residue==0||residue==3||residue==55||residue==56||residue==63;
+        for (size_t sequence=0;sequence<sizeof(sequences)/sizeof(*sequences);++sequence) {
+            Sha256 base;sha256_init(&base);base.used=residue;base.bits=(uint64_t)residue*8u;
+            for(size_t i=0;i<sizeof(base.block);++i)base.block[i]=(uint8_t)(i*19+residue+1);
+            Sha256 complete=base;SolMirLinkageWorkMeter total={.limit=SIZE_MAX};
+            SolMirLinkageDigest output={{0}},expected={{0}};complete.work=&total;
+            for(size_t chunk=0;chunk<sequences[sequence].count;++chunk)
+                sha256_tail_reference_write(&complete,input,sequences[sequence].chunks[chunk]);
+            if(!sha256_tail_reference_finish(&complete,&expected))return false;
+            size_t first_zeros=residue<56?55-residue:residue<63?63-residue:residue==63?56:55;
+            size_t boundaries[]={0,31,32,33,33+first_zeros,34+first_zeros,
+                33+first_zeros+127,33+first_zeros+128,total.used-9,total.used-8,total.used-1,total.used,total.used+1};
+            size_t attempts=sweep?total.used+2:sizeof(boundaries)/sizeof(*boundaries);
+            /* All integer allowances for each representative residue/sequence.
+             * Other residues retain explicit first/last-zero/transform/length cuts. */
+            for(size_t attempt=0;attempt<attempts+4;++attempt) {
+                size_t allowance=attempt<attempts?(sweep?attempt:boundaries[attempt]):SIZE_MAX-7;
+                SolMirLinkageWorkMeter left={.used=7,.limit=7+allowance,.exhausted=(attempt%2)!=0},right=left;
+                Sha256 actual=base,reference=base;
+                if((attempt<attempts?attempt:attempt-attempts)%2)
+                    for(size_t i=0;i<8;++i)actual.state[i]=reference.state[i]=(uint32_t)(i*0x1020304u+17u);
+                bool null_work=attempt>=attempts+2;
+                actual.work=null_work?NULL:&left;reference.work=null_work?NULL:&right;
+                memset(output.bytes,0xa5,sizeof(output.bytes));memset(expected.bytes,0xa5,sizeof(expected.bytes));
+                for(size_t chunk=0;chunk<sequences[sequence].count;++chunk) {
+                    size_t count=sequences[sequence].chunks[chunk];
+                    sha256_write(&actual,input,count);sha256_tail_reference_write(&reference,input,count);
+                    if(!sha256_padding_state_equal(&actual,&reference,&output,&expected))return false;
+                }
+                bool finished=sha256_finish(&actual,&output);
+                bool old_finished=sha256_tail_reference_finish(&reference,&expected);
+                if(finished!=old_finished||!sha256_padding_state_equal(&actual,&reference,&output,&expected))return false;
+            }
+        }
+    }
+    /* Invalid/overflow inputs: no invalid source byte is read on rejection.
+     * Bits are independently within 0..8 bytes of UINT64_MAX, including odd bits. */
+    static const size_t residues[]={0,3,55,56,63};
+    for(size_t r=0;r<sizeof(residues)/sizeof(*residues);++r)
+        for(size_t remaining=0;remaining<=8;++remaining)for(size_t kind=0;kind<6;++kind) {
+            Sha256 actual;sha256_init(&actual);actual.used=residues[r];
+            for(size_t i=0;i<sizeof(actual.block);++i)actual.block[i]=(uint8_t)(i+111);
+            actual.bits=UINT64_MAX-(uint64_t)remaining*8u;
+            SolMirLinkageWorkMeter left={.limit=SIZE_MAX,.exhausted=true},right;
+            if(kind==1){left.used=9;left.limit=8;}
+            if(kind==2)left.used=SIZE_MAX-31;
+            if(kind==3)left.used=SIZE_MAX-32;
+            if(kind==4)actual.valid=false;
+            right=left;Sha256 reference=actual;
+            actual.work=kind==5?NULL:&left;reference.work=kind==5?NULL:&right;
+            SolMirLinkageDigest output,expected;memset(output.bytes,0xa5,sizeof(output.bytes));memset(expected.bytes,0xa5,sizeof(expected.bytes));
+            size_t chunk=remaining+1;
+            sha256_write(&actual,NULL,chunk);sha256_tail_reference_write(&reference,NULL,chunk);
+            if(!sha256_padding_state_equal(&actual,&reference,&output,&expected))return false;
+            bool finished=sha256_finish(&actual,&output),old_finished=sha256_tail_reference_finish(&reference,&expected);
+            if(finished!=old_finished||!sha256_padding_state_equal(&actual,&reference,&output,&expected))return false;
+            /* The same invalid/metered states must also enter finish directly. */
+            sha256_init(&actual);actual.used=residues[r];actual.bits=UINT64_MAX-(uint64_t)remaining*8u;
+            for(size_t i=0;i<sizeof(actual.block);++i)actual.block[i]=(uint8_t)(i+111);
+            actual.valid=kind!=4;left=right;reference=actual;
+            actual.work=kind==5?NULL:&left;reference.work=kind==5?NULL:&right;
+            memset(output.bytes,0xa5,sizeof(output.bytes));memset(expected.bytes,0xa5,sizeof(expected.bytes));
+            finished=sha256_finish(&actual,&output);old_finished=sha256_tail_reference_finish(&reference,&expected);
+            if(finished!=old_finished||!sha256_padding_state_equal(&actual,&reference,&output,&expected))return false;
+        }
+    return true;
+}
+#endif
 
 void sol_mir_linkage_internal_sha256_init(SolMirLinkageSha256 *sha) {
     sha256_init(sha);

@@ -270,14 +270,48 @@ were verified unchanged. See the [P4.4f1d handoff](../docs/p4.4f1d-handoff.md) f
 exact pins, carry provenance, and preserved failures. The current f1e execution
 status is recorded below and in the [interim handoff](../docs/p4.4f1e-handoff.md).
 
-## P4.4f1e S4a — accepted evidence, publication PENDING (October 24, 2026)
+## P4.4f1e S4b — accepted evidence, publication PENDING (October 24, 2026)
+
+S4a is published/remote-verified at `acf3de0d1c23b377605fd682f207c28bc68002b5`
+in its [publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4a/publication-receipt.md).
+The appended [S4b final review](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4b/deadline-correction/tail-binding-evidence-review.md#final-s4b-b1b6-actual-evidence-acceptance)
+accepts **36 identities, 18/mode: nine original-context ON carries +27 fresh
+(nine ON +18 SAN)**, plus **14 original metadata invocations**. E647=46 nonfault+
+601 faults is accepted stage metadata, not final S4c metadata/default execution.
+All eight rejections, two canonical controls and eight hostile mutations are
+accepted per mode; old carries are not current-binary or completed-window results.
+
+Reviewed SHA arithmetic/padding/hex/exact-fence and fresh-owned relocation changes
+preserve allocation/fault sequence, failure states, full bytes/Usage15/witnesses,
+seven renders, secure cleanup and hostile restore/retry. The per-render pure-key
+workspace is not a validation cache; no sampling, validation waiver or cap increase.
+Worst fresh ON active/post-close/distinct outer is2.853264/3.492279/4.720051s;
+SAN10.847718/11.614223/13.013285s. All pass unchanged3/<5/<5 and27/<30/<30 caps,
+parent<120/reserve10. Prior52 pure tests/19 groups are source qualification only.
+The [handoff](../docs/p4.4f1e-handoff.md#s4b-accepted-evidence) links actual current
+eight-source/build/runtime pins, production-helper equivalence and immutable
+failure/UNKNOWN-window history. S3/S4a results retain original contexts; no fresh
+faults, S4a replay or broad default/full-suite/speed claim follows.
+
+S4b publication remains PENDING docs/exact 12-path staged review, Astra readiness
+and coordinator commit/push/remote verification; no source repin/rebuild/runtime
+for this carry. Only the project cursor owns the live step; AGENTS/external evidence/
+original WIP are excluded. S4c3/resources+final metadata/default checks are next
+after publication, then S4d compatibility; S5 not started. SAN leaks disabled, not
+leak-freedom; R-AUTH/held ±1 OPEN, speed UNMET, broad P4/P4.4/full-f1e OPEN and
+host/E6/P4.5/P5 deferred.
+
+## Historical P4.4f1e S4a — October 24, 2026 accepted pre-push checkpoint
+
+The S4a publication-PENDING and S4b-next statements below are pre-push history,
+superseded by the S4a receipt and current S4b checkpoint above.
 
 S3 is published/remote-verified at `eb1aeb276977ab940020307b52914a2f9a8948db`
 in the [publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/s3-publication-receipt.md).
 The [S4a actual-evidence review](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4a/old-clause-correction/evidence-review.md)
 accepts **26×2 obligations: 12 original-context ON case carries +40 fresh
 current-source identities (14 ON +26 SAN)**, plus **four separate W/X discovery
-witnesses**, not new fault executions. Current accepted test SHA256 is
+witnesses**, not new fault executions. Historical S4a test SHA256 is
 `355f3ed5759f4cbfd73c1979bcd1a2208f32d7cb8dbc2f70c67d7afda5ed5fa8`.
 The original12 are per-case carries, not a completed original window. Source/P2
 derives n20/m39/S147; actual roots, retained and nine limited paths retain complete
@@ -305,9 +339,9 @@ OPEN, speed UNMET, host/E6/P4.5/P5 deferred.
 
 **Historical status at this S1 prepublication snapshot (October 21, 2026):** The
 statements below record the state before S1 publication and before S2 evidence
-acceptance; they do not describe the current cursor. S1/S2/S3 are now published;
-S4a technical evidence is accepted with publication PENDING.
-See the [accepted handoff](../docs/p4.4f1e-handoff.md#s4a-accepted-evidence) and
+acceptance; they do not describe the current cursor. S1/S2/S3/S4a are now published;
+S4b technical evidence is accepted with publication PENDING.
+See the [accepted handoff](../docs/p4.4f1e-handoff.md#s4b-accepted-evidence) and
 [external sole project cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md).
 Historical receipts, timings, pins, failures and errata below remain unchanged.
 

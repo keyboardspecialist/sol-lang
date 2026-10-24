@@ -8,9 +8,9 @@ approved ledger. It is not a second checklist, a new test report, or a stable AB
 specification. [TODO.md](../TODO.md) preserves checkpoints and links the external
 sole project execution cursor; this document does not own a queue.
 
-**Status precedence — October 24, 2026:** S3 is published/remote-verified;
-[S4a is technically accepted, publication PENDING](#s4a-accepted-evidence--october-24-2026-publication-pending).
-Older checkpoints below, including October 23's pre-push S3 status, are historical.
+**Status precedence — October 24, 2026:** S3 and S4a are published/remote-verified;
+[S4b is technically accepted, publication PENDING](#s4b-accepted-evidence).
+Older checkpoints below, including S3/S4a pre-push status, are historical.
 Only [H/project-execution-cursor.md](../../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md)
 owns the live step; the [old S3 cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
 is a completed checkpoint. [TODO.md](../TODO.md) is checkpoint navigation.
@@ -542,7 +542,43 @@ and P4.5/host/E6/P5 deferrals remain unchanged. Full f1e, S3 acceptance/publicat
 S4/S5, broad P4/P4.4, and whole-suite speed acceptance remain open or blocked as
 previously recorded.
 
-## S4a accepted evidence — October 24, 2026; publication PENDING
+<a id="s4b-accepted-evidence"></a>
+
+## S4b accepted evidence — October 24, 2026; publication PENDING
+
+The [S4a publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4a/publication-receipt.md)
+verifies `acf3de0d1c23b377605fd682f207c28bc68002b5`. The appended
+[S4b final review](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4b/deadline-correction/tail-binding-evidence-review.md#final-s4b-b1b6-actual-evidence-acceptance)
+accepts **36 identities (18/mode): nine original-context ON case carries +27 fresh
+(nine ON +18 SAN)** and **14 original metadata invocations**. E647=46 nonfault+601
+faults is accepted stage metadata, not final S4c metadata/default execution.
+Eight rejections, two canonical controls and eight typed hostile mutations per
+mode retain full source/bytes/Usage15/runtime/reset/owner assertions.
+
+All fresh deadlines pass unchanged: worst ON relocation active2.853264s /
+post-close3.492279s /distinct outer4.720051s; SAN10.847718s /11.614223s /
+13.013285s. Caps remain3/<5/<5 and27/<30/<30, parent<120/reserve10. The reviewed
+SHA core/padding/hex/fence and fresh-owned relocation correction preserves failure
+states, all allocation/fault ordering, seven renders and security, not sampling,
+validation caching or a deadline increase. Prior pure52/19-group checks remain
+source qualification, not a runtime replacement; none is rerun for this doc carry.
+
+All eight changed source paths and actual build/runtime pins are accepted in the
+final review; [the handoff](p4.4f1e-handoff.md#s4b-accepted-evidence) links them and
+the explicit production-helper equivalence/carry. S3/S4a results stay at original
+source/build contexts, not fresh faults or S4a executions. Original failures,
+partial regressions, missing historical windows and UNKNOWN outer outcomes remain
+unchanged by pointer. S4b publication remains PENDING docs/exact 12-path staged
+review, Astra readiness and coordinator commit/push/remote verification. No source
+repin/rebuild/runtime. S4c3/resources+final metadata/default checks are next after
+S4b publication; S4d compatibility pending, S5 not started. No full-suite/default/
+platform/leak/speed/broad P4/P4.4/full-f1e acceptance; leaks disabled, R-AUTH/held ±1
+OPEN, speed UNMET, host/E6/P4.5/P5 deferred.
+
+## Historical S4a accepted evidence — October 24, 2026; pre-push checkpoint
+
+The publication-PENDING and S4b-next statements below are the S4a pre-push state;
+the S4a receipt and current S4b checkpoint above supersede status only.
 
 The [S3 publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/s3-publication-receipt.md)
 records successful push and remote-master verification of
@@ -550,7 +586,7 @@ records successful push and remote-master verification of
 [S4a actual-evidence review](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4a/old-clause-correction/evidence-review.md)
 accepts **26 keys per mode =52 identities: 12 original-context ON individual
 case carries +40 fresh (14 ON +26 SAN)**, with four separate current W/X discovery
-witnesses. Current accepted test SHA256 is
+witnesses. The historical S4a test SHA256 is
 `355f3ed5759f4cbfd73c1979bcd1a2208f32d7cb8dbc2f70c67d7afda5ed5fa8`;
 source/build/evidence pins remain in that review, not migrated from S3's `dd700…`.
 S4a publication remains PENDING docs/exact staged-tree review, Astra readiness and

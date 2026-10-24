@@ -958,7 +958,26 @@ SolMirRuntimeHostPreflightOutcome sol_mir_runtime_host_abi_preflight(const SolMi
         : SOL_MIR_RUNTIME_HOST_PREFLIGHT_INVALID;
 }
 typedef struct { char text[224]; } HostRenderLine;
-static void host_render_digest(char *out,const SolMirLinkageDigest *digest){for(size_t i=0;i<SOL_MIR_LINKAGE_DIGEST_BYTES;i++)(void)snprintf(out+2*i,3,"%02x",digest->bytes[i]);}
+static void host_render_digest(char *out,const SolMirLinkageDigest *digest){
+    static const char hex[]="0123456789abcdef";
+    for(size_t i=0;i<SOL_MIR_LINKAGE_DIGEST_BYTES;i++){
+        out[2*i]=hex[digest->bytes[i]>>4];out[2*i+1]=hex[digest->bytes[i]&15];
+    }
+    out[2*SOL_MIR_LINKAGE_DIGEST_BYTES]='\0';
+}
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+bool sol_mir_runtime_host_abi_test_hex_regression(void){
+    for(size_t offset=0;offset<256;++offset){
+        SolMirLinkageDigest digest={{0}};char actual[67],reference[67];
+        memset(actual,0x5a,sizeof actual);memset(reference,0x5a,sizeof reference);
+        for(size_t i=0;i<sizeof digest.bytes;++i)digest.bytes[i]=(uint8_t)(offset+i);
+        host_render_digest(actual+1,&digest);
+        for(size_t i=0;i<SOL_MIR_LINKAGE_DIGEST_BYTES;++i)(void)snprintf(reference+1+2*i,3,"%02x",(unsigned)digest.bytes[i]);
+        if(memcmp(actual,reference,sizeof actual)!=0)return false;
+    }
+    return true;
+}
+#endif
 static void key_u64(SolMirLinkageSha256 *state,uint64_t value){uint8_t bytes[8];for(size_t i=0;i<sizeof(bytes);i++)bytes[i]=(uint8_t)(value>>(8*i));sol_mir_linkage_internal_sha256_write(state,bytes,sizeof(bytes));}
 static void key_bytes(SolMirLinkageSha256 *state,const void *bytes,size_t length){key_u64(state,length);if(length)sol_mir_linkage_internal_sha256_write(state,bytes,length);}
 static void key_text(SolMirLinkageSha256 *state,const char *text){key_bytes(state,text,strlen(text));}

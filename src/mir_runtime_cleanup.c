@@ -1771,7 +1771,46 @@ static bool cleanup_transition_digest(const SolMirRuntimeCleanup *c, size_t tran
     digest_u64(&state, x->contract_phase); digest_u64(&state, x->contract_outcome);
     return sol_mir_linkage_internal_sha256_finish(&state, out);
 }
-static void render_digest(Buffer*b,const SolMirLinkageDigest*d){for(size_t i=0;i<SOL_MIR_LINKAGE_DIGEST_BYTES;i++)put(b,"%02x",d->bytes[i]);}
+static void render_hex_byte(Buffer*b,uint8_t value){
+    if(b->bad)return;
+    if((size_t)2>SIZE_MAX-b->n-1){b->bad=true;return;}
+    size_t z=b->n+(size_t)2+1;
+    if(z>b->c){size_t c=b->c?b->c:256;
+        while(c<z){if(c>SIZE_MAX/2){b->bad=true;return;}c*=2;}
+        char*p=realloc(b->p,c);if(!p){b->bad=true;return;}b->p=p;b->c=c;}
+    static const char hex[]="0123456789abcdef";
+    b->p[b->n]=hex[value>>4];b->p[b->n+1]=hex[value&15];b->p[b->n+2]='\0';b->n+=(size_t)2;
+}
+static void render_digest(Buffer*b,const SolMirLinkageDigest*d){for(size_t i=0;i<SOL_MIR_LINKAGE_DIGEST_BYTES;i++)render_hex_byte(b,d->bytes[i]);}
+
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+bool sol_mir_runtime_cleanup_test_hex_regression(void){
+    static const size_t capacities[]={0,1,2,3,63,64,65};
+    for(size_t scenario=0;scenario<sizeof capacities/sizeof *capacities;++scenario){
+        Buffer actual={.c=capacities[scenario]},reference=actual;
+        if(actual.c){actual.p=calloc(actual.c,1);reference.p=calloc(reference.c,1);
+            if(!actual.p||!reference.p){free(actual.p);free(reference.p);return false;}}
+        bool ok=true;
+        for(size_t i=0;i<256;++i){render_hex_byte(&actual,(uint8_t)i);put(&reference,"%02x",(unsigned)(uint8_t)i);
+            if(actual.bad!=reference.bad||actual.bad||actual.n!=reference.n||actual.c!=reference.c
+                ||memcmp(actual.p,reference.p,actual.n+1)!=0){ok=false;break;}}
+        free(actual.p);free(reference.p);if(!ok)return false;
+    }
+    Buffer actual={0},reference={0};SolMirLinkageDigest digest={{0}};
+    for(size_t i=0;i<sizeof digest.bytes;++i)digest.bytes[i]=(uint8_t)(255-i*7);
+    put(&actual,"prefix:%s","text");put(&reference,"prefix:%s","text");
+    for(size_t i=0;i<sizeof digest.bytes;++i){render_hex_byte(&actual,digest.bytes[i]);put(&reference,"%02x",(unsigned)digest.bytes[i]);
+        if(actual.bad||reference.bad||actual.n!=reference.n||actual.c!=reference.c
+            ||memcmp(actual.p,reference.p,actual.n+1)!=0){free(actual.p);free(reference.p);return false;}}
+    put(&actual,"/suffix");put(&reference,"/suffix");
+    bool ok=!actual.bad&&!reference.bad&&actual.n==reference.n&&actual.c==reference.c
+        &&memcmp(actual.p,reference.p,actual.n+1)==0;free(actual.p);free(reference.p);
+    for(size_t scenario=0;scenario<2;++scenario){actual=(Buffer){.n=SIZE_MAX-1,.bad=scenario==0};reference=actual;
+        for(size_t i=0;i<32;++i){render_hex_byte(&actual,(uint8_t)i);put(&reference,"%02x",(unsigned)i);
+            if(!actual.bad||!reference.bad||actual.p!=NULL||reference.p!=NULL||actual.n!=reference.n||actual.c!=reference.c)return false;}}
+    return ok;
+}
+#endif
 static bool cleanup_action_digest(const SolMirRuntimeCleanup *c,
     const SolMirRuntimeCleanupAction *action, SolMirLinkageDigest *out) {
     SolMirLinkageSha256 state;
