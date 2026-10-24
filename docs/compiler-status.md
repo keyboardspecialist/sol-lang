@@ -8,9 +8,9 @@ approved ledger. It is not a second checklist, a new test report, or a stable AB
 specification. [TODO.md](../TODO.md) preserves checkpoints and links the external
 sole project execution cursor; this document does not own a queue.
 
-**Status precedence — October 24, 2026:** S3 and S4a are published/remote-verified;
-[S4b is technically accepted, publication PENDING](#s4b-accepted-evidence).
-Older checkpoints below, including S3/S4a pre-push status, are historical.
+**Status precedence — October 24, 2026:** S3/S4a/S4b are published/remote-verified;
+[S4c is technically accepted, publication PENDING](#s4c-accepted-evidence).
+Older checkpoints below, including S3/S4a/S4b pre-push status, are historical.
 Only [H/project-execution-cursor.md](../../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md)
 owns the live step; the [old S3 cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
 is a completed checkpoint. [TODO.md](../TODO.md) is checkpoint navigation.
@@ -542,9 +542,42 @@ and P4.5/host/E6/P5 deferrals remain unchanged. Full f1e, S3 acceptance/publicat
 S4/S5, broad P4/P4.4, and whole-suite speed acceptance remain open or blocked as
 previously recorded.
 
+<a id="s4c-accepted-evidence"></a>
+
+## S4c accepted evidence — October 24, 2026; publication PENDING
+
+The [S4b publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4b/publication-receipt.md)
+verifies `dacf0a21c63263c93123e0e278d4b8188342be5f`. The appended
+[S4c final review](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4c/evidence-review.md#final-independent-s4c-c1c4-acceptance)
+accepts **six resources,98 metadata children and two builds:106 actual project
+children**. The **49 nonfault inventory=discovery2+S4a26+S4b18+S4c3** is supported
+in both modes by **92 qualified original-context carries +six fresh references**.
+Live E650, unchanged A/B/C/D lists, manifest/shards and original4999 ordered tuples
+are reconciled; same-expression default mapping is source-proved, not fresh49/
+default backend/full-suite execution. Metadata negatives retain original exit2/
+supervisor FAIL with separate expected-nonzero acceptance, not rewritten receipts.
+
+Three real X resource controls per mode retain defaults→exact observed selected
+Usage→one-below→restored-default retry with actual limits. All15 Usage fields,
+full bytes/catalog/provenance/runtime/trace witnesses, independent module-local and
+typed source-edge arity joins, immediate false-return fences, final validators/
+renders/owner close are accepted. No resource-authentication or historical-golden
+claim follows. Current test/build/runtime pins and failure/carry history are linked
+in the [handoff](p4.4f1e-handoff.md#s4c-accepted-evidence). S4b's accepted SHA/fence/
+deadline correction did not raise caps; old contexts are not current-binary replays.
+
+S4c publication PENDING docs/exact five-path staged review, Astra readiness and
+coordinator commit/push/remote verification. No source repin/rebuild/extra runtime
+for this carry. S4d compatibility is next; full S4/S5 remain unclosed. R-AUTH/held
+resealed ±1 OPEN, leaks disabled (not leak-freedom), speed UNMET; no broad P4/P4.4/
+full-f1e, full-suite/platform/default-run acceptance; host/E6/P4.5/P5 deferred.
+
 <a id="s4b-accepted-evidence"></a>
 
-## S4b accepted evidence — October 24, 2026; publication PENDING
+## Historical S4b accepted evidence — October 24, 2026; pre-push checkpoint
+
+S4b publication-PENDING and S4c-next statements below are pre-push history,
+superseded for status by the S4b receipt/current S4c record above.
 
 The [S4a publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4a/publication-receipt.md)
 verifies `acf3de0d1c23b377605fd682f207c28bc68002b5`. The appended

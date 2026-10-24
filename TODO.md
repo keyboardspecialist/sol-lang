@@ -7,7 +7,7 @@ live execution cursor. The sole project cursor is
 [H/project-execution-cursor.md](../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md).
 The [old S3 cursor](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
 is a completed checkpoint, not current authority. The October 24 record below
-supersedes older status: S3 and S4a are published/remote-verified; S4b is technically
+supersedes older status: S3, S4a and S4b are published/remote-verified; S4c is technically
 accepted, publication PENDING. The October 21 ledger remains history.
 The foundation was audited September 9, 2026 against baseline `6ec4ba9`; the
 checkpoint was refreshed October 21, 2026 after verified S2 publication and the
@@ -136,7 +136,39 @@ Publication did not refresh those pins or timings. See the [f1e interim handoff]
 - One coordinator maintains the external sole execution cursor; parallel tracks do
   not create competing priority lists.
 
-## S4b accepted evidence — October 24, 2026; publication PENDING
+## S4c accepted evidence — October 24, 2026; publication PENDING
+
+S4b is published/remote-verified at `dacf0a21c63263c93123e0e278d4b8188342be5f`
+under its [publication receipt](../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4b/publication-receipt.md).
+The [final S4c review](../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4c/evidence-review.md#final-independent-s4c-c1c4-acceptance)
+accepts **six actual resources +98 metadata children +two builds =106 project
+children**, not the108 ceiling. The **49 nonfault keys** are discovery2+S4a26+
+S4b18+S4c3; their98 mode/key identities have **92 original-context carries +six
+fresh resource references**, not49 fresh executions per mode. Live E650=49+601,
+old lists/manifest/shards and exact original4999 tuples are reconciled. Default
+reachability is source-proved with actual metadata/selected evidence, **not a
+default backend/full-suite run** or650 runtime passes.
+
+All15 Usage fields, actual backend limits, defaults→exact→one-below→same-owner
+retry, independent module-local/source-edge arity joins, full bytes/witnesses,
+byte-first fences and real close are accepted. These are observed resource controls,
+not independent resource authentication. Current test/runtime pins and preserved
+failure/carry qualifications are in the [handoff](docs/p4.4f1e-handoff.md#s4c-accepted-evidence).
+S4b's reviewed deadline correction remains accepted, not a cap raise or fresh
+S3/S4a evidence. Original failure/UNKNOWN history remains unchanged by pointer.
+
+S4c publication is **PENDING** exact five-path docs/test staged review, Astra
+readiness and coordinator commit/push/remote verification. No source repin/rebuild/
+extra case for this carry. S4d compatibility is next after verified publication;
+full S4 and S5 are not closed. Only the project cursor above owns the live step;
+the sole S4 index is navigation. AGENTS/external evidence/mixed WIP are excluded.
+No leak/full-suite/speed/broad P4/P4.4/full-f1e acceptance; R-AUTH/held resealed ±1
+OPEN, leaks disabled, speed UNMET, host/E6/P4.5/P5 deferred.
+
+## Historical S4b accepted evidence — October 24, 2026; pre-push checkpoint
+
+S4b publication-PENDING and S4c-next statements below are the reviewed pre-push
+checkpoint; the S4b receipt/current S4c record above supersede status only.
 
 S4a is published/remote-verified at `acf3de0d1c23b377605fd682f207c28bc68002b5`
 under its [publication receipt](../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4a/publication-receipt.md).
@@ -781,7 +813,7 @@ The following are status handoffs, not competing execution cursors:
 
 | Lane / owner | Ready work and exclusive scope | Acceptance handoff |
 | --- | --- | --- |
-| P4.4f1d published / P4.4f1e — October 24, 2026 checkpoint | CORE/S1/S2 at their pins; S3 and S4a published/remote-verified. S4b technically accepted: 36 identities (nine original ON carries +27 fresh), 14 original metadata; publication PENDING. S4c3/final metadata/default checks and S4d pending; S5 not started. | This table is not a cursor; consult the external sole project cursor linked above and [f1e handoff](docs/p4.4f1e-handoff.md#s4b-accepted-evidence) for evidence/publication limits. |
+| P4.4f1d published / P4.4f1e — October 24, 2026 checkpoint | CORE/S1/S2 at their pins; S3/S4a/S4b published/remote-verified. S4c technically accepted: six resources,98 metadata,106 children including two builds;49 nonfault inventory (92 carries+six fresh references), publication PENDING. S4d compatibility pending; full S4/S5 not closed. | This table is not a cursor; consult the external sole project cursor linked above and [f1e handoff](docs/p4.4f1e-handoff.md#s4c-accepted-evidence) for evidence/publication limits. |
 | R-AUTH / separate Sol 6.1 High brief | Independent inherited P3.6 resource-authentication defect and preserved six-path resource WIP; coverage extension is pending and unaccepted. | Specify independent exactness reconstruction and truthful coverage; keep held `build_work`/`build_scratch_bytes` ±1 assertions unresolved until evidence exists. |
 | P4.4f1a integration / coordinator | Bounded metadata checkpoint committed as `5c9c056`, fast-forwarded to `master`, and pushed to `origin/master`; existing default selectors and full registrations remain unchanged. | Integration complete. This publication update does not refresh or extend the accepted test receipts. |
 | P4.5/P5 and host | Dependency-deferred; f1c adds no host adapter, E6 execution, artifact writer, or `sol build` work. | Requires its own approved interface and task briefs. |
