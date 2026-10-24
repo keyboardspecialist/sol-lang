@@ -270,14 +270,45 @@ were verified unchanged. See the [P4.4f1d handoff](../docs/p4.4f1d-handoff.md) f
 exact pins, carry provenance, and preserved failures. The current f1e execution
 status is recorded below and in the [interim handoff](../docs/p4.4f1e-handoff.md).
 
+## P4.4f1e S4a — accepted evidence, publication PENDING (October 24, 2026)
+
+S3 is published/remote-verified at `eb1aeb276977ab940020307b52914a2f9a8948db`
+in the [publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/s3-publication-receipt.md).
+The [S4a actual-evidence review](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4a/old-clause-correction/evidence-review.md)
+accepts **26×2 obligations: 12 original-context ON case carries +40 fresh
+current-source identities (14 ON +26 SAN)**, plus **four separate W/X discovery
+witnesses**, not new fault executions. Current accepted test SHA256 is
+`355f3ed5759f4cbfd73c1979bcd1a2208f32d7cb8dbc2f70c67d7afda5ed5fa8`.
+The original12 are per-case carries, not a completed original window. Source/P2
+derives n20/m39/S147; actual roots, retained and nine limited paths retain complete
+packet/ledger/owner success gates joined to raw protocols and closed receipts.
+S4a is technically accepted but publication remains PENDING docs/exact five-file
+staged review, Astra readiness and coordinator commit/push/remote verification.
+
+**E633=32 nonfault+601 faults** is static registration only, not current metadata
+CLI/default runtime/all633 acceptance. Source-specific S2/S3 carry uses the isolated
+false-default walker branch and four actual discovery witnesses: historical S3's
+1,202 identities /525 FINALs /three no-FINAL leaves are not fresh S3 runs. The
+[handoff](../docs/p4.4f1e-handoff.md#s4a-accepted-evidence) links exact pins, source1
+build failure, source2 failed13/missing original window close, original derive
+project0/adapter1 and corrected raw reconsumption; none is rewritten by acceptance.
+CORE's unavailable full695e01 snapshot qualification remains. S4b18 is next only
+after S4a publication; S4c3/resources+metadata, S4d compatibility and S5 remain pending.
+Only [H/project-execution-cursor.md](../../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md)
+owns execution status; the [sole S4 index](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/evidence-index.json)
+is navigation, not authority. No tests/build/runtime/source repin for this docs carry;
+existing accepted evidence requires no rerun. No full-suite/platform/leak/speed/broad
+P4/P4.4/full-f1e claim: leak detection remains disabled, R-AUTH/held resealed ±1
+OPEN, speed UNMET, host/E6/P4.5/P5 deferred.
+
 ## P4.4f1e direct ensures-call — historical S1 prepublication snapshot
 
 **Historical status at this S1 prepublication snapshot (October 21, 2026):** The
 statements below record the state before S1 publication and before S2 evidence
-acceptance; they do not describe the current cursor. S1/S2 are now published; S3
-technical evidence is accepted with publication PENDING.
-See the [accepted handoff](../docs/p4.4f1e-handoff.md#s3-accepted-evidence) and
-[external sole cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md).
+acceptance; they do not describe the current cursor. S1/S2/S3 are now published;
+S4a technical evidence is accepted with publication PENDING.
+See the [accepted handoff](../docs/p4.4f1e-handoff.md#s4a-accepted-evidence) and
+[external sole project cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md).
 Historical receipts, timings, pins, failures and errata below remain unchanged.
 
 The bounded f1e CORE source and its nine-key-per-mode validation are independently
@@ -549,7 +580,7 @@ are retained. Only libFuzzer's real iteration/status lines establish iteration
 progress. The heartbeat names configured runs but does not invent a completed
 count. Local macOS support proofs do not establish Linux CI, leak or Windows safety.
 
-## S1 publication candidate — accepted prepublication evidence snapshot
+## S1 publication candidate — October 21, 2026 prepublication evidence snapshot
 
 Candidate path `/Users/jsobotka/code/sol-lang-p44f1e-s1-publication`, branch
 `p44-f1e-s1-publication`, base `dfceed6b3e6630271cdc6ba02cb011314f1b31f1`. Candidate
@@ -569,7 +600,7 @@ snapshot, S1 publication was pending and S2 was blocked. S1 has since been publi
 the current cursor and S2 technical-acceptance status follow. The original seven-path WIP and
 external preservation receipt remain untouched.
 
-## P4.4f1e S2 — technical inventory accepted (prepublication snapshot)
+## P4.4f1e S2 — October 21, 2026 accepted prepublication snapshot
 
 At the recorded S2 snapshot, S1 was COMPLETE and published as
 `e93d375e2e9f59d9a819ad470770e741a1511f4a`; `origin/master` was verified at that
@@ -628,7 +659,7 @@ no leak-checking claim is made. The original 950/49a/cdae S1 timing, FAIL receip
 historical cutoff, old-source provisional W observation, and prior non-approvals remain
 unchanged and are not replaced by candidate or S2 timings.
 
-## Historical P4.4f1e S3 test-source proposal — before recovery decision
+## Historical P4.4f1e S3 test-source proposal — October 21, 2026; before recovery decision
 
 At the pre-recovery snapshot, S1 and S2 were complete and published (S1 `e93d375e2e9f59d9a819ad470770e741a1511f4a`,
 S2 `b1f5e540f9b76ee2cc5d11589de09c6c319612c5`; S2 push and remote verification are
@@ -683,7 +714,10 @@ independent evidence review. R3 is blocked on accepted R2 evidence and separate
 continuation authority; R4/S4 and R5/S5 are sequentially blocked thereafter. Both original halts,
 the failed D draft, prior receipts, and the preserved mixed WIP remain unchanged.
 
-## P4.4f1e S3 — accepted fault evidence; publication PENDING (October 23, 2026)
+## Historical P4.4f1e S3 — October 23, 2026 accepted pre-push checkpoint
+
+The publication-PENDING statements below are October 23's pre-push history,
+superseded by the October 24 S3 receipt and S4a record above.
 
 The [independent final1202 review](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/s3-final1202-review.md)
 accepts C3–C8 and permits docs-only publication carry: **1,058 original-context
@@ -723,5 +757,5 @@ leak detection disabled, no leak-freedom claim. No full-suite/platform/speed,
 broad P4.4/full-f1e or R-AUTH/held resealed ±1 acceptance follows. S3 technical
 acceptance is complete; publication stays **PENDING** exact staged-tree review and
 coordinator commit/push/remote verification. S4/S5 remain blocked until verified
-publication and separate assignments. Only the [external sole cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
-owns active execution status; these are dated evidence checkpoints.
+publication and separate assignments. The [old S3 cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
+is now a completed checkpoint, not active authority; these are dated evidence records.

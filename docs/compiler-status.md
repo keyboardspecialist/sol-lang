@@ -6,14 +6,14 @@ E1-E6, P1, and P2.1-P2.6 are complete at this baseline; P2 overall remains open.
 This relocates the detailed baseline README documentation, reconciled with the
 approved ledger. It is not a second checklist, a new test report, or a stable ABI
 specification. [TODO.md](../TODO.md) preserves checkpoints and links the external
-sole S3 execution cursor; this document does not own a queue.
+sole project execution cursor; this document does not own a queue.
 
-**Status precedence:** October 21 and earlier checkpoints below are historical,
-including their then-current cursor and absent-capture/zero-case statements.
-The [October 23 S3 evidence record](#accepted-s3-technical-evidence--october-23-2026-publication-pending)
-supersedes status only: technical acceptance complete, publication PENDING.
-Only [H/execution-cursor.md](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
-owns the live S3 step; [TODO.md](../TODO.md) is checkpoint navigation.
+**Status precedence — October 24, 2026:** S3 is published/remote-verified;
+[S4a is technically accepted, publication PENDING](#s4a-accepted-evidence--october-24-2026-publication-pending).
+Older checkpoints below, including October 23's pre-push S3 status, are historical.
+Only [H/project-execution-cursor.md](../../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md)
+owns the live step; the [old S3 cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
+is a completed checkpoint. [TODO.md](../TODO.md) is checkpoint navigation.
 
 **Historical worktree addendum, October 3, 2026:** P2.7, P2.8, P3.1-P3.6, and
 P4.1-P4.3 were independently approved and complete at that snapshot. P4.3 completes
@@ -50,7 +50,7 @@ predicate, with whole-target scalar/dead-block restrictions. That historical f1b
 boundary does not describe the wider transitive callee admission in f1c below. See
 the [P4.4f1b handoff](p4.4f1b-handoff.md) for its pinned evidence.
 
-**Current status addendum, October 20, 2026 (P4.4f1c; accepted and published):**
+**Historical status addendum, October 20, 2026 (P4.4f1c; accepted and published):**
 Independent final technical/evidence review and documentation review are approved.
 The bounded implementation and its exact evidence were published as
 `24e2d16f6047dd390900c36b2b9c7cb583ba985a` (`Execute ordinary scalar callee chains
@@ -131,7 +131,7 @@ are unmet. P4.5, host/E6, and P5 remain deferred.
 See the [P4.4f1c handoff](p4.4f1c-handoff.md) and
 [TODO.md](../TODO.md#execution-cursor) for the cursor.
 
-**Current status addendum, October 20, 2026 (P4.4f1d; technical/evidence accepted
+**Historical status addendum, October 20, 2026 (P4.4f1d; technical/evidence accepted
 and feature published):** The accepted slice is one direct pure predicate call from a
 type-owned refinement: `type T = refined Int64 where helper(self)`. It requires the
 exact refinement context and SELF binding, a plain owned `Int64` backing, and a
@@ -542,7 +542,43 @@ and P4.5/host/E6/P5 deferrals remain unchanged. Full f1e, S3 acceptance/publicat
 S4/S5, broad P4/P4.4, and whole-suite speed acceptance remain open or blocked as
 previously recorded.
 
-## Accepted S3 technical evidence — October 23, 2026; publication PENDING
+## S4a accepted evidence — October 24, 2026; publication PENDING
+
+The [S3 publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/s3-publication-receipt.md)
+records successful push and remote-master verification of
+`eb1aeb276977ab940020307b52914a2f9a8948db`. The
+[S4a actual-evidence review](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4a/old-clause-correction/evidence-review.md)
+accepts **26 keys per mode =52 identities: 12 original-context ON individual
+case carries +40 fresh (14 ON +26 SAN)**, with four separate current W/X discovery
+witnesses. Current accepted test SHA256 is
+`355f3ed5759f4cbfd73c1979bcd1a2208f32d7cb8dbc2f70c67d7afda5ed5fa8`;
+source/build/evidence pins remain in that review, not migrated from S3's `dd700…`.
+S4a publication remains PENDING docs/exact staged-tree review, Astra readiness and
+coordinator commit/push/remote verification; this is no staged-tree approval.
+
+Source/P2-derived n20/m39/S147 and all nine limited modules, eight root pairs,
+genuine ENTRY resets and unchanged retained raw-repeat behavior are accepted.
+Full packet/ordered ledger/owner checks are source-backed success gates joined to
+actual raw protocols/closed receipts, not retained full module/owner dumps.
+The [handoff](p4.4f1e-handoff.md#s4a-accepted-evidence) links the source-bounds
+reviews and preserved source1 build failure, source2 failed13/missing window close,
+and original derive child0/adapter1 reconsumption history.
+
+E633=32 nonfault+601 faults is **static inventory**, not actual current metadata
+CLI/default runtime or all633 execution. Source-specific S2/S3 carry relies on
+false-default branch isolation and four fresh discovery witnesses, not new S3 fault
+executions or historical repinning: 1,202 historical identities /525 FINALs /three
+honest no-FINAL leaves remain qualified. The
+[sole S4 index](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/evidence-index.json)
+is navigation only. S4b18 is next after S4a publication; S4c3/resources+metadata,
+S4d compatibility and S5 remain pending. No source repin/rebuild/runtime is performed
+for this docs carry. R-AUTH/held resealed ±1 OPEN; speed UNMET; broad P4/P4.4/full-f1e,
+full-suite/platform/leak acceptance unclaimed; host/E6/P4.5/P5 deferred.
+
+## Historical S3 technical evidence — October 23, 2026; pre-push checkpoint
+
+Publication-PENDING and blocked-on-S3 statements here are explicitly the October 23
+pre-push state, superseded by the October 24 receipt/status above.
 
 The [independent final1202 review](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/s3-final1202-review.md)
 records `APPROVED_FINAL_1202_IDENTITY_COVERAGE_AND_INTEGRITY` and
@@ -578,9 +614,9 @@ leak detection is disabled, with no leak-freedom claim.
 
 S3 technical acceptance is complete; publication is **PENDING** independent exact
 staged-tree review and coordinator commit/push/remote verification. S4/S5 remain
-blocked until verified publication and separately assigned work. Only the
-[external cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
-owns the active step. No full-f1e, broad P4/P4.4, platform/full-suite or speed
+blocked until verified publication and separately assigned work. The
+[old S3 cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
+is now a completed checkpoint, not live authority. No full-f1e, broad P4/P4.4, platform/full-suite or speed
 acceptance follows; R-AUTH and held resealed ±1 debt remain open.
 
 Use the [README](../README.md) for onboarding and runnable examples, and
@@ -1704,7 +1740,7 @@ implemented by these compiler owners. P4.1 through P4.3 are complete; P4 remains
 open and P4.4 remains unchecked. The bounded f1a metadata checkpoint and accepted,
 published f1b leaf-execution slice do not close it. See the [f1a handoff](p4.4f1a-handoff.md),
 [f1b handoff](p4.4f1b-handoff.md), and
-[external sole cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md).
+[external sole project cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md).
 Consult [TODO.md](../TODO.md) for checkpoint navigation and
 [the analysis](project-analysis.md) for the experiment rationale.
 

@@ -15,6 +15,7 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdint.h>
+#include <inttypes.h>
 #include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -13156,6 +13157,7 @@ typedef struct {
     size_t max_steps,depth,max_depth;
     bool leaf,dump;
     bool retained_entry_census;
+    bool s4a_old_clause_drop;
     unsigned profile,trace_mode;
     P44f1bPath *path;
 } P44f1bWalk;
@@ -17074,6 +17076,9 @@ static bool p44f1d_walk_check_refined(P44f1bWalk *w,P44f1bFrame *f,size_t image,
         *next_edge,role,violation_site,produced,pending,&actions,false);
 }
 
+static bool p44f1e_s4a_old_drop_event(P44f1bWalk *,const P44f1bFrame *,size_t,size_t,
+    size_t,const P44f1bActions *);
+
 static bool p44f1b_walk_image_raw(P44f1bWalk *w,size_t image,int64_t argument,int64_t *result) {
     const SolMirMaterialization *m=&w->p->concrete.materialization;
     const SolMirOperations *o=&w->p->concrete.operations;
@@ -17095,6 +17100,7 @@ static bool p44f1b_walk_image_raw(P44f1bWalk *w,size_t image,int64_t argument,in
             int64_t value=0,x=0,y=0;bool defines=false;size_t local=in->local;
             if(in->place<m->place_count) {F1B_REQUIRE(m->places[in->place].projections.count==0);local=m->places[in->place].local;}
             P44f1bActions actions={0};bool event=false;size_t inherited=F1B_NONE;
+            bool at_operation_consumed=false;
             switch(in->kind) {
             case SOL_MIR_INST_CONST_INT64:
                 F1B_REQUIRE(in->source_expression<w->p->ir.expression_count
@@ -17166,7 +17172,11 @@ static bool p44f1b_walk_image_raw(P44f1bWalk *w,size_t image,int64_t argument,in
                     ||w->profile==P44F1C_PROFILE_PREDICATE_CALLEES
                     ||w->profile==P44F1D_PROFILE_REFINEMENT_CALLS
                     ||w->profile==P44F1D_PROFILE_RETAINED_REFINEMENT;
-                if(w->profile==P44F1E_PROFILE_ENSURES_CALLS) {
+                if(w->s4a_old_clause_drop&&!strcmp(name,"old_core")
+                    &&m->locals[local].kind==SOL_MIR_MATERIALIZED_LOCAL_PARAMETER) {
+                    F1B_REQUIRE(p44f1e_s4a_old_drop_event(w,&f,block,id,pre_storage,&actions));
+                    at_operation_consumed=true;
+                } else if(w->profile==P44F1E_PROFILE_ENSURES_CALLS) {
                     P44f1eDropEventExpectation expectation=p44f1e_drop_event_expectation(
                         w,&f,block,id,local,pre_storage,&actions);
                     F1B_REQUIRE(expectation!=P44F1E_DROP_EVENT_REJECTED);
@@ -17248,7 +17258,7 @@ static bool p44f1b_walk_image_raw(P44f1bWalk *w,size_t image,int64_t argument,in
             }
             default:F1B_REQUIRE(false);
             }
-            F1B_REQUIRE(p44f1b_walk_event(w,&f,false,image,block,id,false,SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,
+            if(!at_operation_consumed)F1B_REQUIRE(p44f1b_walk_event(w,&f,false,image,block,id,false,SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,
                 F1B_NONE,SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO,inherited,F1B_NONE,false,&actions,!event));
             if(defines)F1B_REQUIRE(p44f1b_walk_put(w,f.values,in->result,in->type,value));
         }
@@ -23794,6 +23804,903 @@ static bool p44f1d_root_case(size_t which,bool trace) {
     return ok&&executed;
 }
 
+/* S4a old-clause amendment. Only the new adapter enables the small walk flag.
+ * This proof is not the S3 division-only diagnostic and does not populate it. */
+#define P44F1E_OLD_IDS(X) \
+    X(image) X(callable) X(owner) X(local) X(source_local) X(source_type) X(recipe) \
+    X(caller) X(call_expression) X(call_binding) X(argument_expression) X(call_argument) \
+    X(block) X(operation) X(activation) X(trace_mode) X(body_reads) X(root_places) \
+    X(context) X(obligation) X(predicate) X(body) X(predicate_binding) X(check_block) \
+    X(snapshot_read) X(snapshot_operand) X(snapshot_source) X(snapshot_offset) X(snapshot_ordinal) \
+    X(context_base) X(input_ordinal) X(snapshot_plan) X(snapshot_slot) X(provenance) \
+    X(result) X(result_expression) X(result_visit) X(route_visit) X(transition) X(role) X(edge) X(site) X(record) \
+    X(step_visit) X(step_event) X(scope_operation) X(scope_event) X(capture_visit) X(requires_visit) \
+    X(route_event) X(route_slot_count) X(route_slot) X(route_slot_action) X(route_slot_disposition) X(route_slot_record)
+typedef struct {
+#define P44F1E_OLD_FIELD(name_) size_t name_;
+    P44F1E_OLD_IDS(P44F1E_OLD_FIELD)
+#undef P44F1E_OLD_FIELD
+    int64_t argument,snapshot_value,result_value;
+    SolMirRuntimeFailureCode code;
+} P44f1eS4aOldProof;
+
+static bool p44f1e_s4a_old_proof_raw(P44f1bWalk *w,size_t image,size_t block,
+    size_t operation,P44f1eS4aOldProof *d) {
+    F1B_REQUIRE(w!=NULL&&w->owner_guard!=NULL&&w->p==&w->owner_guard->owner
+        &&p44f1e_owner_use_allowed(w->owner_guard)&&w->profile==P44F1E_PROFILE_ENSURES_CALLS);
+    const SolIr *ir=&w->p->ir;const SolMirMaterialization *m=&w->p->concrete.materialization;
+    const SolMirOperations *o=&w->p->concrete.operations;const P44f1bPath *path=w->path;
+    memset(d,0,sizeof *d);
+    F1B_REQUIRE(image<m->image_count&&block<m->block_count&&operation<m->instruction_count);
+    const SolMirMaterializedImage *im=&m->images[image];
+    F1B_REQUIRE(im->source_callable<ir->callable_count);
+    const SolIrCallable *c=&ir->callables[im->source_callable];
+    F1B_REQUIRE(!strcmp(c->name,"old_core")&&c->parameters.count==1&&c->parameters.offset<ir->root_count);
+    const SolMirMaterializedInstruction *marker=&m->instructions[operation];
+    size_t local=marker->local;
+    F1B_REQUIRE(marker->kind==SOL_MIR_INST_DROP_IF_INITIALIZED&&marker->block==block
+        &&marker->place==F1B_NONE&&local<m->local_count&&p44f1b_walk_in(im->locals,local,m->local_count)
+        &&p44f1b_walk_in(im->blocks,block,m->block_count));
+    const SolMirMaterializedLocal *ml=&m->locals[local];size_t sl=ir->roots[c->parameters.offset];
+    F1B_REQUIRE(sl<ir->local_count&&ml->source_local==sl&&ml->instance==image
+        &&ml->kind==SOL_MIR_MATERIALIZED_LOCAL_PARAMETER&&ml->ordinal==0&&ml->access==SOL_ACCESS_OWNED);
+    const SolIrLocal *formal=&ir->locals[sl];
+    F1B_REQUIRE(formal->kind==SOL_IR_LOCAL_PARAMETER&&formal->owner==c->owner&&formal->access==SOL_ACCESS_OWNED
+        &&ml->type<m->type_count&&ml->type<w->p->concrete.representation.recipe_count
+        &&m->types[ml->type].is_copy&&w->p->concrete.representation.recipes[ml->type].kind==SOL_MIR_RECIPE_INT64
+        &&w->p->concrete.representation.recipes[ml->type].copy_kind==SOL_MIR_COPY_TRIVIAL);
+    bool typed=p44f1e_plain_i64_type(w->owner_guard,ir,formal->type);
+    bool fenced=p44f1e_owner_fence(w->owner_guard);F1B_REQUIRE(typed&&fenced);
+    typed=p44f1d_backing_join(w,formal->type,ml->type,ml->type);
+    fenced=p44f1e_owner_fence(w->owner_guard);F1B_REQUIRE(typed&&fenced);
+    d->image=image;d->callable=im->source_callable;d->owner=c->owner;d->local=local;
+    d->source_local=sl;d->source_type=formal->type;d->recipe=ml->type;d->block=block;d->operation=operation;
+    d->trace_mode=w->trace_mode;d->code=path->code;d->site=path->site;d->record=path->record;
+    F1B_REQUIRE(w->trace_mode==0||w->trace_mode==(P44F1B_TRACE_CLEANUP|P44F1B_TRACE_REFINEMENT));
+    F1B_REQUIRE(im->places.offset<=m->place_count&&im->places.count<=m->place_count-im->places.offset);
+    for(size_t i=0;i<im->places.count;++i) {
+        const SolMirMaterializedPlace *p=&m->places[im->places.offset+i];
+        if(p->local==local&&p->projections.count==0)++d->root_places;
+    }
+    F1B_REQUIRE(c->body<ir->expression_count);
+    SolSpan body_span=ir->expressions[c->body].span;
+    for(size_t i=0;i<ir->expression_count;++i) {
+        const SolIrExpression *e=&ir->expressions[i];
+        if(e->span.start>=body_span.start&&e->span.end<=body_span.end&&e->kind==SOL_IR_EXPR_PLACE
+            &&e->as.place<ir->place_count&&ir->places[e->as.place].root_kind==SOL_IR_PLACE_ROOT_LOCAL
+            &&ir->places[e->as.place].local==sl)++d->body_reads;
+    }
+    F1B_REQUIRE(d->root_places==0&&d->body_reads==0);
+    d->step_visit=F1B_NONE;d->route_visit=F1B_NONE;d->capture_visit=F1B_NONE;d->requires_visit=F1B_NONE;
+    for(size_t i=0;i<path->visit_count;++i) {
+        const P44f1bVisit *v=&path->visits[i];
+        if(!v->predicate&&v->pre_step&&v->owner==image&&v->block==block&&v->operation==operation) {
+            F1B_REQUIRE(d->step_visit==F1B_NONE);d->step_visit=i;d->activation=v->activation;d->step_event=v->event;
+        }
+    }
+    F1B_REQUIRE(d->step_visit!=F1B_NONE&&d->activation==2);
+    /* Authenticate the selected ordinary root and its unary-minus/literal operand. */
+    const P44f1bVisit *first=&path->visits[0];
+    F1B_REQUIRE(!first->predicate&&first->owner<m->image_count);
+    d->caller=m->images[first->owner].source_callable;F1B_REQUIRE(d->caller<ir->callable_count);
+    bool negative=!strcmp(ir->callables[d->caller].name,"old_false");
+    F1B_REQUIRE(negative||!strcmp(ir->callables[d->caller].name,"old_callee_arithmetic"));
+    d->argument=negative?-1:0;d->snapshot_value=d->argument;
+    F1B_REQUIRE(path->code==(negative?SOL_MIR_RUNTIME_FAILURE_ENSURE_VIOLATION:SOL_MIR_RUNTIME_FAILURE_DIVISION_BY_ZERO));
+    d->call_binding=F1B_NONE;
+    for(size_t i=0;i<m->binding_count;++i) {
+        const SolMirMaterializedBinding *b=&m->bindings[i];
+        if(b->source.callable!=d->caller||b->source.expression>=ir->expression_count
+            ||b->target_kind!=SOL_MIR_MATERIALIZED_TARGET_INSTANCE||b->instance!=image)continue;
+        const SolIrExpression *e=&ir->expressions[b->source.expression];
+        if(e->kind!=SOL_IR_EXPR_CALL||e->as.call.callable!=d->callable)continue;
+        F1B_REQUIRE(d->call_binding==F1B_NONE);d->call_binding=i;d->call_expression=b->source.expression;
+    }
+    F1B_REQUIRE(d->call_binding<m->binding_count);
+    const SolIrExpression *call=&ir->expressions[d->call_expression];
+    F1B_REQUIRE(call->as.call.kind==SOL_IR_CALL_FUNCTION&&call->as.call.operands.count==1
+        &&call->as.call.operands.offset<ir->operand_count);
+    const SolIrOperand *arg=&ir->operands[call->as.call.operands.offset];d->argument_expression=arg->value;
+    F1B_REQUIRE(arg->formal==0&&arg->access==SOL_ACCESS_OWNED&&arg->value<ir->expression_count
+        &&ir->expressions[arg->value].type==formal->type);
+    const SolIrExpression *ae=&ir->expressions[arg->value];
+    if(negative) {
+        F1B_REQUIRE(ae->kind==SOL_IR_EXPR_UNARY&&ae->as.unary.operator_kind==SOL_TOKEN_MINUS
+            &&ae->as.unary.operand<ir->expression_count);
+        ae=&ir->expressions[ae->as.unary.operand];F1B_REQUIRE(ae->type==formal->type);
+    }
+    F1B_REQUIRE(ae->kind==SOL_IR_EXPR_INTEGER&&ae->as.integer==(negative?1:0));
+    d->call_argument=F1B_NONE;
+    for(size_t i=0;i<m->block_count;++i) {
+        const SolMirMaterializedTerminator *t=&m->blocks[i].terminator;
+        if(!p44f1b_walk_in(m->images[first->owner].blocks,i,m->block_count)
+            ||t->kind!=SOL_MIR_TERM_INVOKE||t->binding!=d->call_binding)continue;
+        F1B_REQUIRE(d->call_argument==F1B_NONE&&t->arguments.count==1&&t->arguments.offset<m->call_argument_count);
+        d->call_argument=t->arguments.offset;
+    }
+    F1B_REQUIRE(d->call_argument<m->call_argument_count);
+    const SolMirMaterializedCallArgument *ma=&m->call_arguments[d->call_argument];
+    F1B_REQUIRE(ma->formal==0&&ma->access==SOL_ACCESS_OWNED&&ma->type==ml->type
+        &&ma->source_expression==arg->value&&ma->temporary<m->temporary_count
+        &&m->temporaries[ma->temporary].type==ma->type);
+    for(size_t i=0;i<d->step_visit;++i) {
+        const P44f1bVisit *v=&path->visits[i];
+        if(v->predicate||v->pre_step||v->owner!=image||v->activation!=d->activation
+            ||v->operation!=F1B_NONE||v->transition>=w->p->cleanup.transition_count)continue;
+        const SolMirMaterializedTerminator *t=&m->blocks[v->block].terminator;
+        const SolMirRuntimeCleanupTransition *tr=&w->p->cleanup.transitions[v->transition];
+        if(t->kind!=SOL_MIR_TERM_CHECK_CONTRACT)continue;
+        if(t->contract_phase==SOL_CONTRACT_REQUIRES&&tr->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_SATISFIED)
+            d->requires_visit=i;
+        if(t->contract_phase!=SOL_CONTRACT_ENSURES)continue;
+        F1B_REQUIRE(d->route_visit==F1B_NONE);d->route_visit=i;d->transition=v->transition;
+        d->check_block=v->block;d->obligation=t->source_obligation;d->role=(size_t)tr->edge_role;
+        d->edge=negative?t->violation_edge:t->failure_edge;
+        F1B_REQUIRE(d->edge<m->edge_count&&m->edges[d->edge].block==block
+            &&tr->event==v->event&&tr->continuation==d->edge&&tr->source_edge==d->edge&&tr->destination==block
+            &&tr->primary_failure_wins&&tr->contract_phase==SOL_CONTRACT_ENSURES
+            &&tr->contract_outcome==SOL_CONTRACT_OUTCOME_ALWAYS);
+        F1B_REQUIRE(tr->edge_role==(negative?SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_VIOLATION:SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_FAILURE));
+        if(negative) {
+            F1B_REQUIRE(tr->failure_source==SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31
+                &&tr->failure_site==path->site&&tr->failure_mask==(UINT32_C(1)<<13)
+                &&tr->actions.count==1&&tr->actions.offset<w->p->cleanup.action_count);
+            const SolMirRuntimeCleanupAction *a=&w->p->cleanup.actions[tr->actions.offset];
+            F1B_REQUIRE(a->kind==SOL_MIR_RUNTIME_CLEANUP_ACTION_CHECK_CONTRACT&&a->flags==0
+                &&a->target==d->obligation&&a->recipe==F1B_NONE&&a->drop_path==F1B_NONE);
+        } else F1B_REQUIRE(tr->failure_source==SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING
+            &&tr->failure_site==F1B_NONE&&tr->failure_mask==0&&tr->actions.count==0);
+    }
+    F1B_REQUIRE(d->route_visit!=F1B_NONE&&d->requires_visit!=F1B_NONE&&d->obligation<ir->obligation_count);
+    const SolIrObligation *ob=&ir->obligations[d->obligation];d->predicate=ob->predicate;
+    F1B_REQUIRE(ob->owner_kind==SOL_CONTRACT_OWNER_ITEM&&ob->owner==c->owner&&ob->kind==SOL_CONTRACT_ENSURES
+        &&ob->outcome==SOL_CONTRACT_OUTCOME_ALWAYS&&ob->result_available&&ob->result_type==c->result
+        &&ob->snapshots.count==1&&ob->snapshots.offset<ir->snapshot_count);
+    size_t plan=F1B_NONE;
+    for(size_t i=0;i<o->predicate_count;++i)if(o->predicates[i].image==image&&o->predicates[i].block==d->check_block) {
+        F1B_REQUIRE(plan==F1B_NONE);plan=i;
+    }
+    F1B_REQUIRE(plan<o->predicate_count);d->body=o->predicates[plan].body;d->context=o->predicates[plan].context;
+    d->result=o->predicates[plan].result;
+    F1B_REQUIRE(d->body<o->predicate_body_count&&d->context<m->context_count&&d->result<m->value_count);
+    const SolMirPredicateBody *pb=&o->predicate_bodies[d->body];
+    const SolMirPlanContext *ct=&m->contexts[d->context];
+    F1B_REQUIRE(ct->kind==SOL_MIR_PLAN_CONTEXT_CONTRACT&&ct->instance==image&&ct->obligation==d->obligation
+        &&ct->source.expression==ob->predicate&&pb->context==d->context&&pb->instance==image
+        &&pb->inputs.count==1&&pb->inputs.offset<o->predicate_input_count);
+    typed=p44f1e_contract_call_route(w->p,image,d->check_block,w->owner_guard);
+    fenced=p44f1e_owner_fence(w->owner_guard);F1B_REQUIRE(typed&&fenced);
+    F1B_REQUIRE(ob->predicate<ir->expression_count);
+    const SolIrExpression *pc=&ir->expressions[ob->predicate];
+    F1B_REQUIRE(pc->kind==SOL_IR_EXPR_CALL&&pc->as.call.operands.count==1&&pc->as.call.operands.offset<ir->operand_count);
+    size_t read=ir->operands[pc->as.call.operands.offset].value;
+    F1B_REQUIRE(read<ir->expression_count&&ir->expressions[read].kind==SOL_IR_EXPR_SNAPSHOT_READ);
+    d->snapshot_read=read;d->snapshot_source=ir->expressions[read].as.snapshot;
+    F1B_REQUIRE(d->snapshot_source==ob->snapshots.offset&&d->snapshot_source<ir->snapshot_count);
+    const SolIrSnapshot *ss=&ir->snapshots[d->snapshot_source];d->snapshot_operand=ss->operand;
+    F1B_REQUIRE(ss->read==read&&ss->obligation==d->obligation&&ss->type==formal->type&&ss->operand<ir->expression_count);
+    const SolIrExpression *se=&ir->expressions[ss->operand];
+    F1B_REQUIRE(se->kind==SOL_IR_EXPR_PLACE&&se->as.place<ir->place_count
+        &&ir->places[se->as.place].root_kind==SOL_IR_PLACE_ROOT_LOCAL&&ir->places[se->as.place].local==sl
+        &&ir->places[se->as.place].projections.count==0);
+    d->snapshot_offset=ob->snapshots.offset;d->snapshot_ordinal=d->snapshot_source-ob->snapshots.offset;
+    bool found=false;
+    for(size_t i=0;i<im->contexts.count;++i) {
+        size_t id=im->contexts.offset+i;F1B_REQUIRE(id<m->context_count);
+        if(id==d->context) {found=true;break;}
+        if(m->contexts[id].kind==SOL_MIR_PLAN_CONTEXT_CONTRACT) {
+            F1B_REQUIRE(m->contexts[id].obligation<ir->obligation_count);
+            d->context_base+=ir->obligations[m->contexts[id].obligation].snapshots.count;
+        }
+    }
+    const SolMirPredicateInput *input=&o->predicate_inputs[pb->inputs.offset];d->input_ordinal=input->ordinal;
+    F1B_REQUIRE(found&&input->kind==SOL_MIR_PREDICATE_INPUT_SNAPSHOT&&input->access==SOL_ACCESS_OWNED
+        &&input->recipe==ml->type&&d->input_ordinal==d->context_base+d->snapshot_ordinal);
+    d->snapshot_plan=F1B_NONE;
+    for(size_t i=0;i<o->snapshot_count;++i)if(o->snapshots[i].image==image) {
+        const SolMirOperationSnapshotPlan *s=&o->snapshots[i];
+        F1B_REQUIRE(d->snapshot_plan==F1B_NONE&&s->context==d->context&&s->local==local&&s->recipe==ml->type
+            &&s->copy_kind==SOL_MIR_COPY_TRIVIAL&&s->provenance<o->provenance_count&&s->slot==d->input_ordinal);
+        d->snapshot_plan=i;d->snapshot_slot=s->slot;d->provenance=s->provenance;
+        const SolMirOperationProvenance *pr=&o->provenance[s->provenance];
+        F1B_REQUIRE(pr->kind==SOL_MIR_OPERATION_PROVENANCE_SNAPSHOT&&pr->executable==i
+            &&pr->source_snapshot==d->snapshot_source&&pr->source_expression==ss->operand
+            &&pr->source_obligation==d->obligation&&s->instruction<m->instruction_count
+            &&m->instructions[s->instruction].source_snapshot==d->snapshot_source
+            &&m->instructions[s->instruction].source_expression==read);
+    }
+    F1B_REQUIRE(d->snapshot_plan<o->snapshot_count);
+    d->predicate_binding=F1B_NONE;
+    for(size_t i=0;i<pb->blocks.count;++i) {
+        size_t id=pb->blocks.offset+i;F1B_REQUIRE(id<o->predicate_block_count);
+        const SolMirPredicateTerminator *t=&o->predicate_blocks[id].terminator;
+        if(t->kind!=SOL_MIR_PREDICATE_TERM_INVOKE)continue;
+        F1B_REQUIRE(d->predicate_binding==F1B_NONE&&t->binding<m->binding_count
+            &&m->bindings[t->binding].source.expression==ob->predicate);
+        d->predicate_binding=t->binding;
+    }
+    F1B_REQUIRE(d->predicate_binding<m->binding_count);
+    for(size_t i=0;i<d->step_visit;++i) {
+        const P44f1bVisit *v=&path->visits[i];
+        if(!v->predicate&&v->owner==image&&v->activation==d->activation&&v->pre_step
+            &&v->operation==o->snapshots[d->snapshot_plan].instruction) {
+            F1B_REQUIRE(d->capture_visit==F1B_NONE);d->capture_visit=i;
+        }
+    }
+    F1B_REQUIRE(d->capture_visit!=F1B_NONE&&d->requires_visit<d->capture_visit&&d->capture_visit<d->route_visit);
+    /* The complete body result is distinct from the retained old input. */
+    d->result_expression=F1B_NONE;
+    for(size_t i=0;i<d->route_visit;++i) {
+        const P44f1bVisit *v=&path->visits[i];
+        if(v->predicate||!v->pre_step||v->owner!=image||v->activation!=d->activation
+            ||v->operation>=m->instruction_count)continue;
+        const SolMirMaterializedInstruction *in=&m->instructions[v->operation];
+        if(in->kind==SOL_MIR_INST_CONST_INT64&&in->integer==4) {
+            F1B_REQUIRE(in->source_expression<ir->expression_count
+                &&ir->expressions[in->source_expression].kind==SOL_IR_EXPR_INTEGER
+                &&ir->expressions[in->source_expression].as.integer==4&&v->after==v->before+1);
+            d->result_expression=in->source_expression;d->result_visit=i;
+        }
+    }
+    F1B_REQUIRE(d->result_expression!=F1B_NONE&&d->capture_visit<d->result_visit);d->result_value=4;
+    F1B_REQUIRE(d->site<w->p->conventions.failure_site_count&&d->record>0&&d->record<=w->record_count);
+    const SolMirRuntimeFailureSite *site=&w->p->conventions.failure_sites[d->site];
+    const P44f1bSourceRecord *record=&w->records[d->record-1];
+    F1B_REQUIRE(record->tag==3&&record->source_id==d->site&&record->ordinal==site->occurrence
+        &&record->start==site->source.start&&record->end==site->source.end
+        &&(site->allowed_codes&(UINT32_C(1)<<((unsigned)d->code-1u)))!=0);
+    if(negative)F1B_REQUIRE(site->origin_kind==SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT&&site->owner==d->body);
+    else F1B_REQUIRE(site->origin_kind==SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_ARITHMETIC&&site->owner<m->image_count
+        &&!strcmp(ir->callables[m->images[site->owner].source_callable].name,"terminal"));
+    d->scope_operation=F1B_NONE;
+    const SolMirMaterializedBlock *mb=&m->blocks[block];
+    F1B_REQUIRE(operation+1<m->instruction_count&&m->instructions[operation+1].kind==SOL_MIR_INST_STORAGE_DEAD
+        &&m->instructions[operation+1].local==local&&mb->instructions.offset<=operation
+        &&mb->instructions.count<=m->instruction_count-mb->instructions.offset);
+    for(size_t i=operation+2;i<mb->instructions.offset+mb->instructions.count;++i)
+        if(m->instructions[i].kind==SOL_MIR_INST_SCOPE_EXIT&&m->instructions[i].scope_kind==SOL_MIR_SCOPE_CALLABLE_ENVELOPE) {
+            F1B_REQUIRE(d->scope_operation==F1B_NONE);d->scope_operation=i;
+        }
+    F1B_REQUIRE(d->scope_operation<m->instruction_count);
+    P44f1eEventMatches scope=p44f1e_event_matches(&w->p->cleanup,SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION,
+        SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION,image,block,d->scope_operation);
+    F1B_REQUIRE(scope.count==1);d->scope_event=scope.event;
+    d->route_event=path->visits[d->route_visit].event;
+    for(size_t i=0;i<path->count;++i)if(path->slot_kind[i]==P44F1B_SLOT_REFINEMENT_ROUTE&&path->route_visit[i]==d->route_visit) {
+        ++d->route_slot_count;d->route_slot=i;d->route_slot_action=path->slots[i].action;
+        d->route_slot_record=path->slots[i].record;d->route_slot_disposition=path->slots[i].disposition;
+        F1B_REQUIRE(path->slots[i].action==UINT32_MAX&&path->slots[i].record==d->record
+            &&SOL_WASM_REPRESENTED_TEST_P44_REFINEMENT_ROLE(path->slots[i].disposition)==d->role
+            &&SOL_WASM_REPRESENTED_TEST_P44_REFINEMENT_EVENT(path->slots[i].disposition)==d->route_event);
+    }
+    F1B_REQUIRE(d->route_slot_count==(w->trace_mode?1u:0u));
+    return true;
+}
+
+static bool p44f1e_s4a_old_absence(const SolMirRuntimeCleanup *c,
+    const P44f1eS4aOldProof *source,const P44f1eS4aOldProof *proof,const P44f1bActions *actions) {
+    if(c==NULL||source==NULL||proof==NULL||actions==NULL||actions->count!=0)return false;
+#define P44F1E_OLD_EQUAL(name_) if(source->name_!=proof->name_)return false;
+    P44F1E_OLD_IDS(P44F1E_OLD_EQUAL)
+#undef P44F1E_OLD_EQUAL
+    if(source->argument!=proof->argument||source->snapshot_value!=proof->snapshot_value
+        ||source->result_value!=proof->result_value||source->code!=proof->code)return false;
+    P44f1eEventMatches marker=p44f1e_event_matches(c,SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION,
+        SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION,proof->image,proof->block,proof->operation);
+    P44f1eEventMatches step=p44f1e_event_matches(c,SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION,
+        SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP,proof->image,proof->block,proof->operation);
+    P44f1eEventMatches scope=p44f1e_event_matches(c,SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION,
+        SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION,proof->image,proof->block,proof->scope_operation);
+    if(marker.count!=0||step.count!=1||step.event!=proof->step_event||scope.count!=1||scope.event!=proof->scope_event)return false;
+    const SolMirRuntimeCleanupEvent *e=&c->events[scope.event];
+    if(e->actions.count!=1||e->actions.offset>=c->action_count||e->transitions.count!=1
+        ||e->transitions.offset>=c->transition_count)return false;
+    const SolMirRuntimeCleanupAction *a=&c->actions[e->actions.offset];
+    const SolMirRuntimeCleanupTransition *t=&c->transitions[e->transitions.offset];
+    return a->kind==SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_SCOPE&&a->target==proof->scope_operation
+        &&a->flags==0&&a->recipe==F1B_NONE&&a->drop_path==F1B_NONE&&t->event==scope.event
+        &&t->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO&&t->outcome==SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL
+        &&t->actions.offset==e->actions.offset&&t->actions.count==1&&t->continuation==F1B_NONE
+        &&t->destination==F1B_NONE&&t->source_edge==F1B_NONE&&t->primary_failure_wins
+        &&t->failure_source==SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE&&t->failure_site==F1B_NONE&&t->failure_mask==0;
+}
+
+static bool p44f1e_s4a_old_absence_guarded(P44f1bWalk *w,const P44f1eS4aOldProof *source,
+    const P44f1eS4aOldProof *proof,const P44f1bActions *actions) {
+    bool consumed=p44f1e_s4a_old_absence(&w->p->cleanup,source,proof,actions);
+    bool fenced=p44f1e_owner_fence(w->owner_guard);return consumed&&fenced;
+}
+
+static bool p44f1e_s4a_old_frame(const P44f1bFrame *f,const P44f1eS4aOldProof *proof,
+    size_t pre_storage,bool enabled) {
+    return enabled&&pre_storage==2&&f->image==proof->image&&f->activation==proof->activation
+        &&f->storage[proof->local]==2&&f->argument==proof->argument&&f->requires_passed
+        &&f->locals[proof->local].defined&&f->locals[proof->local].value==proof->argument
+        &&f->snapshot_count==1&&f->snapshot[0]==proof->snapshot_plan
+        &&f->snapshots[proof->snapshot_plan].defined&&f->snapshots[proof->snapshot_plan].value==proof->argument
+        &&f->snapshots[proof->snapshot_plan].recipe==proof->recipe
+        &&f->values[proof->result].defined&&f->values[proof->result].value==proof->result_value
+        &&f->temp_count==0&&f->scope_count>0;
+}
+
+static bool p44f1e_s4a_old_drop_event(P44f1bWalk *w,const P44f1bFrame *f,size_t block,
+    size_t operation,size_t pre_storage,const P44f1bActions *actions) {
+    P44f1eS4aOldProof proof;
+    bool built=p44f1e_s4a_old_proof_raw(w,f->image,block,operation,&proof);
+    bool fenced=p44f1e_owner_fence(w->owner_guard);if(!built||!fenced)return false;
+    bool state=p44f1e_s4a_old_frame(f,&proof,pre_storage,w->s4a_old_clause_drop);
+    bool consumed=state&&p44f1e_s4a_old_absence_guarded(w,&proof,&proof,actions);
+    fenced=p44f1e_owner_fence(w->owner_guard);if(!consumed||!fenced)return false;
+    /* Typed private negatives use copied proof/facts only, never the owner. */
+#define P44F1E_OLD_NEGATIVE(name_) do { \
+    P44f1eS4aOldProof changed=proof;changed.name_++; \
+    if(p44f1e_s4a_old_absence_guarded(w,&proof,&changed,actions))return false; \
+} while(0);
+    P44F1E_OLD_IDS(P44F1E_OLD_NEGATIVE)
+#undef P44F1E_OLD_NEGATIVE
+    P44f1eS4aOldProof changed=proof;changed.argument=proof.argument==0?-1:0;
+    F1B_REQUIRE(!p44f1e_s4a_old_absence_guarded(w,&proof,&changed,actions));
+    changed=proof;changed.snapshot_value++;
+    F1B_REQUIRE(!p44f1e_s4a_old_absence_guarded(w,&proof,&changed,actions));
+    changed=proof;changed.result_value++;
+    F1B_REQUIRE(!p44f1e_s4a_old_absence_guarded(w,&proof,&changed,actions));
+    changed=proof;changed.code=proof.code==SOL_MIR_RUNTIME_FAILURE_ENSURE_VIOLATION
+        ?SOL_MIR_RUNTIME_FAILURE_DIVISION_BY_ZERO:SOL_MIR_RUNTIME_FAILURE_ENSURE_VIOLATION;
+    F1B_REQUIRE(!p44f1e_s4a_old_absence_guarded(w,&proof,&changed,actions));
+    P44f1bFrame frame=*f;frame.activation++;
+    F1B_REQUIRE(!p44f1e_s4a_old_frame(&frame,&proof,pre_storage,true));
+    frame=*f;frame.snapshots[proof.snapshot_plan].defined=false;
+    F1B_REQUIRE(!p44f1e_s4a_old_frame(&frame,&proof,pre_storage,true));
+    frame=*f;frame.snapshots[proof.snapshot_plan].value++;
+    F1B_REQUIRE(!p44f1e_s4a_old_frame(&frame,&proof,pre_storage,true));
+    SolMirRuntimeCleanupEvent private_events[3]={w->p->cleanup.events[proof.step_event],
+        w->p->cleanup.events[proof.scope_event],w->p->cleanup.events[proof.step_event]};
+    const SolMirRuntimeCleanupEvent *se=&w->p->cleanup.events[proof.scope_event];
+    SolMirRuntimeCleanupAction private_action=w->p->cleanup.actions[se->actions.offset];
+    SolMirRuntimeCleanupTransition private_transition=w->p->cleanup.transitions[se->transitions.offset];
+    private_events[1].actions=(SolMirRuntimeSlice){0,1};private_events[1].transitions=(SolMirRuntimeSlice){0,1};
+    private_transition.event=1;private_transition.actions=(SolMirRuntimeSlice){0,1};
+    SolMirRuntimeCleanup copy={.events=private_events,.event_count=2,.actions=&private_action,.action_count=1,
+        .transitions=&private_transition,.transition_count=1};
+    changed=proof;changed.step_event=0;changed.scope_event=1;
+    F1B_REQUIRE(p44f1e_s4a_old_absence(&copy,&changed,&changed,actions));
+    private_events[2].phase=SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION;copy.event_count=3;
+    F1B_REQUIRE(!p44f1e_s4a_old_absence(&copy,&changed,&changed,actions));copy.event_count=2;
+    private_events[0].owner++;
+    F1B_REQUIRE(!p44f1e_s4a_old_absence(&copy,&changed,&changed,actions));private_events[0].owner--;
+    copy.event_count=1;F1B_REQUIRE(!p44f1e_s4a_old_absence(&copy,&changed,&changed,actions));copy.event_count=2;
+    P44f1bActions nonempty={.count=1};
+    F1B_REQUIRE(!p44f1e_s4a_old_absence(&copy,&changed,&changed,&nonempty));
+    return p44f1e_owner_fence(w->owner_guard);
+}
+
+static bool p44f1e_s4a_old_path_prepare(P44f1eCoreOwner *guard,const char *root,
+    const P44f1bSourceRecord *records,size_t count,unsigned trace_mode,P44f1bPath *path) {
+    F1B_REQUIRE(p44f1e_owner_use_allowed(guard));const PropagationPipeline *p=&guard->owner;
+    const SolMirMaterialization *m=&p->concrete.materialization;const SolMirOperations *o=&p->concrete.operations;
+    F1B_REQUIRE(!strcmp(root,"old_false")||(!strcmp(root,"old_callee_arithmetic")&&trace_mode==0));
+    SolIrCallableId launch=SOL_IR_NONE,selected=SOL_IR_NONE;
+    bool found=p44f1b_find_source_function(p,"launch",true,&launch,NULL);
+    bool fenced=p44f1e_owner_fence(guard);F1B_REQUIRE(found&&fenced);
+    found=p44f1b_find_source_function(p,root,false,&selected,NULL);
+    fenced=p44f1e_owner_fence(guard);F1B_REQUIRE(found&&fenced);
+    F1B_REQUIRE(p->concrete.program.root_count==2&&p->concrete.program.roots[0].callable==launch
+        &&p->concrete.program.roots[0].kind==SOL_MIR_PROGRAM_ROOT_ENTRY
+        &&p->concrete.program.roots[1].callable==selected
+        &&p->concrete.program.roots[1].kind==SOL_MIR_PROGRAM_ROOT_INTERNAL_FIXTURE
+        &&p->conventions.entry_count==1&&p->concrete.linkage.entry_export_count==1
+        &&m->value_count<F1B_BOUND&&m->local_count<F1B_BOUND&&m->instruction_count<F1B_BOUND
+        &&m->block_count<F1B_BOUND&&m->temporary_count<F1B_BOUND&&o->predicate_value_count<F1B_BOUND
+        &&o->predicate_block_count<F1B_BOUND&&o->snapshot_count<F1B_BOUND);
+    size_t image=F1B_NONE;
+    for(size_t i=0;i<m->binding_count;++i)if(m->bindings[i].kind==SOL_MIR_PLAN_DEMAND_ROOT
+        &&m->bindings[i].symbolic_callable==selected) {
+        F1B_REQUIRE(image==F1B_NONE&&m->bindings[i].instance<m->image_count);image=m->bindings[i].instance;
+    }
+    F1B_REQUIRE(image<m->image_count&&m->images[image].source_callable==selected);
+    memset(path,0,sizeof *path);path->site=path->n=path->m=F1B_NONE;
+    path->trace_mode=trace_mode;path->max_active_depth=1;
+    P44f1bWalk w={.p=p,.owner_guard=guard,.records=records,.record_count=count,.max_steps=SIZE_MAX,
+        .depth=1,.max_depth=64,.leaf=o->snapshot_count!=0,.profile=P44F1E_PROFILE_ENSURES_CALLS,
+        .trace_mode=trace_mode,.path=path,.s4a_old_clause_drop=true};
+    bool stage=true;bool result=p44f1b_predicate_sources(&w);
+    fenced=p44f1e_owner_finish_stage(guard,true,result,&stage);if(!result||!fenced)return false;
+    result=p44f1b_walk_inventory(&w);fenced=p44f1e_owner_finish_stage(guard,true,result,&stage);if(!result||!fenced)return false;
+    result=p44f1b_walk_image(&w,image,0,&path->value);fenced=p44f1e_owner_finish_stage(guard,true,result,&stage);
+    return result&&fenced&&stage&&w.depth==1&&path->captures==2&&path->drops==2
+        &&path->helper_captures==1&&path->old_core_captures==1&&path->max_active_depth==4&&path->activations==4;
+}
+
+/* S4a is deliberately local: the S3 path layout, walks and success-only guarded
+ * adapter above are immutable dependencies. Limited replay uses those same
+ * source/body/site/recipe/event primitives, not that adapter's success tail. */
+typedef enum {
+    P44F1E_DEPTH_PREDICATE_2, P44F1E_DEPTH_ORDINARY_3, P44F1E_DEPTH_SUCCESS_5,
+    P44F1E_STEP_N_DEPTH_2, P44F1E_STEP_N_PLUS_1_DEPTH_2,
+    P44F1E_STEP_M_DEPTH_3, P44F1E_STEP_M_PLUS_1_DEPTH_3,
+    P44F1E_STEP_S, P44F1E_STEP_S_MINUS_1, P44F1E_LIMIT_COUNT,
+} P44f1eLimitCase;
+
+static const char *const p44f1e_limit_names[]={
+    "depth.predicate-2","depth.ordinary-3","depth.success-5",
+    "step.n-depth2","step.n-plus1-depth2","step.m-depth3",
+    "step.m-plus1-depth3","step.S","step.S-minus1",
+};
+
+typedef struct {
+    size_t visit,binding,expression,body,context,obligation,instance;
+    int64_t argument,callee_argument;
+} P44f1eBoundJoin;
+
+typedef struct {
+    P44f1bPath full,paths[P44F1E_LIMIT_COUNT];
+    SolWasmRepresentedLimits limits[P44F1E_LIMIT_COUNT];
+    size_t n,m,S;
+    P44f1eBoundJoin n_join,m_join;
+} P44f1eSourceBounds;
+
+static bool p44f1e_bounds_walk(P44f1eCoreOwner *guard,
+    const P44f1bSourceRecord *records,size_t record_count,size_t depth,size_t steps,
+    P44f1bPath *path) {
+    F1B_REQUIRE(p44f1e_owner_use_allowed(guard)&&p44f1e_owner_fence(guard));
+    const PropagationPipeline *p=&guard->owner;
+    const SolMirMaterialization *m=&p->concrete.materialization;
+    const SolMirOperations *o=&p->concrete.operations;
+    F1B_REQUIRE(depth>=1&&depth<=64&&m->value_count<F1B_BOUND
+        &&m->local_count<F1B_BOUND&&m->instruction_count<F1B_BOUND
+        &&m->block_count<F1B_BOUND&&m->temporary_count<F1B_BOUND
+        &&o->predicate_value_count<F1B_BOUND&&o->predicate_block_count<F1B_BOUND
+        &&o->snapshot_count<F1B_BOUND);
+    size_t image=F1B_NONE;
+    for(size_t i=0;i<m->image_count;++i) {
+        F1B_REQUIRE(m->images[i].source_callable<p->ir.callable_count);
+        if(strcmp(p->ir.callables[m->images[i].source_callable].name,"launch")==0) {
+            F1B_REQUIRE(image==F1B_NONE);image=i;
+        }
+    }
+    F1B_REQUIRE(image!=F1B_NONE);
+    memset(path,0,sizeof *path);path->site=path->n=path->m=F1B_NONE;
+    path->trace_mode=P44F1B_TRACE_CLEANUP|P44F1B_TRACE_REFINEMENT;
+    path->max_active_depth=1;
+    P44f1bWalk w={.p=p,.owner_guard=guard,.records=records,.record_count=record_count,
+        .max_steps=steps,.depth=1,.max_depth=depth,.leaf=o->snapshot_count!=0,
+        .profile=P44F1E_PROFILE_ENSURES_CALLS,.trace_mode=path->trace_mode,.path=path};
+    bool stage_ok=true;
+    bool source=p44f1b_predicate_sources(&w);
+    bool fenced=p44f1e_owner_finish_stage(guard,true,source,&stage_ok);
+    if(!source||!fenced)return false;
+    bool inventory=p44f1b_walk_inventory(&w);
+    fenced=p44f1e_owner_finish_stage(guard,true,inventory,&stage_ok);
+    if(!inventory||!fenced)return false;
+    bool replay=p44f1b_walk_image(&w,image,0,&path->value);
+    fenced=p44f1e_owner_finish_stage(guard,true,replay,&stage_ok);
+    return replay&&fenced&&stage_ok&&w.depth==1&&path->captures==path->drops;
+}
+
+/* Bind the already source-replayed activation order to source CALL operands.
+ * This is only the fixture's five admitted scalar transports, not an evaluator
+ * for a new source language or another walk/frame implementation. */
+static bool p44f1e_bounds_arguments(const PropagationPipeline *p,const P44f1bPath *path,
+    int64_t arguments[8],size_t parents[8],size_t images[8]) {
+    const SolMirMaterialization *m=&p->concrete.materialization;
+    const SolMirOperations *o=&p->concrete.operations;
+    size_t seen=0,binding=F1B_NONE,parent=F1B_NONE;
+    for(size_t i=0;i<path->visit_count;++i) {
+        const P44f1bVisit *v=&path->visits[i];
+        size_t image=v->predicate?o->predicate_bodies[v->owner].instance:v->owner;
+        F1B_REQUIRE(v->activation>=1&&v->activation<=7&&image<m->image_count);
+        if(v->activation>seen) {
+            F1B_REQUIRE(v->activation==seen+1);
+            images[v->activation]=image;parents[v->activation]=parent;
+            if(seen==0) {F1B_REQUIRE(v->activation==1);arguments[1]=0;parents[1]=F1B_NONE;}
+            else {
+                F1B_REQUIRE(binding<m->binding_count&&parent>=1&&parent<=seen
+                    &&m->bindings[binding].instance==image);
+                const SolIrExpression *call=&p->ir.expressions[m->bindings[binding].source.expression];
+                F1B_REQUIRE(call->kind==SOL_IR_EXPR_CALL&&call->as.call.operands.count==1);
+                const SolIrOperand *operand=&p->ir.operands[call->as.call.operands.offset];
+                F1B_REQUIRE(operand->formal==0&&operand->access==SOL_ACCESS_OWNED
+                    &&operand->value<p->ir.expression_count);
+                const SolIrExpression *arg=&p->ir.expressions[operand->value];
+                int64_t value=arguments[parent];
+                if(arg->kind==SOL_IR_EXPR_INTEGER)value=arg->as.integer;
+                else if(arg->kind==SOL_IR_EXPR_RESULT) {
+                    F1B_REQUIRE(!strcmp(p->ir.callables[m->images[images[parent]].source_callable].name,"core"));
+                    --value; /* the authenticated core return v - 1 */
+                } else if(arg->kind==SOL_IR_EXPR_BINARY) {
+                    F1B_REQUIRE(arg->as.binary.operator_kind==SOL_TOKEN_MINUS
+                        &&arg->as.binary.left<p->ir.expression_count
+                        &&p->ir.expressions[arg->as.binary.left].kind==SOL_IR_EXPR_PLACE
+                        &&arg->as.binary.right<p->ir.expression_count
+                        &&p->ir.expressions[arg->as.binary.right].kind==SOL_IR_EXPR_INTEGER
+                        &&p->ir.expressions[arg->as.binary.right].as.integer==1);--value;
+                } else F1B_REQUIRE(arg->kind==SOL_IR_EXPR_PLACE||arg->kind==SOL_IR_EXPR_SNAPSHOT_READ);
+                arguments[v->activation]=value;
+            }
+            ++seen;
+        }
+        if(!v->pre_step||v->after==v->before||v->operation!=F1B_NONE)continue;
+        size_t selected=F1B_NONE;
+        if(v->predicate) {
+            const SolMirPredicateTerminator *term=&o->predicate_blocks[v->block].terminator;
+            if(term->kind==SOL_MIR_PREDICATE_TERM_INVOKE)selected=term->binding;
+        } else {
+            const SolMirMaterializedTerminator *term=&m->blocks[v->block].terminator;
+            if(term->kind==SOL_MIR_TERM_INVOKE)selected=term->binding;
+        }
+        if(selected!=F1B_NONE) {binding=selected;parent=v->activation;}
+    }
+    return seen==path->activations;
+}
+
+/* Reconstruct dynamic snapshot ownership and the exact slot/event join, including
+ * empty FAILURE routes. The source walker has already checked all frame-local
+ * scopes, temps, argument transfers, result publication and P3 action tuples. */
+static bool p44f1e_bounds_lifetime(P44f1eCoreOwner *guard,const P44f1bPath *path) {
+    F1B_REQUIRE(p44f1e_owner_use_allowed(guard)&&path->activations<=7);
+    const PropagationPipeline *p=&guard->owner;
+    const SolMirMaterialization *m=&p->concrete.materialization;
+    const SolMirOperations *o=&p->concrete.operations;
+    const SolMirRuntimeCleanup *c=&p->cleanup;
+    int64_t arguments[8]={0};size_t parents[8]={0},images[8]={0};
+    F1B_REQUIRE(p44f1e_bounds_arguments(p,path,arguments,parents,images));
+    bool live[8][F1B_BOUND]={{false}};
+    size_t captured=0,dropped=0,slot=0,prefix=0;
+    bool pending=false;
+    for(size_t i=0;i<path->visit_count;++i) {
+        const P44f1bVisit *v=&path->visits[i];
+        F1B_REQUIRE(v->activation>=1&&v->activation<=path->activations
+            &&v->event<c->event_count&&v->before==prefix
+            &&v->after>=prefix&&v->after-prefix<=1);
+        const SolMirRuntimeCleanupTransition *t=v->transition<c->transition_count
+            ?&c->transitions[v->transition]:NULL;
+        if(v->pre_step) {
+            F1B_REQUIRE(t!=NULL&&v->site<p->conventions.failure_site_count
+                &&v->canonical_record!=0);
+            bool denied=t->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_STEP_FAILURE;
+            F1B_REQUIRE(v->after-prefix==(!pending&&!denied?1u:0u));
+            if(denied)pending=true;
+            if(!denied&&!pending&&!v->predicate&&v->operation!=F1B_NONE) {
+                F1B_REQUIRE(v->operation<m->instruction_count);
+                const SolMirMaterializedInstruction *in=&m->instructions[v->operation];
+                if(in->kind==SOL_MIR_INST_CAPTURE_SNAPSHOT) {
+                    size_t found=F1B_NONE;
+                    for(size_t q=0;q<o->snapshot_count;++q)
+                        if(o->snapshots[q].instruction==v->operation) {
+                            F1B_REQUIRE(found==F1B_NONE);found=q;
+                        }
+                    F1B_REQUIRE(found<F1B_BOUND&&!live[v->activation][found]);
+                    live[v->activation][found]=true;++captured;
+                }
+            }
+        } else F1B_REQUIRE(v->after==prefix);
+        prefix=v->after;
+        if(t==NULL)continue;
+        F1B_REQUIRE(t->event==v->event);
+        if(t->outcome==SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE)pending=true;
+        if(slot<path->count&&path->slot_kind[slot]==P44F1B_SLOT_REFINEMENT_ROUTE
+            &&path->route_visit[slot]==i)++slot;
+        for(size_t j=0;j<t->actions.count;++j) {
+            size_t id=t->actions.offset+j;
+            F1B_REQUIRE(id<c->action_count&&slot<path->count
+                &&path->slot_kind[slot]==P44F1B_SLOT_ACTION
+                &&path->slots[slot].action==id
+                &&p44f1b_action_tuple_equal(&path->actions[slot],&c->actions[id]));
+            const SolMirRuntimeCleanupAction *a=&path->actions[slot++];
+            if(a->kind==SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT) {
+                F1B_REQUIRE(a->target<F1B_BOUND&&live[v->activation][a->target]);
+                live[v->activation][a->target]=false;++dropped;
+            }
+        }
+        if(t->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_FAILURE) {
+            F1B_REQUIRE(pending&&t->actions.count==0
+                &&t->failure_source==SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING);
+        }
+        if(t->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN)
+            for(size_t q=0;q<o->snapshot_count;++q)F1B_REQUIRE(!live[v->activation][q]);
+    }
+    for(size_t a=1;a<=path->activations;++a)
+        for(size_t q=0;q<o->snapshot_count;++q)F1B_REQUIRE(!live[a][q]);
+    F1B_REQUIRE(slot==path->count&&prefix==path->steps
+        &&captured==path->captures&&dropped==path->drops&&captured==dropped
+        &&pending==(path->code!=0));
+    return true;
+}
+
+static bool p44f1e_bounds_join(P44f1eCoreOwner *guard,const P44f1bPath *full,
+    bool predicate,P44f1eBoundJoin *join) {
+    F1B_REQUIRE(p44f1e_owner_use_allowed(guard));
+    const PropagationPipeline *p=&guard->owner;
+    const SolMirMaterialization *m=&p->concrete.materialization;
+    const SolMirOperations *o=&p->concrete.operations;
+    size_t matches=0;
+    for(size_t i=0;i<full->visit_count;++i) {
+        const P44f1bVisit *v=&full->visits[i];
+        if(!v->pre_step||v->predicate!=predicate||v->operation!=F1B_NONE)continue;
+        size_t binding=F1B_NONE,body=F1B_NONE,context=F1B_NONE,obligation=F1B_NONE;
+        size_t instance=v->owner;
+        if(predicate) {
+            F1B_REQUIRE(v->owner<o->predicate_body_count&&v->block<o->predicate_block_count);
+            const SolMirPredicateBody *b=&o->predicate_bodies[v->owner];
+            const SolMirPredicateTerminator *t=&o->predicate_blocks[v->block].terminator;
+            if(t->kind!=SOL_MIR_PREDICATE_TERM_INVOKE)continue;
+            body=v->owner;context=b->context;instance=b->instance;
+            F1B_REQUIRE(context<m->context_count);
+            obligation=m->contexts[context].obligation;
+            F1B_REQUIRE(obligation<p->ir.obligation_count);
+            const SolIrObligation *clause=&p->ir.obligations[obligation];
+            F1B_REQUIRE(clause->predicate<p->ir.expression_count);
+            const SolIrExpression *call=&p->ir.expressions[clause->predicate];
+            F1B_REQUIRE(call->kind==SOL_IR_EXPR_CALL&&call->as.call.operands.count==1);
+            size_t operand=p->ir.operands[call->as.call.operands.offset].value;
+            F1B_REQUIRE(operand<p->ir.expression_count);
+            if(p->ir.expressions[operand].kind!=SOL_IR_EXPR_RESULT)continue;
+            F1B_REQUIRE(b->phase==SOL_CONTRACT_ENSURES
+                &&m->contexts[context].kind==SOL_MIR_PLAN_CONTEXT_CONTRACT
+                &&clause->kind==SOL_CONTRACT_ENSURES&&clause->result_available
+                &&instance<m->image_count
+                &&clause->owner==p->ir.callables[m->images[instance].source_callable].owner);
+            binding=t->binding;
+        } else {
+            F1B_REQUIRE(v->owner<m->image_count&&v->block<m->block_count);
+            const SolMirMaterializedTerminator *t=&m->blocks[v->block].terminator;
+            if(t->kind!=SOL_MIR_TERM_INVOKE||v->activation!=3)continue;
+            if(strcmp(p->ir.callables[m->images[v->owner].source_callable].name,"helper"))continue;
+            binding=t->binding;
+        }
+        F1B_REQUIRE(binding<m->binding_count);
+        const SolMirMaterializedBinding *b=&m->bindings[binding];
+        F1B_REQUIRE(b->source.expression<p->ir.expression_count&&b->instance<m->image_count);
+        const SolIrExpression *call=&p->ir.expressions[b->source.expression];
+        F1B_REQUIRE(call->kind==SOL_IR_EXPR_CALL&&call->as.call.kind==SOL_IR_CALL_FUNCTION
+            &&call->as.call.callable==m->images[b->instance].source_callable
+            &&!strcmp(p->ir.callables[call->as.call.callable].name,"helper"));
+        if(!predicate) {
+            F1B_REQUIRE(b->instance==v->owner&&call->as.call.operands.count==1);
+            size_t arg=p->ir.operands[call->as.call.operands.offset].value;
+            F1B_REQUIRE(arg<p->ir.expression_count);
+            const SolIrExpression *sub=&p->ir.expressions[arg];
+            F1B_REQUIRE(sub->kind==SOL_IR_EXPR_BINARY
+                &&sub->as.binary.operator_kind==SOL_TOKEN_MINUS
+                &&sub->as.binary.left<p->ir.expression_count
+                &&p->ir.expressions[sub->as.binary.left].kind==SOL_IR_EXPR_PLACE
+                &&sub->as.binary.right<p->ir.expression_count
+                &&p->ir.expressions[sub->as.binary.right].kind==SOL_IR_EXPR_INTEGER
+                &&p->ir.expressions[sub->as.binary.right].as.integer==1);
+            size_t place=p->ir.expressions[sub->as.binary.left].as.place;
+            F1B_REQUIRE(place<p->ir.place_count&&p->ir.places[place].local<p->ir.local_count);
+            const SolIrLocal *local=&p->ir.locals[p->ir.places[place].local];
+            F1B_REQUIRE(local->owner==p->ir.callables[m->images[v->owner].source_callable].owner);
+        }
+        size_t calls=0;
+        for(size_t j=i+1;j<full->visit_count;++j) {
+            const P44f1bVisit *next=&full->visits[j];
+            if(next->pre_step||next->predicate!=predicate||next->owner!=v->owner
+                ||next->block!=v->block||next->operation!=F1B_NONE
+                ||next->activation!=v->activation)continue;
+            F1B_REQUIRE(next->transition<p->cleanup.transition_count
+                &&p->cleanup.transitions[next->transition].edge_role
+                    ==SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_NORMAL);++calls;
+        }
+        F1B_REQUIRE(calls==1&&v->after==v->before+1);
+        *join=(P44f1eBoundJoin){i,binding,b->source.expression,body,context,obligation,
+            instance,predicate?6:5,predicate?5:4};++matches;
+    }
+    return matches==1;
+}
+
+static bool p44f1e_bounds_source_prepare(P44f1eCoreOwner *guard,
+    const P44f1bSourceRecord *records,size_t record_count,P44f1eSourceBounds *bounds) {
+    F1B_REQUIRE(bounds!=NULL&&p44f1e_owner_use_allowed(guard));
+    memset(bounds,0,sizeof *bounds);
+    bool ok=true;
+    bool walked=p44f1e_bounds_walk(guard,records,record_count,64,SIZE_MAX,&bounds->full);
+    bool fenced=p44f1e_owner_finish_stage(guard,true,walked,&ok);
+    if(!walked||!fenced)return false;
+    P44f1bPath reference={0};
+    bool compared=p44f1e_path_prepare_profile_mode(guard,"launch",records,record_count,
+        64,SIZE_MAX,P44F1E_PROFILE_ENSURES_CALLS,
+        P44F1B_TRACE_CLEANUP|P44F1B_TRACE_REFINEMENT,&reference);
+    fenced=p44f1e_owner_finish_stage(guard,true,compared,&ok);
+    if(!compared||!fenced)return false;
+    /* Every member, including diagnostic/lifetime/route storage, not a trace filter. */
+    F1B_REQUIRE(memcmp(&bounds->full,&reference,sizeof reference)==0
+        &&reference.code==0&&reference.value==5&&reference.max_active_depth==5
+        &&reference.activations==7&&reference.captures==4&&reference.drops==4
+        &&reference.core_captures==1&&reference.helper_captures==3
+        &&reference.old_core_captures==0&&reference.m==F1B_NONE);
+    int64_t arguments[8]={0};size_t parents[8]={0},images[8]={0};
+    F1B_REQUIRE(p44f1e_bounds_arguments(&guard->owner,&reference,arguments,parents,images));
+    static const char *const names[]={"launch","core","helper","helper","terminal","helper","terminal"};
+    static const int64_t values[]={0,6,5,4,4,6,6};
+    static const size_t parent_ids[]={F1B_NONE,1,2,3,4,2,6};
+    for(size_t i=1;i<=7;++i)F1B_REQUIRE(arguments[i]==values[i-1]&&parents[i]==parent_ids[i-1]
+        &&!strcmp(guard->owner.ir.callables[guard->owner.concrete.materialization.images[images[i]].source_callable].name,names[i-1]));
+    bool joined=p44f1e_bounds_join(guard,&reference,true,&bounds->n_join);
+    fenced=p44f1e_owner_finish_stage(guard,true,joined,&ok);
+    if(!joined||!fenced)return false;
+    joined=p44f1e_bounds_join(guard,&reference,false,&bounds->m_join);
+    fenced=p44f1e_owner_finish_stage(guard,true,joined,&ok);
+    if(!joined||!fenced)return false;
+    bounds->n_join.argument=arguments[2];bounds->n_join.callee_argument=arguments[3];
+    bounds->m_join.argument=arguments[3];bounds->m_join.callee_argument=arguments[4];
+    bounds->n=reference.visits[bounds->n_join.visit].before;
+    bounds->m=reference.visits[bounds->m_join.visit].before;bounds->S=reference.steps;
+    F1B_REQUIRE(bounds->n==reference.n&&bounds->n<bounds->m&&bounds->m<bounds->S);
+    bool lifetime=p44f1e_bounds_lifetime(guard,&reference);
+    fenced=p44f1e_owner_finish_stage(guard,true,lifetime,&ok);
+    if(!lifetime||!fenced)return false;
+    for(size_t i=0;i<P44F1E_LIMIT_COUNT;++i) {
+        SolWasmRepresentedLimits *l=&bounds->limits[i];
+        *l=sol_wasm_represented_default_limits();
+        switch((P44f1eLimitCase)i) {
+        case P44F1E_DEPTH_PREDICATE_2:l->max_call_depth=2;break;
+        case P44F1E_DEPTH_ORDINARY_3:l->max_call_depth=3;break;
+        case P44F1E_DEPTH_SUCCESS_5:l->max_call_depth=5;break;
+        case P44F1E_STEP_N_DEPTH_2:l->max_call_depth=2;l->max_steps=bounds->n;break;
+        case P44F1E_STEP_N_PLUS_1_DEPTH_2:l->max_call_depth=2;l->max_steps=bounds->n+1;break;
+        case P44F1E_STEP_M_DEPTH_3:l->max_call_depth=3;l->max_steps=bounds->m;break;
+        case P44F1E_STEP_M_PLUS_1_DEPTH_3:l->max_call_depth=3;l->max_steps=bounds->m+1;break;
+        case P44F1E_STEP_S:l->max_steps=bounds->S;break;
+        case P44F1E_STEP_S_MINUS_1:l->max_steps=bounds->S-1;break;
+        case P44F1E_LIMIT_COUNT:return false;
+        }
+        P44f1bPath *path=&bounds->paths[i];
+        walked=p44f1e_bounds_walk(guard,records,record_count,l->max_call_depth,l->max_steps,path);
+        fenced=p44f1e_owner_finish_stage(guard,true,walked,&ok);
+        if(!walked||!fenced)return false;
+        lifetime=p44f1e_bounds_lifetime(guard,path);
+        fenced=p44f1e_owner_finish_stage(guard,true,lifetime,&ok);
+        if(!lifetime||!fenced)return false;
+        bool success=i==P44F1E_DEPTH_SUCCESS_5||i==P44F1E_STEP_S;
+        if(success) {
+            F1B_REQUIRE(memcmp(path,&reference,sizeof reference)==0);
+        } else {
+            bool step=i==P44F1E_STEP_N_DEPTH_2||i==P44F1E_STEP_M_DEPTH_3
+                ||i==P44F1E_STEP_S_MINUS_1;
+            bool pred=i==P44F1E_DEPTH_PREDICATE_2||i==P44F1E_STEP_N_DEPTH_2
+                ||i==P44F1E_STEP_N_PLUS_1_DEPTH_2;
+            F1B_REQUIRE(path->code==(step?SOL_MIR_RUNTIME_FAILURE_STEP_LIMIT
+                    :SOL_MIR_RUNTIME_FAILURE_CALL_DEPTH_LIMIT)
+                &&path->value==0&&path->site<guard->owner.conventions.failure_site_count
+                &&path->record!=0);
+            const SolMirRuntimeFailureSite *site=&guard->owner.conventions.failure_sites[path->site];
+            F1B_REQUIRE(site->origin_kind==(pred
+                ?(step?SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_STEP:SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_CALL)
+                :(step?SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_STEP:SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_CALL)));
+            F1B_REQUIRE(path->activations==(pred?2u:i==P44F1E_STEP_S_MINUS_1?7u:3u)
+                &&path->captures==(pred?1u:i==P44F1E_STEP_S_MINUS_1?4u:2u)
+                &&path->max_active_depth==(pred?2u:i==P44F1E_STEP_S_MINUS_1?5u:3u));
+            size_t satisfied=0,contract_failures=0,denied=F1B_NONE;
+            for(size_t j=0;j<path->visit_count;++j) {
+                const P44f1bVisit *v=&path->visits[j];
+                if(v->pre_step&&v->site==path->site) {F1B_REQUIRE(denied==F1B_NONE);denied=j;}
+                if(v->transition>=guard->owner.cleanup.transition_count)continue;
+                const SolMirRuntimeCleanupTransition *t=&guard->owner.cleanup.transitions[v->transition];
+                if(!v->predicate&&!v->pre_step&&v->operation==F1B_NONE
+                    &&v->block<guard->owner.concrete.materialization.block_count) {
+                    bool route=p44f1e_contract_call_route(&guard->owner,v->owner,v->block,guard);
+                    F1B_REQUIRE(p44f1e_owner_use_allowed(guard));
+                    if(route) {
+                        if(t->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_SATISFIED)++satisfied;
+                        else {F1B_REQUIRE(t->edge_role==SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_FAILURE);++contract_failures;}
+                    }
+                }
+            }
+            F1B_REQUIRE(p44f1e_owner_fence(guard));
+            if(step) {
+                F1B_REQUIRE(denied<path->visit_count&&path->steps==l->max_steps
+                    &&path->visits[denied].before==path->visits[denied].after);
+                const P44f1bVisit *expected=&reference.visits[i==P44F1E_STEP_N_DEPTH_2
+                    ?bounds->n_join.visit:i==P44F1E_STEP_M_DEPTH_3?bounds->m_join.visit:0];
+                if(i==P44F1E_STEP_S_MINUS_1) {
+                    size_t last=F1B_NONE;
+                    for(size_t j=0;j<reference.visit_count;++j)
+                        if(reference.visits[j].after>reference.visits[j].before)last=j;
+                    F1B_REQUIRE(last<reference.visit_count);expected=&reference.visits[last];
+                }
+                const P44f1bVisit *actual=&path->visits[denied];
+                F1B_REQUIRE(actual->owner==expected->owner&&actual->block==expected->block
+                    &&actual->operation==expected->operation&&actual->activation==expected->activation
+                    &&actual->predicate==expected->predicate&&actual->site==expected->site);
+            }
+            F1B_REQUIRE(satisfied==(i==P44F1E_STEP_S_MINUS_1?2u:0u)
+                &&contract_failures==(i==P44F1E_STEP_S_MINUS_1?0u:1u));
+        }
+    }
+    return ok&&p44f1e_owner_fence(guard);
+}
+
+static bool p44f1e_s4a_catalog_rows(P44f1eCoreOwner *guard,
+    const SolWasmRepresentedTestCallCatalogEntry *entries,size_t count,const char *extra) {
+    F1B_REQUIRE(p44f1e_owner_use_allowed(guard)&&entries!=NULL&&count<=8);
+    const PropagationPipeline *p=&guard->owner;
+    const SolMirMaterialization *m=&p->concrete.materialization;
+    const SolMirOperations *o=&p->concrete.operations;
+    size_t rows[7]={0};
+    for(size_t i=0;i<count;++i) {
+        const SolWasmRepresentedTestCallCatalogEntry *e=&entries[i];
+        for(size_t j=0;j<i;++j)F1B_REQUIRE(e->call!=entries[j].call);
+        F1B_REQUIRE(e->call<p->conventions.call_count);
+        const SolMirRuntimeCall *call=&p->conventions.calls[e->call];
+        F1B_REQUIRE(call->signature<p->conventions.signature_count
+            &&call->internal<p->concrete.linkage.callable_count
+            &&call->target_kind==SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL
+            &&call->operands.count==1&&call->operands.offset<p->conventions.operand_count
+            &&call->writebacks.count==0&&e->signature==call->signature
+            &&e->callee_callable==call->internal&&e->operand_count==1
+            &&e->result_class==SOL_MIR_RUNTIME_RESULT_VALUE
+            &&e->normal_edge==call->normal_edge&&e->failure_edge==call->failure_edge
+            &&e->failure_site==call->failure_site&&e->caller_block==call->block);
+        const SolMirRuntimeSignature *signature=&p->conventions.signatures[call->signature];
+        F1B_REQUIRE(signature->origin==SOL_MIR_RUNTIME_SIGNATURE_INTERNAL
+            &&signature->internal==call->internal&&signature->slots.count==1
+            &&signature->slots.offset<p->conventions.signature_slot_count
+            &&signature->effects<m->effect_row_count&&m->effect_rows[signature->effects].atoms.count==0);
+        const SolMirRuntimeSignatureSlot *formal=&p->conventions.signature_slots[signature->slots.offset];
+        const SolMirRuntimeOperand *operand=&p->conventions.operands[call->operands.offset];
+        F1B_REQUIRE(formal->role==SOL_MIR_RUNTIME_SLOT_PARAMETER&&formal->formal==0
+            &&formal->access==SOL_ACCESS_OWNED&&operand->signature_slot==signature->slots.offset);
+        size_t target=p->concrete.linkage.callables[call->internal].instance;
+        F1B_REQUIRE(target<m->image_count);
+        const char *callee=p->ir.callables[m->images[target].source_callable].name;
+        const char *caller=NULL;size_t binding=F1B_NONE;
+        bool predicate=call->owner_kind==SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE;
+        if(predicate) {
+            F1B_REQUIRE(call->predicate<o->predicate_body_count&&call->block<o->predicate_block_count
+                &&e->caller_image==F1B_NONE&&call->result.kind==SOL_MIR_RUNTIME_VALUE_PREDICATE_VALUE
+                &&operand->value.kind==SOL_MIR_RUNTIME_VALUE_PREDICATE_VALUE);
+            const SolMirPredicateBody *body=&o->predicate_bodies[call->predicate];
+            const SolMirPredicateTerminator *term=&o->predicate_blocks[call->block].terminator;
+            F1B_REQUIRE(body->instance<m->image_count&&body->context<m->context_count
+                &&body->phase==SOL_CONTRACT_ENSURES&&body->outcome==SOL_CONTRACT_OUTCOME_ALWAYS
+                &&term->kind==SOL_MIR_PREDICATE_TERM_INVOKE&&term->result==e->result
+                &&term->result==call->result.id&&term->result_recipe==signature->result
+                &&term->arguments.count==1&&term->arguments.offset<o->predicate_operand_count);
+            const SolMirPredicateOperand *argument=&o->predicate_operands[term->arguments.offset];
+            F1B_REQUIRE(argument->value==operand->value.id&&argument->formal_ordinal==0
+                &&argument->access==SOL_ACCESS_OWNED&&argument->value<o->predicate_value_count
+                &&o->predicate_values[argument->value].recipe==formal->recipe);
+            caller=p->ir.callables[m->images[body->instance].source_callable].name;binding=term->binding;
+        } else {
+            F1B_REQUIRE(call->owner_kind==SOL_MIR_RUNTIME_CALL_OWNER_IMAGE&&call->image<m->image_count
+                &&call->block<m->block_count&&e->caller_image==call->image
+                &&call->result.kind==SOL_MIR_RUNTIME_VALUE_MATERIALIZED_VALUE
+                &&operand->value.kind==SOL_MIR_RUNTIME_VALUE_MATERIALIZED_TEMPORARY);
+            const SolMirMaterializedTerminator *term=&m->blocks[call->block].terminator;
+            F1B_REQUIRE(term->kind==SOL_MIR_TERM_INVOKE&&term->result==e->result&&term->result==call->result.id
+                &&term->arguments.count==1&&term->arguments.offset<m->call_argument_count);
+            const SolMirMaterializedCallArgument *argument=&m->call_arguments[term->arguments.offset];
+            F1B_REQUIRE(argument->formal==0&&argument->access==SOL_ACCESS_OWNED
+                &&argument->temporary==operand->value.id&&argument->temporary<m->temporary_count
+                &&m->temporaries[argument->temporary].type==formal->recipe);
+            caller=p->ir.callables[m->images[call->image].source_callable].name;binding=term->binding;
+        }
+        F1B_REQUIRE(binding<m->binding_count&&m->bindings[binding].instance==target
+            &&m->bindings[binding].source.expression<p->ir.expression_count);
+        const SolIrExpression *source=&p->ir.expressions[m->bindings[binding].source.expression];
+        F1B_REQUIRE(source->kind==SOL_IR_EXPR_CALL&&source->as.call.kind==SOL_IR_CALL_FUNCTION
+            &&source->as.call.callable==m->images[target].source_callable&&source->as.call.operands.count==1);
+        size_t row=F1B_NONE;
+        if(!predicate&&!strcmp(caller,"launch")&&!strcmp(callee,"core"))row=0;
+        if(!predicate&&!strcmp(caller,"helper")&&!strcmp(callee,"helper")) {row=1;F1B_REQUIRE(e->cyclic);}
+        if(!predicate&&!strcmp(caller,"helper")&&!strcmp(callee,"terminal"))row=2;
+        if(predicate&&!strcmp(caller,"core")&&!strcmp(callee,"helper")) {
+            size_t arg=p->ir.operands[source->as.call.operands.offset].value;
+            F1B_REQUIRE(arg<p->ir.expression_count);
+            row=p->ir.expressions[arg].kind==SOL_IR_EXPR_RESULT?3:4;
+            F1B_REQUIRE(row==3||p->ir.expressions[arg].kind==SOL_IR_EXPR_SNAPSHOT_READ);
+        }
+        if(extra!=NULL&&!predicate&&!strcmp(caller,extra)
+            &&!strcmp(callee,!strncmp(extra,"old_",4)?"old_core":"core"))row=5;
+        if(extra!=NULL&&predicate&&!strcmp(caller,"old_core")&&!strcmp(callee,"helper"))row=6;
+        F1B_REQUIRE(row<7);++rows[row];
+    }
+    for(size_t i=0;i<7;++i)F1B_REQUIRE(rows[i]==(i<5||(i==5&&extra!=NULL)
+        ||(i==6&&extra!=NULL&&!strncmp(extra,"old_",4))?1u:0u));
+    return p44f1e_owner_fence(guard);
+}
+
 static const P44f1bRoot p44f1e_roots[]={
     {"launch",5,0,SOL_INTERPRETER_OK,SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_CALL,"core"},
     {"caller_requires",0,SOL_MIR_RUNTIME_FAILURE_REQUIRE_VIOLATION,
@@ -23811,6 +24718,47 @@ static const P44f1bRoot p44f1e_roots[]={
     {"old_callee_arithmetic",0,SOL_MIR_RUNTIME_FAILURE_DIVISION_BY_ZERO,
         SOL_INTERPRETER_DIVISION_BY_ZERO,SOL_MIR_RUNTIME_FAILURE_ORIGIN_IMAGE_ARITHMETIC,"terminal"},
 };
+
+static bool p44f1e_root_primary(P44f1eCoreOwner *guard,size_t which,
+    const P44f1bPath *path,const P44f1bSourceRecord *records,size_t record_count) {
+    F1B_REQUIRE(p44f1e_owner_use_allowed(guard)&&which<8);
+    if(which==0)return path->code==0&&path->record==0;
+    const PropagationPipeline *p=&guard->owner;
+    const SolMirMaterialization *m=&p->concrete.materialization;
+    const SolMirOperations *o=&p->concrete.operations;
+    const P44f1bRoot *want=&p44f1e_roots[which];
+    F1B_REQUIRE(path->code==want->code&&path->site<p->conventions.failure_site_count
+        &&path->record>0&&path->record<=record_count);
+    const SolMirRuntimeFailureSite *s=&p->conventions.failure_sites[path->site];
+    const P44f1bSourceRecord *r=&records[path->record-1];
+    F1B_REQUIRE(s->origin_kind==want->origin&&r->tag==3&&r->source_id==path->site
+        &&r->start==s->source.start&&r->end==s->source.end&&r->ordinal==s->occurrence
+        &&(s->allowed_codes&(UINT32_C(1)<<((unsigned)path->code-1)))!=0);
+    size_t callable=F1B_NONE;
+    if(s->origin_kind==SOL_MIR_RUNTIME_FAILURE_ORIGIN_PREDICATE_RESULT) {
+        F1B_REQUIRE(s->owner<o->predicate_body_count);
+        const SolMirPredicateBody *b=&o->predicate_bodies[s->owner];
+        F1B_REQUIRE(b->instance<m->image_count&&b->context<m->context_count);
+        callable=m->images[b->instance].source_callable;
+        size_t obligation=m->contexts[b->context].obligation;
+        F1B_REQUIRE(callable<p->ir.callable_count&&obligation<p->ir.obligation_count);
+        const SolIrObligation *clause=&p->ir.obligations[obligation];
+        F1B_REQUIRE(clause->owner==p->ir.callables[callable].owner
+            &&clause->kind==(which==1||which==3?SOL_CONTRACT_REQUIRES:SOL_CONTRACT_ENSURES)
+            &&clause->predicate<p->ir.expression_count);
+        if(which==2||which==6) {
+            const SolIrExpression *call=&p->ir.expressions[clause->predicate];
+            F1B_REQUIRE(call->kind==SOL_IR_EXPR_CALL&&call->as.call.operands.count==1);
+            size_t arg=p->ir.operands[call->as.call.operands.offset].value;
+            F1B_REQUIRE(arg<p->ir.expression_count&&p->ir.expressions[arg].kind
+                ==(which==2?SOL_IR_EXPR_RESULT:SOL_IR_EXPR_SNAPSHOT_READ));
+        }
+    } else {
+        F1B_REQUIRE(s->owner<m->image_count);callable=m->images[s->owner].source_callable;
+    }
+    F1B_REQUIRE(callable<p->ir.callable_count&&!strcmp(p->ir.callables[callable].name,want->owner));
+    return true;
+}
 
 static size_t p44f1e_route_count(const P44f1bPath *path) {
     size_t count=0;
@@ -23859,8 +24807,10 @@ static bool p44f1e_root_case(size_t which,bool trace) {
         ok=ok&&fenced&&source_records_ok;
     }
     if(ok) {
-        bool prepared=p44f1e_path_prepare_profile_mode(&owner,want->root,records,
-            record_count,64,SIZE_MAX,P44F1E_PROFILE_ENSURES_CALLS,trace_mode,&root_path);
+        bool prepared=(which==6||(which==7&&!trace))
+            ?p44f1e_s4a_old_path_prepare(&owner,want->root,records,record_count,trace_mode,&root_path)
+            :p44f1e_path_prepare_profile_mode(&owner,want->root,records,
+                record_count,64,SIZE_MAX,P44F1E_PROFILE_ENSURES_CALLS,trace_mode,&root_path);
         bool fenced=p44f1e_owner_finish_stage(&owner,true,prepared,&ok);
         ok=ok&&fenced&&prepared&&root_path.code==want->code&&root_path.value==want->value
             &&root_path.captures==root_path.drops&&(which==0||root_path.record!=0);
@@ -23877,6 +24827,18 @@ static bool p44f1e_root_case(size_t which,bool trace) {
         &&launch_path.captures==4&&launch_path.drops==4
         &&launch_path.core_captures==1&&launch_path.helper_captures==3
         &&launch_path.old_core_captures==0;
+    if(ok) {
+        bool primary=p44f1e_root_primary(&owner,which,&root_path,records,record_count);
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,primary,&ok);
+        ok=ok&&primary&&fenced;
+    }
+    P44f1eBoundJoin root_m={0};
+    if(ok) {
+        bool joined=p44f1e_bounds_join(&owner,&launch_path,false,&root_m);
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,joined,&ok);
+        ok=ok&&joined&&fenced;
+    }
+    size_t source_m=ok?launch_path.visits[root_m.visit].before:0;
     size_t expected_root_routes=which==0?2
         :(which==2||which==3||which==4||which==5)?1:(which==1)?0:1;
     if(ok&&trace)ok=p44f1e_route_count(&root_path)==expected_root_routes
@@ -23966,6 +24928,10 @@ static bool p44f1e_root_case(size_t which,bool trace) {
         } else if(entries[i].cyclic)++recursive_rows;
     }
     ok=ok&&predicate_rows==(paired&&which>=6?3u:2u)&&recursive_rows==1;
+    if(ok) {
+        bool typed=p44f1e_s4a_catalog_rows(&owner,entries,exact.calls,paired?want->root:NULL);
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,typed,&ok);ok=ok&&typed&&fenced;
+    }
 
     SolWasmRepresentedOutput output;sol_wasm_represented_output_init(&output);
     SolDiagnostics diagnostics;sol_diagnostics_init(&diagnostics);
@@ -24007,19 +24973,31 @@ static bool p44f1e_root_case(size_t which,bool trace) {
     }
     int64_t value=0;int32_t code=0,site=0;
     if(executed)executed=wasm_instance_observe(&instance,&value,&code,&site)
-        &&value==5&&code==0&&site==0;
+        &&value==5&&code==0&&site==0&&p44f1b_no_failure_detail(&instance);
     if(executed&&trace)executed=p44f1b_trace_read(&instance,actual,&actual_count)
         &&p44f1e_trace_authentic(&owner,&launch_path,records,record_count,actual,actual_count,
             0,false)&&p44f1b_path_matches(&launch_path,actual,actual_count);
     if(executed&&trace)executed=p44f1e_trace_checker_negatives(&owner,&launch_path,
         records,record_count);
+    if(executed&&!paired) {
+        if(trace) {memcpy(first,actual,actual_count*sizeof *first);first_count=actual_count;}
+        executed=wasm_instance_observe(&instance,&value,&code,&site)
+            &&value==5&&code==0&&site==0&&p44f1b_no_failure_detail(&instance);
+        if(executed&&trace)executed=p44f1b_trace_read(&instance,actual,&actual_count)
+            &&p44f1e_trace_authentic(&owner,&launch_path,records,record_count,actual,
+                actual_count,0,false)&&p44f1b_path_matches(&launch_path,actual,actual_count)
+            &&p44f1b_trace_equal(first,first_count,actual,actual_count);
+    }
     if(executed&&paired) {
         if(trace) {
             wasm_val_t zero=WASM_I32_VAL(0);
             wasm_global_set(instance.trace_count,&zero);
+            wasm_val_t readback=WASM_I32_VAL(-1);
+            wasm_global_get(instance.trace_count,&readback);
+            executed=readback.kind==WASM_I32&&readback.of.i32==0;
         }
         int64_t raw_value=0;int32_t raw_code=0,raw_site=0;
-        executed=p44f1b_call_named_observe(&instance,SOL_WASM_REPRESENTED_TEST_FAILURE_ENTRY_EXPORT,
+        executed=executed&&p44f1b_call_named_observe(&instance,SOL_WASM_REPRESENTED_TEST_FAILURE_ENTRY_EXPORT,
             &raw_value,&raw_code,&raw_site)&&raw_value==want->value
             &&raw_code==(int32_t)want->code&&raw_site==(int32_t)root_path.record
             &&p44f1b_no_failure_detail(&instance);
@@ -24040,7 +25018,673 @@ static bool p44f1e_root_case(size_t which,bool trace) {
         root_path.drops,p44f1e_route_count(&root_path),catalog.calls,expected_calls);
     bool closed=p44f1e_owner_close(&owner);
     free(records);sol_diagnostics_free(&diagnostics);sol_wasm_represented_output_free(&output);
+    if(ok&&executed&&closed)fprintf(stderr,
+        "P44F1E_S4A_ROOT root=%s trace=%d n=%zu m=%zu S=%zu depth=64 steps=100000 source_frozen=1 primary_join=1 repeated=1 no_detail=1 owner_closed=1\n",
+        want->root,trace,launch_path.n,source_m,launch_path.steps);
     return ok&&executed&&closed;
+}
+
+/* This JSON writer has no owner/framework side effects. SIZE_MAX is an absent
+ * coordinate, never a JSON numeric value; strings are escaped byte-for-byte. */
+static void p44f1e_json_size(FILE *out,size_t value) {
+    if(value==F1B_NONE)fputs("null",out);else fprintf(out,"%zu",value);
+}
+
+static void p44f1e_json_string(FILE *out,const char *text) {
+    fputc('"',out);
+    if(text!=NULL)for(const unsigned char *p=(const unsigned char *)text;*p;++p) {
+        if(*p=='"'||*p=='\\') {fputc('\\',out);fputc(*p,out);}
+        else if(*p<32||*p>=127)fprintf(out,"\\u%04x",(unsigned)*p);
+        else fputc(*p,out);
+    }
+    fputc('"',out);
+}
+
+static void p44f1e_json_record(FILE *out,const P44f1bSourceRecord *r,size_t id) {
+    fprintf(out,"{\"id\":%zu,\"tag\":%u,\"kind\":%u,\"path\":",id,(unsigned)r->tag,(unsigned)r->kind);
+    p44f1e_json_string(out,r->path);fputs(",\"symbol\":",out);p44f1e_json_string(out,r->symbol);
+    fprintf(out,",\"start\":%zu,\"end\":%zu,\"ordinal\":%zu,\"source_id\":",
+        r->start,r->end,r->ordinal);
+    p44f1e_json_size(out,r->source_id);fputc('}',out);
+}
+
+static void p44f1e_json_limits(FILE *out,const SolWasmRepresentedLimits *l) {
+    fprintf(out,"{\"max_call_depth\":%" PRIu32 ",\"max_steps\":%" PRIu64 "}",l->max_call_depth,l->max_steps);
+}
+
+static void p44f1e_json_identity(FILE *out,const PropagationPipeline *p,const P44f1bVisit *v) {
+    const SolMirMaterialization *m=&p->concrete.materialization;
+    const SolMirOperations *o=&p->concrete.operations;
+    size_t image=v->predicate?o->predicate_bodies[v->owner].instance:v->owner;
+    size_t callable=m->images[image].source_callable;
+    size_t context=v->predicate?o->predicate_bodies[v->owner].context:F1B_NONE;
+    size_t obligation=context<m->context_count?m->contexts[context].obligation:F1B_NONE;
+    size_t expression=obligation<p->ir.obligation_count?p->ir.obligations[obligation].predicate:F1B_NONE;
+    size_t binding=F1B_NONE,snapshot=F1B_NONE;
+    bool contract_call=false;
+    if(!v->predicate)expression=v->operation==F1B_NONE
+        ?m->blocks[v->block].terminator.source_expression:m->instructions[v->operation].source_expression;
+    if(v->operation==F1B_NONE) {
+        if(v->predicate&&o->predicate_blocks[v->block].terminator.kind==SOL_MIR_PREDICATE_TERM_INVOKE)
+            binding=o->predicate_blocks[v->block].terminator.binding;
+        if(!v->predicate&&m->blocks[v->block].terminator.kind==SOL_MIR_TERM_INVOKE)
+            binding=m->blocks[v->block].terminator.binding;
+        if(!v->predicate&&m->blocks[v->block].terminator.kind==SOL_MIR_TERM_CHECK_CONTRACT) {
+            size_t clause=m->blocks[v->block].terminator.source_obligation;
+            if(clause<p->ir.obligation_count) {
+                obligation=clause;
+                for(size_t q=0;q<o->predicate_count;++q)
+                    if(o->predicates[q].kind==SOL_MIR_OPERATION_PREDICATE_CONTRACT
+                        &&o->predicates[q].image==image&&o->predicates[q].block==v->block)
+                        context=o->predicates[q].context;
+                size_t predicate=p->ir.obligations[clause].predicate;
+                expression=predicate;
+                contract_call=predicate<p->ir.expression_count
+                    &&p->ir.expressions[predicate].kind==SOL_IR_EXPR_CALL;
+            }
+        }
+    } else if(!v->predicate&&m->instructions[v->operation].kind==SOL_MIR_INST_CAPTURE_SNAPSHOT)
+        for(size_t q=0;q<o->snapshot_count;++q)if(o->snapshots[q].instruction==v->operation)snapshot=q;
+    fprintf(out,"{\"image\":%zu,\"callable\":%zu,\"source_owner\":%zu,\"name\":",image,callable,p->ir.callables[callable].owner);
+    p44f1e_json_string(out,p->ir.callables[callable].name);
+    fputs(",\"context\":",out);p44f1e_json_size(out,context);
+    fputs(",\"obligation\":",out);p44f1e_json_size(out,obligation);
+    fputs(",\"expression\":",out);p44f1e_json_size(out,expression);
+    fputs(",\"binding\":",out);p44f1e_json_size(out,binding);
+    fputs(",\"snapshot_plan\":",out);p44f1e_json_size(out,snapshot);
+    fputs(",\"snapshot_slot\":",out);p44f1e_json_size(out,snapshot<o->snapshot_count?o->snapshots[snapshot].slot:F1B_NONE);
+    fprintf(out,",\"contract_call\":%s}",contract_call?"true":"false");
+}
+
+static void p44f1e_json_route(FILE *out,const SolMirRuntimeCleanupTransition *t) {
+    fprintf(out,"{\"role\":%u,\"outcome\":%u,\"failure_source\":%u,\"failure_site\":",
+        (unsigned)t->edge_role,(unsigned)t->outcome,(unsigned)t->failure_source);
+    p44f1e_json_size(out,t->failure_site);
+    fprintf(out,",\"failure_mask\":%" PRIu32 ",\"primary_wins\":%s,\"continuation\":",t->failure_mask,t->primary_failure_wins?"true":"false");
+    p44f1e_json_size(out,t->continuation);fputs(",\"destination\":",out);p44f1e_json_size(out,t->destination);
+    fprintf(out,",\"action_offset\":%zu,\"action_count\":%zu}",t->actions.offset,t->actions.count);
+}
+
+static void p44f1e_json_action(FILE *out,const SolMirRuntimeCleanupAction *a) {
+    fprintf(out,"{\"kind\":%u,\"flags\":%u,\"target\":",(unsigned)a->kind,a->flags);
+    p44f1e_json_size(out,a->target);fputs(",\"recipe\":",out);p44f1e_json_size(out,a->recipe);
+    fputs(",\"drop_path\":",out);p44f1e_json_size(out,a->drop_path);fputc('}',out);
+}
+
+static void p44f1e_json_visit(FILE *out,const PropagationPipeline *p,const P44f1bVisit *v,size_t index) {
+    const SolMirRuntimeCleanupEvent *e=&p->cleanup.events[v->event];
+    fprintf(out,"{\"index\":%zu,\"namespace\":\"%s\",\"owner\":%zu,\"block\":%zu,\"operation\":",
+        index,v->predicate?"predicate":"image",v->owner,v->block);
+    p44f1e_json_size(out,v->operation);
+    fprintf(out,",\"event\":%zu,\"transition\":",v->event);p44f1e_json_size(out,v->transition);
+    fprintf(out,",\"activation\":%zu,\"pre_step\":%s,\"before\":%zu,\"after\":%zu,\"site\":",
+        v->activation,v->pre_step?"true":"false",v->before,v->after);
+    p44f1e_json_size(out,v->site);fputs(",\"record\":",out);
+    if(v->canonical_record==0)fputs("null",out);else p44f1e_json_size(out,v->canonical_record);
+    fputs(",\"occurrence\":",out);p44f1e_json_size(out,v->occurrence);
+    fprintf(out,",\"source\":{\"file\":%zu,\"start\":%zu,\"end\":%zu},\"event_kind\":%u,\"phase\":%u,\"producer\":%u,\"route\":",
+        e->source.file,e->source.start,e->source.end,(unsigned)e->kind,(unsigned)e->phase,(unsigned)e->producer);
+    if(v->transition==F1B_NONE)fputs("null",out);
+    else p44f1e_json_route(out,&p->cleanup.transitions[v->transition]);
+    fputs(",\"identity\":",out);p44f1e_json_identity(out,p,v);
+    fputc('}',out);
+}
+
+static void p44f1e_s4a_json_path_rows(FILE *out,const PropagationPipeline *p,const char *name,
+    const SolWasmRepresentedLimits *limits,const P44f1bPath *path,
+    const int64_t arguments[8],const size_t parents[8],const size_t images[8]) {
+    fputs("{\"name\":",out);p44f1e_json_string(out,name);fputs(",\"limits\":",out);p44f1e_json_limits(out,limits);
+    fprintf(out,",\"code\":%u,\"value\":%" PRId64 ",\"site\":",(unsigned)path->code,path->value);
+    p44f1e_json_size(out,path->site);
+    fprintf(out,",\"record\":%zu,\"no_detail\":true,\"steps\":%zu,\"activations\":%zu,\"max_active_depth\":%zu,\"captures\":%zu,\"drops\":%zu,\"helper_captures\":%zu,\"core_captures\":%zu,\"old_core_captures\":%zu,\"live_snapshots_at_exit\":0,\"result_published\":%s,\"visits\":[",
+        path->record,path->steps,path->activations,path->max_active_depth,path->captures,path->drops,
+        path->helper_captures,path->core_captures,path->old_core_captures,path->code?"false":"true");
+    for(size_t i=0;i<path->visit_count;++i) {
+        if(i)fputc(',',out);p44f1e_json_visit(out,p,&path->visits[i],i);
+    }
+    fputs("],\"slots\":[",out);
+    size_t slot_visit[64],cursor=0;
+    for(size_t v=0;v<path->visit_count;++v) {
+        if(cursor<path->count&&path->slot_kind[cursor]==P44F1B_SLOT_REFINEMENT_ROUTE
+            &&path->route_visit[cursor]==v)slot_visit[cursor++]=v;
+        size_t transition=path->visits[v].transition;
+        if(transition<p->cleanup.transition_count)
+            for(size_t j=0;j<p->cleanup.transitions[transition].actions.count&&cursor<path->count;++j)
+                slot_visit[cursor++]=v;
+    }
+    for(size_t i=0;i<path->count;++i) {
+        if(i)fputc(',',out);
+        const P44TraceSlot *s=&path->slots[i];
+        bool route=path->slot_kind[i]==P44F1B_SLOT_REFINEMENT_ROUTE;
+        size_t visit=slot_visit[i];
+        fprintf(out,"{\"index\":%zu,\"kind\":\"%s\",\"action\":%" PRIu32 ",\"disposition\":%" PRIu32 ",\"record\":%" PRIu32 ",\"visit\":",
+            i,route?"route":"action",s->action,s->disposition,s->record);
+        p44f1e_json_size(out,visit);fputs(",\"payload\":",out);
+        if(route)fputs("null",out);
+        else p44f1e_json_action(out,&path->actions[i]);
+        fputc('}',out);
+    }
+    fputs("],\"activation_states\":[",out);
+    for(size_t i=1;i<=path->activations;++i) {
+        if(i>1)fputc(',',out);
+        size_t callable=p->concrete.materialization.images[images[i]].source_callable;
+        fprintf(out,"{\"activation\":%zu,\"image\":%zu,\"callable\":%zu,\"name\":",i,images[i],callable);
+        p44f1e_json_string(out,p->ir.callables[callable].name);fputs(",\"parent\":",out);p44f1e_json_size(out,parents[i]);
+        fprintf(out,",\"argument\":%" PRId64 "}",arguments[i]);
+    }
+    fputs("]}",out);
+}
+
+static void p44f1e_json_path(FILE *out,const PropagationPipeline *p,const char *name,
+    const SolWasmRepresentedLimits *limits,const P44f1bPath *path) {
+    int64_t arguments[8]={0};size_t parents[8]={0},images[8]={0};
+    if(!p44f1e_bounds_arguments(p,path,arguments,parents,images))return;
+    p44f1e_s4a_json_path_rows(out,p,name,limits,path,arguments,parents,images);
+}
+
+static void p44f1e_json_join(FILE *out,const P44f1eBoundJoin *j) {
+    fprintf(out,"{\"visit\":%zu,\"binding\":%zu,\"expression\":%zu,\"body\":",j->visit,j->binding,j->expression);
+    p44f1e_json_size(out,j->body);fputs(",\"context\":",out);p44f1e_json_size(out,j->context);
+    fputs(",\"obligation\":",out);p44f1e_json_size(out,j->obligation);
+    fprintf(out,",\"instance\":%zu,\"argument\":%" PRId64 ",\"callee_argument\":%" PRId64 "}",j->instance,j->argument,j->callee_argument);
+}
+
+/* Static identities come directly from the authenticated source/P2/P3 owner,
+ * not from the dynamic path copies. Keep all rows, including unselected routes. */
+static bool p44f1e_json_source_model(FILE *out,const PropagationPipeline *p) {
+    const SolMirMaterialization *m=&p->concrete.materialization;
+    const SolMirOperations *o=&p->concrete.operations;
+    const SolMirRuntimeCleanup *c=&p->cleanup;
+    fputs("{\"images\":[",out);
+    for(size_t i=0;i<m->image_count;++i) {
+        size_t callable=m->images[i].source_callable;F1B_REQUIRE(callable<p->ir.callable_count);
+        if(i)fputc(',',out);
+        fprintf(out,"{\"id\":%zu,\"callable\":%zu,\"source_owner\":%zu,\"name\":",i,callable,p->ir.callables[callable].owner);
+        p44f1e_json_string(out,p->ir.callables[callable].name);fputc('}',out);
+    }
+    fputs("],\"bindings\":[",out);
+    for(size_t i=0;i<m->binding_count;++i) {
+        if(i)fputc(',',out);fprintf(out,"{\"id\":%zu,\"image\":",i);
+        p44f1e_json_size(out,m->bindings[i].instance);fputs(",\"expression\":",out);
+        p44f1e_json_size(out,m->bindings[i].source.expression);fputc('}',out);
+    }
+    fputs("],\"contracts\":[",out);
+    for(size_t i=0;i<o->predicate_count;++i) {
+        const SolMirOperationPredicatePlan *q=&o->predicates[i];
+        F1B_REQUIRE(q->kind==SOL_MIR_OPERATION_PREDICATE_CONTRACT&&q->context<m->context_count);
+        size_t obligation=m->contexts[q->context].obligation;
+        F1B_REQUIRE(obligation<p->ir.obligation_count);
+        if(i)fputc(',',out);
+        size_t expression=p->ir.obligations[obligation].predicate;
+        F1B_REQUIRE(expression<p->ir.expression_count);
+        fprintf(out,"{\"id\":%zu,\"image\":%zu,\"block\":%zu,\"body\":%zu,\"context\":%zu,\"obligation\":%zu,\"expression\":%zu,\"direct_call\":%s}",
+            i,q->image,q->block,q->body,q->context,obligation,expression,
+            p->ir.expressions[expression].kind==SOL_IR_EXPR_CALL?"true":"false");
+    }
+    fputs("],\"events\":[",out);
+    for(size_t i=0;i<c->event_count;++i) {
+        const SolMirRuntimeCleanupEvent *e=&c->events[i];
+        bool pred=e->kind==SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION
+            ||e->kind==SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR;
+        P44f1bVisit v={.owner=e->owner,.block=e->block,.operation=e->operation,.predicate=pred};
+        if(i)fputc(',',out);
+        fprintf(out,"{\"id\":%zu,\"namespace\":\"%s\",\"owner\":%zu,\"block\":%zu,\"operation\":",i,pred?"predicate":"image",e->owner,e->block);
+        p44f1e_json_size(out,e->operation);
+        fprintf(out,",\"event_kind\":%u,\"phase\":%u,\"producer\":%u,\"source\":{\"file\":%zu,\"start\":%zu,\"end\":%zu},\"identity\":",
+            (unsigned)e->kind,(unsigned)e->phase,(unsigned)e->producer,e->source.file,e->source.start,e->source.end);
+        p44f1e_json_identity(out,p,&v);fputc('}',out);
+    }
+    fputs("],\"transitions\":[",out);
+    for(size_t i=0;i<c->transition_count;++i) {
+        if(i)fputc(',',out);fprintf(out,"{\"id\":%zu,\"event\":%zu,\"route\":",i,c->transitions[i].event);
+        p44f1e_json_route(out,&c->transitions[i]);fputc('}',out);
+    }
+    fputs("],\"supplemental_sites\":[",out);
+    for(size_t i=0;i<c->supplemental_site_count;++i) {
+        const SolMirRuntimeCleanupSupplementalSite *s=&c->supplemental_sites[i];
+        if(i)fputc(',',out);
+        fprintf(out,"{\"id\":%zu,\"event\":%zu,\"allowed_codes\":%" PRIu32 ",\"source\":{\"file\":%zu,\"start\":%zu,\"end\":%zu}}",
+            i,s->event,s->allowed_codes,s->source.file,s->source.start,s->source.end);
+    }
+    fputs("],\"actions\":[",out);
+    for(size_t i=0;i<c->action_count;++i) {
+        const SolMirRuntimeCleanupAction *a=&c->actions[i];
+        const char *space=NULL;size_t image=F1B_NONE,recipe=F1B_NONE,root=F1B_NONE;
+        F1B_REQUIRE(p44f1b_cleanup_action_payload_authentic(p,i));
+        switch(a->kind) {
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_CHECK_CONTRACT:
+            F1B_REQUIRE(a->target<p->ir.obligation_count);space="obligation";break;
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT:
+            F1B_REQUIRE(a->target<o->snapshot_count);space="snapshot";
+            image=o->snapshots[a->target].image;recipe=o->snapshots[a->target].recipe;break;
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_TEMPORARY:
+            F1B_REQUIRE(a->target<m->temporary_count);space="temporary";recipe=m->temporaries[a->target].type;
+            for(size_t j=0;j<m->image_count;++j)if(p44f1b_walk_in(m->images[j].temporaries,a->target,m->temporary_count))image=j;
+            break;
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PARAMETER:
+            F1B_REQUIRE(a->target<m->local_count);space="parameter";
+            image=m->locals[a->target].instance;recipe=m->locals[a->target].type;
+            for(size_t j=0;j<m->place_count;++j)
+                if(m->places[j].local==a->target&&!m->places[j].projections.count) {root=j;break;}
+            break;
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE:
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_WRITEBACK:
+            F1B_REQUIRE(a->target<m->place_count);space="place";
+            image=m->places[a->target].instance;recipe=m->places[a->target].final_type;
+            for(size_t j=0;j<m->place_count;++j)
+                if(m->places[j].local==m->places[a->target].local&&!m->places[j].projections.count) {root=j;break;}
+            break;
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_SCOPE:
+            F1B_REQUIRE(a->target<m->instruction_count
+                &&(m->instructions[a->target].kind==SOL_MIR_INST_SCOPE_ENTER
+                    ||m->instructions[a->target].kind==SOL_MIR_INST_SCOPE_EXIT));space="scope";
+            for(size_t j=0;j<m->image_count;++j)if(p44f1b_walk_in(m->images[j].instructions,a->target,m->instruction_count))image=j;
+            break;
+        case SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE:
+            space="failure_site";F1B_REQUIRE(a->target==F1B_NONE||a->target<p->conventions.failure_site_count);break;
+        default:F1B_REQUIRE(false); /* No region/handler actions in this fixture. */
+        }
+        if(i)fputc(',',out);fprintf(out,"{\"id\":%zu,\"payload\":",i);p44f1e_json_action(out,a);
+        fputs(",\"target\":{\"namespace\":",out);p44f1e_json_string(out,space);
+        fputs(",\"id\":",out);p44f1e_json_size(out,a->target);fputs(",\"image\":",out);p44f1e_json_size(out,image);
+        fputs(",\"recipe\":",out);p44f1e_json_size(out,recipe);fputs(",\"root\":",out);p44f1e_json_size(out,root);
+        fputs("},\"drop_path\":",out);
+        if(a->drop_path==F1B_NONE)fputs("null",out);
+        else {
+            F1B_REQUIRE(a->drop_path<c->drop_path_count);
+            const SolMirRuntimeCleanupDropPath *d=&c->drop_paths[a->drop_path];
+            fprintf(out,"{\"id\":%zu,\"root\":%zu,\"place\":%zu,\"recipe\":%zu,\"holes_offset\":%zu,\"holes_count\":%zu,\"liveness\":%u}",
+                a->drop_path,d->root,d->place,d->recipe,d->holes.offset,d->holes.count,(unsigned)d->liveness);
+        }
+        fputc('}',out);
+    }
+    fputs("]}",out);return !ferror(out);
+}
+
+static bool p44f1e_s4a_json_tables(FILE *out,const PropagationPipeline *p,
+    const P44f1bSourceRecord *records,size_t count) {
+    fputs(",\"records\":[",out);
+    for(size_t i=0;i<count;++i) {if(i)fputc(',',out);p44f1e_json_record(out,&records[i],i+1);}
+    fputs("],\"sites\":[",out);
+    for(size_t i=0;i<p->conventions.failure_site_count;++i) {
+        const SolMirRuntimeFailureSite *s=&p->conventions.failure_sites[i];if(i)fputc(',',out);
+        fprintf(out,"{\"id\":%zu,\"origin\":%u,\"owner\":%zu,\"block\":%zu,\"operation\":",i,(unsigned)s->origin_kind,s->owner,s->block);
+        p44f1e_json_size(out,s->instruction);
+        fprintf(out,",\"source\":{\"file\":%zu,\"start\":%zu,\"end\":%zu},\"occurrence\":%zu,\"allowed_codes\":%" PRIu32 "}",
+            s->source.file,s->source.start,s->source.end,s->occurrence,s->allowed_codes);
+    }
+    fputs("],\"snapshots\":[",out);
+    for(size_t i=0;i<p->concrete.operations.snapshot_count;++i) {
+        const SolMirOperationSnapshotPlan *s=&p->concrete.operations.snapshots[i];
+        const SolMirMaterializedInstruction *in=&p->concrete.materialization.instructions[s->instruction];
+        const SolIrSnapshot *source=&p->ir.snapshots[in->source_snapshot];
+        if(i)fputc(',',out);
+        fprintf(out,"{\"plan\":%zu,\"image\":%zu,\"instruction\":%zu,\"slot\":%zu,\"context\":%zu,\"local\":%zu,\"recipe\":%zu,\"source_snapshot\":%zu,\"source_obligation\":%" PRIu64 ",\"source_operand\":%zu,\"source_read\":%zu}",
+            i,s->image,s->instruction,s->slot,s->context,s->local,s->recipe,in->source_snapshot,
+            source->obligation,source->operand,source->read);
+    }
+    fputs("],\"source_model\":",out);F1B_REQUIRE(p44f1e_json_source_model(out,p));
+    return !ferror(out);
+}
+
+static bool p44f1e_bounds_serialize(FILE *out,P44f1eCoreOwner *guard,
+    const P44f1bSourceRecord *records,size_t count,const P44f1eSourceBounds *b) {
+    F1B_REQUIRE(out!=NULL&&p44f1e_owner_use_allowed(guard));
+    const PropagationPipeline *p=&guard->owner;
+    SolWasmRepresentedLimits defaults=sol_wasm_represented_default_limits();
+    fputs("{\"schema\":\"p44f1e-source-bounds-v1\",\"owner_closed\":true,\"consumer_calls\":{\"interpreter\":0,\"catalog\":0,\"build\":0,\"instance\":0,\"fault\":0},\"default_limits\":",out);
+    p44f1e_json_limits(out,&defaults);
+    fprintf(out,",\"n\":%zu,\"m\":%zu,\"S\":%zu,\"n_join\":",b->n,b->m,b->S);
+    p44f1e_json_join(out,&b->n_join);fputs(",\"m_join\":",out);p44f1e_json_join(out,&b->m_join);
+    F1B_REQUIRE(p44f1e_s4a_json_tables(out,p,records,count));
+    fputs(",\"full\":",out);p44f1e_json_path(out,p,"full",&defaults,&b->full);
+    fputs(",\"charged_visits\":[",out);size_t charged=0;
+    for(size_t i=0;i<b->full.visit_count;++i)if(b->full.visits[i].after>b->full.visits[i].before) {
+        if(charged++)fputc(',',out);p44f1e_json_visit(out,p,&b->full.visits[i],i);
+    }
+    fputs("],\"paths\":[",out);
+    for(size_t i=0;i<P44F1E_LIMIT_COUNT;++i) {
+        if(i)fputc(',',out);p44f1e_json_path(out,p,p44f1e_limit_names[i],&b->limits[i],&b->paths[i]);
+    }
+    fputs("]}\n",out);
+    return !ferror(out)&&p44f1e_owner_fence(guard);
+}
+
+static int p44f1e_source_bounds_diagnostic(void) {
+    const char *directory=SOL_TEST_SOURCE_DIR "/tests/conformance/p44f1e_ensures_calls";
+    P44f1eCoreOwner owner={0};SolMirProgramRoot roots[2];size_t root_count=0;
+    P44f1eSourceBounds *bounds=calloc(1,sizeof *bounds);
+    P44f1bSourceRecord *records=NULL;size_t count=0;
+    bool ok=bounds!=NULL&&p44f1e_owner_prepare_roots(&owner,directory,NULL,false,roots,&root_count);
+    if(ok) {
+        bool shape=root_count==1&&owner.owner.conventions.entry_count==1
+            &&owner.owner.concrete.linkage.entry_export_count==1;
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,shape,&ok);ok=ok&&shape&&fenced;
+    }
+    if(ok) {
+        bool source=p44f1b_source_records(&owner.owner,directory,&records,&count);
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,source,&ok);ok=ok&&source&&fenced;
+    }
+    if(ok)ok=p44f1e_bounds_source_prepare(&owner,records,count,bounds);
+    FILE *buffer=tmpfile();
+    if(ok&&buffer!=NULL)ok=p44f1e_bounds_serialize(buffer,&owner,records,count,bounds);
+    else ok=false;
+    bool closed=p44f1e_owner_close(&owner);
+    free(records);free(bounds);
+    if(ok&&closed) {
+        ok=fflush(buffer)==0&&fseek(buffer,0,SEEK_SET)==0;
+        unsigned char bytes[4096];size_t n=0;
+        while(ok&&(n=fread(bytes,1,sizeof bytes,buffer))!=0)
+            ok=fwrite(bytes,1,n,stdout)==n;
+        ok=ok&&!ferror(buffer)&&fflush(stdout)==0;
+    }
+    if(buffer!=NULL) {bool close_ok=fclose(buffer)==0;ok=ok&&close_ok;}
+    return ok&&closed?0:1;
+}
+
+static const char *const p44f1e_s4a_old_suffixes[]={"old_false.plain","old_false.traced",
+    "old_callee_arithmetic.plain","old_callee_arithmetic.traced"};
+
+static int p44f1e_s4a_old_diagnostic(size_t selected) {
+    if(selected>=4)return 2;
+    const char *directory=SOL_TEST_SOURCE_DIR "/tests/conformance/p44f1e_ensures_calls";
+    const char *root=selected<2?"old_false":"old_callee_arithmetic";
+    unsigned trace_mode=(selected&1u)?P44F1B_TRACE_CLEANUP|P44F1B_TRACE_REFINEMENT:0;
+    P44f1eCoreOwner owner={0};SolMirProgramRoot roots[2];size_t root_count=0;
+    P44f1bSourceRecord *records=NULL;size_t count=0;P44f1bPath *paths=calloc(2,sizeof *paths);
+    bool ok=paths!=NULL&&p44f1e_owner_prepare_roots(&owner,directory,root,false,roots,&root_count);
+    if(ok) {
+        bool shape=root_count==2;bool fenced=p44f1e_owner_finish_stage(&owner,true,shape,&ok);ok=ok&&shape&&fenced;
+    }
+    if(ok) {
+        bool source=p44f1b_source_records(&owner.owner,directory,&records,&count);
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,source,&ok);ok=ok&&source&&fenced;
+    }
+    if(ok) {
+        bool replay=selected==3?p44f1e_path_prepare_profile_mode(&owner,root,records,count,64,SIZE_MAX,
+            P44F1E_PROFILE_ENSURES_CALLS,trace_mode,&paths[0])
+            :p44f1e_s4a_old_path_prepare(&owner,root,records,count,trace_mode,&paths[0]);
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,replay,&ok);ok=ok&&replay&&fenced;
+    }
+    if(ok) {
+        bool replay=p44f1e_path_prepare_profile_mode(&owner,"launch",records,count,64,SIZE_MAX,
+            P44F1E_PROFILE_ENSURES_CALLS,trace_mode,&paths[1]);
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,replay,&ok);ok=ok&&replay&&fenced;
+    }
+    P44f1eS4aOldProof proof={0};const PropagationPipeline *p=&owner.owner;
+    P44f1bWalk view={.p=p,.owner_guard=&owner,.records=records,.record_count=count,
+        .profile=P44F1E_PROFILE_ENSURES_CALLS,.trace_mode=trace_mode,.path=paths};
+    size_t markers=0;
+    if(ok)for(size_t i=0;i<paths[0].visit_count&&ok;++i) {
+        const P44f1bVisit *v=&paths[0].visits[i];const SolMirMaterialization *m=&p->concrete.materialization;
+        if(v->predicate||!v->pre_step||v->operation>=m->instruction_count||v->owner>=m->image_count)continue;
+        const SolMirMaterializedInstruction *in=&m->instructions[v->operation];
+        if(in->kind!=SOL_MIR_INST_DROP_IF_INITIALIZED||in->local>=m->local_count
+            ||m->locals[in->local].kind!=SOL_MIR_MATERIALIZED_LOCAL_PARAMETER
+            ||strcmp(p->ir.callables[m->images[v->owner].source_callable].name,"old_core"))continue;
+        ++markers;bool built=p44f1e_s4a_old_proof_raw(&view,v->owner,v->block,v->operation,&proof);
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,built,&ok);ok=ok&&built&&fenced;
+        if(ok) {P44f1bActions empty={0};ok=p44f1e_s4a_old_absence_guarded(&view,&proof,&proof,&empty);}
+    }
+    if(ok)ok=markers==1&&paths[0].captures==2&&paths[0].drops==2&&paths[0].activations==4
+        &&paths[0].max_active_depth==4&&paths[1].code==0&&paths[1].value==5
+        &&paths[1].captures==4&&paths[1].drops==4;
+    if(ok&&selected==3)ok=p44f1e_drop_event_proof_valid(&paths[0].drop_event)&&p44f1e_owner_fence(&owner);
+    FILE *buffer=tmpfile();if(buffer==NULL)ok=false;
+    if(ok) {
+        fputs("{\"schema\":\"p44f1e-old-clause-v1\",\"owner_closed\":true,\"consumer_calls\":{\"interpreter\":0,\"catalog\":0,\"build\":0,\"instance\":0,\"fault\":0},\"suffix\":",buffer);
+        p44f1e_json_string(buffer,p44f1e_s4a_old_suffixes[selected]);
+        fprintf(buffer,",\"trace_mode\":%u,\"legacy_s3_witness\":%s,\"proof\":{",trace_mode,selected==3?"true":"false");
+#define P44F1E_OLD_JSON(name_) fprintf(buffer,"\"" #name_ "\":%zu,",proof.name_);
+        P44F1E_OLD_IDS(P44F1E_OLD_JSON)
+#undef P44F1E_OLD_JSON
+        fprintf(buffer,"\"argument\":%" PRId64 ",\"snapshot_value\":%" PRId64 ",\"result_value\":%" PRId64 ",\"code\":%u}",
+            proof.argument,proof.snapshot_value,proof.result_value,(unsigned)proof.code);
+        ok=p44f1e_s4a_json_tables(buffer,p,records,count);
+        if(ok) {
+            SolWasmRepresentedLimits limits=sol_wasm_represented_default_limits();
+            int64_t arguments[8]={0,0,proof.argument,proof.argument,proof.argument};
+            size_t parents[8]={0,F1B_NONE,1,2,3},images[8]={0};
+            const char *names[4]={root,"old_core","helper","terminal"};
+            for(size_t i=0;i<paths[0].visit_count&&ok;++i) {
+                const P44f1bVisit *v=&paths[0].visits[i];
+                size_t image=v->predicate?p->concrete.operations.predicate_bodies[v->owner].instance:v->owner;
+                ok=v->activation>=1&&v->activation<=4&&image<p->concrete.materialization.image_count;
+                if(ok) {
+                    size_t callable=p->concrete.materialization.images[image].source_callable;
+                    ok=callable<p->ir.callable_count&&!strcmp(p->ir.callables[callable].name,names[v->activation-1]);
+                    images[v->activation]=image;
+                }
+            }
+            if(ok) {
+                fputs(",\"root_path\":",buffer);
+                p44f1e_s4a_json_path_rows(buffer,p,root,&limits,&paths[0],arguments,parents,images);
+                fputs(",\"launch_path\":",buffer);p44f1e_json_path(buffer,p,"launch",&limits,&paths[1]);
+                fputs("}\n",buffer);ok=!ferror(buffer);
+            }
+        }
+        bool fenced=p44f1e_owner_fence(&owner);ok=ok&&fenced;
+    }
+    bool closed=p44f1e_owner_close(&owner);free(records);free(paths);
+    if(ok&&closed) {
+        ok=fflush(buffer)==0&&fseek(buffer,0,SEEK_SET)==0;unsigned char bytes[4096];size_t n=0;
+        while(ok&&(n=fread(bytes,1,sizeof bytes,buffer))!=0)ok=fwrite(bytes,1,n,stdout)==n;
+        ok=ok&&!ferror(buffer)&&fflush(stdout)==0;
+    }
+    if(buffer!=NULL) {bool close_ok=fclose(buffer)==0;ok=ok&&close_ok;}
+    return ok&&closed?0:1;
+}
+
+static bool p44f1e_limit_trace(P44f1eCoreOwner *guard,const P44f1bPath *path,
+    const P44f1bSourceRecord *records,size_t record_count,const P44TraceSlot *slots,size_t count) {
+    F1B_REQUIRE(p44f1e_owner_use_allowed(guard));
+    if(!p44f1b_path_matches(path,slots,count))return false;
+    for(size_t i=0;i<count;++i) {
+        bool valid=false;
+        if(path->slot_kind[i]==P44F1B_SLOT_REFINEMENT_ROUTE)
+            valid=p44f1e_route_slot_authentic(guard,path,records,record_count,i,&slots[i]);
+        else {
+            valid=p44_trace_slots_authentic(&guard->owner,&slots[i],1,(int32_t)path->record,NULL);
+            bool fenced=p44f1e_owner_fence(guard);
+            if(!valid||!fenced)return false;
+            valid=p44f1b_cleanup_action_payload_authentic(&guard->owner,slots[i].action);
+        }
+        bool fenced=p44f1e_owner_fence(guard);
+        if(!valid||!fenced)return false;
+    }
+    return true;
+}
+
+static bool p44f1e_limit_trace_negatives(P44f1eCoreOwner *guard,const P44f1bPath *path,
+    const P44f1bSourceRecord *records,size_t record_count) {
+    F1B_REQUIRE(path->count>0&&path->count<64);
+    P44TraceSlot changed[64];
+    for(size_t i=0;i<path->count;++i) {
+        memcpy(changed,path->slots,path->count*sizeof *changed);
+        memmove(changed+i,changed+i+1,(path->count-i-1)*sizeof *changed);
+        F1B_REQUIRE(!p44f1e_limit_trace(guard,path,records,record_count,changed,path->count-1)
+            &&p44f1e_owner_use_allowed(guard));
+        memcpy(changed,path->slots,path->count*sizeof *changed);
+        memmove(changed+i+1,changed+i,(path->count-i)*sizeof *changed);
+        F1B_REQUIRE(!p44f1e_limit_trace(guard,path,records,record_count,changed,path->count+1)
+            &&p44f1e_owner_use_allowed(guard));
+        for(size_t field=0;field<3;++field) {
+            memcpy(changed,path->slots,path->count*sizeof *changed);
+            if(field==0)changed[i].action^=1;
+            if(field==1)changed[i].disposition^=1;
+            if(field==2)changed[i].record^=1;
+            F1B_REQUIRE(!p44f1e_limit_trace(guard,path,records,record_count,changed,path->count)
+                &&p44f1e_owner_use_allowed(guard));
+        }
+        if(path->slot_kind[i]==P44F1B_SLOT_REFINEMENT_ROUTE) {
+            memcpy(changed,path->slots,path->count*sizeof *changed);
+            changed[i].disposition^=UINT32_C(1)<<16;
+            F1B_REQUIRE(!p44f1e_limit_trace(guard,path,records,record_count,changed,path->count)
+                &&p44f1e_owner_use_allowed(guard));
+            changed[i].action=0;
+            F1B_REQUIRE(!p44f1e_limit_trace(guard,path,records,record_count,changed,path->count)
+                &&p44f1e_owner_use_allowed(guard));
+        }
+    }
+    if(path->count>1) {
+        memcpy(changed,path->slots,path->count*sizeof *changed);
+        size_t different=1;
+        while(different<path->count&&!memcmp(changed,changed+different,sizeof *changed))++different;
+        F1B_REQUIRE(different<path->count);
+        P44TraceSlot saved=changed[0];changed[0]=changed[different];changed[different]=saved;
+        F1B_REQUIRE(!p44f1e_limit_trace(guard,path,records,record_count,changed,path->count)
+            &&p44f1e_owner_use_allowed(guard));
+    }
+    return p44f1e_owner_fence(guard);
+}
+
+static bool p44f1e_limit_catalog(P44f1eCoreOwner *guard,const char *directory,
+    const SolWasmRepresentedLimits *limits) {
+    F1B_REQUIRE(p44f1e_owner_use_allowed(guard));
+    const PropagationPipeline *p=&guard->owner;
+    const SolMirMaterialization *m=&p->concrete.materialization;
+    const SolMirOperations *o=&p->concrete.operations;
+    SolWasmRepresentedBuildRequest request={&p->lowered,directory,limits};
+    SolWasmRepresentedTestCallCatalog summary={0},exact={0};
+    bool ok=true;
+    SolWasmRepresentedResult result=sol_wasm_represented_test_call_catalog(&request,NULL,0,&summary);
+    bool fenced=p44f1e_owner_finish_stage(guard,true,result==SOL_WASM_REPRESENTED_OK,&ok);
+    if(!ok||!fenced)return false;
+    F1B_REQUIRE(summary.calls==5&&summary.edges==5&&summary.has_cycle&&summary.longest_chain==0);
+    SolWasmRepresentedTestCallCatalogEntry entries[5]={{0}};
+    result=sol_wasm_represented_test_call_catalog(&request,entries,5,&exact);
+    fenced=p44f1e_owner_finish_stage(guard,true,result==SOL_WASM_REPRESENTED_OK,&ok);
+    if(!ok||!fenced)return false;
+    F1B_REQUIRE(exact.calls==5&&exact.edges==5&&exact.has_cycle&&exact.longest_chain==0);
+    size_t predicates=0,recursive=0;bool seen[5]={false};
+    for(size_t i=0;i<5;++i) {
+        const SolWasmRepresentedTestCallCatalogEntry *e=&entries[i];
+        F1B_REQUIRE(e->call<p->conventions.call_count);
+        const SolMirRuntimeCall *call=&p->conventions.calls[e->call];
+        F1B_REQUIRE(call->internal<p->concrete.linkage.callable_count
+            &&call->signature<p->conventions.signature_count
+            &&call->target_kind==SOL_MIR_RUNTIME_TARGET_DIRECT_INTERNAL
+            &&e->callee_callable==call->internal&&e->signature==call->signature
+            &&e->caller_block==call->block&&e->operand_count==1
+            &&e->result_class==SOL_MIR_RUNTIME_RESULT_VALUE);
+        size_t target=p->concrete.linkage.callables[call->internal].instance;
+        F1B_REQUIRE(target<m->image_count);
+        const char *callee=p->ir.callables[m->images[target].source_callable].name;
+        size_t row=F1B_NONE;
+        if(call->owner_kind==SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE) {
+            ++predicates;
+            F1B_REQUIRE(e->caller_image==F1B_NONE&&call->predicate<o->predicate_body_count);
+            const SolMirPredicateBody *body=&o->predicate_bodies[call->predicate];
+            F1B_REQUIRE(body->instance<m->image_count&&body->context<m->context_count
+                &&body->phase==SOL_CONTRACT_ENSURES&&!strcmp(callee,"helper"));
+            const SolMirPredicateTerminator *term=&o->predicate_blocks[call->block].terminator;
+            F1B_REQUIRE(term->kind==SOL_MIR_PREDICATE_TERM_INVOKE
+                &&e->result==term->result&&e->normal_edge==term->normal_edge
+                &&e->failure_edge==term->failure_edge);
+            size_t obligation=m->contexts[body->context].obligation;
+            F1B_REQUIRE(obligation<p->ir.obligation_count
+                &&!strcmp(p->ir.callables[m->images[body->instance].source_callable].name,"core"));
+            const SolIrExpression *source=&p->ir.expressions[p->ir.obligations[obligation].predicate];
+            F1B_REQUIRE(source->kind==SOL_IR_EXPR_CALL&&source->as.call.operands.count==1);
+            size_t arg=p->ir.operands[source->as.call.operands.offset].value;
+            row=p->ir.expressions[arg].kind==SOL_IR_EXPR_RESULT?3:4;
+            F1B_REQUIRE(row==3||p->ir.expressions[arg].kind==SOL_IR_EXPR_SNAPSHOT_READ);
+        } else {
+            F1B_REQUIRE(call->owner_kind==SOL_MIR_RUNTIME_CALL_OWNER_IMAGE
+                &&call->image<m->image_count&&e->caller_image==call->image);
+            const char *caller=p->ir.callables[m->images[call->image].source_callable].name;
+            const SolMirMaterializedTerminator *term=&m->blocks[call->block].terminator;
+            F1B_REQUIRE(term->kind==SOL_MIR_TERM_INVOKE&&e->result==term->result
+                &&e->normal_edge==term->normal_edge&&e->failure_edge==term->failure_edge);
+            if(!strcmp(caller,"launch")&&!strcmp(callee,"core"))row=0;
+            if(!strcmp(caller,"helper")&&!strcmp(callee,"helper")) {row=1;++recursive;F1B_REQUIRE(e->cyclic);}
+            if(!strcmp(caller,"helper")&&!strcmp(callee,"terminal"))row=2;
+        }
+        F1B_REQUIRE(row<5&&!seen[row]);seen[row]=true;
+    }
+    F1B_REQUIRE(predicates==2&&recursive==1);
+    bool typed=p44f1e_s4a_catalog_rows(guard,entries,5,NULL);
+    bool final_fence=p44f1e_owner_finish_stage(guard,true,typed,&ok);
+    return typed&&final_fence&&ok;
+}
+
+static bool p44f1e_limit_case(P44f1eLimitCase selected) {
+    if(selected>=P44F1E_LIMIT_COUNT)return false;
+    const char *directory=SOL_TEST_SOURCE_DIR "/tests/conformance/p44f1e_ensures_calls";
+    sol_wasm_represented_test_callback_writeback_probe(false);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(true);
+    sol_wasm_represented_test_p44_refinement_trace_probe(true);
+    P44f1eCoreOwner owner={0};SolMirProgramRoot roots[2];size_t root_count=0;
+    P44f1eSourceBounds *bounds=calloc(1,sizeof *bounds);
+    P44f1bSourceRecord *records=NULL;size_t record_count=0;
+    bool ok=bounds!=NULL&&p44f1e_owner_prepare_roots(&owner,directory,NULL,false,roots,&root_count);
+    if(ok) {
+        bool source=root_count==1&&p44f1b_source_records(&owner.owner,directory,&records,&record_count);
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,source,&ok);ok=ok&&source&&fenced;
+    }
+    if(ok)ok=p44f1e_bounds_source_prepare(&owner,records,record_count,bounds);
+    const P44f1bPath *path=bounds==NULL?NULL:&bounds->paths[selected];
+    const SolWasmRepresentedLimits *limits=bounds==NULL?NULL:&bounds->limits[selected];
+    /* Source/P2 replay of ALL nine paths has finished before the first consumer. */
+    if(ok) {
+        SolIrCallableId launch=SOL_IR_NONE;
+        bool found=p44f1b_find_source_function(&owner.owner,"launch",true,&launch,NULL);
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,found,&ok);ok=ok&&found&&fenced;
+        if(ok) {
+            SolInterpreterResult interpreted;sol_interpreter_result_init(&interpreted);
+            bool returned=sol_interpret(&(SolInterpreterRequest){.ir=&owner.owner.ir,.callable=launch,
+                .definition=SOL_IR_NONE,.contracts=SOL_INTERPRETER_CONTRACTS_CHECK,
+                .limits={100000,64,100000,1048576,10000}},&interpreted);
+            bool success=returned&&interpreted.value.kind==SOL_INTERPRETER_VALUE_INT64&&interpreted.value.as.integer==5;
+            fenced=p44f1e_owner_finish_stage(&owner,true,success,&ok);ok=ok&&success&&fenced;
+            sol_interpreter_result_free(&interpreted);
+        }
+    }
+    if(ok)ok=p44f1e_limit_catalog(&owner,directory,limits);
+    SolWasmRepresentedOutput output;sol_wasm_represented_output_init(&output);
+    SolDiagnostics diagnostics;sol_diagnostics_init(&diagnostics);
+    if(ok) {
+        SolWasmRepresentedResult built=sol_wasm_represented_build(
+            &(SolWasmRepresentedBuildRequest){&owner.owner.lowered,directory,limits},&output,&diagnostics);
+        bool success=built==SOL_WASM_REPRESENTED_OK&&diagnostics.count==0;
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,success,&ok);ok=ok&&success&&fenced;
+    }
+    if(ok)ok=sol_wasm_represented_validate(&output.bytes)==SOL_WASM_REPRESENTED_OK
+        &&p44f1b_provenance_matches_source(&output.bytes,&output.usage,records,record_count);
+    if(ok) {
+        bool valid=sol_mir_runtime_lowered_program_validate(&owner.owner.lowered,NULL);
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,valid,&ok);ok=ok&&valid&&fenced;
+    }
+    if(ok) {
+        bool valid=sol_mir_runtime_cleanup_validate(&owner.owner.cleanup,NULL);
+        bool fenced=p44f1e_owner_finish_stage(&owner,true,valid,&ok);ok=ok&&valid&&fenced;
+    }
+    WasmInstance instance={0};char entry[256];
+    if(ok)ok=entry_symbol(&output.bytes,entry,sizeof entry)&&wasm_instance_open(&output.bytes,entry,&instance);
+    P44TraceSlot first[64],actual[64];size_t first_count=0,actual_count=0;
+    for(size_t i=0;ok&&i<2;++i) {
+        int64_t value=0;int32_t code=0,site=0;
+        ok=wasm_instance_observe(&instance,&value,&code,&site)
+            &&value==path->value&&code==(int32_t)path->code&&site==(int32_t)path->record
+            &&p44f1b_no_failure_detail(&instance)
+            &&p44f1b_trace_read(&instance,actual,&actual_count);
+        if(ok)ok=p44f1e_limit_trace(&owner,path,records,record_count,actual,actual_count);
+        if(ok&&i==0) {
+            memcpy(first,actual,actual_count*sizeof *first);first_count=actual_count;
+            ok=p44f1e_limit_trace_negatives(&owner,path,records,record_count);
+        } else if(ok)ok=p44f1b_trace_equal(first,first_count,actual,actual_count);
+    }
+    wasm_instance_close(&instance);
+    sol_wasm_represented_test_callback_writeback_probe(false);
+    sol_wasm_represented_test_p44_cleanup_trace_probe(false);
+    sol_wasm_represented_test_p44_refinement_trace_probe(false);
+    bool closed=p44f1e_owner_close(&owner);
+    if(ok&&closed)fprintf(stderr,
+        "P44F1E_S4A_LIMIT name=%s n=%zu m=%zu S=%zu depth=%" PRIu32 " steps=%" PRIu64 " code=%u record=%zu source_frozen=1 repeated=1 no_detail=1 owner_closed=1\n",
+        p44f1e_limit_names[selected],bounds->n,bounds->m,bounds->S,limits->max_call_depth,
+        limits->max_steps,(unsigned)path->code,path->record);
+    free(records);free(bounds);sol_diagnostics_free(&diagnostics);sol_wasm_represented_output_free(&output);
+    return ok&&closed;
 }
 
 static bool p44f1d_definition_named(const SolIr *ir,const char *name,
@@ -42580,6 +44224,28 @@ static int p44f1e_dispatch(const char *selected,bool list) {
     P44F1E_CASE("represented.ensures-calls.reject.target-dead-text",p44f1e_reject_case(7));
     P44F1E_CASE("represented.ensures-calls.discovery.plain",p44f1e_allocation_discovery(false));
     P44F1E_CASE("represented.ensures-calls.discovery.traced",p44f1e_allocation_discovery(true));
+    P44F1E_CASE("represented.ensures-calls.launch.plain",p44f1e_root_case(0,false));
+    P44F1E_CASE("represented.ensures-calls.caller_requires.plain",p44f1e_root_case(1,false));
+    P44F1E_CASE("represented.ensures-calls.caller_requires.traced",p44f1e_root_case(1,true));
+    P44F1E_CASE("represented.ensures-calls.caller_false.plain",p44f1e_root_case(2,false));
+    P44F1E_CASE("represented.ensures-calls.callee_requires.plain",p44f1e_root_case(3,false));
+    P44F1E_CASE("represented.ensures-calls.callee_requires.traced",p44f1e_root_case(3,true));
+    P44F1E_CASE("represented.ensures-calls.callee_arithmetic.plain",p44f1e_root_case(4,false));
+    P44F1E_CASE("represented.ensures-calls.callee_ensures.plain",p44f1e_root_case(5,false));
+    P44F1E_CASE("represented.ensures-calls.callee_ensures.traced",p44f1e_root_case(5,true));
+    P44F1E_CASE("represented.ensures-calls.old_false.plain",p44f1e_root_case(6,false));
+    P44F1E_CASE("represented.ensures-calls.old_false.traced",p44f1e_root_case(6,true));
+    P44F1E_CASE("represented.ensures-calls.old_callee_arithmetic.plain",p44f1e_root_case(7,false));
+    P44F1E_CASE("represented.ensures-calls.old_callee_arithmetic.traced",p44f1e_root_case(7,true));
+    P44F1E_CASE("represented.ensures-calls.depth.predicate-2",p44f1e_limit_case(P44F1E_DEPTH_PREDICATE_2));
+    P44F1E_CASE("represented.ensures-calls.depth.ordinary-3",p44f1e_limit_case(P44F1E_DEPTH_ORDINARY_3));
+    P44F1E_CASE("represented.ensures-calls.depth.success-5",p44f1e_limit_case(P44F1E_DEPTH_SUCCESS_5));
+    P44F1E_CASE("represented.ensures-calls.step.n-depth2",p44f1e_limit_case(P44F1E_STEP_N_DEPTH_2));
+    P44F1E_CASE("represented.ensures-calls.step.n-plus1-depth2",p44f1e_limit_case(P44F1E_STEP_N_PLUS_1_DEPTH_2));
+    P44F1E_CASE("represented.ensures-calls.step.m-depth3",p44f1e_limit_case(P44F1E_STEP_M_DEPTH_3));
+    P44F1E_CASE("represented.ensures-calls.step.m-plus1-depth3",p44f1e_limit_case(P44F1E_STEP_M_PLUS_1_DEPTH_3));
+    P44F1E_CASE("represented.ensures-calls.step.S",p44f1e_limit_case(P44F1E_STEP_S));
+    P44F1E_CASE("represented.ensures-calls.step.S-minus1",p44f1e_limit_case(P44F1E_STEP_S_MINUS_1));
 #undef P44F1E_CASE
     for(size_t profile=0;profile<2;++profile) {
         RepresentedFault sweep=profile==0?FAULT_ENSURES_CALL_PLAIN
@@ -42888,6 +44554,17 @@ static void execute_runner(const RepresentedRunner *runner, size_t first, size_t
 }
 
 int main(int argc, char **argv) {
+    for(int i=1;i<argc;++i)if(!strcmp(argv[i],"--p44f1e-source-old-clause")) {
+        if(argc!=3||i!=1||getenv("SOL_P44E_FOCUS"))return 2;
+        for(size_t j=0;j<4;++j)if(!strcmp(argv[2],p44f1e_s4a_old_suffixes[j]))
+            return p44f1e_s4a_old_diagnostic(j);
+        return 2;
+    }
+    /* Scan before every selector, including the reverse-order mixed forms. */
+    for(int i=1;i<argc;++i)if(!strcmp(argv[i],"--p44f1e-source-bounds")) {
+        if(argc!=2||i!=1||getenv("SOL_P44E_FOCUS"))return 2;
+        return p44f1e_source_bounds_diagnostic();
+    }
     if(argc>=2&&(!strcmp(argv[1],"--list-p44f1e-cases")
         ||!strcmp(argv[1],"--p44f1e-case"))) {
         if(getenv("SOL_P44E_FOCUS"))return 2;

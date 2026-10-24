@@ -2,9 +2,13 @@
 
 <a id="execution-cursor"></a>
 
-This list preserves the project backlog and status checkpoints; it is not the live
-S3 execution cursor. The ledger below is the historical October 21, 2026 checkpoint; the
-sole live S3 cursor is [H/execution-cursor.md](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md).
+This list preserves the project backlog and dated status checkpoints; it is not a
+live execution cursor. The sole project cursor is
+[H/project-execution-cursor.md](../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md).
+The [old S3 cursor](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
+is a completed checkpoint, not current authority. The October 24 record below
+supersedes older status: S3 is published/remote-verified; S4a is technically
+accepted, publication PENDING. The October 21 ledger remains history.
 The foundation was audited September 9, 2026 against baseline `6ec4ba9`; the
 checkpoint was refreshed October 21, 2026 after verified S2 publication and the
 user-authorized S3 recovery decision. Earlier S1 setup, S2 pre-acceptance, and
@@ -132,7 +136,36 @@ Publication did not refresh those pins or timings. See the [f1e interim handoff]
 - One coordinator maintains the external sole execution cursor; parallel tracks do
   not create competing priority lists.
 
-## S3 accepted technical evidence — October 23, 2026; publication PENDING
+## S4a accepted evidence — October 24, 2026; publication PENDING
+
+S3 is published at `eb1aeb276977ab940020307b52914a2f9a8948db`, with push and
+remote-master verification complete in the
+[publication receipt](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/s3-publication-receipt.md).
+The [S4a independent review](../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4a/old-clause-correction/evidence-review.md)
+accepts all **26×2 obligations: 12 original-context ON case carries +40 fresh
+current-source identities (14 ON +26 SAN)**, plus **four separate W/X discovery
+witnesses**, not extra S4a keys or new S3 faults. Current accepted test SHA256 is
+`355f3ed5759f4cbfd73c1979bcd1a2208f32d7cb8dbc2f70c67d7afda5ed5fa8`.
+S4a technical acceptance is not publication approval: docs/exact five-file
+staged-tree review, Astra readiness and coordinator commit/push/remote verification
+remain pending. No rebuild, repin or runtime rerun is needed for this docs carry.
+
+The **633 E keys (32 nonfault +601 faults)** are static registration evidence,
+not current metadata CLI/default runtime or full-suite acceptance. Source-specific
+S2/S3 carry uses the isolated false-default walker branch plus actual discovery;
+historical S3's 1,202 identities /525 FINALs /three no-FINAL leaves are not fresh
+S3 executions. See the [handoff](docs/p4.4f1e-handoff.md#s4a-accepted-evidence)
+for source-bounds, failure-history and carry limits, and the
+[sole S4 evidence index](../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/evidence-index.json)
+for navigation, not authority. S4b's 18 keys are next only after verified S4a
+publication; S4c's three resources/metadata, S4d compatibility and S5 remain pending.
+R-AUTH/held resealed ±1 remain OPEN; speed UNMET; broad P4/P4.4/full-f1e and
+leak/platform/full-suite acceptance are not claimed; host/E6/P4.5/P5 stay deferred.
+
+## Historical S3 accepted evidence — October 23, 2026; pre-push checkpoint
+
+The publication-PENDING statements in this section describe October 23 only;
+the October 24 publication receipt and S4a record above supersede that status.
 
 The [independent final1202 review](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/s3-final1202-review.md)
 accepts C3–C8 and permits docs-only publication carry. The exact disjoint union is
@@ -150,8 +183,8 @@ links the accepted final-integrity/capture receipts; it grants no authority.
 Actual source/build/environment attribution and evidence limits are in the
 [handoff](docs/p4.4f1e-handoff.md#s3-accepted-evidence). Test source remains
 `dd700c09b8fe4da69967e1147c2078cf71c5f8d3ae0029256306335289e634bd`.
-This dated carry is not another cursor: only [H/execution-cursor.md](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
-owns the active step. No leak-freedom, full-suite, speed, platform, broad P4.4 or
+This dated carry is not another cursor: [H/execution-cursor.md](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
+is now the completed S3 checkpoint. No leak-freedom, full-suite, speed, platform, broad P4.4 or
 full-f1e acceptance follows; R-AUTH and held resealed ±1 debt remain open.
 
 ## Test-Suite Speed and Progress Backlog
@@ -521,7 +554,7 @@ P3 completes static runtime lowering but defines no executor, physical ABI, Wasm
 adapter, allocator implementation, CLI/build artifact, or tokens. The P3.3 policy
 retains exact inherited P3.1 sites and adds supplemental sites only for uncovered
 allocation/resource producers. P3.W1 remains unperformed historical/optional
-proposed work and non-cursor; it does not replace the external S3 execution cursor.
+proposed work and non-cursor; it does not replace the external project execution cursor.
 The earlier S2 publication transaction is complete at its own pins.
 
 ### P4 - WebAssembly Backend and Host Adapter
@@ -642,7 +675,7 @@ receipt or prior FAIL was repaired or relabeled. Historical ON9/SAN4 focused cou
 plus nine new PASSes per mode produce cumulative ON18/SAN13 accounting, not 18/13
 all-PASS unique cases. CORE build hashes belong only to that accepted checkpoint.
 
-At the pre-final-S2 snapshot, historical X at test `6e10fdfe…` remained UNKNOWN at active 3.004135583s / outer
+At the October 21, 2026 pre-final-S2 snapshot, historical X at test `6e10fdfe…` remained UNKNOWN at active 3.004135583s / outer
 3.079325s, without same-source retry or deadline increase. Historical W at test
 `46e16a9d…` / ON binary `f8ee4a13…` remains a PASS at 2.405744s / 2.468456s with
 two owners and 257 provisional rows at that old source; it is not a carry or input
@@ -714,7 +747,7 @@ The following are status handoffs, not competing execution cursors:
 
 | Lane / owner | Ready work and exclusive scope | Acceptance handoff |
 | --- | --- | --- |
-| P4.4f1d published / P4.4f1e | CORE/S1/S2 remain complete at their own pins, S1/S2 published. S3 technical evidence is independently accepted: 1,202 identities /525 real FINALs /3 no-FINAL leaves; publication PENDING. S4/S5 await verified S3 publication. | This table is not a cursor; consult the external sole cursor linked above and [f1e handoff](docs/p4.4f1e-handoff.md#s3-accepted-evidence) for evidence and publication limits. |
+| P4.4f1d published / P4.4f1e — October 24, 2026 checkpoint | CORE/S1/S2 at their pins; S3 published/remote-verified at `eb1aeb2…`. S4a technically accepted: 52 identities (12 original carries +40 fresh), four separate discovery witnesses; S4a publication PENDING. S4b18/S4c3/S4d/S5 pending. | This table is not a cursor; consult the external sole project cursor linked above and [f1e handoff](docs/p4.4f1e-handoff.md#s4a-accepted-evidence) for evidence/publication limits. |
 | R-AUTH / separate Sol 6.1 High brief | Independent inherited P3.6 resource-authentication defect and preserved six-path resource WIP; coverage extension is pending and unaccepted. | Specify independent exactness reconstruction and truthful coverage; keep held `build_work`/`build_scratch_bytes` ±1 assertions unresolved until evidence exists. |
 | P4.4f1a integration / coordinator | Bounded metadata checkpoint committed as `5c9c056`, fast-forwarded to `master`, and pushed to `origin/master`; existing default selectors and full registrations remain unchanged. | Integration complete. This publication update does not refresh or extend the accepted test receipts. |
 | P4.5/P5 and host | Dependency-deferred; f1c adds no host adapter, E6 execution, artifact writer, or `sol build` work. | Requires its own approved interface and task briefs. |
@@ -910,7 +943,7 @@ Each compiler increment should:
 
 Roadmap and experiment updates should also:
 
-- keep the external S3 cursor authoritative and documentation examples consistent
+- keep the external project cursor authoritative and documentation examples consistent
   with the implemented CLI and semantics; label snapshot dates and historical handoffs;
 - distinguish implemented behavior, runtime checks, static acceptance, proofs, and
   experimental evidence; record omissions, blockers, and negative results explicitly;
