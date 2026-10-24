@@ -274,9 +274,10 @@ status is recorded below and in the [interim handoff](../docs/p4.4f1e-handoff.md
 
 **Historical status at this S1 prepublication snapshot (October 21, 2026):** The
 statements below record the state before S1 publication and before S2 evidence
-acceptance; they do not describe the current cursor. S1 is now published, and S2
-technical inventory acceptance is complete with publication as the only active item.
-See the current [S2 handoff](../docs/p4.4f1e-handoff.md) and [execution cursor](../TODO.md#execution-cursor).
+acceptance; they do not describe the current cursor. S1/S2 are now published; S3
+technical evidence is accepted with publication PENDING.
+See the [accepted handoff](../docs/p4.4f1e-handoff.md#s3-accepted-evidence) and
+[external sole cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md).
 Historical receipts, timings, pins, failures and errata below remain unchanged.
 
 The bounded f1e CORE source and its nine-key-per-mode validation are independently
@@ -568,12 +569,12 @@ snapshot, S1 publication was pending and S2 was blocked. S1 has since been publi
 the current cursor and S2 technical-acceptance status follow. The original seven-path WIP and
 external preservation receipt remain untouched.
 
-## P4.4f1e S2 — technical inventory accepted; publication pending
+## P4.4f1e S2 — technical inventory accepted (prepublication snapshot)
 
-S1 is COMPLETE and published as
+At the recorded S2 snapshot, S1 was COMPLETE and published as
 `e93d375e2e9f59d9a819ad470770e741a1511f4a`; `origin/master` was verified at that
 commit. Independent final evidence review accepts S2 technical inventory freeze.
-**Only S2 publication is active:** documentation/staged-tree review and Astra
+At that snapshot, **only S2 publication was active:** documentation/staged-tree review and Astra
 alignment precede the coordinator's commit, push, and remote verification. S2 has not
 yet been committed or pushed. S3 is blocked on verified S2 publication and helper
 review; S4 is blocked on S3; S5 is blocked on S1–S4. See the [sole cursor](../TODO.md#execution-cursor)
@@ -626,3 +627,101 @@ not accepted/published. SAN used ASan/UBSan halt-on-error with leak detection di
 no leak-checking claim is made. The original 950/49a/cdae S1 timing, FAIL receipts,
 historical cutoff, old-source provisional W observation, and prior non-approvals remain
 unchanged and are not replaced by candidate or S2 timings.
+
+## Historical P4.4f1e S3 test-source proposal — before recovery decision
+
+At the pre-recovery snapshot, S1 and S2 were complete and published (S1 `e93d375e2e9f59d9a819ad470770e741a1511f4a`,
+S2 `b1f5e540f9b76ee2cc5d11589de09c6c319612c5`; S2 push and remote verification are
+complete). The S3 test implementation and appended registrations were proposed, not
+accepted. No build, selector, CLI, or runtime fault was launched for that proposal;
+its proposed 1,202 ON/SAN receipts were not claimed. The S2 inventory remains frozen
+at W=257 and X=344 with its accepted actual-line digests; source-classified would-fail
+paths are not injected fault evidence. This historical source proposal is not the
+current execution cursor or the new-baseline qualifier plan.
+
+The proposed addition was 257 plain plus 344 traced registered
+fault IDs, physically injected at the same ordinal `j`; it adds one contracts control
+and no runner/shard. The proposed static expansion is 611 E keys, 78 unique controls,
+119 expanded control tuples, 5,483 fault tuples, and 5,602 ordered tuples. Those
+counts remain unaccepted until the complete source expansion and old-list/manifest
+byte-preservation review. The four C pilots are accepted historical observations
+under their old environment, not qualifiers for a new baseline. See the current
+[sole cursor](../TODO.md#execution-cursor) and [f1e handoff](../docs/p4.4f1e-handoff.md).
+
+## Historical P4.4f1e recovery checkpoint — October 21, 2026 (R2 then active)
+
+The absent-snapshot, zero-qualifier and unlaunched-remainder statements below are
+historical and superseded for status by the accepted S3 record that follows.
+
+CORE, S1, and S2 are complete at their own pins; S1 and S2 are published. S3 is IN
+PROGRESS as a container, and R2 reviewed baseline/pilot requalification is its sole
+ACTIVE leaf. R1 repository persistence/review is COMPLETED following independent
+approval of the selected decision and five-step plan; Astra's exit steering is
+READY_R2.
+The bounded diagnosis found that original complete environment values were not
+retained; the specific later drift cause is UNKNOWN. The user authorized preparing a
+new actual captured baseline without guessing or reconstructing old values. Four C
+pilots remain historical accepted observations only. There are zero new-baseline
+qualifiers and zero of the 1,198 remaining cases launched. The actual private
+snapshot and manifest do not exist, and environment hashes remain null. No gate,
+freeze, coordinator execution authority, build, configure, runtime, or S3 publication
+has occurred.
+
+Source/controller/freezer/capture preparation is
+`APPROVED_PENDING_ACTUAL_CAPTURE`, pending actual capture. After capture, independent
+final controller/pin-completion review remains required; this is not R2 completion or
+execution authority. Source
+`tests/wasm_represented_tests.c` at
+`dd700c09b8fe4da69967e1147c2078cf71c5f8d3ae0029256306335289e634bd` is already
+separately approved; source approval is not new-baseline runtime acceptance. The
+pinned B capture utility is ready for a later one-shot actual capture. R2 will reuse
+the existing ON/SAN binaries with zero new configure/builds; only after actual
+capture, independent final controller/pin-completion review, gate, coordinator
+authority, and freeze may it
+run exactly four new-context qualifiers in two bounded windows, then pause for
+independent evidence review. R3 is blocked on accepted R2 evidence and separate
+continuation authority; R4/S4 and R5/S5 are sequentially blocked thereafter. Both original halts,
+the failed D draft, prior receipts, and the preserved mixed WIP remain unchanged.
+
+## P4.4f1e S3 — accepted fault evidence; publication PENDING (October 23, 2026)
+
+The [independent final1202 review](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/s3-final1202-review.md)
+accepts C3–C8 and permits docs-only publication carry: **1,058 original-context
+references +144 new SAN-X200..342,344 cases =1,202 physical identities, 601/mode**,
+covering ON/SAN × (W1..257, X1..344). There are **525 real FINALs (381+144), not
+1,202 FINALs**. SAN-W-0167, SAN-W-0229 and SAN-X-0199 are three distinct honest
+`CASE_LEVEL_REFERENCE_CARRY` leaves without FINALs. Their original seven-item
+missing-fact lists, historical failed/UNKNOWN exits and T attempt41
+`UNKNOWN_NO_CHILD` remain unchanged; acceptance does not repair original
+frontier/timing/closing/FINAL facts. See the [handoff](../docs/p4.4f1e-handoff.md#s3-accepted-evidence)
+for those pointers and actual current source/build/environment attribution.
+
+The accepted execution uses unchanged test source
+`dd700c09b8fe4da69967e1147c2078cf71c5f8d3ae0029256306335289e634bd`, actual protected
+recovery environment and reused ON/SAN outputs, not S2's initial maps or fresh
+builds. The [sole index](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/s3-evidence-index.json)
+links successful Q final integrity and sealed, durable waited capture with
+controller0/wrapper0 and coordinator-preserved normal outer completion. Prior
+original A/P exit/closing remain missing/UNKNOWN, not replaced by Q success.
+
+Per-ordinal failed-prefix/sibling/diagnostic/empty-output/Usage15, immediate unarmed
+retry/full records/module `memcmp`/Usage, witnesses, validators, seven-renderer
+fences/sticky preservation and real close are **source-backed success-gating
+assertions joined to actual raw protocols/receipts**, not retained full
+owner/module/record blobs or a syscall trace. S2 cross-mode module identity remains
+length+SHA256 only. Source/static expansion is 611 E keys, 78 unique controls /119
+expanded controls /5,483 fault tuples /5,602 ordered tuples /24 runners /50 shards
+/31 sweeps; these registrations and shared selected/default mapping are source
+facts, not fresh CLI/list/manifest/default-run certification or execution of all
+old faults. **CLI/default/metadata checks, tests, builds, qualifier and runtime
+were NOT_RUN for this docs carry.** No replay or rerun is needed for publication.
+
+Caps remain ON active≤3/full+distinct outer<5, SAN active≤27/full+distinct outer<30,
+parent<120/reserve10, retaining historical timing qualifications. SAN uses
+`ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`, `UBSAN_OPTIONS=halt_on_error=1`;
+leak detection disabled, no leak-freedom claim. No full-suite/platform/speed,
+broad P4.4/full-f1e or R-AUTH/held resealed ±1 acceptance follows. S3 technical
+acceptance is complete; publication stays **PENDING** exact staged-tree review and
+coordinator commit/push/remote verification. S4/S5 remain blocked until verified
+publication and separate assignments. Only the [external sole cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
+owns active execution status; these are dated evidence checkpoints.

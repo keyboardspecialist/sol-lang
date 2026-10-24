@@ -1,11 +1,15 @@
 # Sol Compiler TODO
 
-This list is the sole live authority for work status and execution order. The
-foundation was audited September 9, 2026 against baseline `6ec4ba9`; live status
-and the cursor were refreshed October 21, 2026 after S2 technical acceptance.
-An earlier S1 setup interruption and earlier S2 pre-acceptance status are retained
-below as history. S2 technical inventory acceptance is complete; only its
-publication transaction is active.
+<a id="execution-cursor"></a>
+
+This list preserves the project backlog and status checkpoints; it is not the live
+S3 execution cursor. The ledger below is the historical October 21, 2026 checkpoint; the
+sole live S3 cursor is [H/execution-cursor.md](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md).
+The foundation was audited September 9, 2026 against baseline `6ec4ba9`; the
+checkpoint was refreshed October 21, 2026 after verified S2 publication and the
+user-authorized S3 recovery decision. Earlier S1 setup, S2 pre-acceptance, and
+pre-recovery S3 source-review statuses below are retained as history. CORE, S1,
+and S2 are complete at their own pins; S1 and S2 are published.
 The broader language and
 toolchain phases remain documented in the [README](README.md#roadmap).
 [Project analysis](docs/project-analysis.md) is an analysis snapshot;
@@ -14,14 +18,21 @@ with a current-worktree addendum, not a competing queue. Impact and complexity
 use a 1-5 scale, where 5 is foundational or architectural.
 Ordering accounts for dependencies rather than only the impact/complexity ratio.
 
-## Execution Cursor
+## Historical Execution Cursor — October 21, 2026
 
-- **Exactly one ACTIVE item: S2 publication only — commit, push, and verify the
-  accepted technical checkpoint.** CORE is complete at its own pins (9 ON + 9 SAN
-  only); S1 is complete and published as
+This entire R2 ledger is superseded for status by the October 23 accepted-evidence
+record below; its zero-qualifier, absent-capture and remaining-case statements are
+historical, not current execution instructions or allowances.
+
+- **Exactly one ACTIVE leaf: R2 reviewed baseline and pilot requalification.** R1
+  repository persistence and review is COMPLETED: the selected new-baseline decision
+  and five-step plan are persisted, independently approved, and Astra's exit steering
+  is READY_R2. S3 is **IN PROGRESS as a container**, not a second ACTIVE
+  item. CORE is complete at its own pins (9 ON + 9 SAN only); S1 is complete and published as
   `e93d375e2e9f59d9a819ad470770e741a1511f4a` (`Complete S1 native ensures-call
-  discovery checkpoint`), with `origin/master` verified there. Independent final
-  review accepts the S2 inventory freeze: `N_W=257`, `N_X=344`, `M=601` (arithmetic
+  discovery checkpoint`). S2 is published as
+  `b1f5e540f9b76ee2cc5d11589de09c6c319612c5`; push and remote verification are complete.
+  Independent final review accepts the S2 inventory freeze: `N_W=257`, `N_X=344`, `M=601` (arithmetic
   only), W actual-line digest
   `defb27c27204ea4ddb0d51ccc088d202a3ed94ae4627213057868cea209d1c1d`, and X
   actual-line digest
@@ -35,29 +46,34 @@ Ordering accounts for dependencies rather than only the impact/complexity ratio.
   equality, all 15 `Usage` fields, witnesses, four seven-render sets, and both closes.
   Cross-mode module identity is length+SHA-256 (raw module blobs were not retained);
   row digests use actual source lines without normalization. S2 technical acceptance
-  is CLOSED; only publication remains. Current source lists ten E keys (eight CORE,
+  and publication are COMPLETE at `b1f5e540f9b76ee2cc5d11589de09c6c319612c5`.
+  At the S2 checkpoint, source listed ten E keys (eight CORE,
   W, X); 77 unique controls /118 expanded controls /4,882 old fault tuples /5,000
   ordered tuples /24 runners /50 shards /29 sweeps remain unchanged. No default,
-  metadata/list CLI, sweep, or fault injection was run for S2. S3 helpers and all
-  W1..257/X1..344 fault ordinals in both modes remain unaccepted and unlaunched;
-  source-classified would-fail paths are not injected failures. The original
-  seven-path WIP remains preserved and untouched. See the [interim handoff](docs/p4.4f1e-handoff.md)
-  and external `s2-inventories/final-evidence-review.md`.
+  metadata/list CLI, sweep, or fault injection was run for S2. Four accepted C pilots
+  remain historical observations under their original environment; they are not new-
+  baseline qualifiers. No new-baseline pilot or remaining case has launched, and the
+  new qualifying count is zero. The original seven-path WIP remains preserved and
+  untouched. See the [five-step recovery plan and current handoff](docs/p4.4f1e-handoff.md).
 
 | State | Bounded step | Exit / publication boundary |
 | --- | --- | --- |
 | COMPLETED | CORE at its own pins | Test `695e01…`; 9 ON + 9 SAN accepted, E1 closed for these observations only. Reopen only if an actual changed dependency affects CORE; this is not acceptance of the dirty combined tree. |
-| COMPLETED | S1 — published native ensures-call discovery checkpoint | Commit `e93d375e2e9f59d9a819ad470770e741a1511f4a`; `origin/master` verified at the same commit. This closes S1 publication only, not the full f1e milestone. |
-| **ACTIVE — publication only** | **S2 — accepted inventory freeze; commit/push/verify** | Technical acceptance is complete: `N_W=257`, `N_X=344`, `M=601` arithmetic only, both actual-line digests reviewed, and four fresh assertion-pinned ON/SAN repeats accepted against the initial inventories. Publish this accepted milestone, then verify the actual commit/tree/remote. |
-| BLOCKED on verified S2 push and helper brief/review | S3 — review helpers, then every new fault ordinal | No helper or injection is accepted/launched. After S2 publication, review complete helpers/mappings first; preserve the per-ordinal baseline/injection/fence/failure/retry/witness/close chain, then accept every W/X ordinal in ON and SAN across finite batches with no missing/duplicate identities. |
-| BLOCKED on S3 | S4 — remaining behavior/compatibility | Future small groups only: 4a routes/bounds; 4b rejection/canonical/mutations; 4c resources/metadata; 4d compatibility. Each group needs exact frozen keys, its source-specific exit, and independent evidence review; no parallel activation. |
-| BLOCKED on S1–S4 | S5 — integration/final review/docs/publication | Reconcile final pins/evidence and run only affected integration checks; independent final review accepts the scope. Commit/push each independently accepted **and verified publishable** milestone under standing direction; S5 does not hold earlier publishable work. |
+| COMPLETED | S1 — published native ensures-call discovery checkpoint | Commit `e93d375e2e9f59d9a819ad470770e741a1511f4a`; S1 publication is complete, not full f1e acceptance. |
+| COMPLETED | S2 — accepted inventory freeze, published | Commit `b1f5e540f9b76ee2cc5d11589de09c6c319612c5`; push and remote verification complete. Technical acceptance remains at its own pins. |
+| COMPLETED | R1 — persist/review recovery decision | The selected actual-new-baseline route and five-step plan are persisted in the four named documents and independently approved; Astra's exit steering is READY_R2. This is not S3 technical acceptance or publication. |
+| **ACTIVE — sole leaf** | **R2 — reviewed baseline and four fresh qualifiers** | Source/controller/freezer/capture preparation is `APPROVED_PENDING_ACTUAL_CAPTURE`. No actual private snapshot or manifest exists; environment hashes remain null. After actual capture, independent final controller/pin-completion review, gate, coordinator execution authority, freeze, four new-context cases in two windows, and independent evidence review remain ahead. Zero configure/builds; reuse verified old outputs. Source approval and preparation approval are not new-baseline execution acceptance. |
+| BLOCKED on R2 acceptance and separate continuation authority | R3 — remaining S3 union and publication | Run the same 1,198 unconsumed cases once in 232 windows; independently reconcile exactly 1,202 new-baseline receipts (601/mode), then docs-only carry review and exact staged-tree publication review. |
+| BLOCKED on published S3 | R4 = S4 — behavior/compatibility groups | Sequential bounded groups 4a routes/bounds, 4b rejection/canonical/mutations, 4c resources/metadata, 4d compatibility; each needs its own brief, finite budget, review, and publication boundary. |
+| BLOCKED on accepted prior steps | R5 = S5 — affected integration/final publication | Bound only genuinely affected integration checks; reconcile pins, evidence, carry, deferrals, and preserved WIP; independent final review and verified publication. No default full-suite replay. |
 | OPEN / deferred from this sequence | Separate debt | R-AUTH and held resealed ±1 checks OPEN; whole-suite speed UNMET; broad P4/P4.4 OPEN. Host/E6/P4.5/P5 execution remains deferred; none is an added S1 prerequisite. |
 
 For any step, technical acceptance and independent publishability are separate. S1
-publication and S2 technical acceptance are complete; only S2 publication is active.
-Never stage the combined original dirty test file wholesale. Do not predeclare S3 or
-all f1e as prerequisites to S2 publication.
+and S2 are published. The four historical S3 pilots are accepted only under their
+original context; the new-baseline qualifier count is zero and the 1,198 remaining
+cases remain unconsumed. Both original halts and the preserved D draft remain
+unchanged. Never stage the preserved original mixed WIP wholesale. S4 and S5 remain
+blocked on accepted/published S3.
 
 CORE source and bounded evidence are independently approved: both frozen CORE target
 builds and all nine selected cases per mode passed, closing E1 for those 18 fresh
@@ -101,9 +117,10 @@ Publication did not refresh those pins or timings. See the [f1e interim handoff]
   ALL60 audit is finished:
   58 PASS, zero FAIL, two cutoffs, **NOT_ACCEPTANCE**. Speed goals remain unmet; this
   cursor change does not resolve them. P4.4f1b and bounded f1c are accepted and
-  published; f1e has one five-step cursor above: CORE and S1 are complete, with S1
-  published; S2 technical inventory acceptance is complete and its commit/push/remote
-  verification is the sole active item. S3–S5 remain blocked. The earlier S1 setup
+  published; an earlier f1e checkpoint recorded CORE and S1 complete, with S1
+  published; S2 technical inventory acceptance was complete and its commit/push/remote
+  verification was the sole active item at that earlier snapshot. S3–S5 were then
+  blocked. The earlier S1 setup
   interruption is history. Candidate evidence remains limited to its reviewed build,
   two native semantic cases and 13 metadata invocations; the f1d counts remain
   historical mixed fresh/carry accounting, not new f1e results.
@@ -112,8 +129,30 @@ Publication did not refresh those pins or timings. See the [f1e interim handoff]
   governance and protected evaluation boundary.
 - M2-M5 remain gated unless M1 is reopened and completed feasibly. M4E remains
   optional within that gated track.
-- One coordinator maintains this single next-overall cursor; parallel tracks do
+- One coordinator maintains the external sole execution cursor; parallel tracks do
   not create competing priority lists.
+
+## S3 accepted technical evidence — October 23, 2026; publication PENDING
+
+The [independent final1202 review](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/s3-final1202-review.md)
+accepts C3–C8 and permits docs-only publication carry. The exact disjoint union is
+**1,058 accepted original-context references +144 new cases =1,202 physical
+identities, 601 per mode**, covering ON/SAN × (W1..257, X1..344). There are **525
+real FINALs (381+144), not 1,202 FINALs**. SAN-W-0167, SAN-W-0229 and SAN-X-0199
+remain three distinct `CASE_LEVEL_REFERENCE_CARRY` leaves without FINALs; their
+missing facts and all failed/UNKNOWN histories remain unchanged.
+
+Technical acceptance is complete; publication remains **PENDING** exact staged-tree
+review and coordinator commit/push/remote verification. S4/S5 remain blocked until
+verified S3 publication and require separate assignments. No runtime remains to
+replay or rerun for this carry. The [sole evidence index](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/s3-evidence-index.json)
+links the accepted final-integrity/capture receipts; it grants no authority.
+Actual source/build/environment attribution and evidence limits are in the
+[handoff](docs/p4.4f1e-handoff.md#s3-accepted-evidence). Test source remains
+`dd700c09b8fe4da69967e1147c2078cf71c5f8d3ae0029256306335289e634bd`.
+This dated carry is not another cursor: only [H/execution-cursor.md](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
+owns the active step. No leak-freedom, full-suite, speed, platform, broad P4.4 or
+full-f1e acceptance follows; R-AUTH and held resealed ±1 debt remain open.
 
 ## Test-Suite Speed and Progress Backlog
 
@@ -482,8 +521,8 @@ P3 completes static runtime lowering but defines no executor, physical ABI, Wasm
 adapter, allocator implementation, CLI/build artifact, or tokens. The P3.3 policy
 retains exact inherited P3.1 sites and adds supplemental sites only for uncovered
 allocation/resource producers. P3.W1 remains unperformed historical/optional
-proposed work and non-cursor; it does not replace the active P4.4f1e S2 publication
-transaction following accepted W/X capture, cross-mode review, and pin freeze.
+proposed work and non-cursor; it does not replace the external S3 execution cursor.
+The earlier S2 publication transaction is complete at its own pins.
 
 ### P4 - WebAssembly Backend and Host Adapter
 
@@ -656,8 +695,8 @@ reconcile S2/S3 additions against the published 77-control/5,000-tuple base, wit
 inferring 79 or guessing pins. This S1 publication snapshot predates S2 technical
 acceptance; the later accepted pins are recorded in the execution cursor above. The
 remaining49 obligations, M fault injections, compatibility/resources, and S3–S5
-remain pending. Full f1e is not accepted, and S3 is not active before verified S2
-publication.
+remain pending. Full f1e is not accepted. This historical S1 snapshot predates S2
+publication and the later recovery decision; its cursor wording is not current.
 No old-486, full-4,882, SAN replay, or broad CORE replay gate is added to S1. See the
 [f1e interim handoff](docs/p4.4f1e-handoff.md) and
 [f1d handoff](docs/p4.4f1d-handoff.md).
@@ -675,7 +714,7 @@ The following are status handoffs, not competing execution cursors:
 
 | Lane / owner | Ready work and exclusive scope | Acceptance handoff |
 | --- | --- | --- |
-| P4.4f1d published / P4.4f1e | f1d publication remains historical. For f1e, consult the single cursor above: CORE and S1 are complete, S1 is published, S2 technical acceptance is complete and only S2 publication is active; S3–S5 remain blocked. | This handoff table is not a second cursor; see [f1e interim handoff](docs/p4.4f1e-handoff.md) for evidence attribution and the technical-acceptance/publication boundary. |
+| P4.4f1d published / P4.4f1e | CORE/S1/S2 remain complete at their own pins, S1/S2 published. S3 technical evidence is independently accepted: 1,202 identities /525 real FINALs /3 no-FINAL leaves; publication PENDING. S4/S5 await verified S3 publication. | This table is not a cursor; consult the external sole cursor linked above and [f1e handoff](docs/p4.4f1e-handoff.md#s3-accepted-evidence) for evidence and publication limits. |
 | R-AUTH / separate Sol 6.1 High brief | Independent inherited P3.6 resource-authentication defect and preserved six-path resource WIP; coverage extension is pending and unaccepted. | Specify independent exactness reconstruction and truthful coverage; keep held `build_work`/`build_scratch_bytes` ±1 assertions unresolved until evidence exists. |
 | P4.4f1a integration / coordinator | Bounded metadata checkpoint committed as `5c9c056`, fast-forwarded to `master`, and pushed to `origin/master`; existing default selectors and full registrations remain unchanged. | Integration complete. This publication update does not refresh or extend the accepted test receipts. |
 | P4.5/P5 and host | Dependency-deferred; f1c adds no host adapter, E6 execution, artifact writer, or `sol build` work. | Requires its own approved interface and task briefs. |
@@ -871,7 +910,7 @@ Each compiler increment should:
 
 Roadmap and experiment updates should also:
 
-- keep this file's cursor/status authoritative and documentation examples consistent
+- keep the external S3 cursor authoritative and documentation examples consistent
   with the implemented CLI and semantics; label snapshot dates and historical handoffs;
 - distinguish implemented behavior, runtime checks, static acceptance, proofs, and
   experimental evidence; record omissions, blockers, and negative results explicitly;

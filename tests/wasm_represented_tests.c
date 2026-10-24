@@ -705,7 +705,8 @@ typedef enum {
     FAULT_PREDICATE_TRANSPORT_REJECTION, FAULT_PREDICATE_LEAF_DIRECT_TAIL,
     FAULT_PREDICATE_LEAF_TRACED, FAULT_PREDICATE_CALLEE_RECURSIVE_TAIL,
     FAULT_PREDICATE_CALLEE_TRACED, FAULT_REFINEMENT_CALL_RETAINED_TAIL,
-    FAULT_REFINEMENT_CALL_TRACED, FAULT_SWEEP_COUNT
+    FAULT_REFINEMENT_CALL_TRACED, FAULT_ENSURES_CALL_PLAIN,
+    FAULT_ENSURES_CALL_TRACED, FAULT_SWEEP_COUNT
 } RepresentedFault;
 static void represented_control(const char *id);
 static void represented_fault(RepresentedFault sweep, size_t ordinal, size_t hook_after);
@@ -34558,6 +34559,21 @@ static P44f1eAllocationPinMode p44f1e_allocation_pin_mode_values(
         :P44F1E_ALLOCATION_PIN_STATE_INVALID;
 }
 
+static const uint8_t p44f1e_allocation_w_digest[32]={0xde,0xfb,0x27,0xc2,0x72,0x04,0xea,0x4d,
+    0xdb,0x0d,0x51,0xcc,0xc0,0x88,0xd2,0x02,
+    0xa3,0xed,0x94,0xae,0x46,0x27,0x21,0x30,
+    0x57,0x86,0x8c,0xea,0x20,0x9d,0x1c,0x1d};
+static const uint8_t p44f1e_allocation_x_digest[32]={0x78,0xc3,0x1c,0x56,0xe9,0x44,0x7e,0xa9,
+    0x65,0x4d,0x43,0x45,0xb7,0x87,0x4d,0xa1,
+    0x67,0xa5,0xd2,0xcb,0x39,0xfd,0x92,0x6b,
+    0x80,0xe7,0xcc,0xbe,0xb4,0xcb,0x26,0x1a};
+
+static P44f1eAllocationPinMode p44f1e_allocation_pin_mode(void) {
+    return p44f1e_allocation_pin_mode_values(P44F1E_W_ALLOCATION_COUNT,
+        p44f1e_allocation_w_digest,P44F1E_X_ALLOCATION_COUNT,
+        p44f1e_allocation_x_digest);
+}
+
 
 
 #define P44F1E_ALLOCATION_FUNCTION_CAP 8u
@@ -34651,18 +34667,11 @@ typedef struct {
 
 static bool p44f1e_allocation_inventory_pin(bool traced,
     const P44f1bAllocationCapture *capture,uint8_t digest[32]) {
-    static const uint8_t w_digest[32]={0xde,0xfb,0x27,0xc2,0x72,0x04,0xea,0x4d,
-        0xdb,0x0d,0x51,0xcc,0xc0,0x88,0xd2,0x02,
-        0xa3,0xed,0x94,0xae,0x46,0x27,0x21,0x30,
-        0x57,0x86,0x8c,0xea,0x20,0x9d,0x1c,0x1d};
-    static const uint8_t x_digest[32]={0x78,0xc3,0x1c,0x56,0xe9,0x44,0x7e,0xa9,
-        0x65,0x4d,0x43,0x45,0xb7,0x87,0x4d,0xa1,
-        0x67,0xa5,0xd2,0xcb,0x39,0xfd,0x92,0x6b,
-        0x80,0xe7,0xcc,0xbe,0xb4,0xcb,0x26,0x1a};
     size_t expected=traced?P44F1E_X_ALLOCATION_COUNT:P44F1E_W_ALLOCATION_COUNT;
-    const uint8_t *pinned=traced?x_digest:w_digest;
+    const uint8_t *pinned=traced?p44f1e_allocation_x_digest:p44f1e_allocation_w_digest;
     P44f1eAllocationPinMode mode=p44f1e_allocation_pin_mode_values(
-        P44F1E_W_ALLOCATION_COUNT,w_digest,P44F1E_X_ALLOCATION_COUNT,x_digest);
+        P44F1E_W_ALLOCATION_COUNT,p44f1e_allocation_w_digest,
+        P44F1E_X_ALLOCATION_COUNT,p44f1e_allocation_x_digest);
     if(capture==NULL||digest==NULL||capture->record_count==0
         ||capture->attempts!=capture->record_count
         ||mode==P44F1E_ALLOCATION_PIN_STATE_INVALID
@@ -37782,6 +37791,403 @@ static bool p44f1e_allocation_discovery(bool traced) {
 
 
 
+static void p44f1e_allocation_usage_diagnostic(const P44f1eAllocationProfile *profile,
+    const P44f1bAllocationCapture *capture) {
+    if(profile==NULL||capture==NULL)return;
+    uint64_t host_payload_bytes=0;bool host_payload_sum_valid=true;
+    for(size_t i=0;i<capture->record_count;++i) {
+        const SolWasmRepresentedTestAllocationRecord *r=&capture->records[i];
+        if(r->item_size==0||r->count>SIZE_MAX/r->item_size) {
+            host_payload_sum_valid=false;break;
+        }
+        size_t row_bytes=r->count*r->item_size;
+        if(row_bytes>UINT64_MAX-host_payload_bytes) {
+            host_payload_sum_valid=false;break;
+        }
+        host_payload_bytes+=(uint64_t)row_bytes;
+    }
+    fprintf(stderr,"P44F1E_FAULT_BASELINE_USAGE profile=%c host_attempts_actual=%zu host_records_actual=%zu host_attempts_match_records=%d host_payload_bytes_expected=%llu host_payload_sum_valid=%d usage.work_bytes_actual=%zu source_provenance_records_expected=%zu usage.provenance_records_actual=%zu guest_allocation_requests_expected=0 usage.allocation_requests_actual=%llu guest_allocation_bytes_expected=0 usage.allocation_bytes_actual=%llu\n",
+        profile->traced?'X':'W',capture->attempts,capture->record_count,
+        p44f1e_allocation_attempt_record_join(capture->attempts,
+            capture->record_count),
+        (unsigned long long)host_payload_bytes,host_payload_sum_valid,
+        capture->usage.work_bytes,profile->record_count,
+        capture->usage.provenance_records,
+        (unsigned long long)capture->usage.allocation_requests,
+        (unsigned long long)capture->usage.allocation_bytes);
+}
+
+static bool p44f1e_allocation_fault_private_checks(void) {
+    static const char function_a[]="fault_private_record";
+    static const char function_b[]="fault_private_record_corrupt";
+    SolWasmRepresentedTestAllocationRecord records[3]={
+        {1,SOL_WASM_REPRESENTED_TEST_ALLOC_CATALOG_CALLS,
+            SOL_WASM_REPRESENTED_TEST_ALLOC_PHASE_CATALOG,function_a,101,2,4,0,0,false},
+        {2,SOL_WASM_REPRESENTED_TEST_ALLOC_CATALOG_RESUME,
+            SOL_WASM_REPRESENTED_TEST_ALLOC_PHASE_CATALOG,function_a,102,3,8,0,0,false},
+        {3,SOL_WASM_REPRESENTED_TEST_ALLOC_KAHN_INDEGREE,
+            SOL_WASM_REPRESENTED_TEST_ALLOC_PHASE_CATALOG,function_a,103,4,16,0,0,false},
+    };
+    SolWasmRepresentedTestAllocationRecord failed_records[3];
+    memcpy(failed_records,records,sizeof records);
+    SolWasmRepresentedTestAllocationRecord changed=records[0];
+    bool ten_fields=true;
+    for(size_t field=0;field<10;++field) {
+        changed=records[0];
+        switch(field) {
+        case 0: changed.ordinal++;break;
+        case 1: changed.site=SOL_WASM_REPRESENTED_TEST_ALLOC_CATALOG_RESUME;break;
+        case 2: changed.phase=SOL_WASM_REPRESENTED_TEST_ALLOC_PHASE_ORDER;break;
+        case 3: changed.function=function_b;break;
+        case 4: changed.line++;break;
+        case 5: changed.count++;break;
+        case 6: changed.item_size++;break;
+        case 7: changed.old_count++;break;
+        case 8: changed.new_count++;break;
+        case 9: changed.is_grow=true;break;
+        default: ten_fields=false;break;
+        }
+        ten_fields=ten_fields
+            &&!p44f1b_allocation_record_equal(&records[0],&changed);
+    }
+    changed=records[0];changed.function=NULL;
+    bool null_function_rejected=!p44f1b_allocation_record_equal(&records[0],&changed);
+
+    P44f1bAllocationCapture baseline={.records=records,.record_count=3,.attempts=3};
+    P44f1bAllocationCapture failed={.records=failed_records,.record_count=3,.attempts=3};
+    bool records_positive=p44f1b_allocation_records_equal(&baseline,&failed);
+    failed.attempts=2;
+    bool attempt_mismatch_rejected=!p44f1b_allocation_records_equal(&baseline,&failed);
+    failed.attempts=3;failed.record_count=2;
+    bool missing_record_rejected=!p44f1b_allocation_records_equal(&baseline,&failed);
+    failed.record_count=3;
+    bool prefix_positive=p44f1b_allocation_failed_prefix(&baseline,&failed,3);
+    failed.record_count=2;failed.attempts=2;
+    bool truncated_rejected=!p44f1b_allocation_failed_prefix(&baseline,&failed,3);
+    failed.record_count=3;failed.attempts=3;
+    failed_records[2].count++;
+    bool third_sibling_rejected=!p44f1b_allocation_failed_prefix(&baseline,&failed,3);
+    failed_records[2].count--;
+    failed.attempts=2;
+    bool prefix_attempt_mismatch_rejected=
+        !p44f1b_allocation_failed_prefix(&baseline,&failed,3);
+    failed.attempts=3;failed.record_count=2;
+    bool prefix_count_mismatch_rejected=
+        !p44f1b_allocation_failed_prefix(&baseline,&failed,3);
+    failed.record_count=3;
+    bool prefix_beyond_baseline_rejected=
+        !p44f1b_allocation_failed_prefix(&baseline,&failed,4);
+
+    SolWasmRepresentedUsage zero={0},usage={0};
+    bool usage_positive=usage_zero(&zero)&&usage_equal(&zero,&usage);
+    bool usage_fields=true;
+    for(size_t field=0;field<15;++field) {
+        usage=zero;
+        switch(field) {
+        case 0: usage.functions=1;break;
+        case 1: usage.blocks=1;break;
+        case 2: usage.edges=1;break;
+        case 3: usage.values=1;break;
+        case 4: usage.locals=1;break;
+        case 5: usage.generated_nodes=1;break;
+        case 6: usage.table_elements=1;break;
+        case 7: usage.static_data_bytes=1;break;
+        case 8: usage.allocation_requests=1;break;
+        case 9: usage.allocation_bytes=1;break;
+        case 10: usage.provenance_records=1;break;
+        case 11: usage.work_bytes=1;break;
+        case 12: usage.scratch_bytes=1;break;
+        case 13: usage.owned_bytes=1;break;
+        case 14: usage.output_bytes=1;break;
+        default: usage_fields=false;break;
+        }
+        usage_fields=usage_fields&&!usage_zero(&usage)&&!usage_equal(&zero,&usage);
+        usage=zero;
+    }
+
+    SolDiagnostic diagnostic_items[2]={{0}};
+    (void)snprintf(diagnostic_items[0].code,sizeof diagnostic_items[0].code,"wasm-p43");
+    (void)snprintf(diagnostic_items[0].message,sizeof diagnostic_items[0].message,
+        "P4.3 represented call catalog allocation failed");
+    (void)snprintf(diagnostic_items[1].code,sizeof diagnostic_items[1].code,"wasm-p43");
+    (void)snprintf(diagnostic_items[1].message,sizeof diagnostic_items[1].message,
+        "extra diagnostic");
+    SolDiagnostics empty={0};
+    SolDiagnostics one={.items=diagnostic_items,.count=1};
+    SolDiagnostics extra={.items=diagnostic_items,.count=2};
+    P44f1bAllocationFaultRule no_diagnostic={0};
+    P44f1bAllocationFaultRule known={.diagnostic=
+        "P4.3 represented call catalog allocation failed"};
+    bool diagnostic_checks=p44f1b_allocation_failure_diagnostic(&empty,
+            &no_diagnostic)
+        &&!p44f1b_allocation_failure_diagnostic(&one,&no_diagnostic)
+        &&p44f1b_allocation_failure_diagnostic(&one,&known)
+        &&!p44f1b_allocation_failure_diagnostic(&empty,&known)
+        &&!p44f1b_allocation_failure_diagnostic(&extra,&known);
+    (void)snprintf(diagnostic_items[0].code,sizeof diagnostic_items[0].code,"wrong");
+    bool wrong_code_rejected=!p44f1b_allocation_failure_diagnostic(&one,&known);
+    (void)snprintf(diagnostic_items[0].code,sizeof diagnostic_items[0].code,"wasm-p43");
+    (void)snprintf(diagnostic_items[0].message,sizeof diagnostic_items[0].message,
+        "wrong diagnostic");
+    bool wrong_text_rejected=!p44f1b_allocation_failure_diagnostic(&one,&known);
+
+    uint8_t zero_digest[32]={0},one_digest[32]={1};
+    return ten_fields&&null_function_rejected&&records_positive
+        &&attempt_mismatch_rejected&&missing_record_rejected&&prefix_positive
+        &&truncated_rejected&&third_sibling_rejected
+        &&prefix_attempt_mismatch_rejected&&prefix_count_mismatch_rejected
+        &&prefix_beyond_baseline_rejected&&usage_positive&&usage_fields
+        &&diagnostic_checks&&wrong_code_rejected&&wrong_text_rejected
+        &&p44f1e_allocation_close_checker_negatives()
+        &&p44f1e_allocation_pin_mode()==P44F1E_ALLOCATION_PINNED_REQUIRED
+        &&p44f1e_allocation_pin_mode_values(0,zero_digest,0,zero_digest)
+            ==P44F1E_ALLOCATION_UNPINNED_DISCOVERY
+        &&p44f1e_allocation_pin_mode_values(1,zero_digest,1,one_digest)
+            ==P44F1E_ALLOCATION_PIN_STATE_INVALID
+        &&p44f1e_allocation_pin_mode_values(1,one_digest,1,one_digest)
+            ==P44F1E_ALLOCATION_PINNED_REQUIRED;
+}
+
+static bool p44f1e_allocation_fault_one(bool traced,size_t physical_ordinal,
+    RepresentedFault sweep) {
+    P44f1eAllocationProfile profile;P44f1bAllocationCapture baseline={0},failed_trace={0},
+        retry_trace={0};P44f1eAllocationWitness baseline_witness={0},retry_witness={0};
+    memset(&profile,0,sizeof profile);profile.traced=traced;
+    size_t expected_count=traced?P44F1E_X_ALLOCATION_COUNT:P44F1E_W_ALLOCATION_COUNT;
+    RepresentedFault expected_sweep=traced?FAULT_ENSURES_CALL_TRACED
+        :FAULT_ENSURES_CALL_PLAIN;
+    bool private_ok=p44f1e_allocation_fault_private_checks()
+        &&p44f1e_allocation_private_negative_checks()
+        &&p44f1e_allocation_pin_mode()==P44F1E_ALLOCATION_PINNED_REQUIRED;
+    if(!private_ok||expected_count==0||sweep!=expected_sweep)
+        return p44f1e_allocation_reject(&profile,"A4.fault-private-or-pin-state",
+            "fault.private-pin-gate",physical_ordinal,1,0);
+    bool prepared=p44f1e_allocation_profile_prepare(traced,&profile);
+    SolWasmRepresentedTestCallCatalog catalog={0};
+    bool catalog_ok=prepared&&p44f1e_allocation_catalog(&profile,&catalog);
+    SolWasmRepresentedOutput baseline_output,failed,retry;
+    sol_wasm_represented_output_init(&baseline_output);
+    sol_wasm_represented_output_init(&failed);sol_wasm_represented_output_init(&retry);
+    SolDiagnostics diagnostics;sol_diagnostics_init(&diagnostics);
+    sol_wasm_represented_test_fail_allocation_after(0);
+    bool initial_owner_allowed=prepared&&p44f1e_owner_use_allowed(&profile.owner);
+    bool initial_fence=initial_owner_allowed&&p44f1e_owner_fence(&profile.owner);
+    if(initial_owner_allowed&&!initial_fence) {
+        profile.preservation_failed=true;profile.owner.preservation_failed=true;
+    }
+    bool initial=prepared&&catalog_ok&&initial_owner_allowed&&initial_fence;
+    if(prepared&&!catalog_ok)profile.semantic_failed=true;
+    bool recording=initial&&sol_wasm_represented_test_allocation_record_begin(4096);
+    SolWasmRepresentedResult baseline_result=recording?sol_wasm_represented_build(
+        &(SolWasmRepresentedBuildRequest){&profile.owner.owner.lowered,
+            profile.directory,NULL},&baseline_output,&diagnostics)
+        :SOL_WASM_REPRESENTED_INVALID_INPUT;
+    size_t baseline_attempts=sol_wasm_represented_test_allocation_attempts();
+    sol_wasm_represented_test_fail_allocation_after(0);
+    sol_wasm_represented_test_allocation_record_end();
+    bool baseline_preserved=recording&&p44f1e_owner_fence(&profile.owner);
+    if(recording&&!baseline_preserved)profile.preservation_failed=true;
+    bool baseline_artifact=baseline_preserved
+        &&baseline_result==SOL_WASM_REPRESENTED_OK&&diagnostics.count==0
+        &&baseline_output.bytes.bytes!=NULL&&baseline_output.bytes.count!=0;
+    if(baseline_preserved)baseline.usage=baseline_output.usage;
+    bool baseline_trace=baseline_artifact
+        &&p44f1b_allocation_trace_copy(&baseline,baseline_attempts,baseline_attempts);
+    if(baseline_trace)p44f1e_allocation_usage_diagnostic(&profile,&baseline);
+    bool prefix_ok=baseline_trace&&p44f1e_allocation_prefix_valid(&profile,&baseline)
+        &&p44f1e_allocation_record_anchors_valid(&baseline);
+    bool prefix_fence=baseline_preserved&&p44f1e_owner_fence(&profile.owner);
+    if(baseline_preserved&&!prefix_fence)profile.preservation_failed=true;
+    uint8_t inventory_digest[32]={0};
+    bool inventory_pinned=prefix_ok&&p44f1e_allocation_inventory_pin(traced,
+        &baseline,inventory_digest);
+    bool baseline_ready=baseline_artifact&&prefix_ok&&prefix_fence&&inventory_pinned;
+    bool baseline_witness_ran=baseline_ready
+        &&p44f1e_owner_use_allowed(&profile.owner);
+    bool baseline_witness_ok=false;
+    if(baseline_witness_ran)baseline_witness_ok=p44f1e_allocation_witness(
+        &profile,&baseline_output,&baseline_witness);
+    bool witness_fence=!baseline_witness_ran||p44f1e_owner_fence(&profile.owner);
+    if(baseline_witness_ran&&!witness_fence)profile.preservation_failed=true;
+    bool baseline_ok=baseline_ready&&baseline_witness_ok&&witness_fence
+        &&baseline_attempts==expected_count;
+    P44f1bAllocationFaultRule rule={0};size_t group_end=0;
+    bool classified=baseline_ok&&physical_ordinal>=1
+        &&physical_ordinal<=expected_count
+        &&p44f1e_allocation_rule(&baseline,physical_ordinal,&rule,&group_end)
+        &&group_end>=physical_ordinal&&group_end<=expected_count;
+    const SolWasmRepresentedTestAllocationRecord *row=classified
+        ?&baseline.records[physical_ordinal-1]:NULL;
+    classified=classified&&row!=NULL&&row->ordinal==physical_ordinal;
+    if(classified) {
+        const char *stage=rule.stage==P44F1B_ALLOC_STAGE_CATALOG?"catalog"
+            :rule.stage==P44F1B_ALLOC_STAGE_ORDER?"order"
+            :rule.stage==P44F1B_ALLOC_STAGE_PROVENANCE?"provenance"
+            :rule.stage==P44F1B_ALLOC_STAGE_EMISSION?"emission":"wire";
+        fprintf(stderr,
+        "P44F1E_FAULT_ROW profile=%c j=%zu N=%zu ordinal=%zu site=%d phase=%d function=%s line=%zu count=%zu item_size=%zu grow=%d old_count=%zu new_count=%zu stage=%s expected_result=ALLOCATION_FAILED diagnostic_code=%s diagnostic_count=%d diagnostic=%s g=%zu\n",
+            traced?'X':'W',physical_ordinal,baseline.attempts,row->ordinal,
+            (int)row->site,(int)row->phase,row->function,row->line,row->count,
+            row->item_size,row->is_grow,row->old_count,row->new_count,stage,
+            rule.diagnostic==NULL?"<none>":"wasm-p43",
+            rule.diagnostic==NULL?0:1,
+            rule.diagnostic==NULL?"<none>":rule.diagnostic,group_end);
+        fflush(stderr);
+    }
+    failed.bytes.bytes=malloc(1);failed.bytes.count=failed.bytes.bytes==NULL?0:1;
+    failed.usage.functions=17;
+    bool fail_recording=classified&&failed.bytes.bytes!=NULL
+        &&p44f1e_owner_use_allowed(&profile.owner)
+        &&sol_wasm_represented_test_allocation_record_begin(4096);
+    if(fail_recording)represented_fault(sweep,physical_ordinal,physical_ordinal);
+    SolWasmRepresentedResult failed_result=fail_recording?sol_wasm_represented_build(
+        &(SolWasmRepresentedBuildRequest){&profile.owner.owner.lowered,
+            profile.directory,NULL},&failed,&diagnostics)
+        :SOL_WASM_REPRESENTED_INVALID_INPUT;
+    size_t failed_attempts=sol_wasm_represented_test_allocation_attempts();
+    sol_wasm_represented_test_fail_allocation_after(0);
+    sol_wasm_represented_test_allocation_record_end();
+    /* The byte-first owner fence is unconditional on the backend result. */
+    bool failed_preserved=fail_recording&&p44f1e_owner_fence(&profile.owner);
+    if(fail_recording&&!failed_preserved)profile.preservation_failed=true;
+    bool failed_prefix=failed_preserved
+        &&p44f1b_allocation_trace_copy(&failed_trace,failed_attempts,group_end)
+        &&p44f1b_allocation_failed_prefix(&baseline,&failed_trace,group_end);
+    bool failed_empty_output=!failed.bytes.bytes&&!failed.bytes.count
+        &&usage_zero(&failed.usage);
+    bool failure_diagnostic_ok=
+        p44f1b_allocation_failure_diagnostic(&diagnostics,&rule);
+    bool failure_ok=classified&&failed_preserved
+        &&failed_result==SOL_WASM_REPRESENTED_ALLOCATION_FAILED
+        &&failed_attempts==group_end&&failed_prefix
+        &&failed_empty_output&&failure_diagnostic_ok;
+    sol_wasm_represented_output_free(&failed);
+    sol_wasm_represented_output_free(&failed);
+
+    sol_diagnostics_free(&diagnostics);sol_diagnostics_init(&diagnostics);
+    bool retry_recording=failed_preserved&&p44f1e_owner_use_allowed(&profile.owner)
+        &&sol_wasm_represented_test_allocation_record_begin(4096);
+    SolWasmRepresentedResult retry_result=retry_recording?sol_wasm_represented_build(
+        &(SolWasmRepresentedBuildRequest){&profile.owner.owner.lowered,
+            profile.directory,NULL},&retry,&diagnostics)
+        :SOL_WASM_REPRESENTED_INVALID_INPUT;
+    size_t retry_attempts=sol_wasm_represented_test_allocation_attempts();
+    sol_wasm_represented_test_fail_allocation_after(0);
+    sol_wasm_represented_test_allocation_record_end();
+    bool retry_preserved=retry_recording&&p44f1e_owner_fence(&profile.owner);
+    if(retry_recording&&!retry_preserved)profile.preservation_failed=true;
+    bool retry_records=retry_preserved
+        &&p44f1b_allocation_trace_copy(&retry_trace,retry_attempts,baseline.attempts)
+        &&p44f1b_allocation_records_equal(&baseline,&retry_trace);
+    bool retry_artifact=retry_preserved&&retry_result==SOL_WASM_REPRESENTED_OK
+        &&retry_attempts==baseline.attempts&&retry_records&&diagnostics.count==0
+        &&retry.bytes.bytes!=NULL&&retry.bytes.count==baseline_output.bytes.count
+        &&memcmp(retry.bytes.bytes,baseline_output.bytes.bytes,
+            baseline_output.bytes.count)==0
+        &&usage_equal(&retry.usage,&baseline_output.usage);
+    bool retry_witness_ran=retry_artifact&&p44f1e_owner_use_allowed(&profile.owner);
+    bool retry_witness_ok=false;
+    if(retry_witness_ran)retry_witness_ok=p44f1e_allocation_witness(
+        &profile,&retry,&retry_witness);
+    bool retry_witness_fence=!retry_witness_ran||p44f1e_owner_fence(&profile.owner);
+    if(retry_witness_ran&&!retry_witness_fence)profile.preservation_failed=true;
+    bool final_lowered=false,final_lowered_fence=false;
+    if(retry_preserved&&p44f1e_owner_use_allowed(&profile.owner)) {
+        final_lowered=sol_mir_runtime_lowered_program_validate(
+            &profile.owner.owner.lowered,NULL);
+        final_lowered_fence=p44f1e_owner_fence(&profile.owner);
+        if(!final_lowered_fence)profile.preservation_failed=true;
+    }
+    bool final_cleanup=false,final_cleanup_fence=false;
+    if(final_lowered_fence&&p44f1e_owner_use_allowed(&profile.owner)) {
+        final_cleanup=sol_mir_runtime_cleanup_validate(
+            &profile.owner.owner.cleanup,NULL);
+        final_cleanup_fence=p44f1e_owner_fence(&profile.owner);
+        if(!final_cleanup_fence)profile.preservation_failed=true;
+    }
+    bool validators_ok=final_lowered&&final_lowered_fence
+        &&final_cleanup&&final_cleanup_fence;
+    bool retry_ok=retry_artifact&&retry_witness_ok&&retry_witness_fence
+        &&p44f1e_allocation_witness_equal(&baseline_witness,&retry_witness)
+        &&validators_ok;
+    bool final_safe=p44f1e_allocation_sync_preservation(&profile);
+    bool checks_ok=baseline_ok&&classified&&failure_ok&&retry_ok&&final_safe
+        &&!profile.preservation_failed&&!profile.semantic_failed;
+
+    size_t module_bytes=baseline_output.bytes.count;
+    uint8_t module_digest[32]={0};
+    bool module_hash_valid=baseline_output.bytes.bytes!=NULL&&module_bytes!=0;
+    if(module_hash_valid)sha256(baseline_output.bytes.bytes,module_bytes,module_digest);
+    SolWasmRepresentedUsage usage=baseline_output.usage;
+    bool retry_bytes_equal=retry_artifact;
+    bool retry_usage_equal=retry_artifact
+        &&usage_equal(&retry.usage,&baseline_output.usage);
+    bool witness_equal=retry_witness_ok&&retry_witness_fence
+        &&p44f1e_allocation_witness_equal(&baseline_witness,&retry_witness);
+    size_t inventory_count=baseline.record_count;
+    p44f1b_allocation_capture_free(&baseline);
+    p44f1b_allocation_capture_free(&failed_trace);
+    p44f1b_allocation_capture_free(&retry_trace);
+    sol_wasm_represented_output_free(&baseline_output);
+    sol_wasm_represented_output_free(&retry);sol_diagnostics_free(&diagnostics);
+    sol_test_progress_operation_begin("f1e-allocation-final-owner-close");
+    bool final_close_ok=p44f1e_allocation_profile_free(&profile);
+    sol_test_progress_operation_end();
+    bool sticky_failure=profile.preservation_failed;
+    bool final_ok=checks_ok&&final_close_ok&&!sticky_failure&&module_hash_valid;
+    if(!checks_ok)fprintf(stderr,
+        "P44F1E_FAULT profile=%c j=%zu baseline=%d classified=%d g=%zu failed=%d/%zu retry=%d/%zu preserve=%d\n",
+        traced?'X':'W',physical_ordinal,baseline_ok,classified,group_end,
+        failure_ok,failed_attempts,retry_ok,retry_attempts,!sticky_failure);
+    if(!final_close_ok)fprintf(stderr,
+        "P44F1E_FAULT_FINALIZE_REJECT profile=%c j=%zu close_and_final_render=%d preservation_failed=%d\n",
+        traced?'X':'W',physical_ordinal,final_close_ok,sticky_failure);
+    if(final_ok) {
+        fprintf(stderr,
+            "P44F1E_FAULT_COMPLETE profile=%c j=%zu N=%zu g=%zu failed_attempts=%zu retry_attempts=%zu inventory_sha256=",
+            traced?'X':'W',physical_ordinal,expected_count,group_end,
+            failed_attempts,retry_attempts);
+        for(size_t i=0;i<sizeof inventory_digest;++i)fprintf(stderr,"%02x",inventory_digest[i]);
+        fprintf(stderr," module_bytes=%zu module_sha256=",module_bytes);
+        for(size_t i=0;i<sizeof module_digest;++i)fprintf(stderr,"%02x",module_digest[i]);
+        fprintf(stderr,
+            " usage15=%zu,%zu,%zu,%zu,%zu,%zu,%zu,%zu,%llu,%llu,%zu,%zu,%zu,%zu,%zu prefix=%d records=%d bytes=%d usage=%d witness=%d validators=%d final_render_close=%d failed_empty=%d diagnostic=%d inventory_records=%zu\n",
+            usage.functions,usage.blocks,usage.edges,usage.values,usage.locals,
+            usage.generated_nodes,usage.table_elements,usage.static_data_bytes,
+            (unsigned long long)usage.allocation_requests,
+            (unsigned long long)usage.allocation_bytes,usage.provenance_records,
+            usage.work_bytes,usage.scratch_bytes,usage.owned_bytes,usage.output_bytes,
+            failed_prefix,retry_records,retry_bytes_equal,retry_usage_equal,witness_equal,
+            validators_ok,final_close_ok,failed_empty_output,
+            failure_diagnostic_ok,inventory_count);
+        fflush(stderr);
+    }
+    return final_ok;
+}
+
+static bool p44f1e_allocation_fault_sweeps(void) {
+    if(P44F1E_W_ALLOCATION_COUNT==0||P44F1E_X_ALLOCATION_COUNT==0
+        ||p44f1e_allocation_pin_mode()!=P44F1E_ALLOCATION_PINNED_REQUIRED)
+        return false;
+    for(size_t profile=0;profile<2;++profile) {
+        RepresentedFault sweep=profile==0?FAULT_ENSURES_CALL_PLAIN
+            :FAULT_ENSURES_CALL_TRACED;
+        const size_t count=profile==0?P44F1E_W_ALLOCATION_COUNT
+            :P44F1E_X_ALLOCATION_COUNT;
+        const char *name=profile==0?"ensures-call-plain":"ensures-call-traced";
+        for(size_t ordinal=1;ordinal<=count;++ordinal) {
+            char key[160];
+            (void)snprintf(key,sizeof key,"represented.ensures-calls.fault.%s.%04zu",
+                name,ordinal);
+            sol_test_progress_case(key);
+            bool ok=p44f1e_allocation_fault_one(profile!=0,ordinal,sweep);
+            sol_test_progress_case_end();
+            if(!ok)return false;
+        }
+    }
+    return true;
+}
+
 static bool p44f1d_legacy_refined_case(size_t ordinal,bool prior_metadata,
     P44f1aHookIsolationObservation *observation) {
     (void)observation;
@@ -38419,6 +38825,8 @@ static void run_contracts(size_t first, size_t last) {
     CHECK(p44f1d_allocation_fault_sweeps());
     represented_control("contracts.ensures-call-core-s1");
     CHECK(p44f1e_dispatch(NULL,false)==0);
+    represented_control("contracts.ensures-call-faults");
+    CHECK(p44f1e_allocation_fault_sweeps());
 }
 
 static void run_qualified_frozen(size_t first, size_t last) {
@@ -41877,6 +42285,7 @@ static const char *const represented_controls[] = {
     "contracts.refinement-call-execution",
     "contracts.refinement-call-faults",
     "contracts.ensures-call-core-s1",
+    "contracts.ensures-call-faults",
 };
 typedef struct {
     const char *id, *owner;
@@ -41913,6 +42322,8 @@ static RepresentedFaultSweep represented_sweeps[FAULT_SWEEP_COUNT] = {
     [FAULT_PREDICATE_CALLEE_TRACED] = {"predicate-callee-traced", "contracts", 297, {false}},
     [FAULT_REFINEMENT_CALL_RETAINED_TAIL] = {"refinement-call-retained-tail", "contracts", 95, {false}},
     [FAULT_REFINEMENT_CALL_TRACED] = {"refinement-call-traced", "contracts", 272, {false}},
+    [FAULT_ENSURES_CALL_PLAIN] = {"ensures-call-plain", "contracts", P44F1E_W_ALLOCATION_COUNT, {false}},
+    [FAULT_ENSURES_CALL_TRACED] = {"ensures-call-traced", "contracts", P44F1E_X_ALLOCATION_COUNT, {false}},
 };
 static const RepresentedRunner *active_runner;
 static bool control_seen[sizeof represented_controls / sizeof *represented_controls];
@@ -42170,7 +42581,61 @@ static int p44f1e_dispatch(const char *selected,bool list) {
     P44F1E_CASE("represented.ensures-calls.discovery.plain",p44f1e_allocation_discovery(false));
     P44F1E_CASE("represented.ensures-calls.discovery.traced",p44f1e_allocation_discovery(true));
 #undef P44F1E_CASE
+    for(size_t profile=0;profile<2;++profile) {
+        RepresentedFault sweep=profile==0?FAULT_ENSURES_CALL_PLAIN
+            :FAULT_ENSURES_CALL_TRACED;
+        for(size_t ordinal=1;ordinal<=represented_sweeps[sweep].count;++ordinal) {
+            char key[160];
+            (void)snprintf(key,sizeof key,
+                "represented.ensures-calls.fault.%s.%04zu",
+                represented_sweeps[sweep].id,ordinal);
+            if(list)puts(key);
+            else if(selected!=NULL&&!strcmp(selected,key)) {
+                found=true;sol_test_progress_case(key);
+                CHECK(p44f1e_allocation_fault_one(profile!=0,ordinal,sweep));
+                sol_test_progress_case_end();
+            }
+        }
+    }
     return found?(failures?1:0):2;
+}
+
+static bool p44f1e_fault_key_known(const char *selected) {
+    if(selected==NULL)return false;
+    for(size_t profile=0;profile<2;++profile) {
+        RepresentedFault sweep=profile==0?FAULT_ENSURES_CALL_PLAIN
+            :FAULT_ENSURES_CALL_TRACED;
+        for(size_t ordinal=1;ordinal<=represented_sweeps[sweep].count;++ordinal) {
+            char key[176];
+            (void)snprintf(key,sizeof key,"represented.ensures-calls.fault.%s.%04zu",
+                represented_sweeps[sweep].id,ordinal);
+            if(!strcmp(selected,key))return true;
+        }
+    }
+    return false;
+}
+
+static int p44f1e_selected_fault_accounting(const char *selected) {
+    for(size_t profile=0;profile<2;++profile) {
+        RepresentedFault sweep=profile==0?FAULT_ENSURES_CALL_PLAIN
+            :FAULT_ENSURES_CALL_TRACED;
+        for(size_t ordinal=1;ordinal<=represented_sweeps[sweep].count;++ordinal) {
+            char key[176];
+            (void)snprintf(key,sizeof key,"represented.ensures-calls.fault.%s.%04zu",
+                represented_sweeps[sweep].id,ordinal);
+            if(strcmp(selected,key))continue;
+            const RepresentedRunner *runner=p44f1c_contracts_runner();
+            if(runner==NULL)return 1;
+            active_runner=runner;observed_faults=0;
+            for(size_t i=0;i<FAULT_SWEEP_COUNT;++i)
+                memset(represented_sweeps[i].seen,0,sizeof represented_sweeps[i].seen);
+            int result=p44f1e_dispatch(selected,false);
+            CHECK(represented_sweeps[sweep].seen[ordinal]&&observed_faults==1);
+            active_runner=NULL;
+            return result==0&&failures==0?0:1;
+        }
+    }
+    return 2;
 }
 
 
@@ -42428,8 +42893,11 @@ int main(int argc, char **argv) {
         if(getenv("SOL_P44E_FOCUS"))return 2;
         if(argc==2&&!strcmp(argv[1],"--list-p44f1e-cases"))
             return p44f1e_dispatch(NULL,true);
-        if(argc==3&&!strcmp(argv[1],"--p44f1e-case"))
+        if(argc==3&&!strcmp(argv[1],"--p44f1e-case")) {
+            if(p44f1e_fault_key_known(argv[2]))
+                return p44f1e_selected_fault_accounting(argv[2]);
             return p44f1e_dispatch(argv[2],false);
+        }
         return 2;
     }
 
