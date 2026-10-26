@@ -270,7 +270,41 @@ were verified unchanged. See the [P4.4f1d handoff](../docs/p4.4f1d-handoff.md) f
 exact pins, carry provenance, and preserved failures. The current f1e execution
 status is recorded below and in the [interim handoff](../docs/p4.4f1e-handoff.md).
 
-## P4.4f1e full S4 — technical evidence accepted, publication PENDING (October 25, 2026)
+## P4.4f1e S5 — I1–I4 integration accepted, publication PENDING (October 26, 2026)
+
+Full S4 is **COMPLETE/PUBLISHED** at `ec70d583bd2ddb75426f316f6761d4a4db07d567`
+under its [receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4d/publication-receipt.md)
+and [published verification](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4d/publication-verification.md).
+[S5 I1–I4 acceptance](../../sol-lang/.git/agent-handoffs/p44-f1e/s5-integration/evidence-review.md)
+joins the full14-path/594-hunk cumulative mapping to accepted actual compiler-library/
+test integration, original evidence and unchanged413-source/config/ten-artifact
+bindings. All14 prior pure checks passed; none is rerun here. No new public CLI
+Wasm surface or generic CLI-test coverage follows. The ordered15 current path/
+size/full-hash witnesses live only in the [canonical source footer](../docs/p4.4f1e-handoff.md#s5-canonical-source-footer).
+
+S4's98 nonfault identities,170 compatibility identities (140 original-D fresh+30
+standalone carries),98 C metadata and804 remainder dispositions/543 unavailable
+primaries remain qualified original contexts, not fresh S5 children. S3 remains
+original1202 identities/525 FINALs/three honest no-FINAL references; all historical
+failures/UNKNOWNs/missing closes stay unrepaired. Metadata/default mapping is not
+default/full-suite runtime. **New S5 project children/builds are zero in all modes.**
+
+**I5 docs/staged acceptance and I6 publication/completion remain PENDING**: exact
+four-doc staging, separate Sol review, Astra readiness, coordinator commit/push/
+remote/bridge and independent published verification must precede completion.
+Only after I6 and the explicit accepted original-obligation map may bounded f1e
+S1–S5 be called complete, not broader P4/P4.4/platform. External receipt/bridge owns
+final publication facts; no prospective commit hash/post-push doc commit is claimed.
+R-AUTH/P3.6/held±1 OPEN, speed UNMET, leaks disabled/not leak-freedom, OFF compile-only;
+host/E6/P4.5/P5 deferred. AGENTS/mixed WIP excluded. `README.md`'s October 3 overview
+is outside this four-doc scope and not current execution authority: only the
+[sole external cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md)
+owns execution; TODO is a dated checkpoint.
+
+## Historical P4.4f1e full S4 — October 25, 2026 accepted pre-push checkpoint
+
+S4 publication-PENDING/S5-not-started statements below are dated pre-push history;
+the full-S4 receipt/current S5 checkpoint above supersede status only.
 
 S4c is published/remote-verified at `50c7475816c7feb4c1f18c0d5a64365cb1f88498`
 in its [publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4c/publication-receipt.md);
@@ -405,8 +439,8 @@ OPEN, speed UNMET, host/E6/P4.5/P5 deferred.
 **Historical status at this S1 prepublication snapshot (October 21, 2026):** The
 statements below record the state before S1 publication and before S2 evidence
 acceptance; they do not describe the current cursor. S1/S2/S3/S4a/S4b/S4c are now
-published; S4d/full-S4 technical evidence is accepted with publication PENDING.
-See the [accepted handoff](../docs/p4.4f1e-handoff.md#s4d-full-s4-accepted-evidence) and
+published; full S4 is COMPLETE/PUBLISHED and S5 I1–I4 integration is accepted,
+own publication PENDING. See the [accepted handoff](../docs/p4.4f1e-handoff.md#s5-accepted-integration) and
 [external sole project cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md).
 Historical receipts, timings, pins, failures and errata below remain unchanged.
 

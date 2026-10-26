@@ -6,10 +6,11 @@ This list preserves the project backlog and dated status checkpoints; it is not 
 live execution cursor. The sole project cursor is
 [H/project-execution-cursor.md](../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md).
 The [old S3 cursor](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
-is a completed checkpoint, not current authority. The October 25 record below
-supersedes older status: S3/S4a/S4b/S4c are published/remote-verified; S4d and full S4
-technical evidence are accepted, publication PENDING. S5 bounded planning is next,
-not started. The October 21 ledger remains history.
+is a completed checkpoint, not current authority. The October 26 record below
+supersedes older status: full S4 is COMPLETE/PUBLISHED; S5 I1–I4 technical integration
+is independently accepted, own publication PENDING. The October 21 ledger remains
+history. `README.md`'s October 3 overview/“TODO sole live ledger” description is
+dated, outside this four-doc scope and not current execution authority.
 The foundation was audited September 9, 2026 against baseline `6ec4ba9`; the
 checkpoint was refreshed October 21, 2026 after verified S2 publication and the
 user-authorized S3 recovery decision. Earlier S1 setup, S2 pre-acceptance, and
@@ -137,7 +138,44 @@ Publication did not refresh those pins or timings. See the [f1e interim handoff]
 - One coordinator maintains the external sole execution cursor; parallel tracks do
   not create competing priority lists.
 
-## Full S4 technical evidence accepted — October 25, 2026; S4d publication PENDING
+## S5 I1–I4 accepted — October 26, 2026; I5 checkpoint, publication PENDING
+
+Full S4 is **COMPLETE/PUBLISHED** at `ec70d583bd2ddb75426f316f6761d4a4db07d567`:
+[receipt](../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4d/publication-receipt.md),
+[independent published verification](../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4d/publication-verification.md).
+The [S5 source-review final append](../sol-lang/.git/agent-handoffs/p44-f1e/s5-integration/source-review.md#current-correction-disposition-and-source-acceptance--2026-10-26)
+and [I1–I4 evidence acceptance](../sol-lang/.git/agent-handoffs/p44-f1e/s5-integration/evidence-review.md)
+accept the complete cumulative **14-path/594-hunk** source/affected-integration
+mapping, actual compiler-library/test pipeline and qualified original evidence.
+All14 pure checks passed in the accepted review; none is rerun by this doc task.
+No new public CLI Wasm surface or generic CLI-test coverage is claimed.
+
+The [canonical source footer](docs/p4.4f1e-handoff.md#s5-canonical-source-footer)
+owns the ordered15 path/size/full-SHA rows and413-source context; other historical
+pin tables retain their dated contexts. Source413/config/artifact10 remain unchanged.
+S4's98 nonfault identities,170 compatibility identities (140 original-D fresh+30
+original standalone carries),98 C metadata and804 remainder dispositions (543
+unavailable primaries) remain qualified original evidence, not S5 executions.
+S3 remains original1202 identities/525 FINALs/three honest no-FINAL references;
+all failures/UNKNOWNs and missing closing facts are preserved, not backfilled.
+
+**S5 I5 docs/staged acceptance and I6 publication/completion remain PENDING**.
+Normal S5 has zero new project children/builds in all modes. Only exact four-doc
+staging, separate Sol I5 review, Astra readiness, coordinator commit/push/remote/
+bridge and independent published verification can close I6. Only then, with the
+explicit original-obligation map accepted and no necessary pending obligation,
+may **bounded f1e S1–S5** completion be stated. No prospective S5 commit is claimed;
+the external receipt/bridge is final publication authority. R-AUTH/P3.6/held resealed
+±1 OPEN, speed UNMET, leaks disabled/not leak-freedom, OFF compile-only, platform/
+broad P4/P4.4 unclosed; host/E6/P4.5/P5 deferred. AGENTS/mixed WIP excluded.
+Only the sole external cursor above owns execution; the
+[S5 index](../sol-lang/.git/agent-handoffs/p44-f1e/s5-integration/evidence-index.json)
+is coordinator-owned navigation, not approval or a second cursor.
+
+## Historical full S4 technical acceptance — October 25, 2026; pre-push checkpoint
+
+S4 publication-PENDING/S5-not-started statements below are dated pre-push history;
+the verified full-S4 receipt and current S5 record above supersede status only.
 
 S4c is published/remote-verified at `50c7475816c7feb4c1f18c0d5a64365cb1f88498`
 under its [publication receipt](../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4c/publication-receipt.md);
@@ -848,7 +886,7 @@ The following are status handoffs, not competing execution cursors:
 
 | Lane / owner | Ready work and exclusive scope | Acceptance handoff |
 | --- | --- | --- |
-| P4.4f1d published / P4.4f1e — October 25, 2026 checkpoint | CORE/S1/S2 at their pins; S3/S4a/S4b/S4c published/remote-verified. S4d/full-S4 technical evidence accepted:170 compatibility identities (140 fresh+30 original carries),28 windows;49 nonfault keys/98 identities in original contexts. S4d/full-S4 publication PENDING; S5 bounded planning next/not started. | This table is not a cursor; consult the external sole project cursor linked above and [f1e handoff](docs/p4.4f1e-handoff.md#s4d-full-s4-accepted-evidence) for evidence/publication limits. |
+| P4.4f1d published / P4.4f1e — October 26, 2026 checkpoint | Full S4 COMPLETE/PUBLISHED at `ec70d583…`; S5 I1–I4 technical integration independently accepted, I5 docs/staged review and I6 publication PENDING. Zero new S5 project children/builds; original evidence contexts retained. | This table is not a cursor; consult the external sole project cursor and [S5 checkpoint/footer](docs/p4.4f1e-handoff.md#s5-accepted-integration) for exact source/obligation/publication boundaries. |
 | R-AUTH / separate Sol 6.1 High brief | Independent inherited P3.6 resource-authentication defect and preserved six-path resource WIP; coverage extension is pending and unaccepted. | Specify independent exactness reconstruction and truthful coverage; keep held `build_work`/`build_scratch_bytes` ±1 assertions unresolved until evidence exists. |
 | P4.4f1a integration / coordinator | Bounded metadata checkpoint committed as `5c9c056`, fast-forwarded to `master`, and pushed to `origin/master`; existing default selectors and full registrations remain unchanged. | Integration complete. This publication update does not refresh or extend the accepted test receipts. |
 | P4.5/P5 and host | Dependency-deferred; f1c adds no host adapter, E6 execution, artifact writer, or `sol build` work. | Requires its own approved interface and task briefs. |

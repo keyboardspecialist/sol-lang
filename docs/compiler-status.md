@@ -8,10 +8,11 @@ approved ledger. It is not a second checklist, a new test report, or a stable AB
 specification. [TODO.md](../TODO.md) preserves checkpoints and links the external
 sole project execution cursor; this document does not own a queue.
 
-**Status precedence — October 25, 2026:** S3/S4a/S4b/S4c are published/remote-verified;
-[S4d/full-S4 technical evidence is accepted, publication PENDING](#s4d-full-s4-accepted-evidence).
-S5 bounded affected-integration planning is next/not started. Older checkpoints
-below, including S3/S4a/S4b/S4c pre-push status, are historical.
+**Status precedence — October 26, 2026:** full S4 is COMPLETE/PUBLISHED;
+[S5 I1–I4 integration is accepted, own publication PENDING](#s5-accepted-integration).
+Earlier pre-push checkpoints below are historical. `README.md`'s October 3 overview
+and “TODO sole live ledger” description are dated/outside this four-doc scope,
+not the current cursor or a claim of repository-wide prose freshness.
 Only [H/project-execution-cursor.md](../../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md)
 owns the live step; the [old S3 cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
 is a completed checkpoint. [TODO.md](../TODO.md) is checkpoint navigation.
@@ -543,9 +544,43 @@ and P4.5/host/E6/P5 deferrals remain unchanged. Full f1e, S3 acceptance/publicat
 S4/S5, broad P4/P4.4, and whole-suite speed acceptance remain open or blocked as
 previously recorded.
 
+<a id="s5-accepted-integration"></a>
+
+## S5 I1–I4 accepted — October 26, 2026; publication PENDING
+
+Full S4 is **COMPLETE/PUBLISHED** at `ec70d583bd2ddb75426f316f6761d4a4db07d567`
+under its [receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4d/publication-receipt.md)
+and [independent published verification](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4d/publication-verification.md).
+[S5 I1–I4 acceptance](../../sol-lang/.git/agent-handoffs/p44-f1e/s5-integration/evidence-review.md)
+joins the complete14-path/594-hunk cumulative diff,413 physical sources/configs,
+ten artifacts/archive/link recipes and original-obligation map to actual accepted
+compiler-library/test integration. All14 prior pure checks passed; this docs task
+runs none. No new CLI Wasm surface or generic CLI-test evidence is implied.
+
+The [canonical source footer](p4.4f1e-handoff.md#s5-canonical-source-footer) is the
+single current ordered15-row source table, with exact sizes/full hashes and413-map
+context. S4's98 nonfault/170 compatibility identities (140 fresh original-D+30
+historical),98 metadata and804 remainder dispositions/543 unavailable primaries
+remain qualified original contexts. S3 stays1202 original identities/525 FINALs/
+three honest no-FINAL references; no fault replay, new timing/default/full-suite
+acceptance or reconstructed failures/UNKNOWNs/closing facts.
+
+S5 technical integration is accepted; **I5 actual docs/staged approval and I6
+publication/completion remain PENDING**. Zero fresh S5 project children/builds;
+source/config/artifact/footer bindings unchanged. Exact four-doc staging, separate
+Sol review/Astra readiness, coordinator commit/push/remote/bridge and independent
+published consumer must precede S5 completion. Only with I6 and the explicit original
+obligation map accepted may bounded f1e S1–S5 be complete, not broader P4/P4.4.
+External receipts supply final publication facts, not a prospective self-hash or
+post-push doc commit. R-AUTH/P3.6/held±1 OPEN, speed UNMET, leaks disabled/not
+leak-freedom, OFF compile-only/platform unclosed; host/E6/P4.5/P5 deferred.
+
 <a id="s4d-full-s4-accepted-evidence"></a>
 
-## Full S4 technical evidence accepted — October 25, 2026; publication PENDING
+## Historical full S4 technical acceptance — October 25, 2026; pre-push checkpoint
+
+S4 publication-PENDING/S5-not-started statements below are pre-push history;
+the verified full-S4 receipt/current S5 record above supersede status only.
 
 The [S4c publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4c/publication-receipt.md)
 verifies `50c7475816c7feb4c1f18c0d5a64365cb1f88498`; prior A/B receipts remain
