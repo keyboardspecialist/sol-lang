@@ -8,9 +8,10 @@ approved ledger. It is not a second checklist, a new test report, or a stable AB
 specification. [TODO.md](../TODO.md) preserves checkpoints and links the external
 sole project execution cursor; this document does not own a queue.
 
-**Status precedence — October 24, 2026:** S3/S4a/S4b are published/remote-verified;
-[S4c is technically accepted, publication PENDING](#s4c-accepted-evidence).
-Older checkpoints below, including S3/S4a/S4b pre-push status, are historical.
+**Status precedence — October 25, 2026:** S3/S4a/S4b/S4c are published/remote-verified;
+[S4d/full-S4 technical evidence is accepted, publication PENDING](#s4d-full-s4-accepted-evidence).
+S5 bounded affected-integration planning is next/not started. Older checkpoints
+below, including S3/S4a/S4b/S4c pre-push status, are historical.
 Only [H/project-execution-cursor.md](../../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md)
 owns the live step; the [old S3 cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
 is a completed checkpoint. [TODO.md](../TODO.md) is checkpoint navigation.
@@ -542,9 +543,45 @@ and P4.5/host/E6/P5 deferrals remain unchanged. Full f1e, S3 acceptance/publicat
 S4/S5, broad P4/P4.4, and whole-suite speed acceptance remain open or blocked as
 previously recorded.
 
+<a id="s4d-full-s4-accepted-evidence"></a>
+
+## Full S4 technical evidence accepted — October 25, 2026; publication PENDING
+
+The [S4c publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4c/publication-receipt.md)
+verifies `50c7475816c7feb4c1f18c0d5a64365cb1f88498`; prior A/B receipts remain
+authoritative. The appended [S4d final review](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4d/evidence-review.md#final-san70--d1d5--full-s4-technical-evidence-acceptance--2026-10-25)
+accepts **D1–D5/full S4 technical evidence**, **170 compatibility identities:140
+fresh +30 original-context standalone carries**, **28 closed actual windows**.
+The separate49 nonfault keys/98 mode identities and98 C metadata children keep
+their accepted original contexts. E650/old4999 ordered tuples/default mapping
+remain source/metadata proofs, not fresh650/default/full-suite execution.
+
+All23 physical typed anchors and six profiles D96/T203/Q129/R297/U98/V272 retain
+complete ten-field/non-line integrity: D/T/Q/R use authentic summaries and full C
+capture equality gates; U/V expose complete rows, normalized only in line to F1D.
+Ordinary modules retain full byte/Usage15/catalog equality and only the two named
+path-field projections. Full controls, renders/fences/witnesses/closure remain;
+S4b's accepted deadline fix retained the 3/27 active caps. No new fault replay or broad suite.
+
+The [handoff](p4.4f1e-handoff.md#s4d-full-s4-accepted-evidence) links exact413 source/
+ten-artifact pins, all804 remainder dispositions and immutable failure/UNKNOWN
+history. S3 remains original1202 identities/525 FINALs/three honest no-FINAL leaves,
+not new validation. Producer PREPUBLICATION/review-required labels remain original;
+the independent review supplies technical acceptance, not a rewritten status file.
+
+S4d/full-S4 publication PENDING exact four-doc staged review, Astra full-S4 audit
+and coordinator commit/push/remote verification. No source edit/repin/rebuild/new
+case is needed for the approved frozen carry. S5 bounded affected-integration
+planning is next/not started, only after verified publication. R-AUTH/held±1 OPEN,
+speed UNMET, SAN leaks disabled (not leak-freedom), platform/broad P4/P4.4/full-f1e
+unclosed; OFF compile-only, host/E6/P4.5/P5 deferred.
+
 <a id="s4c-accepted-evidence"></a>
 
-## S4c accepted evidence — October 24, 2026; publication PENDING
+## Historical S4c accepted evidence — October 24, 2026; pre-push checkpoint
+
+S4c publication-PENDING and S4d-next statements below are pre-push history;
+the S4c receipt/current full-S4 technical checkpoint above supersede status only.
 
 The [S4b publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4b/publication-receipt.md)
 verifies `dacf0a21c63263c93123e0e278d4b8188342be5f`. The appended

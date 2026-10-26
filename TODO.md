@@ -6,9 +6,10 @@ This list preserves the project backlog and dated status checkpoints; it is not 
 live execution cursor. The sole project cursor is
 [H/project-execution-cursor.md](../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md).
 The [old S3 cursor](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
-is a completed checkpoint, not current authority. The October 24 record below
-supersedes older status: S3, S4a and S4b are published/remote-verified; S4c is technically
-accepted, publication PENDING. The October 21 ledger remains history.
+is a completed checkpoint, not current authority. The October 25 record below
+supersedes older status: S3/S4a/S4b/S4c are published/remote-verified; S4d and full S4
+technical evidence are accepted, publication PENDING. S5 bounded planning is next,
+not started. The October 21 ledger remains history.
 The foundation was audited September 9, 2026 against baseline `6ec4ba9`; the
 checkpoint was refreshed October 21, 2026 after verified S2 publication and the
 user-authorized S3 recovery decision. Earlier S1 setup, S2 pre-acceptance, and
@@ -136,7 +137,41 @@ Publication did not refresh those pins or timings. See the [f1e interim handoff]
 - One coordinator maintains the external sole execution cursor; parallel tracks do
   not create competing priority lists.
 
-## S4c accepted evidence — October 24, 2026; publication PENDING
+## Full S4 technical evidence accepted — October 25, 2026; S4d publication PENDING
+
+S4c is published/remote-verified at `50c7475816c7feb4c1f18c0d5a64365cb1f88498`
+under its [publication receipt](../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4c/publication-receipt.md);
+S4a/S4b publication remains verified at its original receipts. The appended
+[S4d final review](../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4d/evidence-review.md#final-san70--d1d5--full-s4-technical-evidence-acceptance--2026-10-25)
+accepts D1–D5 and **full S4 technical evidence**: **170 compatibility identities =140
+fresh +30 original-context standalone carries**, across **28 actual windows**.
+The separate **49 nonfault keys/98 mode identities** retain their own accepted
+discovery/S4a/S4b/S4c contexts, not fresh S4d execution. Original C metadata and exact
+old4999 tuples/default-source mapping carry, not default/full-suite execution.
+
+All23 typed allocation anchors, six profiles D96/T203/Q129/R297/U98/V272, full
+ten-field row obligations, ordinary full bytes/Usage15/catalog and two-path-only
+projection are accepted. Formats remain honest: D/T/Q/R summaries are backed by
+full C equality gates; U/V expose all rows. S4b's reviewed deadline fix retained
+3/27 active caps and full checks; no fault replay or new broad validation follows.
+The [handoff](docs/p4.4f1e-handoff.md#s4d-full-s4-accepted-evidence) links current
+source413/artifact10 pins, accepted remainder dispositions and preserved failures/
+UNKNOWNs. S3 remains original1202 identities/525 FINALs/three honest no-FINAL leaves.
+
+**S4d/full-S4 publication is PENDING**, not completed/published: exact four-doc
+staged review, Astra full-S4 readiness and coordinator commit/push/exact remote
+verification remain. This source-frozen docs-only carry needs no rebuild/repin/
+fresh case. Receipts override dated pre-push wording; only the external sole
+project cursor owns ongoing execution. AGENTS/external evidence/mixed WIP excluded.
+After verified publication, **S5 separately bounded affected-integration planning
+is next, NOT STARTED**. R-AUTH/held resealed ±1 OPEN, speed UNMET, leak checking and
+platform/broad P4/P4.4/full-f1e closure unclaimed; OFF compile-only, host/E6/P4.5/P5
+deferred. Technical S4 closure does not close these unrelated tracks.
+
+## Historical S4c accepted evidence — October 24, 2026; pre-push checkpoint
+
+S4c publication-PENDING and S4d-next statements below are pre-push history;
+the S4c receipt/current full-S4 technical checkpoint above supersede status only.
 
 S4b is published/remote-verified at `dacf0a21c63263c93123e0e278d4b8188342be5f`
 under its [publication receipt](../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4b/publication-receipt.md).
@@ -813,7 +848,7 @@ The following are status handoffs, not competing execution cursors:
 
 | Lane / owner | Ready work and exclusive scope | Acceptance handoff |
 | --- | --- | --- |
-| P4.4f1d published / P4.4f1e — October 24, 2026 checkpoint | CORE/S1/S2 at their pins; S3/S4a/S4b published/remote-verified. S4c technically accepted: six resources,98 metadata,106 children including two builds;49 nonfault inventory (92 carries+six fresh references), publication PENDING. S4d compatibility pending; full S4/S5 not closed. | This table is not a cursor; consult the external sole project cursor linked above and [f1e handoff](docs/p4.4f1e-handoff.md#s4c-accepted-evidence) for evidence/publication limits. |
+| P4.4f1d published / P4.4f1e — October 25, 2026 checkpoint | CORE/S1/S2 at their pins; S3/S4a/S4b/S4c published/remote-verified. S4d/full-S4 technical evidence accepted:170 compatibility identities (140 fresh+30 original carries),28 windows;49 nonfault keys/98 identities in original contexts. S4d/full-S4 publication PENDING; S5 bounded planning next/not started. | This table is not a cursor; consult the external sole project cursor linked above and [f1e handoff](docs/p4.4f1e-handoff.md#s4d-full-s4-accepted-evidence) for evidence/publication limits. |
 | R-AUTH / separate Sol 6.1 High brief | Independent inherited P3.6 resource-authentication defect and preserved six-path resource WIP; coverage extension is pending and unaccepted. | Specify independent exactness reconstruction and truthful coverage; keep held `build_work`/`build_scratch_bytes` ±1 assertions unresolved until evidence exists. |
 | P4.4f1a integration / coordinator | Bounded metadata checkpoint committed as `5c9c056`, fast-forwarded to `master`, and pushed to `origin/master`; existing default selectors and full registrations remain unchanged. | Integration complete. This publication update does not refresh or extend the accepted test receipts. |
 | P4.5/P5 and host | Dependency-deferred; f1c adds no host adapter, E6 execution, artifact writer, or `sol build` work. | Requires its own approved interface and task briefs. |

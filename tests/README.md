@@ -270,7 +270,40 @@ were verified unchanged. See the [P4.4f1d handoff](../docs/p4.4f1d-handoff.md) f
 exact pins, carry provenance, and preserved failures. The current f1e execution
 status is recorded below and in the [interim handoff](../docs/p4.4f1e-handoff.md).
 
-## P4.4f1e S4c — accepted evidence, publication PENDING (October 24, 2026)
+## P4.4f1e full S4 — technical evidence accepted, publication PENDING (October 25, 2026)
+
+S4c is published/remote-verified at `50c7475816c7feb4c1f18c0d5a64365cb1f88498`
+in its [publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4c/publication-receipt.md);
+S4a/S4b receipts remain authoritative. The appended
+[S4d final review](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4d/evidence-review.md#final-san70--d1d5--full-s4-technical-evidence-acceptance--2026-10-25)
+accepts **D1–D5/full S4 technical evidence**, **170 compatibility identities =140
+fresh +30 standalone original-context carries**, **28 actual windows**. The separate
+**49 nonfault keys/98 mode identities** and98 C metadata children retain their own
+accepted original contexts, not fresh S4d runs. E650, exact old4999 ordered tuples,
+manifest/shards/default mapping carry without new default/full-suite execution.
+
+All23 physical typed anchors, six profiles D96/T203/Q129/R297/U98/V272 and complete
+ten-field/non-line obligations pass: D/T/Q/R retain summary formats/full C equality
+gates, U/V all actual rows with only line normalized to F1D. Ordinary full module
+bytes/Usage15/catalog and two-path-only projection pass. Full controls/renders/
+fences/witnesses/closure remain; S4b's accepted deadline correction retained the
+3/27 active caps. The [handoff](../docs/p4.4f1e-handoff.md#s4d-full-s4-accepted-evidence) links
+current accepted source413/artifact10 pins, all804 remainder dispositions and
+immutable failure/UNKNOWN history. S3 remains original1202 identities/525 FINALs/
+three honest no-FINAL leaves, not new replay or reconstructed closing facts.
+
+**S4d/full-S4 publication PENDING** exact four-doc staged review, Astra full-S4 audit
+and coordinator commit/push/exact remote verification/receipt. No source edit/repin/
+rebuild/new test/case is needed for this frozen docs carry. Only the external sole
+cursor owns live execution; AGENTS/mixed WIP excluded. **S5 bounded affected-integration
+planning next/NOT STARTED** after verified publication. R-AUTH/held±1
+OPEN, speed UNMET, SAN leaks disabled (not leak-freedom), platform/broad P4/P4.4/
+full-f1e unclosed; OFF compile-only, host/E6/P4.5/P5 deferred.
+
+## Historical P4.4f1e S4c — October 24, 2026 accepted pre-push checkpoint
+
+S4c publication-PENDING and S4d-next statements below are pre-push history;
+the S4c receipt/current full-S4 technical checkpoint above supersede status only.
 
 S4b is published/remote-verified at `dacf0a21c63263c93123e0e278d4b8188342be5f`
 in its [publication receipt](../../sol-lang/.git/agent-handoffs/p44-f1e/s4-behavior/s4b/publication-receipt.md).
@@ -371,9 +404,9 @@ OPEN, speed UNMET, host/E6/P4.5/P5 deferred.
 
 **Historical status at this S1 prepublication snapshot (October 21, 2026):** The
 statements below record the state before S1 publication and before S2 evidence
-acceptance; they do not describe the current cursor. S1/S2/S3/S4a/S4b are now published;
-S4c technical evidence is accepted with publication PENDING.
-See the [accepted handoff](../docs/p4.4f1e-handoff.md#s4c-accepted-evidence) and
+acceptance; they do not describe the current cursor. S1/S2/S3/S4a/S4b/S4c are now
+published; S4d/full-S4 technical evidence is accepted with publication PENDING.
+See the [accepted handoff](../docs/p4.4f1e-handoff.md#s4d-full-s4-accepted-evidence) and
 [external sole project cursor](../../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md).
 Historical receipts, timings, pins, failures and errata below remain unchanged.
 
