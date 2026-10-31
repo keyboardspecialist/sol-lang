@@ -6,10 +6,11 @@ This list preserves the project backlog and dated status checkpoints; it is not 
 live execution cursor. The sole project cursor is
 [H/project-execution-cursor.md](../sol-lang/.git/agent-handoffs/p44-f1e/project-execution-cursor.md).
 The [old S3 cursor](../sol-lang/.git/agent-handoffs/p44-f1e/s3-faults/execution-cursor.md)
-is a completed checkpoint, not current authority. The October 26 record below
-supersedes older status: full S4 is COMPLETE/PUBLISHED; S5 I1–I4 technical integration
-is independently accepted, own publication PENDING. The October 21 ledger remains
-history. `README.md`'s October 3 overview/“TODO sole live ledger” description is
+is a completed checkpoint, not current authority. The October 26 record below remains the latest S5 publication-status checkpoint;
+the October 31 BR1 source checkpoint below is later source evidence only and does
+not replace that status or the sole external project cursor. Full S4 is
+COMPLETE/PUBLISHED; S5 I1–I4 technical integration is independently accepted,
+own publication PENDING. The October 21 ledger remains history. `README.md`'s October 3 overview/“TODO sole live ledger” description is
 dated, outside this four-doc scope and not current execution authority.
 The foundation was audited September 9, 2026 against baseline `6ec4ba9`; the
 checkpoint was refreshed October 21, 2026 after verified S2 publication and the
@@ -23,6 +24,19 @@ toolchain phases remain documented in the [README](README.md#roadmap).
 with a current-worktree addendum, not a competing queue. Impact and complexity
 use a 1-5 scale, where 5 is foundational or architectural.
 Ordering accounts for dependencies rather than only the impact/complexity ratio.
+
+## BR1 Source Checkpoint — October 31, 2026
+
+This dated source-evidence checkpoint records the focused BR1 source gate without
+changing the execution cursor. The five focused tests and whitespace check were
+independently accepted on the unchanged candidate14 image. Its original 110-second
+fullpath timeout remains closed as a timeout; the separately authorized
+aggregate-240-second rerun passed in 155.227541 seconds without changing production
+deadlines. The final-source capture is static and awaits independent review; it is
+not runtime approval. Corrected C remains uncompiled and actual semantics
+unvalidated: BR1 is not complete or published, and actual phases/build remain
+NOT_RUN. Any later actual binding is blocked on a reviewed fresh-HEAD versus
+historical-parent transition.
 
 ## Historical Execution Cursor — October 21, 2026
 

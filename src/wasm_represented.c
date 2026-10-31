@@ -5319,6 +5319,216 @@ static bool represented_source_plain_int64(const SolIr *ir, size_t type) {
         && item->effect_parameter == SOL_IR_NONE;
 }
 
+/* BR1 is a new source-typed leaf, not a new physical scalar convention. */
+static bool represented_br1_source_bool(const SolIr *ir, size_t type) {
+    if (type >= ir->type_count) return false;
+    const SolIrType *item = &ir->types[type];
+    return item->kind == SOL_IR_TYPE_BOOL && item->definition == SOL_IR_NONE
+        && item->argument_count == 0 && item->parameter_count == 0
+        && item->result == SOL_IR_NONE && item->effects.count == 0
+        && item->effect_parameter == SOL_IR_NONE;
+}
+
+static bool represented_br1_bool_recipe(const SolMirConcreteProgram *concrete,
+    size_t type, size_t recipe) {
+    const SolMirMaterialization *m = &concrete->materialization;
+    if (type >= m->type_count || type >= concrete->layout.type_count
+        || recipe >= concrete->representation.recipe_count
+        || concrete->layout.types[type].recipe != recipe) return false;
+    const SolMirMaterializedType *materialized = &m->types[type];
+    const SolMirRecipe *physical = &concrete->representation.recipes[recipe];
+    return materialized->kind == SOL_IR_TYPE_BOOL
+        && materialized->definition == SOL_IR_NONE
+        && materialized->nominal_category == SOL_MIR_MATERIALIZED_NOMINAL_NONE
+        && materialized->arguments.count == 0 && materialized->parameters.count == 0
+        && materialized->parameter_accesses.count == 0
+        && materialized->result == SOL_MIR_MATERIALIZED_NONE
+        && materialized->backing == SOL_MIR_MATERIALIZED_NONE
+        && materialized->capability_source == SOL_MIR_MATERIALIZED_NONE
+        && materialized->fields.count == 0 && materialized->variants.count == 0
+        && materialized->ownership_components.count == 0
+        && !materialized->nominal_open && materialized->is_copy
+        && materialized->effects == SOL_MIR_MATERIALIZED_NONE
+        && physical->kind == SOL_MIR_RECIPE_BOOL
+        && physical->concrete_definition == SOL_IR_NONE
+        && physical->storage == SOL_MIR_STORAGE_SCALAR
+        && physical->copy_kind == SOL_MIR_COPY_TRIVIAL
+        && physical->drop_kind == SOL_MIR_DROP_NONE
+        && physical->inhabited && physical->is_copy && !physical->zero_sized
+        && physical->fields.count == 0 && physical->variants.count == 0
+        && physical->parameters.count == 0 && physical->parameter_accesses.count == 0
+        && physical->result == SOL_MIR_RECIPE_NONE
+        && physical->backing == SOL_MIR_RECIPE_NONE
+        && physical->capability_source == SOL_MIR_RECIPE_NONE
+        && physical->effects == SOL_MIR_MATERIALIZED_NONE;
+}
+
+static bool represented_br1_leaf_target(const SolWasmRepresentedBuildRequest *request,
+    size_t callable_id, const SolMirRuntimeSignature *signature) {
+    const SolMirRuntimeConventions *c = request->program->conventions;
+    const SolMirConcreteProgram *concrete = c->concrete;
+    const SolMirMaterialization *m = &concrete->materialization;
+    const SolIr *ir = concrete->program.ir;
+    if (callable_id >= concrete->linkage.callable_count || signature == NULL
+        || signature->origin != SOL_MIR_RUNTIME_SIGNATURE_INTERNAL
+        || signature->internal != callable_id
+        || signature_for(c, callable_id) != signature
+        || signature->result_class != SOL_MIR_RUNTIME_RESULT_VALUE
+        || signature->slots.count != 1 || signature->slots.offset >= c->signature_slot_count
+        || !represented_pure_effect_row(m, signature->effects)) return false;
+    size_t instance = concrete->linkage.callables[callable_id].instance;
+    if (instance >= m->image_count) return false;
+    const SolMirMaterializedImage *image = &m->images[instance];
+    if (image->source_callable >= ir->callable_count) return false;
+    const SolIrCallable *source = &ir->callables[image->source_callable];
+    const SolMirRuntimeSignatureSlot *slot = &c->signature_slots[signature->slots.offset];
+    if (source->kind != SOL_IR_CALLABLE_FUNCTION || source->parameters.count != 1
+        || source->parameters.offset >= ir->root_count
+        || source->effects.count != 0 || source->generic_parameters.count != 0
+        || source->effect_parameters.count != 0 || source->effect_parameter != SOL_IR_NONE
+        || source->receiver != SOL_IR_NONE
+        || !represented_br1_source_bool(ir, source->result)
+        || image->result != signature->result
+        || slot->role != SOL_MIR_RUNTIME_SLOT_PARAMETER || slot->formal != 0
+        || slot->access != SOL_ACCESS_OWNED || signature->effects != image->effects
+        || !represented_br1_bool_recipe(concrete, slot->recipe, slot->recipe)
+        || !represented_br1_bool_recipe(concrete, signature->result, signature->result))
+        return false;
+    size_t local_id = ir->roots[source->parameters.offset];
+    if (local_id >= ir->local_count) return false;
+    const SolIrLocal *local = &ir->locals[local_id];
+    if (local->kind != SOL_IR_LOCAL_PARAMETER || local->owner != source->owner
+        || local->access != SOL_ACCESS_OWNED
+        || !represented_br1_source_bool(ir, local->type)
+        || !represented_predicate_leaf_scalar_target(concrete, request->program->cleanup, instance))
+        return false;
+    size_t parameters = 0;
+    for (size_t n = 0; n < image->locals.count; ++n) {
+        const SolMirMaterializedLocal *row = &m->locals[image->locals.offset + n];
+        if (row->kind != SOL_MIR_MATERIALIZED_LOCAL_PARAMETER) continue;
+        if (row->instance != instance || row->source_local != local_id || row->ordinal != 0
+            || row->access != SOL_ACCESS_OWNED
+            || !represented_br1_bool_recipe(concrete, row->type, slot->recipe)) return false;
+        ++parameters;
+    }
+    if (parameters != 1) return false;
+    /* Inspect the complete owned image, not reachable execution or catalog edges
+     * alone. Dead outgoing calls and recursive calls are equally outside BR1. */
+    for (size_t n = 0; n < image->blocks.count; ++n)
+        if (m->blocks[image->blocks.offset + n].terminator.kind == SOL_MIR_TERM_INVOKE)
+            return false;
+    for (size_t n = 0; n < c->call_count; ++n) {
+        const SolMirRuntimeCall *call = &c->calls[n];
+        if (call->owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_IMAGE && call->image == instance)
+            return false;
+        if (call->owner_kind == SOL_MIR_RUNTIME_CALL_OWNER_PREDICATE) {
+            if (call->predicate >= concrete->operations.predicate_body_count) return false;
+            const SolMirPredicateBody *body = &concrete->operations.predicate_bodies[call->predicate];
+            if (body->owner_kind == SOL_MIR_PREDICATE_OWNER_INSTANCE && body->instance == instance)
+                return false;
+        }
+    }
+    return true;
+}
+
+static bool represented_br1_argument_exact(const SolWasmRepresentedBuildRequest *request,
+    const RepresentedQualifiedIndex *qualified_index, size_t body_id, size_t block_id,
+    const SolMirRuntimeSignatureSlot *slot, const SolIrExpression *source_call,
+    const SolMirPredicateValue *argument, size_t argument_id) {
+    const SolMirConcreteProgram *concrete = request->program->conventions->concrete;
+    const SolMirMaterialization *m = &concrete->materialization;
+    const SolMirOperations *o = &concrete->operations;
+    const SolIr *ir = concrete->program.ir;
+    const SolMirPredicateBody *body = &o->predicate_bodies[body_id];
+    const SolMirPlanContext *context = &m->contexts[body->context];
+    const SolIrObligation *obligation = &ir->obligations[context->obligation];
+    const SolMirMaterializedImage *image = &m->images[body->instance];
+    const SolMirOperationPredicatePlan *plan = represented_plan_for_body(request,
+        qualified_index, body->instance, body_id);
+    if (image->source_callable >= ir->callable_count || plan == NULL
+        || plan < o->predicates || plan >= o->predicates + o->predicate_count
+        || plan->kind != SOL_MIR_OPERATION_PREDICATE_CONTRACT
+        || plan->image != body->instance || plan->body != body_id
+        || plan->context != body->context || plan->contract_phase != SOL_CONTRACT_REQUIRES
+        || plan->contract_outcome != SOL_CONTRACT_OUTCOME_ALWAYS
+        || plan->provenance >= o->provenance_count
+        || plan->block < image->blocks.offset
+        || plan->block - image->blocks.offset >= image->blocks.count
+        || plan->block >= m->block_count || body->phase != SOL_CONTRACT_REQUIRES
+        || body->refinement_self_recipe != SOL_MIR_RECIPE_NONE
+        || obligation->owner_kind != SOL_CONTRACT_OWNER_ITEM
+        || obligation->owner != ir->callables[image->source_callable].owner
+        || ir->callables[image->source_callable].kind != SOL_IR_CALLABLE_FUNCTION
+        || obligation->snapshots.count != 0 || obligation->result_available
+        || obligation->result_type != SOL_IR_NONE
+        || context->source.expression != obligation->predicate
+        || !represented_predicate_leaf_range(image->locals.offset, image->locals.count,
+            m->local_count)
+        || argument_id < body->values.offset
+        || argument_id - body->values.offset >= body->values.count) return false;
+    const SolMirMaterializedTerminator *check = &m->blocks[plan->block].terminator;
+    const SolMirOperationProvenance *provenance = &o->provenance[plan->provenance];
+    if (check->kind != SOL_MIR_TERM_CHECK_CONTRACT
+        || check->source_obligation != context->obligation
+        || check->contract_phase != SOL_CONTRACT_REQUIRES
+        || check->contract_outcome != SOL_CONTRACT_OUTCOME_ALWAYS
+        || provenance->kind != SOL_MIR_OPERATION_PROVENANCE_PREDICATE
+        || provenance->executable != (size_t)(plan - o->predicates)
+        || provenance->source_obligation != context->obligation
+        || provenance->source_expression != check->source_expression
+        || provenance->source_definition != SOL_IR_NONE
+        || provenance->source_snapshot != SOL_IR_NONE) return false;
+    const SolIrOperand *operand = &ir->operands[source_call->as.call.operands.offset];
+    if (operand->formal != 0 || operand->access != SOL_ACCESS_OWNED
+        || operand->value >= ir->expression_count) return false;
+    const SolIrExpression *source = &ir->expressions[operand->value];
+    if (!represented_br1_source_bool(ir, source->type)
+        || !represented_br1_source_bool(ir, source_call->type)) return false;
+    if (source->kind == SOL_IR_EXPR_BOOL) {
+        if (argument->kind != SOL_MIR_PREDICATE_VALUE_INSTRUCTION
+            || argument->block != block_id || argument->definition >= o->predicate_instruction_count)
+            return false;
+        const SolMirPredicateInstruction *instruction = &o->predicate_instructions[argument->definition];
+        const SolMirPredicateBlock *block = &o->predicate_blocks[block_id];
+        return argument->definition >= block->instructions.offset
+            && argument->definition - block->instructions.offset < block->instructions.count
+            && instruction->block == block_id && instruction->result == argument_id
+            && instruction->kind == SOL_MIR_PREDICATE_INST_BOOL
+            && instruction->recipe == slot->recipe && instruction->boolean == source->as.boolean;
+    }
+    if (source->kind != SOL_IR_EXPR_PLACE || source->as.place >= ir->place_count
+        || source->local_use != SOL_IR_LOCAL_USE_NONE
+        || argument->kind != SOL_MIR_PREDICATE_VALUE_INPUT
+        || argument->definition < body->inputs.offset
+        || argument->definition - body->inputs.offset >= body->inputs.count) return false;
+    const SolIrPlace *place = &ir->places[source->as.place];
+    const SolMirPredicateInput *input = &o->predicate_inputs[argument->definition];
+    const SolIrCallable *caller = &ir->callables[image->source_callable];
+    if (place->root_kind != SOL_IR_PLACE_ROOT_LOCAL || place->projections.count != 0
+        || place->type != source->type
+        || place->local >= ir->local_count || input->kind != SOL_MIR_PREDICATE_INPUT_PARAMETER
+        || input->access != SOL_ACCESS_OWNED || input->recipe != slot->recipe
+        || caller->parameters.offset > ir->root_count
+        || caller->parameters.count > ir->root_count - caller->parameters.offset
+        || input->ordinal >= caller->parameters.count
+        || ir->roots[caller->parameters.offset + input->ordinal] != place->local) return false;
+    const SolIrLocal *local = &ir->locals[place->local];
+    if (local->kind != SOL_IR_LOCAL_PARAMETER || local->owner != caller->owner
+        || local->type != source->type
+        || local->access != SOL_ACCESS_OWNED || !represented_br1_source_bool(ir, local->type))
+        return false;
+    size_t matches = 0;
+    for (size_t n = 0; n < image->locals.count; ++n) {
+        const SolMirMaterializedLocal *row = &m->locals[image->locals.offset + n];
+        if (row->source_local != place->local) continue;
+        if (row->instance != body->instance || row->kind != SOL_MIR_MATERIALIZED_LOCAL_PARAMETER
+            || row->ordinal != input->ordinal || row->access != SOL_ACCESS_OWNED
+            || !represented_br1_bool_recipe(concrete, row->type, input->recipe)) return false;
+        ++matches;
+    }
+    return matches == 1;
+}
+
 /* The first predicate-call join is intentionally private and scalar.  Keep
  * owner/body/block namespaces explicit here: a predicate block number is not
  * an image block number, and its result ID is not a materialized image value. */
@@ -5428,9 +5638,12 @@ static bool represented_predicate_call_exact(const SolWasmRepresentedBuildReques
     const SolMirPredicateValue *argument = predicate_operand->value < o->predicate_value_count
         ? &o->predicate_values[predicate_operand->value] : NULL;
     const SolMirPredicateValue *result = &o->predicate_values[term->result];
+    bool br1_bool = slot->recipe < concrete->representation.recipe_count
+        && concrete->representation.recipes[slot->recipe].kind == SOL_MIR_RECIPE_BOOL;
     if (slot->role != SOL_MIR_RUNTIME_SLOT_PARAMETER || slot->formal != 0
         || slot->access != SOL_ACCESS_OWNED || slot->recipe >= concrete->representation.recipe_count
-        || concrete->representation.recipes[slot->recipe].kind != SOL_MIR_RECIPE_INT64
+        || (br1_bool ? refinement || ensures_call
+            : concrete->representation.recipes[slot->recipe].kind != SOL_MIR_RECIPE_INT64)
         || concrete->representation.recipes[slot->recipe].storage != SOL_MIR_STORAGE_SCALAR
         || concrete->representation.recipes[signature->result].kind != SOL_MIR_RECIPE_BOOL
         || concrete->representation.recipes[signature->result].storage != SOL_MIR_STORAGE_SCALAR
@@ -5498,6 +5711,9 @@ static bool represented_predicate_call_exact(const SolWasmRepresentedBuildReques
         || source_call->as.call.operands.count > concrete->program.ir->operand_count
             - source_call->as.call.operands.offset
         || !represented_predicate_leaf_scalar_target(concrete, cleanup, callee->instance)) return false;
+    if (br1_bool && (!represented_br1_leaf_target(request, target, signature)
+        || !represented_br1_argument_exact(request, qualified_index, body_id, block_id,
+            slot, source_call, argument, predicate_operand->value))) return false;
     if (refinement) {
         const SolIrOperand *source_operand = &ir->operands[source_call->as.call.operands.offset];
         if (source_operand->formal != 0 || source_operand->access != SOL_ACCESS_OWNED
@@ -5817,6 +6033,13 @@ static bool represented_predicate_target_signature_exact(
         || m->images[callable->instance].source_callable >= concrete->program.ir->callable_count)
         return false;
     const SolMirRuntimeSignature *signature = signature_for(conventions, callable_id);
+    if (signature != NULL && signature->slots.count == 1
+        && signature->slots.offset < conventions->signature_slot_count) {
+        size_t recipe = conventions->signature_slots[signature->slots.offset].recipe;
+        if (recipe < representation->recipe_count
+            && representation->recipes[recipe].kind == SOL_MIR_RECIPE_BOOL)
+            return represented_br1_leaf_target(request, callable_id, signature);
+    }
     if (signature == NULL || signature->origin != SOL_MIR_RUNTIME_SIGNATURE_INTERNAL
         || signature->internal != callable_id || signature->result_class != SOL_MIR_RUNTIME_RESULT_VALUE
         || signature->slots.count != 1 || signature->slots.offset > conventions->signature_slot_count
