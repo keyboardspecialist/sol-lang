@@ -22,6 +22,12 @@ static int failures;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #x); ++failures; } } while (0)
 typedef struct { SolDiagnostics d; SolHirModule h; SolTypeTable t; SolEffectTable e; SolContractTable k; SolIr ir; SolPackage p; } Fixture;
 typedef struct { SolMirConcreteProgram concrete; SolMirRuntimeConventions conventions; SolMirRuntimeValues values; SolMirRuntimeCleanup cleanup; SolMirRuntimeHostAbi host; SolMirRuntimeHandlerAbi handlers; SolMirRuntimeLoweredProgram lowered; } Pipeline;
+enum {
+#define LOWERED_TABLE_INDEX(member,type,singular) LOWERED_TABLE_INDEX_##member,
+    SOL_MIR_RUNTIME_LOWERED_TABLES(LOWERED_TABLE_INDEX)
+#undef LOWERED_TABLE_INDEX
+    LOWERED_TABLE_FAMILY_COUNT
+};
 typedef struct { SolSource source; SolTokens tokens; SolSyntaxTree syntax; SolDiagnostics d; SolHirModule h; SolTypeTable t; SolEffectTable e; SolContractTable k; SolIr ir; } TextFixture;
 static SolIrCallableId find(const SolIr *ir,const char*n,SolIrCallableKind k) { for(size_t i=0;i<ir->callable_count;i++)if(ir->callables[i].kind==k&&!strcmp(ir->callables[i].name,n))return i;return SOL_IR_NONE; }
 static bool setup_at(Fixture*f,const char*directory) { memset(f,0,sizeof *f);sol_package_init(&f->p);sol_diagnostics_init(&f->d);sol_hir_module_init(&f->h);sol_type_table_init(&f->t);sol_effect_table_init(&f->e);sol_contract_table_init(&f->k);sol_ir_init(&f->ir);char message[256];if(!sol_package_load_directory(&f->p,directory,&f->d,message,sizeof message))return false;SolHirFileScope scopes[8];if(f->p.file_count>8)return false;for(size_t i=0;i<f->p.file_count;i++)scopes[i]=(SolHirFileScope){f->p.files[i].module_name,f->p.files[i].import_start,f->p.files[i].import_count,f->p.files[i].item_start,f->p.files[i].item_count};return sol_hir_lower_scoped(&f->p.source,&f->p.syntax,scopes,f->p.file_count,&f->h,&f->d)&&sol_type_check(&f->p.source,&f->p.syntax,&f->h,&f->t,&f->d)&&sol_effect_check(&f->p.source,&f->p.syntax,&f->h,&f->t,&f->e,&f->d)&&sol_contract_lower(&f->p.source,&f->p.syntax,&f->h,&f->t,&f->e,&f->k,&f->d)&&sol_ir_lower_scoped(&f->p.source,&f->p.syntax,&f->h,&f->t,&f->e,&f->k,f->p.files,f->p.file_count,&f->ir,&f->d); }
@@ -90,6 +96,181 @@ static void check_build_work(const Pipeline *p) {
         && work.actual_work == work.draft_work + work.reserved_persistent_work
         && work.actual_work == p->lowered.usage.build_work
         && work.build_scratch_bytes == p->lowered.usage.build_scratch_bytes);
+}
+static bool r_auth_copy_requires_runtime(SolMirCopyKind kind) {
+    return kind == SOL_MIR_COPY_TEXT || kind == SOL_MIR_COPY_AGGREGATE
+        || kind == SOL_MIR_COPY_WRAPPER;
+}
+/* Independently derive the validator-only unmetered producer-search visits
+ * from the authenticated source predecessors. The builder intentionally does
+ * not charge this pattern-extraction prefix to build_work. */
+static bool r_auth_pattern_scan_work(const Pipeline *p, size_t *out) {
+    const SolMirMaterialization *materialization = &p->concrete.materialization;
+    const SolMirOperations *operations = &p->concrete.operations;
+    size_t work = 0;
+    for (size_t instruction = 0; instruction < materialization->instruction_count; ++instruction) {
+        if (materialization->instructions[instruction].kind != SOL_MIR_INST_PATTERN_VALUE)
+            continue;
+        bool arithmetic_producer = false;
+        for (size_t plan = 0; plan < operations->arithmetic_count; ++plan)
+            if (operations->arithmetic[plan].instruction == instruction
+                && operations->arithmetic[plan].failures) {
+                arithmetic_producer = true;
+                break;
+            }
+        if (arithmetic_producer) continue;
+        for (size_t plan = 0; plan < operations->pattern_extraction_count; ++plan) {
+            const SolMirOperationPatternExtraction *candidate =
+                &operations->pattern_extractions[plan];
+            if (work == SIZE_MAX) return false;
+            ++work;
+            if (candidate->instruction == instruction
+                && r_auth_copy_requires_runtime(candidate->copy_kind)
+                && candidate->result_recipe < p->values.allocation_plan_count
+                && p->values.allocation_plans[candidate->result_recipe].kind
+                    != SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE) break;
+        }
+    }
+    *out = work;
+    return true;
+}
+/* The builder's terminator-demand pass reads image from its drafted block row.
+ * Validator reconstruction has no such row, so it pays only a validation-meter
+ * image-slice lookup for each block. Count the exact visited prefix. */
+static bool r_auth_image_emission_lookup_work(const Pipeline *p, size_t *out) {
+    const SolMirMaterialization *materialization = &p->concrete.materialization;
+    size_t work = 0;
+    for (size_t block = 0; block < materialization->block_count; ++block) {
+        bool found = false;
+        for (size_t image = 0; image < materialization->image_count; ++image) {
+            const SolMirPlanSlice slice = materialization->images[image].blocks;
+            if (work == SIZE_MAX) return false;
+            ++work;
+            if (block >= slice.offset && block - slice.offset < slice.count) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    *out = work;
+    return true;
+}
+typedef struct {
+    size_t builder_schedule_ticks;
+    size_t predicate_incidence_ticks;
+    size_t image_emission_lookup_ticks;
+    size_t table_accumulator_ticks;
+    size_t build_formula_ticks;
+    size_t grant_cardinality_ticks;
+    size_t pattern_producer_scan_ticks;
+    size_t total;
+} RAuthValidationWorkDelta;
+/* Per-slot equation, using only the old literal Usage rows and predecessor data:
+ * delta = (old build_work - persistent_work - draft_allocation_work)
+ *       + image_emission_lookup_work + pattern_scan_work
+ *       + (2*N + A + 5) + (13 + [C!=0] + [G!=0]) + 2*G.
+ * The first term is the independently recounted successful census/draft scan
+ * schedule, including P + P*E predicate incidence; its incidence component is
+ * exposed and checked separately. The extra image lookup is needed because the
+ * independent emitter cannot read drafted rows. Remaining terms are the new
+ * checked table/coverage accumulators, scalar bridge, grant-census arithmetic,
+ * and the validator-metered prefix of the otherwise BUILD-unmetered producer lookup.
+ * Inputs are frozen expectations and authenticated predecessors, never fresh
+ * owner Usage or builder-observed counters. */
+static bool r_auth_expected_validation_delta(const Pipeline *p,
+    const SolMirRuntimeLoweredProgramUsage *expected, RAuthValidationWorkDelta *out) {
+    size_t rows = 0, nonempty = 0, table_families = 0, table_index = 0;
+#define COUNT_TABLE(member,type,singular) do { \
+    size_t count = expected->member; \
+    if (count > SIZE_MAX - rows || table_families == SIZE_MAX) return false; \
+    rows += count; ++table_families; \
+    if (count) { if (nonempty == SIZE_MAX) return false; ++nonempty; } \
+    ++table_index; \
+} while (0);
+    SOL_MIR_RUNTIME_LOWERED_TABLES(COUNT_TABLE)
+#undef COUNT_TABLE
+    if (table_index != LOWERED_TABLE_FAMILY_COUNT) return false;
+    size_t coverage = expected->image_instructions;
+    if (expected->image_blocks > SIZE_MAX - coverage) return false;
+    coverage += expected->image_blocks;
+    if (expected->predicate_instructions > SIZE_MAX - coverage) return false;
+    coverage += expected->predicate_instructions;
+    if (expected->predicate_blocks > SIZE_MAX - coverage) return false;
+    coverage += expected->predicate_blocks;
+    if (expected->predicate_edges > SIZE_MAX - coverage) return false;
+    coverage += expected->predicate_edges;
+
+    size_t seal_overhead, seal_work, double_seal, persistent, draft_allocations;
+    if (table_families > SIZE_MAX / 5) return false;
+    seal_overhead = table_families * 5;
+    if (seal_overhead > SIZE_MAX - 22) return false;
+    seal_overhead += 22;
+    if (expected->owned_bytes > SIZE_MAX - seal_overhead) return false;
+    seal_work = expected->owned_bytes + seal_overhead;
+    if (seal_work > SIZE_MAX / 2) return false;
+    double_seal = seal_work * 2;
+    persistent = nonempty;
+    if (rows > SIZE_MAX - persistent) return false;
+    persistent += rows;
+    if (double_seal > SIZE_MAX - persistent) return false;
+    persistent += double_seal;
+    draft_allocations = nonempty;
+    if (coverage) { if (draft_allocations == SIZE_MAX) return false; ++draft_allocations; }
+    if (expected->host_grants) {
+        if (draft_allocations == SIZE_MAX) return false;
+        ++draft_allocations;
+    }
+    if (expected->build_work < persistent
+        || expected->build_work - persistent < draft_allocations) return false;
+    size_t builder_schedule_ticks = expected->build_work - persistent - draft_allocations;
+    size_t predicate_incidence_product, predicate_incidence_ticks;
+    if (expected->predicate_blocks && expected->predicate_edges
+        > SIZE_MAX / expected->predicate_blocks) return false;
+    predicate_incidence_product = expected->predicate_blocks * expected->predicate_edges;
+    if (predicate_incidence_product > SIZE_MAX - expected->predicate_blocks) return false;
+    predicate_incidence_ticks = expected->predicate_blocks + predicate_incidence_product;
+    if (builder_schedule_ticks < predicate_incidence_ticks) return false;
+    /* reconstruct_build_usage separately checks N table-family additions,
+     * N row additions, A nonempty-table additions, and five coverage additions. */
+    if (nonempty > SIZE_MAX - 5
+        || table_families > (SIZE_MAX - nonempty - 5) / 2) return false;
+    size_t accumulator_ticks = 2 * table_families + nonempty + 5;
+    /* checked_build_cost_formula performs 13 unconditional checked operations:
+     * four owned-byte, three seal-size, one seal multiplication, two persistent,
+     * and three build-total operations. Coverage/grant allocation each add one
+     * conditional checked operation. */
+    size_t formula_ticks = 13 + (coverage != 0) + (expected->host_grants != 0);
+    if (expected->host_grants > SIZE_MAX / 2) return false;
+    size_t grant_cardinality_ticks = 2 * expected->host_grants;
+    size_t pattern_work, image_lookup_work;
+    if (!r_auth_pattern_scan_work(p, &pattern_work)
+        || !r_auth_image_emission_lookup_work(p, &image_lookup_work)) return false;
+    const size_t components[] = {builder_schedule_ticks, image_lookup_work, pattern_work,
+        accumulator_ticks, formula_ticks, grant_cardinality_ticks};
+    size_t added = 0;
+    for (size_t i = 0; i < sizeof components / sizeof *components; ++i) {
+        if (components[i] > SIZE_MAX - added) return false;
+        added += components[i];
+    }
+    *out = (RAuthValidationWorkDelta){builder_schedule_ticks,
+        predicate_incidence_ticks, image_lookup_work, accumulator_ticks,
+        formula_ticks, grant_cardinality_ticks, pattern_work, added};
+    return true;
+}
+static bool r_auth_expected_validation_delta_from_tables(const Pipeline *p,
+    const size_t *table_counts, size_t owned_bytes, size_t build_work,
+    size_t host_grants, RAuthValidationWorkDelta *out) {
+    SolMirRuntimeLoweredProgramUsage expected = {0};
+    size_t index = 0;
+#define LOAD_TABLE(member,type,singular) expected.member = table_counts[index++];
+    SOL_MIR_RUNTIME_LOWERED_TABLES(LOAD_TABLE)
+#undef LOAD_TABLE
+    if (index != LOWERED_TABLE_FAMILY_COUNT) return false;
+    expected.owned_bytes = owned_bytes;
+    expected.build_work = build_work;
+    expected.host_grants = host_grants;
+    return r_auth_expected_validation_delta(p, &expected, out);
 }
 static void reseal(SolMirRuntimeLoweredProgram *);
 static size_t render_key_collision_pairs(const char (*keys)[65],size_t count){size_t collisions=0;for(size_t i=0;i<count;++i)for(size_t q=i+1;q<count;++q)collisions+=!memcmp(keys[i],keys[q],65);return collisions;}
@@ -1117,9 +1298,17 @@ static void test_slice_d_e6_usage(const Pipeline *p) {
     }
     CHECK(pre_invoke == 5 && pre_residual == 0);
     static const size_t expected[] = {471,65,64,64,64,65,4,6,4,0,0,0,4,80,12,12,52,20,20,295,7668,5,4,5,0,0,0};
-    size_t work = 0;
-    /* 28 local ranges: byte visit +28*(iteration+overlap)=57; four paths. */
-    CHECK(sol_test_path_work(3555662, 228, sizeof SOL_TEST_SOURCE_DIR - 1, &work));
+    RAuthValidationWorkDelta derivation = {0};
+    /* 121's E6 path-neutral base: old literal 3,555,662 plus the complete
+     * independently derived reconstruction delta above (no observed Usage). */
+    size_t work = 0, base = 3555662;
+    CHECK(r_auth_expected_validation_delta_from_tables(p, expected,
+        2362008, 5763131, 4, &derivation)
+        && derivation.total <= SIZE_MAX - base);
+    if (derivation.total <= SIZE_MAX - base) base += derivation.total;
+    /* Old base + independently derived reconstruction ticks; path contribution
+     * remains 28 local ranges * four paths * 57 bytes, unchanged. */
+    CHECK(sol_test_path_work(base, 228, sizeof SOL_TEST_SOURCE_DIR - 1, &work));
     expect_slice_d_usage(p, expected, 2362008, 2362586, 5763131, 17968, work,
         36799488, 36870336);
 }
@@ -1484,6 +1673,14 @@ static void test_long_virtual_path_validation_work(void) {
 }
 static void test_slice_d_p35_usage(const Pipeline *p, size_t validation_work) {
     static const size_t expected[] = {198,16,10,10,10,16,0,0,0,0,0,0,0,33,5,7,11,7,7,54,2742,0,0,0,7,14,128};
+    RAuthValidationWorkDelta derivation = {0};
+    /* Callers supply the two distinct old P35/P35-reordered path bases;
+     * both add this fixture-cardinality-derived delta before path bytes. */
+    CHECK(r_auth_expected_validation_delta_from_tables(p, expected,
+        849008, 2017530, 0, &derivation)
+        && derivation.total <= SIZE_MAX - validation_work);
+    if (derivation.total <= SIZE_MAX - validation_work)
+        validation_work += derivation.total;
     expect_slice_d_usage(p, expected, 849008, 849222, 2017530, 6550, validation_work,
         13415424, 13440600);
 }
@@ -3079,6 +3276,28 @@ static const struct { const char *name, *leaf; size_t pairs; } transport_context
     {"unit_direct", "p44_parallel_predicate_transport_unit_direct", 1},
     {"unit_input_result", "p44_parallel_predicate_transport_unit_input_result", 2},
 };
+static void transport_usage_diagnostic(const char *label,
+    const SolMirRuntimeLoweredProgramUsage *usage) {
+#define PRINT_USAGE(member,type,singular) \
+    fprintf(stderr, "R_AUTH_USAGE %s.%s=%zu\n", label, #member, usage->member);
+    SOL_MIR_RUNTIME_LOWERED_TABLES(PRINT_USAGE)
+#undef PRINT_USAGE
+    fprintf(stderr, "R_AUTH_USAGE %s.erased_loops=%zu\n", label, usage->erased_loops);
+    fprintf(stderr, "R_AUTH_USAGE %s.provenance_records=%zu\n", label, usage->provenance_records);
+    fprintf(stderr, "R_AUTH_USAGE %s.demanded_semantic_plans=%zu\n", label,
+        usage->demanded_semantic_plans);
+    fprintf(stderr, "R_AUTH_USAGE %s.owned_bytes=%zu\n", label, usage->owned_bytes);
+    fprintf(stderr, "R_AUTH_USAGE %s.build_scratch_bytes=%zu\n", label,
+        usage->build_scratch_bytes);
+    fprintf(stderr, "R_AUTH_USAGE %s.build_work=%zu\n", label, usage->build_work);
+    fprintf(stderr, "R_AUTH_USAGE %s.validation_scratch_bytes=%zu\n", label,
+        usage->validation_scratch_bytes);
+    fprintf(stderr, "R_AUTH_USAGE %s.validation_work=%zu\n", label,
+        usage->validation_work);
+    fprintf(stderr, "R_AUTH_USAGE %s.render_bytes=%zu\n", label, usage->render_bytes);
+    fprintf(stderr, "R_AUTH_USAGE %s.render_scratch_bytes=%zu\n", label,
+        usage->render_scratch_bytes);
+}
 static void transport_lowered_frozen(Pipeline *p, size_t test, const char *baseline) {
     /* Retained literal census, not observed Usage. Only one physical source path
      * changes prefix; the normalized aggregate path is fixed before construction.
@@ -3094,6 +3313,17 @@ static void transport_lowered_frozen(Pipeline *p, size_t test, const char *basel
     };
     CHECK(test < sizeof frozen / sizeof *frozen); if (test >= sizeof frozen / sizeof *frozen) return;
     SolMirRuntimeLoweredProgramUsage expected = frozen[test].usage;
+    RAuthValidationWorkDelta derivation = {0};
+    /* For each of the seven retained contexts, add its own old-literal-derived
+     * delta to only validation_work, then preserve the historical 57*29 path
+     * normalization and reapply the current physical-prefix contribution. */
+    CHECK(r_auth_expected_validation_delta(p, &expected, &derivation)
+        && derivation.total <= SIZE_MAX - expected.validation_work);
+    CHECK(derivation.builder_schedule_ticks >= derivation.predicate_incidence_ticks
+        && derivation.predicate_incidence_ticks == expected.predicate_blocks
+            + expected.predicate_blocks * expected.predicate_edges);
+    if (derivation.total <= SIZE_MAX - expected.validation_work)
+        expected.validation_work += derivation.total;
     CHECK(p->concrete.program.ir->file_count == 1);
     CHECK(sol_test_path_work(expected.validation_work - 57 * 29, 57,
         sizeof SOL_TEST_SOURCE_DIR - 1, &expected.validation_work));
@@ -3102,6 +3332,26 @@ static void transport_lowered_frozen(Pipeline *p, size_t test, const char *basel
     sol_mir_linkage_internal_sha256_write(&sha, baseline, strlen(baseline));
     CHECK(sol_mir_linkage_internal_sha256_finish(&sha, &digest));
     for (size_t i = 0; i < 32; ++i) snprintf(hash + i * 2, 3, "%02x", digest.bytes[i]);
+    if (memcmp(&p->lowered.usage, &expected, sizeof expected)) {
+        fprintf(stderr, "R_AUTH_USAGE_MISMATCH context=%s index=%zu\n",
+            transport_contexts[test].name, test);
+        transport_usage_diagnostic("actual", &p->lowered.usage);
+        transport_usage_diagnostic("expected", &expected);
+        fprintf(stderr,
+            "R_AUTH_VALIDATION_DELTA context=%s builder_schedule_ticks=%zu "
+            "predicate_incidence_ticks=%zu image_emission_lookup_ticks=%zu "
+            "table_accumulator_ticks=%zu build_formula_ticks=%zu "
+            "grant_cardinality_ticks=%zu pattern_producer_scan_ticks=%zu total=%zu "
+            "old_frozen_validation_base=%zu path_coefficient=%zu path_normalization=%zu "
+            "source_prefix_length=%zu file_count=%zu derived_expected_validation_work=%zu\n",
+            transport_contexts[test].name, derivation.builder_schedule_ticks,
+            derivation.predicate_incidence_ticks, derivation.image_emission_lookup_ticks,
+            derivation.table_accumulator_ticks, derivation.build_formula_ticks,
+            derivation.grant_cardinality_ticks, derivation.pattern_producer_scan_ticks,
+            derivation.total, frozen[test].usage.validation_work, (size_t)57, (size_t)29,
+            sizeof SOL_TEST_SOURCE_DIR - 1, p->concrete.program.ir->file_count,
+            expected.validation_work);
+    }
     CHECK(!memcmp(&p->lowered.usage, &expected, sizeof expected));
     CHECK(strlen(baseline) == frozen[test].length && !strcmp(hash, frozen[test].hash)
         && strlen(baseline) <= p->lowered.usage.render_bytes);
@@ -3506,6 +3756,7 @@ static void transport_baseline_work(size_t which) {
     sol_test_progress_phase_end();
     sol_test_progress_phase("owner", "full-pipeline", 1);
     bool built = setup_ok && (which == 0 ? build(&f, &p, NULL) : build_handlers(&f, &p));
+    if (!built) sol_diagnostics_render_human(stderr, &f.p.source, &f.d);
     CHECK(built); if (built) sol_test_progress_completed(1);
     sol_test_progress_phase_end();
     sol_test_progress_phase("check", "exact-path-work", 1);
@@ -3596,11 +3847,229 @@ static int transport_fault_cases(const char *selected, bool list) {
         }
     return found ? (failures ? 1 : 0) : 2;
 }
+static bool transport_r_auth_owner(Fixture *f, Pipeline *p, const char *key) {
+    if (!strcmp(key, "usage.direct") || !strcmp(key, "limits.direct")) {
+        bool setup_ok = setup_at(f, SOL_TEST_SOURCE_DIR "/tests/conformance/p44f_site_domains_direct");
+        return setup_ok && build_transport_entry(f, p);
+    }
+    if (!strcmp(key, "usage.ensures_old")) {
+        bool setup_ok = setup_at(f, SOL_TEST_SOURCE_DIR "/tests/conformance/p44_parallel_predicate_transport_ensures_old");
+        return setup_ok && build_transport_entry(f, p);
+    }
+    if (!strcmp(key, "usage.e6") || !strcmp(key, "limits.e6")
+        || !strcmp(key, "safety.e6")) {
+        bool setup_ok = setup(f);
+        return setup_ok && build(f, p, NULL);
+    }
+    if (!strcmp(key, "usage.p35") || !strcmp(key, "limits.p35")) {
+        bool setup_ok = setup_at(f, SOL_TEST_SOURCE_DIR "/tests/conformance/p35");
+        return setup_ok && build_handlers(f, p);
+    }
+    if (!strcmp(key, "usage.p36_graph")) {
+        bool setup_ok = setup_at(f, SOL_TEST_SOURCE_DIR "/tests/conformance/p36_graph");
+        return setup_ok && build_graph(f, p);
+    }
+    if (!strcmp(key, "usage.pre_operations")) {
+        bool setup_ok = setup(f);
+        return setup_ok && build_pre_operations(f, p, false);
+    }
+    return false;
+}
+static void transport_predicate_incidence_regression(Pipeline *p) {
+    const SolMirOperations *operations = &p->concrete.operations;
+    CHECK(operations->predicate_block_count == 3
+        && operations->predicate_edge_count == 2);
+    CHECK(operations->predicate_block_count
+            + operations->predicate_block_count * operations->predicate_edge_count == 9);
+    CHECK(p->lowered.predicate_block_count == 3
+        && p->lowered.predicate_edge_count == 2);
+    CHECK(sol_mir_runtime_lowered_program_validate(&p->lowered, NULL));
+    char *baseline = rendered(&p->lowered, NULL);
+    CHECK(baseline != NULL);
+    if (baseline) transport_lowered_frozen(p, 0, baseline);
+    free(baseline);
+}
+static void transport_resealed_counter_case(Pipeline *p, const char *key) {
+    TransportSnapshot snapshot = {0};
+    char *baseline = rendered(&p->lowered, NULL);
+    CHECK(baseline != NULL && transport_snapshot(p, &snapshot));
+    CHECK(sol_mir_runtime_lowered_program_validate(&p->lowered, NULL));
+    SolMirRuntimeLoweredProgramUsage saved_usage = p->lowered.usage;
+    uint64_t saved_seal = p->lowered.authentication;
+#define REPRODUCE(field) do { \
+    const size_t original = saved_usage.field; \
+    CHECK(original > 0 && original < p->lowered.limits.max_##field); \
+    if (original > 0 && original < p->lowered.limits.max_##field) { \
+        for (size_t direction = 0; direction < 2; ++direction) { \
+            CHECK(sol_mir_runtime_lowered_program_validate(&p->lowered, NULL)); \
+            p->lowered.usage.field = direction == 0 ? original - 1 : original + 1; \
+            reseal(&p->lowered); \
+            CHECK(p->lowered.authentication != 0 && p->lowered.authentication != saved_seal); \
+            TransportSnapshot malformed_snapshot = {0}; \
+            bool malformed_saved = transport_snapshot(p, &malformed_snapshot); \
+            CHECK(malformed_saved); \
+            SolDiagnostics diagnostics; sol_diagnostics_init(&diagnostics); \
+            bool accepted = sol_mir_runtime_lowered_program_validate(&p->lowered, &diagnostics); \
+            if (malformed_saved) transport_snapshot_check(&malformed_snapshot); \
+            if (accepted) fprintf(stderr, \
+                "R-AUTH REPRODUCER ACCEPTED_RESEALED_COUNTER case=%s field=%s delta=%s\n", \
+                key, #field, direction == 0 ? "-1" : "+1"); \
+            CHECK(!accepted && diagnostics.count == 1 && !diagnostics.allocation_failed \
+                && !strcmp(diagnostics.items[0].code, "SOL-MIR-RUNTIME-LOWERED-002") \
+                && !strcmp(diagnostics.items[0].message, "runtime lowered typed relation is malformed")); \
+            bool zero_output = lowered_render_rejected(&p->lowered); \
+            if (malformed_saved) transport_snapshot_check(&malformed_snapshot); \
+            bool sentinel_output = transport_sentinel_rejected(&p->lowered); \
+            if (malformed_saved) transport_snapshot_check(&malformed_snapshot); \
+            CHECK(zero_output && sentinel_output); \
+            SolDiagnostics measuring_diagnostics; sol_diagnostics_init(&measuring_diagnostics); \
+            SolMirRuntimeLoweredProgramBuildOutcome measuring_outcome = \
+                sol_mir_runtime_lowered_program_internal_validate(&p->lowered, \
+                    &measuring_diagnostics, true, NULL); \
+            if (malformed_saved) transport_snapshot_check(&malformed_snapshot); \
+            CHECK(measuring_outcome \
+                == SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_INVALID_PREDECESSOR \
+                && measuring_diagnostics.count == 1 \
+                && !strcmp(measuring_diagnostics.items[0].code, "SOL-MIR-RUNTIME-LOWERED-002")); \
+            sol_diagnostics_free(&measuring_diagnostics); sol_diagnostics_free(&diagnostics); \
+            transport_snapshot_free(&malformed_snapshot); \
+            p->lowered.usage.field = original; p->lowered.authentication = saved_seal; \
+            CHECK(sol_mir_runtime_lowered_program_validate(&p->lowered, NULL)); \
+            transport_snapshot_check(&snapshot); \
+            char *restored = rendered(&p->lowered, NULL); \
+            CHECK(restored && baseline && !strcmp(restored, baseline)); free(restored); \
+        } \
+    } \
+} while (0)
+    REPRODUCE(build_scratch_bytes);
+    REPRODUCE(build_work);
+#undef REPRODUCE
+    CHECK(p->lowered.authentication == saved_seal
+        && !memcmp(&p->lowered.usage, &saved_usage, sizeof saved_usage));
+    transport_snapshot_check(&snapshot); free(baseline); transport_snapshot_free(&snapshot);
+}
+static void transport_usage_counter_case(const char *key) {
+    Fixture f; Pipeline p; init(&p);
+    bool built = transport_r_auth_owner(&f, &p, key); CHECK(built);
+    if (built) {
+        if (!strcmp(key, "usage.direct"))
+            transport_predicate_incidence_regression(&p);
+        check_build_work(&p);
+        transport_resealed_counter_case(&p, key);
+    }
+    done(&p); finish(&f);
+}
+static void transport_build_limits_case(const char *key) {
+    Fixture f; Pipeline p; init(&p);
+    bool built = transport_r_auth_owner(&f, &p, key); CHECK(built);
+    if (built) {
+        SolMirRuntimeLoweredProgramLimits exact = exact_limits(&p);
+        SolMirRuntimeLoweredProgramBuildRequest request = {&p.conventions, &p.values,
+            &p.cleanup, &p.host, &p.handlers, &exact};
+        CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered, NULL));
+        SolMirRuntimeLoweredProgram candidate; sol_mir_runtime_lowered_program_init(&candidate);
+        CHECK(sol_mir_runtime_lowered_program_build(&request, &candidate, NULL)
+            == SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_SUCCEEDED
+            && !memcmp(&candidate.usage, &p.lowered.usage, sizeof candidate.usage));
+        sol_mir_runtime_lowered_program_free(&candidate);
+        for (size_t stage = 0; stage < 2; ++stage) {
+            SolMirRuntimeLoweredProgramLimits below = exact;
+            if (stage == 0) {
+                CHECK(p.lowered.usage.build_scratch_bytes > 0);
+                if (!p.lowered.usage.build_scratch_bytes) continue;
+                below.max_build_scratch_bytes = p.lowered.usage.build_scratch_bytes - 1;
+            } else {
+                CHECK(p.lowered.usage.build_work > 0);
+                if (!p.lowered.usage.build_work) continue;
+                below.max_build_work = p.lowered.usage.build_work - 1;
+            }
+            sol_mir_runtime_lowered_program_init(&candidate);
+            sol_mir_runtime_lowered_program_test_reset_allocation_attempts();
+            CHECK(sol_mir_runtime_lowered_program_build(
+                    &(SolMirRuntimeLoweredProgramBuildRequest){&p.conventions, &p.values,
+                        &p.cleanup, &p.host, &p.handlers, &below}, &candidate, NULL)
+                == SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_RESOURCE_EXHAUSTED);
+            CHECK(transport_empty_lowered(&candidate)
+                && sol_mir_runtime_lowered_program_test_persistent_allocation_attempts() == 0);
+            if (stage == 0)
+                CHECK(sol_mir_runtime_lowered_program_test_build_scratch_allocation_attempts() == 0);
+            sol_mir_runtime_lowered_program_free(&candidate);
+            sol_mir_runtime_lowered_program_init(&candidate);
+            CHECK(sol_mir_runtime_lowered_program_build(&request, &candidate, NULL)
+                == SOL_MIR_RUNTIME_LOWERED_PROGRAM_BUILD_SUCCEEDED
+                && !memcmp(&candidate.usage, &p.lowered.usage, sizeof candidate.usage));
+            sol_mir_runtime_lowered_program_free(&candidate);
+        }
+        transport_disable_faults();
+    }
+    done(&p); finish(&f);
+}
+static void transport_safety_e6(void) {
+    Fixture f; Pipeline p; init(&p); TransportSnapshot snapshot = {0};
+    bool built = transport_r_auth_owner(&f, &p, "safety.e6"); CHECK(built);
+    if (built) {
+        check_build_work(&p);
+        char *baseline = rendered(&p.lowered, NULL);
+        CHECK(baseline && transport_snapshot(&p, &snapshot));
+        test_slice_d_raw_owner_preflight(&p);
+        test_slice_d_allocation_faults(&p);
+        test_exact_validation_work_limit(&p);
+        transport_snapshot_check(&snapshot);
+        CHECK(sol_mir_runtime_lowered_program_validate(&p.lowered, NULL));
+        char *restored = rendered(&p.lowered, NULL);
+        CHECK(restored && baseline && !strcmp(restored, baseline));
+        free(restored); free(baseline);
+    }
+    transport_disable_faults(); transport_snapshot_free(&snapshot);
+    done(&p); finish(&f);
+}
+static void transport_build_cost_arithmetic(void) {
+    size_t scratch = SIZE_MAX, work = SIZE_MAX;
+    sol_mir_runtime_lowered_program_test_reset_allocation_attempts();
+    CHECK(sol_mir_runtime_lowered_program_test_build_cost_formula(
+        0, 0, 0, 0, 0, 0, 0, 0, &scratch, &work)
+        && scratch == 0 && work == 44);
+    CHECK(sol_mir_runtime_lowered_program_test_build_cost_formula(
+        0, 0, 0, 0, 0, 27, 0, 0, &scratch, &work)
+        && scratch == 0 && work == 314);
+    CHECK(sol_mir_runtime_lowered_program_test_build_cost_formula(
+        40, 2, 3, 5, 2, 27, 11, 13, &scratch, &work)
+        && scratch == 42 + 3 * sizeof(size_t) && work == 429);
+    CHECK(!sol_mir_runtime_lowered_program_test_build_cost_formula(
+        1, SIZE_MAX, 0, 0, 0, 0, 0, 0, &scratch, &work));
+    CHECK(!sol_mir_runtime_lowered_program_test_build_cost_formula(
+        0, 0, SIZE_MAX, 0, 0, 0, 0, 0, &scratch, &work));
+    CHECK(!sol_mir_runtime_lowered_program_test_build_cost_formula(
+        0, 0, 0, 0, 0, SIZE_MAX, 0, 0, &scratch, &work));
+    CHECK(!sol_mir_runtime_lowered_program_test_build_cost_formula(
+        0, 0, 0, 0, 0, 0, SIZE_MAX, 1, &scratch, &work));
+    CHECK(sol_mir_runtime_lowered_program_test_allocation_attempts() == 0);
+}
+static int transport_r_auth_cases(const char *selected) {
+    bool found = selected == NULL;
+#define CASE(key, call) do { if (!selected || !strcmp(selected, key)) { \
+    found = true; sol_test_progress_case(key); call; sol_test_progress_case_end(); } } while (0)
+    CASE("usage.direct", transport_usage_counter_case("usage.direct"));
+    CASE("usage.ensures_old", transport_usage_counter_case("usage.ensures_old"));
+    CASE("usage.e6", transport_usage_counter_case("usage.e6"));
+    CASE("usage.p35", transport_usage_counter_case("usage.p35"));
+    CASE("usage.p36_graph", transport_usage_counter_case("usage.p36_graph"));
+    CASE("usage.pre_operations", transport_usage_counter_case("usage.pre_operations"));
+    CASE("limits.direct", transport_build_limits_case("limits.direct"));
+    CASE("limits.e6", transport_build_limits_case("limits.e6"));
+    CASE("limits.p35", transport_build_limits_case("limits.p35"));
+    CASE("safety.e6", transport_safety_e6());
+    CASE("arithmetic", transport_build_cost_arithmetic());
+#undef CASE
+    return found ? (failures ? 1 : 0) : 2;
+}
 int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--list-p44f1a-cases")) return transport_fault_cases(NULL, true);
     if (argc == 3 && !strcmp(argv[1], "--p44f1a-case")) return transport_fault_cases(argv[2], false);
+    if (argc == 3 && !strcmp(argv[1], "--r-auth-case")) return transport_r_auth_cases(argv[2]);
     if (argc != 1) return 2;
     (void)transport_fault_cases(NULL, false);
+    (void)transport_r_auth_cases(NULL);
 #define test_site_domains(...) SOL_TEST_RUN(test_site_domains(__VA_ARGS__))
 #define test_vocabulary(...) SOL_TEST_RUN(test_vocabulary(__VA_ARGS__))
 #define check_build_work(...) SOL_TEST_RUN(check_build_work(__VA_ARGS__))

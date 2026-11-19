@@ -93,7 +93,9 @@ execute_process(
 string(REGEX REPLACE "[\r\n]+$" "" SOL_BINARYEN_WASM_OPT_VERSION
     "${SOL_BINARYEN_WASM_OPT_VERSION}")
 if(NOT SOL_BINARYEN_WASM_OPT_STATUS EQUAL 0
-    OR NOT SOL_BINARYEN_WASM_OPT_VERSION STREQUAL "wasm-opt version 129")
+    OR (NOT SOL_BINARYEN_WASM_OPT_VERSION STREQUAL "wasm-opt version 129"
+        AND NOT SOL_BINARYEN_WASM_OPT_VERSION STREQUAL
+            "wasm-opt version 129 (version_129)"))
     message(FATAL_ERROR
         "SOL_ENABLE_WASM_BACKEND=ON requires Binaryen 129. Selected wasm-opt "
         "'${SOL_BINARYEN_WASM_OPT}' returned '${SOL_BINARYEN_WASM_OPT_VERSION}' "
