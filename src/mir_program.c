@@ -1337,34 +1337,427 @@ SolMirProgramBuildOutcome sol_mir_program_build(
     return outcome;
 }
 
-static bool mir_equal(const SolMir *a, const SolMir *b) {
-#define BYTES(field, count) ((a->count == 0) || memcmp(a->field, b->field, \
-        a->count * sizeof(*a->field)) == 0)
-    return a->callable == b->callable && a->generic_parameters.offset
-            == b->generic_parameters.offset
-        && a->generic_parameters.count == b->generic_parameters.count
-        && a->effect_parameters.offset == b->effect_parameters.offset
-        && a->effect_parameters.count == b->effect_parameters.count
-        && a->entry == b->entry && a->contract_body == b->contract_body
-        && a->contract_epilogue == b->contract_epilogue
-        && a->block_count == b->block_count
-        && a->instruction_count == b->instruction_count
-        && a->value_count == b->value_count
-        && a->parameter_value_count == b->parameter_value_count
-        && a->edge_value_count == b->edge_value_count
-        && a->call_argument_count == b->call_argument_count
-        && a->loop_count == b->loop_count
-        && a->construct_operand_count == b->construct_operand_count
-        && a->temporary_count == b->temporary_count
-        && BYTES(blocks, block_count) && BYTES(instructions, instruction_count)
-        && BYTES(values, value_count)
-        && BYTES(parameter_values, parameter_value_count)
-        && BYTES(edge_values, edge_value_count)
-        && BYTES(call_arguments, call_argument_count) && BYTES(loops, loop_count)
-        && BYTES(construct_operands, construct_operand_count)
-        && BYTES(temporaries, temporary_count);
-#undef BYTES
+static bool mir_span_equal(SolSpan a, SolSpan b) {
+    return a.start == b.start && a.end == b.end;
 }
+
+static bool mir_slice_equal(SolMirSlice a, SolMirSlice b) {
+    return a.offset == b.offset && a.count == b.count;
+}
+
+static bool ir_slice_equal(SolIrSlice a, SolIrSlice b) {
+    return a.offset == b.offset && a.count == b.count;
+}
+
+static bool mir_place_equal(SolMirPlace a, SolMirPlace b) {
+    return a.local == b.local && a.source_place == b.source_place;
+}
+
+static bool mir_edge_equal(SolMirEdge a, SolMirEdge b) {
+    return a.block == b.block && mir_slice_equal(a.arguments, b.arguments);
+}
+
+static bool mir_call_argument_equal(SolMirCallArgument a,
+    SolMirCallArgument b) {
+    return a.formal == b.formal && a.access == b.access
+        && a.source_expression == b.source_expression
+        && a.temporary == b.temporary && a.place == b.place;
+}
+
+static bool mir_instruction_equal(const SolMirInstruction *a,
+    const SolMirInstruction *b) {
+    if (a->kind != b->kind || a->block != b->block
+        || a->result != b->result || a->type != b->type
+        || a->source_expression != b->source_expression
+        || !mir_span_equal(a->span, b->span)) return false;
+    switch (a->kind) {
+        case SOL_MIR_INST_CONST_INT64:
+            return a->as.integer == b->as.integer;
+        case SOL_MIR_INST_CONST_BOOL:
+            return a->as.boolean == b->as.boolean;
+        case SOL_MIR_INST_CONST_TEXT:
+        case SOL_MIR_INST_CONST_UNIT:
+        case SOL_MIR_INST_HANDLER_ENTER:
+        case SOL_MIR_INST_HANDLER_EXIT:
+            return true;
+        case SOL_MIR_INST_PARAMETER_LIVE:
+        case SOL_MIR_INST_STORAGE_LIVE:
+        case SOL_MIR_INST_DROP_IF_INITIALIZED:
+        case SOL_MIR_INST_STORAGE_DEAD:
+            return a->as.local == b->as.local;
+        case SOL_MIR_INST_LOAD_COPY:
+        case SOL_MIR_INST_LOAD_MOVE:
+        case SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED:
+            return mir_place_equal(a->as.place, b->as.place);
+        case SOL_MIR_INST_LOAD_UPDATE:
+            return a->as.update_load.statement == b->as.update_load.statement
+                && mir_place_equal(a->as.update_load.place,
+                    b->as.update_load.place);
+        case SOL_MIR_INST_STORE:
+            return mir_place_equal(a->as.store.place, b->as.store.place)
+                && a->as.store.value == b->as.store.value;
+        case SOL_MIR_INST_UNARY:
+            return a->as.unary.operator_kind == b->as.unary.operator_kind
+                && a->as.unary.operand == b->as.unary.operand;
+        case SOL_MIR_INST_BINARY:
+            return a->as.binary.operator_kind == b->as.binary.operator_kind
+                && a->as.binary.left == b->as.binary.left
+                && a->as.binary.right == b->as.binary.right;
+        case SOL_MIR_INST_COMPOUND_UPDATE:
+            return a->as.compound_update.statement
+                    == b->as.compound_update.statement
+                && a->as.compound_update.operator_kind
+                    == b->as.compound_update.operator_kind
+                && mir_place_equal(a->as.compound_update.place,
+                    b->as.compound_update.place)
+                && a->as.compound_update.previous
+                    == b->as.compound_update.previous
+                && a->as.compound_update.right == b->as.compound_update.right;
+        case SOL_MIR_INST_REGION_ENTER:
+        case SOL_MIR_INST_REGION_EXIT:
+            return a->as.region == b->as.region;
+        case SOL_MIR_INST_TEMPORARY_INIT:
+            return a->as.temporary_init.temporary
+                    == b->as.temporary_init.temporary
+                && a->as.temporary_init.value == b->as.temporary_init.value;
+        case SOL_MIR_INST_TEMPORARY_DROP:
+            return a->as.temporary_drop.temporary
+                    == b->as.temporary_drop.temporary
+                && a->as.temporary_drop.preserve_depth
+                    == b->as.temporary_drop.preserve_depth;
+        case SOL_MIR_INST_EXPRESSION_RESULT:
+            return a->as.operand == b->as.operand;
+        case SOL_MIR_INST_PATTERN_TEST:
+        case SOL_MIR_INST_PATTERN_VALUE:
+        case SOL_MIR_INST_MATCH_ARM:
+            return a->as.pattern.match_expression
+                    == b->as.pattern.match_expression
+                && a->as.pattern.arm == b->as.pattern.arm
+                && a->as.pattern.arm_ordinal == b->as.pattern.arm_ordinal
+                && a->as.pattern.pattern == b->as.pattern.pattern
+                && a->as.pattern.scrutinee == b->as.pattern.scrutinee;
+        case SOL_MIR_INST_CONSTRUCT:
+            return a->as.construct.kind == b->as.construct.kind
+                && a->as.construct.kind >= SOL_MIR_CONSTRUCT_RECORD
+                && a->as.construct.kind <= SOL_MIR_CONSTRUCT_DISTINCT
+                && a->as.construct.definition == b->as.construct.definition
+                && a->as.construct.variant == b->as.construct.variant
+                && mir_slice_equal(a->as.construct.operands,
+                    b->as.construct.operands)
+                && ir_slice_equal(a->as.construct.capability_roots,
+                    b->as.construct.capability_roots)
+                && ir_slice_equal(a->as.construct.operation_roots,
+                    b->as.construct.operation_roots);
+        case SOL_MIR_INST_FUNCTION_VALUE:
+            return a->as.function_callable == b->as.function_callable;
+        case SOL_MIR_INST_CAPTURE_SNAPSHOT:
+            return a->as.snapshot == b->as.snapshot;
+        case SOL_MIR_INST_SCOPE_ENTER:
+        case SOL_MIR_INST_SCOPE_EXIT:
+            return a->as.scope.kind == b->as.scope.kind
+                && a->as.scope.kind > SOL_MIR_SCOPE_INVALID
+                && a->as.scope.kind <= SOL_MIR_SCOPE_REGION
+                && a->as.scope.source == b->as.scope.source;
+    }
+    return false;
+}
+
+static bool mir_terminator_equal(const SolMirTerminator *a,
+    const SolMirTerminator *b) {
+    if (a->kind != b->kind || !mir_span_equal(a->span, b->span)) return false;
+    switch (a->kind) {
+        case SOL_MIR_TERM_GOTO:
+            return mir_edge_equal(a->as.go_to, b->as.go_to);
+        case SOL_MIR_TERM_BRANCH:
+            return a->as.branch.condition == b->as.branch.condition
+                && mir_edge_equal(a->as.branch.true_edge,
+                    b->as.branch.true_edge)
+                && mir_edge_equal(a->as.branch.false_edge,
+                    b->as.branch.false_edge);
+        case SOL_MIR_TERM_RETURN:
+        case SOL_MIR_TERM_PANIC:
+            return a->as.value == b->as.value;
+        case SOL_MIR_TERM_INVOKE:
+            return a->as.invoke.source_expression
+                    == b->as.invoke.source_expression
+                && a->as.invoke.kind == b->as.invoke.kind
+                && a->as.invoke.callable == b->as.invoke.callable
+                && ir_slice_equal(a->as.invoke.type_arguments,
+                    b->as.invoke.type_arguments)
+                && ir_slice_equal(a->as.invoke.effects, b->as.invoke.effects)
+                && a->as.invoke.effect_parameter
+                    == b->as.invoke.effect_parameter
+                && ir_slice_equal(a->as.invoke.evidence, b->as.invoke.evidence)
+                && a->as.invoke.callee == b->as.invoke.callee
+                && mir_call_argument_equal(a->as.invoke.receiver,
+                    b->as.invoke.receiver)
+                && mir_slice_equal(a->as.invoke.arguments,
+                    b->as.invoke.arguments)
+                && a->as.invoke.result == b->as.invoke.result
+                && mir_edge_equal(a->as.invoke.normal_edge,
+                    b->as.invoke.normal_edge)
+                && mir_edge_equal(a->as.invoke.failure_edge,
+                    b->as.invoke.failure_edge);
+        case SOL_MIR_TERM_RESUME_FAILURE:
+            return true;
+        case SOL_MIR_TERM_UNREACHABLE:
+            return a->as.unreachable.statement == b->as.unreachable.statement
+                && a->as.unreachable.obligation
+                    == b->as.unreachable.obligation;
+        case SOL_MIR_TERM_BREAK:
+        case SOL_MIR_TERM_CONTINUE:
+            return a->as.transfer.statement == b->as.transfer.statement
+                && a->as.transfer.loop == b->as.transfer.loop
+                && mir_edge_equal(a->as.transfer.edge, b->as.transfer.edge);
+        case SOL_MIR_TERM_CHECK_REFINED:
+            return a->as.check_refined.source_expression
+                    == b->as.check_refined.source_expression
+                && a->as.check_refined.definition
+                    == b->as.check_refined.definition
+                && a->as.check_refined.obligation
+                    == b->as.check_refined.obligation
+                && a->as.check_refined.representation
+                    == b->as.check_refined.representation
+                && a->as.check_refined.result == b->as.check_refined.result
+                && mir_edge_equal(a->as.check_refined.normal_edge,
+                    b->as.check_refined.normal_edge)
+                && mir_edge_equal(a->as.check_refined.failure_edge,
+                    b->as.check_refined.failure_edge);
+        case SOL_MIR_TERM_MATCH_FAILURE:
+            return a->as.match_failure == b->as.match_failure;
+        case SOL_MIR_TERM_PROPAGATE:
+            return a->as.propagate.source_expression
+                    == b->as.propagate.source_expression
+                && a->as.propagate.kind == b->as.propagate.kind
+                && a->as.propagate.operand == b->as.propagate.operand
+                && a->as.propagate.value_result
+                    == b->as.propagate.value_result
+                && a->as.propagate.residual_result
+                    == b->as.propagate.residual_result
+                && mir_edge_equal(a->as.propagate.value_edge,
+                    b->as.propagate.value_edge)
+                && mir_edge_equal(a->as.propagate.residual_edge,
+                    b->as.propagate.residual_edge);
+        case SOL_MIR_TERM_CHECK_CONTRACT:
+            return a->as.check_contract.obligation
+                    == b->as.check_contract.obligation
+                && a->as.check_contract.phase == b->as.check_contract.phase
+                && a->as.check_contract.outcome == b->as.check_contract.outcome
+                && a->as.check_contract.result == b->as.check_contract.result
+                && mir_edge_equal(a->as.check_contract.satisfied_edge,
+                    b->as.check_contract.satisfied_edge)
+                && mir_edge_equal(a->as.check_contract.violation_edge,
+                    b->as.check_contract.violation_edge)
+                && mir_edge_equal(a->as.check_contract.failure_edge,
+                    b->as.check_contract.failure_edge);
+        case SOL_MIR_TERM_CONTRACT_VIOLATION:
+            return a->as.contract_violation == b->as.contract_violation;
+        case SOL_MIR_TERM_INVALID:
+            return false;
+    }
+    return false;
+}
+
+static bool mir_block_equal(const SolMirBlock *a, const SolMirBlock *b) {
+    return a->id == b->id && a->order == b->order
+        && mir_slice_equal(a->parameters, b->parameters)
+        && mir_slice_equal(a->instructions, b->instructions)
+        && mir_terminator_equal(&a->terminator, &b->terminator)
+        && mir_span_equal(a->span, b->span) && a->started == b->started;
+}
+
+static bool mir_value_equal(const SolMirValue *a, const SolMirValue *b) {
+    return a->kind == b->kind && a->kind >= SOL_MIR_VALUE_BLOCK_PARAMETER
+        && a->kind <= SOL_MIR_VALUE_TERMINATOR
+        && a->type == b->type && a->block == b->block
+        && a->definition == b->definition
+        && a->source_expression == b->source_expression
+        && mir_span_equal(a->span, b->span);
+}
+
+static bool mir_call_arguments_equal(const SolMirCallArgument *a,
+    const SolMirCallArgument *b, size_t count) {
+    for (size_t index = 0; index < count; ++index) {
+        if (!mir_call_argument_equal(a[index], b[index])) return false;
+    }
+    return true;
+}
+
+static bool mir_loops_equal(const SolMirLoop *a, const SolMirLoop *b,
+    size_t count) {
+    for (size_t index = 0; index < count; ++index) {
+        if (a[index].statement != b[index].statement
+            || a[index].parent != b[index].parent
+            || a[index].preheader != b[index].preheader
+            || a[index].header != b[index].header
+            || a[index].condition != b[index].condition
+            || a[index].body != b[index].body
+            || a[index].backedge != b[index].backedge
+            || a[index].exit != b[index].exit
+            || !ir_slice_equal(a[index].obligations, b[index].obligations)
+            || !mir_span_equal(a[index].span, b[index].span)) return false;
+    }
+    return true;
+}
+
+static bool mir_construct_operands_equal(const SolMirConstructOperand *a,
+    const SolMirConstructOperand *b, size_t count) {
+    for (size_t index = 0; index < count; ++index) {
+        if (a[index].formal != b[index].formal
+            || a[index].source_expression != b[index].source_expression
+            || a[index].temporary != b[index].temporary) return false;
+    }
+    return true;
+}
+
+static bool mir_temporaries_equal(const SolMirTemporary *a,
+    const SolMirTemporary *b, size_t count) {
+    for (size_t index = 0; index < count; ++index) {
+        if (a[index].type != b[index].type
+            || a[index].source_expression != b[index].source_expression
+            || !mir_span_equal(a[index].span, b[index].span)) return false;
+    }
+    return true;
+}
+
+static bool mir_equal(const SolMir *a, const SolMir *b) {
+    if (a->callable != b->callable
+        || !ir_slice_equal(a->generic_parameters, b->generic_parameters)
+        || !ir_slice_equal(a->effect_parameters, b->effect_parameters)
+        || a->entry != b->entry || a->contract_body != b->contract_body
+        || a->contract_epilogue != b->contract_epilogue
+        || a->block_count != b->block_count
+        || a->instruction_count != b->instruction_count
+        || a->value_count != b->value_count
+        || a->parameter_value_count != b->parameter_value_count
+        || a->edge_value_count != b->edge_value_count
+        || a->call_argument_count != b->call_argument_count
+        || a->loop_count != b->loop_count
+        || a->construct_operand_count != b->construct_operand_count
+        || a->temporary_count != b->temporary_count) return false;
+    for (size_t index = 0; index < a->block_count; ++index) {
+        if (!mir_block_equal(&a->blocks[index], &b->blocks[index])) return false;
+    }
+    for (size_t index = 0; index < a->instruction_count; ++index) {
+        if (!mir_instruction_equal(&a->instructions[index],
+                &b->instructions[index])) return false;
+    }
+    for (size_t index = 0; index < a->value_count; ++index) {
+        if (!mir_value_equal(&a->values[index], &b->values[index])) return false;
+    }
+    for (size_t index = 0; index < a->parameter_value_count; ++index) {
+        if (a->parameter_values[index] != b->parameter_values[index]) return false;
+    }
+    for (size_t index = 0; index < a->edge_value_count; ++index) {
+        if (a->edge_values[index] != b->edge_values[index]) return false;
+    }
+    return mir_call_arguments_equal(a->call_arguments, b->call_arguments,
+            a->call_argument_count)
+        && mir_loops_equal(a->loops, b->loops, a->loop_count)
+        && mir_construct_operands_equal(a->construct_operands,
+            b->construct_operands, a->construct_operand_count)
+        && mir_temporaries_equal(a->temporaries, b->temporaries,
+            a->temporary_count);
+}
+
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+bool sol_mir_program_test_mir_equal(const SolMir *a, const SolMir *b) {
+    return mir_equal(a, b);
+}
+
+bool sol_mir_program_test_instruction_equal(const SolMirInstruction *a,
+    const SolMirInstruction *b) {
+    return mir_instruction_equal(a, b);
+}
+
+bool sol_mir_program_test_terminator_equal(const SolMirTerminator *a,
+    const SolMirTerminator *b) {
+    return mir_terminator_equal(a, b);
+}
+#endif
+
+static bool program_source_equal(SolMirProgramSource a,
+    SolMirProgramSource b) {
+    return a.callable == b.callable && a.expression == b.expression
+        && a.file == b.file && a.start == b.start && a.end == b.end;
+}
+
+static bool program_root_equal(SolMirProgramRoot a, SolMirProgramRoot b) {
+    return a.callable == b.callable && a.kind == b.kind;
+}
+
+static bool program_reference_equal(SolMirProgramReference a,
+    SolMirProgramReference b) {
+    return a.kind == b.kind && program_source_equal(a.source, b.source)
+        && a.target == b.target;
+}
+
+static bool program_import_equal(SolMirProgramImport a,
+    SolMirProgramImport b) {
+    return a.callable == b.callable
+        && program_source_equal(a.first_source, b.first_source)
+        && a.source_count == b.source_count;
+}
+
+static bool program_specialization_equal(SolMirProgramSpecialization a,
+    SolMirProgramSpecialization b) {
+    return a.trait == b.trait && a.requirement == b.requirement
+        && a.type == b.type && a.implementation == b.implementation
+        && a.method == b.method
+        && program_source_equal(a.first_source, b.first_source)
+        && a.source_count == b.source_count;
+}
+
+static bool program_equal(const SolMirProgram *a, const SolMirProgram *b) {
+    if (a->ir != b->ir || a->root_count != b->root_count
+        || a->approved_import_count != b->approved_import_count
+        || a->template_count != b->template_count
+        || a->import_count != b->import_count
+        || a->specialization_count != b->specialization_count
+        || a->reference_count != b->reference_count
+        || a->limits.max_callable_classifications
+            != b->limits.max_callable_classifications
+        || a->limits.max_references != b->limits.max_references
+        || a->limits.max_discovery_work != b->limits.max_discovery_work
+        || a->usage.callable_classifications
+            != b->usage.callable_classifications
+        || a->usage.references != b->usage.references
+        || a->usage.discovery_work != b->usage.discovery_work) return false;
+    for (size_t index = 0; index < a->root_count; ++index) {
+        if (!program_root_equal(a->roots[index], b->roots[index])) return false;
+    }
+    for (size_t index = 0; index < a->approved_import_count; ++index) {
+        if (a->approved_imports[index] != b->approved_imports[index]) return false;
+    }
+    for (size_t index = 0; index < a->import_count; ++index) {
+        if (!program_import_equal(a->imports[index], b->imports[index])) {
+            return false;
+        }
+    }
+    for (size_t index = 0; index < a->specialization_count; ++index) {
+        if (!program_specialization_equal(a->specializations[index],
+                b->specializations[index])) return false;
+    }
+    for (size_t index = 0; index < a->reference_count; ++index) {
+        if (!program_reference_equal(a->references[index], b->references[index])) {
+            return false;
+        }
+    }
+    for (size_t index = 0; index < a->template_count; ++index) {
+        if (a->templates[index].callable != b->templates[index].callable
+            || !mir_equal(&a->templates[index].mir,
+                &b->templates[index].mir)) return false;
+    }
+    return true;
+}
+
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+bool sol_mir_program_test_program_equal(const SolMirProgram *a,
+    const SolMirProgram *b) {
+    return program_equal(a, b);
+}
+#endif
+
 
 typedef struct {
     uintptr_t start;
@@ -1721,36 +2114,7 @@ bool sol_mir_program_validate(const SolMirProgram *program,
     if (outcome == SOL_MIR_PROGRAM_BUILD_ALLOCATION_FAILED
         && diagnostics != NULL) diagnostics->allocation_failed = true;
     bool valid = outcome == SOL_MIR_PROGRAM_BUILD_SUCCEEDED
-        && program->root_count == expected.root_count
-        && program->approved_import_count == expected.approved_import_count
-        && program->template_count == expected.template_count
-        && program->import_count == expected.import_count
-        && program->specialization_count == expected.specialization_count
-        && program->reference_count == expected.reference_count
-        && memcmp(&program->usage, &expected.usage,
-            sizeof(program->usage)) == 0
-        && memcmp(program->roots, expected.roots,
-            program->root_count * sizeof(*program->roots)) == 0
-        && (program->approved_import_count == 0
-            || memcmp(program->approved_imports, expected.approved_imports,
-                program->approved_import_count
-                    * sizeof(*program->approved_imports)) == 0)
-        && (program->import_count == 0
-            || memcmp(program->imports, expected.imports,
-                program->import_count * sizeof(*program->imports)) == 0)
-        && (program->specialization_count == 0
-            || memcmp(program->specializations, expected.specializations,
-                program->specialization_count
-                    * sizeof(*program->specializations)) == 0)
-        && (program->reference_count == 0
-            || memcmp(program->references, expected.references,
-                program->reference_count * sizeof(*program->references)) == 0);
-    for (size_t index = 0; valid && index < program->template_count; ++index) {
-        valid = program->templates[index].callable
-                == expected.templates[index].callable
-            && mir_equal(&program->templates[index].mir,
-                &expected.templates[index].mir);
-    }
+        && program_equal(program, &expected);
     sol_mir_program_free(&expected);
     if (!valid && diagnostics != NULL) {
         sol_diagnostics_add(diagnostics, "SOL-MIR-PROGRAM-001",

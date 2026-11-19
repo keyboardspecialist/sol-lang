@@ -7,8 +7,17 @@
 #include "sol/package.h"
 
 #include <stdio.h>
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
+
+bool sol_mir_program_test_mir_equal(const SolMir *a, const SolMir *b);
+bool sol_mir_program_test_instruction_equal(const SolMirInstruction *a,
+    const SolMirInstruction *b);
+bool sol_mir_program_test_terminator_equal(const SolMirTerminator *a,
+    const SolMirTerminator *b);
+bool sol_mir_program_test_program_equal(const SolMirProgram *a,
+    const SolMirProgram *b);
 
 static int failures;
 
@@ -19,6 +28,10 @@ static int failures;
         ++failures; \
     } \
 } while (0)
+
+static void flip_scalar_byte(void *field, size_t size) {
+    if (size != 0) ((unsigned char *)field)[0] ^= 1u;
+}
 
 typedef struct {
     SolSource source;
@@ -126,27 +139,354 @@ static SolMirProgramBuildOutcome build(const SolIr *ir,
     return outcome;
 }
 
+static bool oracle_span_equal(SolSpan a, SolSpan b) {
+    return a.start == b.start && a.end == b.end;
+}
+
+static bool oracle_mir_slice_equal(SolMirSlice a, SolMirSlice b) {
+    return a.offset == b.offset && a.count == b.count;
+}
+
+static bool oracle_ir_slice_equal(SolIrSlice a, SolIrSlice b) {
+    return a.offset == b.offset && a.count == b.count;
+}
+
+static bool oracle_place_equal(SolMirPlace a, SolMirPlace b) {
+    return a.local == b.local && a.source_place == b.source_place;
+}
+
+static bool oracle_edge_equal(SolMirEdge a, SolMirEdge b) {
+    return a.block == b.block
+        && oracle_mir_slice_equal(a.arguments, b.arguments);
+}
+
+static bool oracle_call_argument_equal(SolMirCallArgument a,
+    SolMirCallArgument b) {
+    return a.formal == b.formal && a.access == b.access
+        && a.source_expression == b.source_expression
+        && a.temporary == b.temporary && a.place == b.place;
+}
+
+static bool oracle_instruction_equal(const SolMirInstruction *a,
+    const SolMirInstruction *b) {
+    if (a->kind != b->kind || a->block != b->block
+        || a->result != b->result || a->type != b->type
+        || a->source_expression != b->source_expression
+        || !oracle_span_equal(a->span, b->span)) return false;
+    switch (a->kind) {
+        case SOL_MIR_INST_CONST_INT64:
+            return a->as.integer == b->as.integer;
+        case SOL_MIR_INST_CONST_BOOL:
+            return a->as.boolean == b->as.boolean;
+        case SOL_MIR_INST_CONST_TEXT:
+        case SOL_MIR_INST_CONST_UNIT:
+        case SOL_MIR_INST_HANDLER_ENTER:
+        case SOL_MIR_INST_HANDLER_EXIT:
+            return true;
+        case SOL_MIR_INST_PARAMETER_LIVE:
+        case SOL_MIR_INST_STORAGE_LIVE:
+        case SOL_MIR_INST_DROP_IF_INITIALIZED:
+        case SOL_MIR_INST_STORAGE_DEAD:
+            return a->as.local == b->as.local;
+        case SOL_MIR_INST_LOAD_COPY:
+        case SOL_MIR_INST_LOAD_MOVE:
+        case SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED:
+            return oracle_place_equal(a->as.place, b->as.place);
+        case SOL_MIR_INST_LOAD_UPDATE:
+            return a->as.update_load.statement == b->as.update_load.statement
+                && oracle_place_equal(a->as.update_load.place,
+                    b->as.update_load.place);
+        case SOL_MIR_INST_STORE:
+            return oracle_place_equal(a->as.store.place, b->as.store.place)
+                && a->as.store.value == b->as.store.value;
+        case SOL_MIR_INST_UNARY:
+            return a->as.unary.operator_kind == b->as.unary.operator_kind
+                && a->as.unary.operand == b->as.unary.operand;
+        case SOL_MIR_INST_BINARY:
+            return a->as.binary.operator_kind == b->as.binary.operator_kind
+                && a->as.binary.left == b->as.binary.left
+                && a->as.binary.right == b->as.binary.right;
+        case SOL_MIR_INST_COMPOUND_UPDATE:
+            return a->as.compound_update.statement
+                    == b->as.compound_update.statement
+                && a->as.compound_update.operator_kind
+                    == b->as.compound_update.operator_kind
+                && oracle_place_equal(a->as.compound_update.place,
+                    b->as.compound_update.place)
+                && a->as.compound_update.previous
+                    == b->as.compound_update.previous
+                && a->as.compound_update.right == b->as.compound_update.right;
+        case SOL_MIR_INST_REGION_ENTER:
+        case SOL_MIR_INST_REGION_EXIT:
+            return a->as.region == b->as.region;
+        case SOL_MIR_INST_TEMPORARY_INIT:
+            return a->as.temporary_init.temporary
+                    == b->as.temporary_init.temporary
+                && a->as.temporary_init.value == b->as.temporary_init.value;
+        case SOL_MIR_INST_TEMPORARY_DROP:
+            return a->as.temporary_drop.temporary
+                    == b->as.temporary_drop.temporary
+                && a->as.temporary_drop.preserve_depth
+                    == b->as.temporary_drop.preserve_depth;
+        case SOL_MIR_INST_EXPRESSION_RESULT:
+            return a->as.operand == b->as.operand;
+        case SOL_MIR_INST_PATTERN_TEST:
+        case SOL_MIR_INST_PATTERN_VALUE:
+        case SOL_MIR_INST_MATCH_ARM:
+            return a->as.pattern.match_expression
+                    == b->as.pattern.match_expression
+                && a->as.pattern.arm == b->as.pattern.arm
+                && a->as.pattern.arm_ordinal == b->as.pattern.arm_ordinal
+                && a->as.pattern.pattern == b->as.pattern.pattern
+                && a->as.pattern.scrutinee == b->as.pattern.scrutinee;
+        case SOL_MIR_INST_CONSTRUCT:
+            return a->as.construct.kind == b->as.construct.kind
+                && a->as.construct.definition == b->as.construct.definition
+                && a->as.construct.variant == b->as.construct.variant
+                && oracle_mir_slice_equal(a->as.construct.operands,
+                    b->as.construct.operands)
+                && oracle_ir_slice_equal(a->as.construct.capability_roots,
+                    b->as.construct.capability_roots)
+                && oracle_ir_slice_equal(a->as.construct.operation_roots,
+                    b->as.construct.operation_roots);
+        case SOL_MIR_INST_FUNCTION_VALUE:
+            return a->as.function_callable == b->as.function_callable;
+        case SOL_MIR_INST_CAPTURE_SNAPSHOT:
+            return a->as.snapshot == b->as.snapshot;
+        case SOL_MIR_INST_SCOPE_ENTER:
+        case SOL_MIR_INST_SCOPE_EXIT:
+            return a->as.scope.kind == b->as.scope.kind
+                && a->as.scope.source == b->as.scope.source;
+    }
+    return false;
+}
+
+static bool oracle_terminator_equal(const SolMirTerminator *a,
+    const SolMirTerminator *b) {
+    if (a->kind != b->kind || !oracle_span_equal(a->span, b->span)) {
+        return false;
+    }
+    switch (a->kind) {
+        case SOL_MIR_TERM_GOTO:
+            return oracle_edge_equal(a->as.go_to, b->as.go_to);
+        case SOL_MIR_TERM_BRANCH:
+            return a->as.branch.condition == b->as.branch.condition
+                && oracle_edge_equal(a->as.branch.true_edge,
+                    b->as.branch.true_edge)
+                && oracle_edge_equal(a->as.branch.false_edge,
+                    b->as.branch.false_edge);
+        case SOL_MIR_TERM_RETURN:
+        case SOL_MIR_TERM_PANIC:
+            return a->as.value == b->as.value;
+        case SOL_MIR_TERM_INVOKE:
+            return a->as.invoke.source_expression
+                    == b->as.invoke.source_expression
+                && a->as.invoke.kind == b->as.invoke.kind
+                && a->as.invoke.callable == b->as.invoke.callable
+                && oracle_ir_slice_equal(a->as.invoke.type_arguments,
+                    b->as.invoke.type_arguments)
+                && oracle_ir_slice_equal(a->as.invoke.effects,
+                    b->as.invoke.effects)
+                && a->as.invoke.effect_parameter
+                    == b->as.invoke.effect_parameter
+                && oracle_ir_slice_equal(a->as.invoke.evidence,
+                    b->as.invoke.evidence)
+                && a->as.invoke.callee == b->as.invoke.callee
+                && oracle_call_argument_equal(a->as.invoke.receiver,
+                    b->as.invoke.receiver)
+                && oracle_mir_slice_equal(a->as.invoke.arguments,
+                    b->as.invoke.arguments)
+                && a->as.invoke.result == b->as.invoke.result
+                && oracle_edge_equal(a->as.invoke.normal_edge,
+                    b->as.invoke.normal_edge)
+                && oracle_edge_equal(a->as.invoke.failure_edge,
+                    b->as.invoke.failure_edge);
+        case SOL_MIR_TERM_RESUME_FAILURE:
+            return true;
+        case SOL_MIR_TERM_UNREACHABLE:
+            return a->as.unreachable.statement == b->as.unreachable.statement
+                && a->as.unreachable.obligation
+                    == b->as.unreachable.obligation;
+        case SOL_MIR_TERM_BREAK:
+        case SOL_MIR_TERM_CONTINUE:
+            return a->as.transfer.statement == b->as.transfer.statement
+                && a->as.transfer.loop == b->as.transfer.loop
+                && oracle_edge_equal(a->as.transfer.edge, b->as.transfer.edge);
+        case SOL_MIR_TERM_CHECK_REFINED:
+            return a->as.check_refined.source_expression
+                    == b->as.check_refined.source_expression
+                && a->as.check_refined.definition
+                    == b->as.check_refined.definition
+                && a->as.check_refined.obligation
+                    == b->as.check_refined.obligation
+                && a->as.check_refined.representation
+                    == b->as.check_refined.representation
+                && a->as.check_refined.result == b->as.check_refined.result
+                && oracle_edge_equal(a->as.check_refined.normal_edge,
+                    b->as.check_refined.normal_edge)
+                && oracle_edge_equal(a->as.check_refined.failure_edge,
+                    b->as.check_refined.failure_edge);
+        case SOL_MIR_TERM_MATCH_FAILURE:
+            return a->as.match_failure == b->as.match_failure;
+        case SOL_MIR_TERM_PROPAGATE:
+            return a->as.propagate.source_expression
+                    == b->as.propagate.source_expression
+                && a->as.propagate.kind == b->as.propagate.kind
+                && a->as.propagate.operand == b->as.propagate.operand
+                && a->as.propagate.value_result
+                    == b->as.propagate.value_result
+                && a->as.propagate.residual_result
+                    == b->as.propagate.residual_result
+                && oracle_edge_equal(a->as.propagate.value_edge,
+                    b->as.propagate.value_edge)
+                && oracle_edge_equal(a->as.propagate.residual_edge,
+                    b->as.propagate.residual_edge);
+        case SOL_MIR_TERM_CHECK_CONTRACT:
+            return a->as.check_contract.obligation
+                    == b->as.check_contract.obligation
+                && a->as.check_contract.phase == b->as.check_contract.phase
+                && a->as.check_contract.outcome == b->as.check_contract.outcome
+                && a->as.check_contract.result == b->as.check_contract.result
+                && oracle_edge_equal(a->as.check_contract.satisfied_edge,
+                    b->as.check_contract.satisfied_edge)
+                && oracle_edge_equal(a->as.check_contract.violation_edge,
+                    b->as.check_contract.violation_edge)
+                && oracle_edge_equal(a->as.check_contract.failure_edge,
+                    b->as.check_contract.failure_edge);
+        case SOL_MIR_TERM_CONTRACT_VIOLATION:
+            return a->as.contract_violation == b->as.contract_violation;
+        case SOL_MIR_TERM_INVALID:
+            return false;
+    }
+    return false;
+}
+
+static bool oracle_mir_equal(const SolMir *a, const SolMir *b) {
+    if (a->callable != b->callable
+        || !oracle_ir_slice_equal(a->generic_parameters, b->generic_parameters)
+        || !oracle_ir_slice_equal(a->effect_parameters, b->effect_parameters)
+        || a->entry != b->entry || a->contract_body != b->contract_body
+        || a->contract_epilogue != b->contract_epilogue
+        || a->block_count != b->block_count
+        || a->instruction_count != b->instruction_count
+        || a->value_count != b->value_count
+        || a->parameter_value_count != b->parameter_value_count
+        || a->edge_value_count != b->edge_value_count
+        || a->call_argument_count != b->call_argument_count
+        || a->loop_count != b->loop_count
+        || a->construct_operand_count != b->construct_operand_count
+        || a->temporary_count != b->temporary_count) return false;
+    for (size_t index = 0; index < a->block_count; ++index) {
+        const SolMirBlock *x = &a->blocks[index], *y = &b->blocks[index];
+        if (x->id != y->id || x->order != y->order
+            || !oracle_mir_slice_equal(x->parameters, y->parameters)
+            || !oracle_mir_slice_equal(x->instructions, y->instructions)
+            || !oracle_terminator_equal(&x->terminator, &y->terminator)
+            || !oracle_span_equal(x->span, y->span)
+            || x->started != y->started) return false;
+    }
+    for (size_t index = 0; index < a->instruction_count; ++index) {
+        if (!oracle_instruction_equal(&a->instructions[index],
+                &b->instructions[index])) return false;
+    }
+    for (size_t index = 0; index < a->value_count; ++index) {
+        const SolMirValue *x = &a->values[index], *y = &b->values[index];
+        if (x->kind != y->kind || x->type != y->type || x->block != y->block
+            || x->definition != y->definition
+            || x->source_expression != y->source_expression
+            || !oracle_span_equal(x->span, y->span)) return false;
+    }
+    for (size_t index = 0; index < a->parameter_value_count; ++index) {
+        if (a->parameter_values[index] != b->parameter_values[index]) return false;
+    }
+    for (size_t index = 0; index < a->edge_value_count; ++index) {
+        if (a->edge_values[index] != b->edge_values[index]) return false;
+    }
+    for (size_t index = 0; index < a->call_argument_count; ++index) {
+        if (!oracle_call_argument_equal(a->call_arguments[index],
+                b->call_arguments[index])) return false;
+    }
+    for (size_t index = 0; index < a->loop_count; ++index) {
+        const SolMirLoop *x = &a->loops[index], *y = &b->loops[index];
+        if (x->statement != y->statement || x->parent != y->parent
+            || x->preheader != y->preheader || x->header != y->header
+            || x->condition != y->condition || x->body != y->body
+            || x->backedge != y->backedge || x->exit != y->exit
+            || !oracle_ir_slice_equal(x->obligations, y->obligations)
+            || !oracle_span_equal(x->span, y->span)) return false;
+    }
+    for (size_t index = 0; index < a->construct_operand_count; ++index) {
+        const SolMirConstructOperand *x = &a->construct_operands[index];
+        const SolMirConstructOperand *y = &b->construct_operands[index];
+        if (x->formal != y->formal
+            || x->source_expression != y->source_expression
+            || x->temporary != y->temporary) return false;
+    }
+    for (size_t index = 0; index < a->temporary_count; ++index) {
+        const SolMirTemporary *x = &a->temporaries[index];
+        const SolMirTemporary *y = &b->temporaries[index];
+        if (x->type != y->type || x->source_expression != y->source_expression
+            || !oracle_span_equal(x->span, y->span)) return false;
+    }
+    return true;
+}
+
+static bool oracle_source_equal(SolMirProgramSource a,
+    SolMirProgramSource b) {
+    return a.callable == b.callable && a.expression == b.expression
+        && a.file == b.file && a.start == b.start && a.end == b.end;
+}
+
 static bool program_fields_equal(const SolMirProgram *a,
     const SolMirProgram *b) {
-#define ARRAY_EQUAL(left, right, count, size) \
-    ((count) == 0 || memcmp((left), (right), (count) * (size)) == 0)
-    return a->ir == b->ir && a->root_count == b->root_count
-        && a->approved_import_count == b->approved_import_count
-        && a->template_count == b->template_count
-        && a->import_count == b->import_count
-        && a->specialization_count == b->specialization_count
-        && a->reference_count == b->reference_count
-        && memcmp(&a->usage, &b->usage, sizeof(a->usage)) == 0
-        && ARRAY_EQUAL(a->roots, b->roots, a->root_count, sizeof(*a->roots))
-        && ARRAY_EQUAL(a->approved_imports, b->approved_imports,
-            a->approved_import_count, sizeof(*a->approved_imports))
-        && ARRAY_EQUAL(a->imports, b->imports, a->import_count,
-            sizeof(*a->imports))
-        && ARRAY_EQUAL(a->specializations, b->specializations,
-            a->specialization_count, sizeof(*a->specializations))
-        && ARRAY_EQUAL(a->references, b->references, a->reference_count,
-            sizeof(*a->references));
-#undef ARRAY_EQUAL
+    if (a->ir != b->ir || a->root_count != b->root_count
+        || a->approved_import_count != b->approved_import_count
+        || a->template_count != b->template_count
+        || a->import_count != b->import_count
+        || a->specialization_count != b->specialization_count
+        || a->reference_count != b->reference_count
+        || a->limits.max_callable_classifications
+            != b->limits.max_callable_classifications
+        || a->limits.max_references != b->limits.max_references
+        || a->limits.max_discovery_work != b->limits.max_discovery_work
+        || a->usage.callable_classifications
+            != b->usage.callable_classifications
+        || a->usage.references != b->usage.references
+        || a->usage.discovery_work != b->usage.discovery_work) return false;
+    for (size_t index = 0; index < a->root_count; ++index) {
+        if (a->roots[index].callable != b->roots[index].callable
+            || a->roots[index].kind != b->roots[index].kind) return false;
+    }
+    for (size_t index = 0; index < a->approved_import_count; ++index) {
+        if (a->approved_imports[index] != b->approved_imports[index]) return false;
+    }
+    for (size_t index = 0; index < a->import_count; ++index) {
+        const SolMirProgramImport *x = &a->imports[index], *y = &b->imports[index];
+        if (x->callable != y->callable
+            || !oracle_source_equal(x->first_source, y->first_source)
+            || x->source_count != y->source_count) return false;
+    }
+    for (size_t index = 0; index < a->specialization_count; ++index) {
+        const SolMirProgramSpecialization *x = &a->specializations[index];
+        const SolMirProgramSpecialization *y = &b->specializations[index];
+        if (x->trait != y->trait || x->requirement != y->requirement
+            || x->type != y->type || x->implementation != y->implementation
+            || x->method != y->method
+            || !oracle_source_equal(x->first_source, y->first_source)
+            || x->source_count != y->source_count) return false;
+    }
+    for (size_t index = 0; index < a->reference_count; ++index) {
+        const SolMirProgramReference *x = &a->references[index];
+        const SolMirProgramReference *y = &b->references[index];
+        if (x->kind != y->kind || !oracle_source_equal(x->source, y->source)
+            || x->target != y->target) return false;
+    }
+    for (size_t index = 0; index < a->template_count; ++index) {
+        if (a->templates[index].callable != b->templates[index].callable
+            || !oracle_mir_equal(&a->templates[index].mir,
+                &b->templates[index].mir)) return false;
+    }
+    return true;
 }
 
 /* Independently reconstruct the bounded hostile proof's work census: one tick
@@ -287,6 +627,818 @@ static void free_e6(Compilation *compilation, SolPackage *package) {
     sol_hir_module_free(&compilation->hir);
     sol_diagnostics_free(&compilation->diagnostics);
     sol_package_free(package);
+}
+
+static size_t first_scope_instruction(const SolMir *mir,
+    SolMirInstructionKind kind) {
+    for (size_t index = 0; index < mir->instruction_count; ++index) {
+        if (mir->instructions[index].kind == kind) return index;
+    }
+    return SIZE_MAX;
+}
+
+static bool lower_first_scope_mir(const SolIr *ir, SolMir *mir,
+    SolIrCallableId *callable_id, SolMirInstructionKind *scope_kind) {
+    for (SolIrCallableId id = 0; id < ir->callable_count; ++id) {
+        if (ir->callables[id].body == SOL_IR_NONE) continue;
+        SolMir candidate;
+        sol_mir_init(&candidate);
+        SolDiagnostics diagnostics;
+        sol_diagnostics_init(&diagnostics);
+        SolMirLowerOutcome outcome
+            = sol_mir_lower_callable(ir, id, &candidate, &diagnostics);
+        sol_diagnostics_free(&diagnostics);
+        if (outcome != SOL_MIR_LOWER_SUCCEEDED) {
+            sol_mir_free(&candidate);
+            continue;
+        }
+        for (size_t index = 0; index < candidate.instruction_count; ++index) {
+            SolMirInstructionKind kind = candidate.instructions[index].kind;
+            if (kind != SOL_MIR_INST_SCOPE_ENTER
+                && kind != SOL_MIR_INST_SCOPE_EXIT) continue;
+            *mir = candidate;
+            *callable_id = id;
+            *scope_kind = kind;
+            return true;
+        }
+        sol_mir_free(&candidate);
+    }
+    return false;
+}
+
+static bool copy_mir_arena_bytes(SolMir *destination, const SolMir *source) {
+#define COPY_MIR_ARENA(member, count) do { \
+    if (destination->count != source->count \
+        || source->count > SIZE_MAX / sizeof(*source->member)) return false; \
+    if (source->count != 0) { \
+        if (destination->member == NULL || source->member == NULL) return false; \
+        memcpy(destination->member, source->member, \
+            source->count * sizeof(*source->member)); \
+    } \
+} while (0)
+    COPY_MIR_ARENA(blocks, block_count);
+    COPY_MIR_ARENA(instructions, instruction_count);
+    COPY_MIR_ARENA(values, value_count);
+    COPY_MIR_ARENA(parameter_values, parameter_value_count);
+    COPY_MIR_ARENA(edge_values, edge_value_count);
+    COPY_MIR_ARENA(call_arguments, call_argument_count);
+    COPY_MIR_ARENA(loops, loop_count);
+    COPY_MIR_ARENA(construct_operands, construct_operand_count);
+    COPY_MIR_ARENA(temporaries, temporary_count);
+#undef COPY_MIR_ARENA
+    return true;
+}
+
+static void test_canonical_representation(void) {
+    Compilation compilation;
+    SolPackage package;
+    SolMir original, representation;
+    sol_mir_init(&original);
+    sol_mir_init(&representation);
+    CHECK(compile_e6(&compilation, &package));
+    SolIrCallableId callable_id = SOL_IR_NONE;
+    SolMirInstructionKind scope_kind = SOL_MIR_INST_SCOPE_ENTER;
+    bool lowered = lower_first_scope_mir(&compilation.ir, &original,
+        &callable_id, &scope_kind);
+    CHECK(lowered);
+    if (!lowered) goto cleanup;
+    CHECK(sol_mir_validate(&compilation.ir, &original, NULL));
+    SolDiagnostics lower_diagnostics;
+    sol_diagnostics_init(&lower_diagnostics);
+    SolMirLowerOutcome duplicate_outcome = sol_mir_lower_callable(
+        &compilation.ir, callable_id, &representation, &lower_diagnostics);
+    sol_diagnostics_free(&lower_diagnostics);
+    CHECK(duplicate_outcome == SOL_MIR_LOWER_SUCCEEDED);
+    if (duplicate_outcome != SOL_MIR_LOWER_SUCCEEDED) goto cleanup;
+    CHECK(sol_mir_validate(&compilation.ir, &representation, NULL));
+    CHECK(original.instructions != representation.instructions
+        && original.block_count == representation.block_count
+        && original.instruction_count == representation.instruction_count);
+    CHECK(copy_mir_arena_bytes(&representation, &original));
+    CHECK(sol_mir_program_test_mir_equal(&original, &representation));
+
+    size_t original_index = first_scope_instruction(&original, scope_kind);
+    size_t representation_index
+        = first_scope_instruction(&representation, scope_kind);
+    CHECK(original_index != SIZE_MAX && representation_index != SIZE_MAX);
+    if (original_index == SIZE_MAX || representation_index == SIZE_MAX) {
+        goto cleanup;
+    }
+    size_t kind_offset = offsetof(SolMirInstruction, as.scope.kind);
+    size_t kind_size = sizeof(((SolMirInstruction *)0)->as.scope.kind);
+    size_t source_offset = offsetof(SolMirInstruction, as.scope.source);
+    size_t padding_begin = kind_offset + kind_size;
+    bool has_scope_padding = source_offset > padding_begin;
+    size_t scope_size = sizeof(((SolMirInstruction *)0)->as.scope);
+    size_t union_size = sizeof(((SolMirInstruction *)0)->as);
+    bool has_inactive_union_tail = union_size > scope_size;
+    SolMirInstruction *before = &original.instructions[original_index];
+    SolMirInstruction *after = &representation.instructions[representation_index];
+    fprintf(stderr,
+        "canonical representation layout scope.kind=(%zu,%zu) "
+        "scope.source=(%zu,%zu) padding=%s inactive_union_tail=%s\n",
+        kind_offset, kind_size, source_offset,
+        sizeof(((SolMirInstruction *)0)->as.scope.source),
+        has_scope_padding ? "poisoned" : "NOT_RUN",
+        has_inactive_union_tail ? "tested" : "NOT_RUN");
+    if (!has_scope_padding) {
+        fprintf(stderr,
+            "canonical representation padding subcase NOT_RUN: "
+            "no host gap between scope.kind and scope.source\n");
+    }
+
+    CHECK(before->kind == after->kind
+        && before->block == after->block
+        && before->result == after->result
+        && before->type == after->type
+        && before->source_expression == after->source_expression
+        && before->span.start == after->span.start
+        && before->span.end == after->span.end
+        && before->as.scope.kind == after->as.scope.kind
+        && before->as.scope.source == after->as.scope.source);
+    unsigned char *bytes = (unsigned char *)after;
+    unsigned char saved;
+    if (has_scope_padding) {
+        saved = bytes[padding_begin];
+        bytes[padding_begin] ^= 1u;
+        CHECK(before->kind == after->kind
+            && before->block == after->block
+            && before->result == after->result
+            && before->type == after->type
+            && before->source_expression == after->source_expression
+            && before->span.start == after->span.start
+            && before->span.end == after->span.end
+            && before->as.scope.kind == after->as.scope.kind
+            && before->as.scope.source == after->as.scope.source);
+        CHECK(sol_mir_validate(&compilation.ir, &original, NULL));
+        CHECK(sol_mir_validate(&compilation.ir, &representation, NULL));
+        CHECK(sol_mir_program_test_mir_equal(&original, &representation));
+        bytes[padding_begin] = saved;
+    }
+    CHECK(sol_mir_program_test_mir_equal(&original, &representation));
+    CHECK(sol_mir_validate(&compilation.ir, &representation, NULL));
+
+    /* These independent subcases must still run when padding is absent. */
+    size_t active_union_end = offsetof(SolMirInstruction, as)
+        + sizeof(after->as.scope);
+    if (has_inactive_union_tail) {
+        size_t inactive_offset = active_union_end;
+        saved = bytes[inactive_offset];
+        bytes[inactive_offset] ^= 1u;
+        CHECK(before->kind == after->kind
+            && before->as.scope.kind == after->as.scope.kind
+            && before->as.scope.source == after->as.scope.source);
+        CHECK(sol_mir_validate(&compilation.ir, &representation, NULL));
+        CHECK(sol_mir_program_test_mir_equal(&original, &representation));
+        bytes[inactive_offset] = saved;
+    } else {
+        fprintf(stderr,
+            "canonical representation inactive-union subcase NOT_RUN: "
+            "no inactive union tail on this host\n");
+    }
+    CHECK(sol_mir_program_test_mir_equal(&original, &representation));
+
+    SolIrCallableId launch = callable(&compilation.ir, "launch",
+        SOL_IR_CALLABLE_FUNCTION);
+    const char *approval_names[] = {"write", "get", "count", "read"};
+    SolIrCallableId approvals[4];
+    for (size_t index = 0; index < 4; ++index) {
+        approvals[index] = callable(&compilation.ir, approval_names[index],
+            SOL_IR_CALLABLE_CAPABILITY);
+        CHECK(approvals[index] != SOL_IR_NONE);
+    }
+    SolMirProgramRoot roots[5];
+    roots[0] = (SolMirProgramRoot){launch, SOL_MIR_PROGRAM_ROOT_ENTRY};
+    size_t root_count = 1;
+    for (SolIrCallableId id = 0; id < compilation.ir.callable_count; ++id) {
+        if (compilation.ir.callables[id].kind == SOL_IR_CALLABLE_TEST) {
+            roots[root_count++] = (SolMirProgramRoot){id,
+                SOL_MIR_PROGRAM_ROOT_TEST};
+        }
+    }
+    SolMirProgram owner;
+    sol_mir_program_init(&owner);
+    CHECK(build(&compilation.ir, roots, root_count, approvals, 4, NULL, &owner)
+        == SOL_MIR_PROGRAM_BUILD_SUCCEEDED);
+    CHECK(sol_mir_program_validate(&owner, NULL));
+    SolMir *owned_mir = NULL;
+    for (size_t index = 0; index < owner.template_count; ++index) {
+        if (owner.templates[index].callable == callable_id) {
+            owned_mir = &owner.templates[index].mir;
+            break;
+        }
+    }
+    CHECK(owned_mir != NULL);
+    if (owned_mir != NULL) {
+        size_t owned_index = first_scope_instruction(owned_mir, scope_kind);
+        CHECK(owned_index != SIZE_MAX);
+        if (owned_index != SIZE_MAX) {
+            SolMirInstruction *owned = &owned_mir->instructions[owned_index];
+            unsigned char *owned_bytes = (unsigned char *)owned;
+            if (source_offset > padding_begin) {
+                saved = owned_bytes[padding_begin];
+                owned_bytes[padding_begin] ^= 1u;
+                CHECK(sol_mir_program_validate(&owner, NULL));
+                owned_bytes[padding_begin] = saved;
+            }
+            if (has_inactive_union_tail) {
+                size_t inactive_offset = offsetof(SolMirInstruction, as)
+                    + sizeof(owned->as.scope);
+                saved = owned_bytes[inactive_offset];
+                owned_bytes[inactive_offset] ^= 1u;
+                CHECK(sol_mir_program_validate(&owner, NULL));
+                owned_bytes[inactive_offset] = saved;
+            }
+        }
+    }
+    bool owner_valid_after_poison_restore
+        = sol_mir_program_validate(&owner, NULL);
+    CHECK(owner_valid_after_poison_restore);
+    fprintf(stderr,
+        "canonical representation public-owner padding=%s "
+        "inactive_union_tail=%s final_validation=%s\n",
+        has_scope_padding ? "tested" : "NOT_RUN",
+        has_inactive_union_tail ? "tested" : "NOT_RUN",
+        owner_valid_after_poison_restore ? "PASS" : "FAIL");
+    sol_mir_program_free(&owner);
+
+cleanup:
+    sol_mir_free(&representation);
+    sol_mir_free(&original);
+    free_e6(&compilation, &package);
+}
+
+static void test_instruction_discriminants_and_fields(void) {
+    SolMirInstruction left = {0}, right;
+#define INST_DIFF(change) do { \
+    right = left; \
+    change; \
+    CHECK(!sol_mir_program_test_instruction_equal(&left, &right)); \
+} while (0)
+#define INST_FIELD(field) INST_DIFF(flip_scalar_byte(&(field), sizeof(field)))
+    left.kind = SOL_MIR_INST_SCOPE_ENTER;
+    left.block = 3;
+    left.result = 5;
+    left.type = 7;
+    left.source_expression = 9;
+    left.span = (SolSpan){11, 13};
+    left.as.scope = (SolMirScope){SOL_MIR_SCOPE_BLOCK, 17};
+    CHECK(sol_mir_program_test_instruction_equal(&left, &left));
+    INST_DIFF(right.kind = SOL_MIR_INST_SCOPE_EXIT);
+    INST_FIELD(right.block);
+    INST_FIELD(right.result);
+    INST_FIELD(right.type);
+    INST_FIELD(right.source_expression);
+    INST_FIELD(right.span.start);
+    INST_FIELD(right.span.end);
+    INST_FIELD(right.as.scope.kind);
+    INST_FIELD(right.as.scope.source);
+    right = left;
+    right.kind = (SolMirInstructionKind)-1;
+    left.kind = (SolMirInstructionKind)-1;
+    CHECK(!sol_mir_program_test_instruction_equal(&left, &right));
+
+    /* Comparator-seam negatives only; these do not forge validated owners. */
+    left = (SolMirInstruction){0};
+    left.kind = SOL_MIR_INST_SCOPE_ENTER;
+    left.as.scope.kind = SOL_MIR_SCOPE_INVALID;
+    right = left;
+    CHECK(!sol_mir_program_test_instruction_equal(&left, &right));
+    left = (SolMirInstruction){0};
+    left.kind = SOL_MIR_INST_CONSTRUCT;
+    left.as.construct.kind = (SolMirConstructKind)-1;
+    right = left;
+    CHECK(!sol_mir_program_test_instruction_equal(&left, &right));
+
+    for (int kind = SOL_MIR_INST_CONST_INT64;
+        kind <= SOL_MIR_INST_FUNCTION_VALUE; ++kind) {
+        left = (SolMirInstruction){0};
+        left.kind = (SolMirInstructionKind)kind;
+        if (left.kind == SOL_MIR_INST_SCOPE_ENTER
+            || left.kind == SOL_MIR_INST_SCOPE_EXIT) {
+            left.as.scope.kind = SOL_MIR_SCOPE_CALLABLE_ENVELOPE;
+        }
+        CHECK(sol_mir_program_test_instruction_equal(&left, &left));
+    }
+
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_CONST_INT64;
+    INST_FIELD(right.as.integer);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_CONST_BOOL;
+    INST_FIELD(right.as.boolean);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_PARAMETER_LIVE;
+    INST_FIELD(right.as.local);
+    left.kind = SOL_MIR_INST_STORAGE_LIVE; INST_FIELD(right.as.local);
+    left.kind = SOL_MIR_INST_DROP_IF_INITIALIZED; INST_FIELD(right.as.local);
+    left.kind = SOL_MIR_INST_STORAGE_DEAD; INST_FIELD(right.as.local);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_LOAD_COPY;
+    INST_FIELD(right.as.place.local); INST_FIELD(right.as.place.source_place);
+    left.kind = SOL_MIR_INST_LOAD_MOVE;
+    INST_FIELD(right.as.place.local); INST_FIELD(right.as.place.source_place);
+    left.kind = SOL_MIR_INST_DROP_PLACE_IF_INITIALIZED;
+    INST_FIELD(right.as.place.local); INST_FIELD(right.as.place.source_place);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_LOAD_UPDATE;
+    INST_FIELD(right.as.update_load.statement);
+    INST_FIELD(right.as.update_load.place.local);
+    INST_FIELD(right.as.update_load.place.source_place);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_STORE;
+    INST_FIELD(right.as.store.place.local);
+    INST_FIELD(right.as.store.place.source_place);
+    INST_FIELD(right.as.store.value);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_UNARY;
+    INST_FIELD(right.as.unary.operator_kind);
+    INST_FIELD(right.as.unary.operand);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_BINARY;
+    INST_FIELD(right.as.binary.operator_kind);
+    INST_FIELD(right.as.binary.left); INST_FIELD(right.as.binary.right);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_COMPOUND_UPDATE;
+    INST_FIELD(right.as.compound_update.statement);
+    INST_FIELD(right.as.compound_update.operator_kind);
+    INST_FIELD(right.as.compound_update.place.local);
+    INST_FIELD(right.as.compound_update.place.source_place);
+    INST_FIELD(right.as.compound_update.previous);
+    INST_FIELD(right.as.compound_update.right);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_REGION_ENTER;
+    INST_FIELD(right.as.region);
+    left.kind = SOL_MIR_INST_REGION_EXIT; INST_FIELD(right.as.region);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_TEMPORARY_INIT;
+    INST_FIELD(right.as.temporary_init.temporary);
+    INST_FIELD(right.as.temporary_init.value);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_TEMPORARY_DROP;
+    INST_FIELD(right.as.temporary_drop.temporary);
+    INST_FIELD(right.as.temporary_drop.preserve_depth);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_EXPRESSION_RESULT;
+    INST_FIELD(right.as.operand);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_PATTERN_TEST;
+    INST_FIELD(right.as.pattern.match_expression);
+    INST_FIELD(right.as.pattern.arm); INST_FIELD(right.as.pattern.arm_ordinal);
+    INST_FIELD(right.as.pattern.pattern); INST_FIELD(right.as.pattern.scrutinee);
+    left.kind = SOL_MIR_INST_PATTERN_VALUE;
+    INST_FIELD(right.as.pattern.match_expression);
+    INST_FIELD(right.as.pattern.arm); INST_FIELD(right.as.pattern.arm_ordinal);
+    INST_FIELD(right.as.pattern.pattern); INST_FIELD(right.as.pattern.scrutinee);
+    left.kind = SOL_MIR_INST_MATCH_ARM;
+    INST_FIELD(right.as.pattern.match_expression);
+    INST_FIELD(right.as.pattern.arm); INST_FIELD(right.as.pattern.arm_ordinal);
+    INST_FIELD(right.as.pattern.pattern); INST_FIELD(right.as.pattern.scrutinee);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_CONSTRUCT;
+    INST_FIELD(right.as.construct.kind);
+    INST_FIELD(right.as.construct.definition);
+    INST_FIELD(right.as.construct.variant);
+    INST_FIELD(right.as.construct.operands.offset);
+    INST_FIELD(right.as.construct.operands.count);
+    INST_FIELD(right.as.construct.capability_roots.offset);
+    INST_FIELD(right.as.construct.capability_roots.count);
+    INST_FIELD(right.as.construct.operation_roots.offset);
+    INST_FIELD(right.as.construct.operation_roots.count);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_FUNCTION_VALUE;
+    INST_FIELD(right.as.function_callable);
+    left = (SolMirInstruction){0}; left.kind = SOL_MIR_INST_CAPTURE_SNAPSHOT;
+    INST_FIELD(right.as.snapshot);
+#undef INST_FIELD
+#undef INST_DIFF
+}
+
+static void test_terminator_discriminants_and_fields(void) {
+    SolMirTerminator left = {0}, right;
+#define TERM_DIFF(change) do { \
+    right = left; \
+    change; \
+    CHECK(!sol_mir_program_test_terminator_equal(&left, &right)); \
+} while (0)
+#define TERM_FIELD(field) TERM_DIFF(flip_scalar_byte(&(field), sizeof(field)))
+    left.kind = SOL_MIR_TERM_GOTO;
+    left.span = (SolSpan){2, 4};
+    left.as.go_to = (SolMirEdge){6, {8, 10}};
+    CHECK(sol_mir_program_test_terminator_equal(&left, &left));
+    TERM_DIFF(right.kind = SOL_MIR_TERM_BRANCH);
+    TERM_FIELD(right.span.start); TERM_FIELD(right.span.end);
+    TERM_FIELD(right.as.go_to.block);
+    TERM_FIELD(right.as.go_to.arguments.offset);
+    TERM_FIELD(right.as.go_to.arguments.count);
+
+    for (int kind = SOL_MIR_TERM_GOTO;
+        kind <= SOL_MIR_TERM_CONTRACT_VIOLATION; ++kind) {
+        left = (SolMirTerminator){0};
+        left.kind = (SolMirTerminatorKind)kind;
+        CHECK(sol_mir_program_test_terminator_equal(&left, &left));
+    }
+    left.kind = SOL_MIR_TERM_INVALID;
+    CHECK(!sol_mir_program_test_terminator_equal(&left, &left));
+    left.kind = (SolMirTerminatorKind)-1;
+    right = left;
+    CHECK(!sol_mir_program_test_terminator_equal(&left, &right));
+    left.kind = SOL_MIR_TERM_GOTO;
+
+    left = (SolMirTerminator){0}; left.kind = SOL_MIR_TERM_BRANCH;
+    TERM_FIELD(right.as.branch.condition);
+    TERM_FIELD(right.as.branch.true_edge.block);
+    TERM_FIELD(right.as.branch.true_edge.arguments.offset);
+    TERM_FIELD(right.as.branch.true_edge.arguments.count);
+    TERM_FIELD(right.as.branch.false_edge.block);
+    TERM_FIELD(right.as.branch.false_edge.arguments.offset);
+    TERM_FIELD(right.as.branch.false_edge.arguments.count);
+    left = (SolMirTerminator){0}; left.kind = SOL_MIR_TERM_RETURN;
+    TERM_FIELD(right.as.value);
+    left.kind = SOL_MIR_TERM_PANIC; TERM_FIELD(right.as.value);
+    left = (SolMirTerminator){0}; left.kind = SOL_MIR_TERM_INVOKE;
+    TERM_FIELD(right.as.invoke.source_expression);
+    TERM_FIELD(right.as.invoke.kind); TERM_FIELD(right.as.invoke.callable);
+    TERM_FIELD(right.as.invoke.type_arguments.offset);
+    TERM_FIELD(right.as.invoke.type_arguments.count);
+    TERM_FIELD(right.as.invoke.effects.offset);
+    TERM_FIELD(right.as.invoke.effects.count);
+    TERM_FIELD(right.as.invoke.effect_parameter);
+    TERM_FIELD(right.as.invoke.evidence.offset);
+    TERM_FIELD(right.as.invoke.evidence.count);
+    TERM_FIELD(right.as.invoke.callee);
+    TERM_FIELD(right.as.invoke.receiver.formal);
+    TERM_FIELD(right.as.invoke.receiver.access);
+    TERM_FIELD(right.as.invoke.receiver.source_expression);
+    TERM_FIELD(right.as.invoke.receiver.temporary);
+    TERM_FIELD(right.as.invoke.receiver.place);
+    TERM_FIELD(right.as.invoke.arguments.offset);
+    TERM_FIELD(right.as.invoke.arguments.count);
+    TERM_FIELD(right.as.invoke.result);
+    TERM_FIELD(right.as.invoke.normal_edge.block);
+    TERM_FIELD(right.as.invoke.normal_edge.arguments.offset);
+    TERM_FIELD(right.as.invoke.normal_edge.arguments.count);
+    TERM_FIELD(right.as.invoke.failure_edge.block);
+    TERM_FIELD(right.as.invoke.failure_edge.arguments.offset);
+    TERM_FIELD(right.as.invoke.failure_edge.arguments.count);
+    left = (SolMirTerminator){0}; left.kind = SOL_MIR_TERM_UNREACHABLE;
+    TERM_FIELD(right.as.unreachable.statement);
+    TERM_FIELD(right.as.unreachable.obligation);
+    left = (SolMirTerminator){0}; left.kind = SOL_MIR_TERM_BREAK;
+    TERM_FIELD(right.as.transfer.statement); TERM_FIELD(right.as.transfer.loop);
+    TERM_FIELD(right.as.transfer.edge.block);
+    TERM_FIELD(right.as.transfer.edge.arguments.offset);
+    TERM_FIELD(right.as.transfer.edge.arguments.count);
+    left.kind = SOL_MIR_TERM_CONTINUE;
+    TERM_FIELD(right.as.transfer.statement); TERM_FIELD(right.as.transfer.loop);
+    TERM_FIELD(right.as.transfer.edge.block);
+    TERM_FIELD(right.as.transfer.edge.arguments.offset);
+    TERM_FIELD(right.as.transfer.edge.arguments.count);
+    left = (SolMirTerminator){0}; left.kind = SOL_MIR_TERM_CHECK_REFINED;
+    TERM_FIELD(right.as.check_refined.source_expression);
+    TERM_FIELD(right.as.check_refined.definition);
+    TERM_FIELD(right.as.check_refined.obligation);
+    TERM_FIELD(right.as.check_refined.representation);
+    TERM_FIELD(right.as.check_refined.result);
+    TERM_FIELD(right.as.check_refined.normal_edge.block);
+    TERM_FIELD(right.as.check_refined.normal_edge.arguments.offset);
+    TERM_FIELD(right.as.check_refined.normal_edge.arguments.count);
+    TERM_FIELD(right.as.check_refined.failure_edge.block);
+    TERM_FIELD(right.as.check_refined.failure_edge.arguments.offset);
+    TERM_FIELD(right.as.check_refined.failure_edge.arguments.count);
+    left = (SolMirTerminator){0}; left.kind = SOL_MIR_TERM_MATCH_FAILURE;
+    TERM_FIELD(right.as.match_failure);
+    left = (SolMirTerminator){0}; left.kind = SOL_MIR_TERM_PROPAGATE;
+    TERM_FIELD(right.as.propagate.source_expression);
+    TERM_FIELD(right.as.propagate.kind); TERM_FIELD(right.as.propagate.operand);
+    TERM_FIELD(right.as.propagate.value_result);
+    TERM_FIELD(right.as.propagate.residual_result);
+    TERM_FIELD(right.as.propagate.value_edge.block);
+    TERM_FIELD(right.as.propagate.value_edge.arguments.offset);
+    TERM_FIELD(right.as.propagate.value_edge.arguments.count);
+    TERM_FIELD(right.as.propagate.residual_edge.block);
+    TERM_FIELD(right.as.propagate.residual_edge.arguments.offset);
+    TERM_FIELD(right.as.propagate.residual_edge.arguments.count);
+    left = (SolMirTerminator){0}; left.kind = SOL_MIR_TERM_CHECK_CONTRACT;
+    TERM_FIELD(right.as.check_contract.obligation);
+    TERM_FIELD(right.as.check_contract.phase);
+    TERM_FIELD(right.as.check_contract.outcome);
+    TERM_FIELD(right.as.check_contract.result);
+    TERM_FIELD(right.as.check_contract.satisfied_edge.block);
+    TERM_FIELD(right.as.check_contract.satisfied_edge.arguments.offset);
+    TERM_FIELD(right.as.check_contract.satisfied_edge.arguments.count);
+    TERM_FIELD(right.as.check_contract.violation_edge.block);
+    TERM_FIELD(right.as.check_contract.violation_edge.arguments.offset);
+    TERM_FIELD(right.as.check_contract.violation_edge.arguments.count);
+    TERM_FIELD(right.as.check_contract.failure_edge.block);
+    TERM_FIELD(right.as.check_contract.failure_edge.arguments.offset);
+    TERM_FIELD(right.as.check_contract.failure_edge.arguments.count);
+    left = (SolMirTerminator){0}; left.kind = SOL_MIR_TERM_CONTRACT_VIOLATION;
+    TERM_FIELD(right.as.contract_violation);
+#undef TERM_FIELD
+#undef TERM_DIFF
+}
+
+static void test_program_comparator_fields(void) {
+    SolIr ir;
+    sol_ir_init(&ir);
+    SolMir mir;
+    sol_mir_init(&mir);
+    SolMirProgramRoot roots_left[] = {{3, SOL_MIR_PROGRAM_ROOT_ENTRY}};
+    SolMirProgramRoot roots_right[] = {{3, SOL_MIR_PROGRAM_ROOT_ENTRY}};
+    SolIrCallableId approvals_left[] = {5}, approvals_right[] = {5};
+    SolMirProgramImport imports_left[] = {{7, {11, 13, 17, 19, 23}, 29}};
+    SolMirProgramImport imports_right[] = {{7, {11, 13, 17, 19, 23}, 29}};
+    SolMirProgramSpecialization specs_left[] = {
+        {31, 37, 41, 43, 47, {53, 59, 61, 67, 71}, 73},
+    };
+    SolMirProgramSpecialization specs_right[] = {
+        {31, 37, 41, 43, 47, {53, 59, 61, 67, 71}, 73},
+    };
+    SolMirProgramReference refs_left[] = {
+        {SOL_MIR_PROGRAM_REFERENCE_INVOKE, {79, 83, 89, 97, 101}, 103},
+    };
+    SolMirProgramReference refs_right[] = {
+        {SOL_MIR_PROGRAM_REFERENCE_INVOKE, {79, 83, 89, 97, 101}, 103},
+    };
+    SolMirProgramTemplate templates_left[] = {{107, {0}}};
+    SolMirProgramTemplate templates_right[] = {{107, {0}}};
+    templates_left[0].mir = mir;
+    templates_right[0].mir = mir;
+    SolMirProgram left = {
+        .ir = &ir, .roots = roots_left, .root_count = 1,
+        .approved_imports = approvals_left, .approved_import_count = 1,
+        .templates = templates_left, .template_count = 1,
+        .imports = imports_left, .import_count = 1,
+        .specializations = specs_left, .specialization_count = 1,
+        .references = refs_left, .reference_count = 1,
+        .limits = {109, 113, 127}, .usage = {131, 137, 139},
+    };
+    SolMirProgram right = left;
+    right.roots = roots_right;
+    right.approved_imports = approvals_right;
+    right.templates = templates_right;
+    right.imports = imports_right;
+    right.specializations = specs_right;
+    right.references = refs_right;
+    CHECK(sol_mir_program_test_program_equal(&left, &right));
+    CHECK(program_fields_equal(&left, &right));
+#define PROGRAM_CHANGE(change) do { \
+    change; \
+    CHECK(!sol_mir_program_test_program_equal(&left, &right)); \
+    CHECK(!program_fields_equal(&left, &right)); \
+} while (0)
+#define PROGRAM_FIELD(left_field, right_field) do { \
+    flip_scalar_byte(&(right_field), sizeof(right_field)); \
+    PROGRAM_CHANGE((void)0); \
+    (right_field) = (left_field); \
+} while (0)
+    right.ir = NULL; PROGRAM_CHANGE((void)0); right.ir = left.ir;
+    PROGRAM_FIELD(left.root_count, right.root_count);
+    PROGRAM_FIELD(left.approved_import_count, right.approved_import_count);
+    PROGRAM_FIELD(left.template_count, right.template_count);
+    PROGRAM_FIELD(left.import_count, right.import_count);
+    PROGRAM_FIELD(left.specialization_count, right.specialization_count);
+    PROGRAM_FIELD(left.reference_count, right.reference_count);
+    PROGRAM_FIELD(left.limits.max_callable_classifications,
+        right.limits.max_callable_classifications);
+    PROGRAM_FIELD(left.limits.max_references, right.limits.max_references);
+    PROGRAM_FIELD(left.limits.max_discovery_work, right.limits.max_discovery_work);
+    PROGRAM_FIELD(left.usage.callable_classifications,
+        right.usage.callable_classifications);
+    PROGRAM_FIELD(left.usage.references, right.usage.references);
+    PROGRAM_FIELD(left.usage.discovery_work, right.usage.discovery_work);
+    PROGRAM_FIELD(roots_left[0].callable, roots_right[0].callable);
+    PROGRAM_FIELD(roots_left[0].kind, roots_right[0].kind);
+    PROGRAM_FIELD(approvals_left[0], approvals_right[0]);
+    PROGRAM_FIELD(imports_left[0].callable, imports_right[0].callable);
+    PROGRAM_FIELD(imports_left[0].first_source.callable,
+        imports_right[0].first_source.callable);
+    PROGRAM_FIELD(imports_left[0].first_source.expression,
+        imports_right[0].first_source.expression);
+    PROGRAM_FIELD(imports_left[0].first_source.file,
+        imports_right[0].first_source.file);
+    PROGRAM_FIELD(imports_left[0].first_source.start,
+        imports_right[0].first_source.start);
+    PROGRAM_FIELD(imports_left[0].first_source.end,
+        imports_right[0].first_source.end);
+    PROGRAM_FIELD(imports_left[0].source_count, imports_right[0].source_count);
+    PROGRAM_FIELD(specs_left[0].trait, specs_right[0].trait);
+    PROGRAM_FIELD(specs_left[0].requirement, specs_right[0].requirement);
+    PROGRAM_FIELD(specs_left[0].type, specs_right[0].type);
+    PROGRAM_FIELD(specs_left[0].implementation, specs_right[0].implementation);
+    PROGRAM_FIELD(specs_left[0].method, specs_right[0].method);
+    PROGRAM_FIELD(specs_left[0].first_source.callable,
+        specs_right[0].first_source.callable);
+    PROGRAM_FIELD(specs_left[0].first_source.expression,
+        specs_right[0].first_source.expression);
+    PROGRAM_FIELD(specs_left[0].first_source.file,
+        specs_right[0].first_source.file);
+    PROGRAM_FIELD(specs_left[0].first_source.start,
+        specs_right[0].first_source.start);
+    PROGRAM_FIELD(specs_left[0].first_source.end,
+        specs_right[0].first_source.end);
+    PROGRAM_FIELD(specs_left[0].source_count, specs_right[0].source_count);
+    PROGRAM_FIELD(refs_left[0].kind, refs_right[0].kind);
+    PROGRAM_FIELD(refs_left[0].source.callable, refs_right[0].source.callable);
+    PROGRAM_FIELD(refs_left[0].source.expression, refs_right[0].source.expression);
+    PROGRAM_FIELD(refs_left[0].source.file, refs_right[0].source.file);
+    PROGRAM_FIELD(refs_left[0].source.start, refs_right[0].source.start);
+    PROGRAM_FIELD(refs_left[0].source.end, refs_right[0].source.end);
+    PROGRAM_FIELD(refs_left[0].target, refs_right[0].target);
+    PROGRAM_FIELD(templates_left[0].callable, templates_right[0].callable);
+    PROGRAM_FIELD(templates_left[0].mir.entry, templates_right[0].mir.entry);
+#undef PROGRAM_FIELD
+#undef PROGRAM_CHANGE
+    sol_mir_free(&mir);
+    sol_ir_free(&ir);
+}
+
+static void check_mir_header_and_arena_fields(const SolMir *left, SolMir *right) {
+    CHECK(sol_mir_program_test_mir_equal(left, right));
+#define MIR_FIELD(field) do { \
+    flip_scalar_byte(&(field), sizeof(field)); \
+    CHECK(!sol_mir_program_test_mir_equal(left, right)); \
+    flip_scalar_byte(&(field), sizeof(field)); \
+    CHECK(sol_mir_program_test_mir_equal(left, right)); \
+} while (0)
+    MIR_FIELD(right->callable);
+    MIR_FIELD(right->generic_parameters.offset);
+    MIR_FIELD(right->generic_parameters.count);
+    MIR_FIELD(right->effect_parameters.offset);
+    MIR_FIELD(right->effect_parameters.count);
+    MIR_FIELD(right->entry);
+    MIR_FIELD(right->contract_body);
+    MIR_FIELD(right->contract_epilogue);
+    MIR_FIELD(right->block_count);
+    MIR_FIELD(right->instruction_count);
+    MIR_FIELD(right->value_count);
+    MIR_FIELD(right->parameter_value_count);
+    MIR_FIELD(right->edge_value_count);
+    MIR_FIELD(right->call_argument_count);
+    MIR_FIELD(right->loop_count);
+    MIR_FIELD(right->construct_operand_count);
+    MIR_FIELD(right->temporary_count);
+    for (size_t index = 0; index < left->block_count; ++index) {
+        MIR_FIELD(right->blocks[index].id);
+        MIR_FIELD(right->blocks[index].order);
+        MIR_FIELD(right->blocks[index].parameters.offset);
+        MIR_FIELD(right->blocks[index].parameters.count);
+        MIR_FIELD(right->blocks[index].instructions.offset);
+        MIR_FIELD(right->blocks[index].instructions.count);
+        MIR_FIELD(right->blocks[index].terminator.kind);
+        MIR_FIELD(right->blocks[index].span.start);
+        MIR_FIELD(right->blocks[index].span.end);
+        MIR_FIELD(right->blocks[index].started);
+    }
+    for (size_t index = 0; index < left->instruction_count; ++index) {
+        MIR_FIELD(right->instructions[index].kind);
+        MIR_FIELD(right->instructions[index].block);
+        MIR_FIELD(right->instructions[index].result);
+        MIR_FIELD(right->instructions[index].type);
+        MIR_FIELD(right->instructions[index].source_expression);
+        MIR_FIELD(right->instructions[index].span.start);
+        MIR_FIELD(right->instructions[index].span.end);
+    }
+    for (size_t index = 0; index < left->value_count; ++index) {
+        MIR_FIELD(right->values[index].kind);
+        MIR_FIELD(right->values[index].type);
+        MIR_FIELD(right->values[index].block);
+        MIR_FIELD(right->values[index].definition);
+        MIR_FIELD(right->values[index].source_expression);
+        MIR_FIELD(right->values[index].span.start);
+        MIR_FIELD(right->values[index].span.end);
+    }
+    for (size_t index = 0; index < left->parameter_value_count; ++index) {
+        MIR_FIELD(right->parameter_values[index]);
+    }
+    for (size_t index = 0; index < left->edge_value_count; ++index) {
+        MIR_FIELD(right->edge_values[index]);
+    }
+    for (size_t index = 0; index < left->call_argument_count; ++index) {
+        MIR_FIELD(right->call_arguments[index].formal);
+        MIR_FIELD(right->call_arguments[index].access);
+        MIR_FIELD(right->call_arguments[index].source_expression);
+        MIR_FIELD(right->call_arguments[index].temporary);
+        MIR_FIELD(right->call_arguments[index].place);
+    }
+    for (size_t index = 0; index < left->loop_count; ++index) {
+        MIR_FIELD(right->loops[index].statement);
+        MIR_FIELD(right->loops[index].parent);
+        MIR_FIELD(right->loops[index].preheader);
+        MIR_FIELD(right->loops[index].header);
+        MIR_FIELD(right->loops[index].condition);
+        MIR_FIELD(right->loops[index].body);
+        MIR_FIELD(right->loops[index].backedge);
+        MIR_FIELD(right->loops[index].exit);
+        MIR_FIELD(right->loops[index].obligations.offset);
+        MIR_FIELD(right->loops[index].obligations.count);
+        MIR_FIELD(right->loops[index].span.start);
+        MIR_FIELD(right->loops[index].span.end);
+    }
+    for (size_t index = 0; index < left->construct_operand_count; ++index) {
+        MIR_FIELD(right->construct_operands[index].formal);
+        MIR_FIELD(right->construct_operands[index].source_expression);
+        MIR_FIELD(right->construct_operands[index].temporary);
+    }
+    for (size_t index = 0; index < left->temporary_count; ++index) {
+        MIR_FIELD(right->temporaries[index].type);
+        MIR_FIELD(right->temporaries[index].source_expression);
+        MIR_FIELD(right->temporaries[index].span.start);
+        MIR_FIELD(right->temporaries[index].span.end);
+    }
+#undef MIR_FIELD
+}
+
+static void test_canonical_active_fields(void) {
+    test_instruction_discriminants_and_fields();
+    test_terminator_discriminants_and_fields();
+    test_program_comparator_fields();
+
+    Compilation compilation;
+    SolPackage package;
+    CHECK(compile_e6(&compilation, &package));
+    size_t tested_callables = 0;
+    for (SolIrCallableId id = 0; id < compilation.ir.callable_count; ++id) {
+        if (compilation.ir.callables[id].body == SOL_IR_NONE) continue;
+        SolMir left, right;
+        sol_mir_init(&left);
+        sol_mir_init(&right);
+        SolDiagnostics diagnostics;
+        sol_diagnostics_init(&diagnostics);
+        SolMirLowerOutcome first = sol_mir_lower_callable(&compilation.ir, id,
+            &left, &diagnostics);
+        sol_diagnostics_free(&diagnostics);
+        if (first == SOL_MIR_LOWER_SUCCEEDED) {
+            sol_diagnostics_init(&diagnostics);
+            SolMirLowerOutcome second = sol_mir_lower_callable(&compilation.ir,
+                id, &right, &diagnostics);
+            sol_diagnostics_free(&diagnostics);
+            CHECK(second == SOL_MIR_LOWER_SUCCEEDED);
+            if (second == SOL_MIR_LOWER_SUCCEEDED
+                && copy_mir_arena_bytes(&right, &left)) {
+                CHECK(left.instructions != right.instructions
+                    && left.blocks != right.blocks);
+                check_mir_header_and_arena_fields(&left, &right);
+                ++tested_callables;
+            } else if (second == SOL_MIR_LOWER_SUCCEEDED) {
+                CHECK(false);
+            }
+        }
+        sol_mir_free(&right);
+        sol_mir_free(&left);
+    }
+    CHECK(tested_callables != 0);
+
+    Compilation loop_compilation;
+    const char *loop_source =
+        "module mir_program\n"
+        "function loop_fixture() -> Int64 effects { pure } {\n"
+        "    var current = 0\n"
+        "    while current < 2 decreases { 2 - current } {\n"
+        "        current += 1\n"
+        "    }\n"
+        "    return current\n"
+        "}\n";
+    bool loop_compiled = compile_text(&loop_compilation, loop_source);
+    CHECK(loop_compiled);
+    if (loop_compiled) {
+        SolIrCallableId loop_callable = callable(&loop_compilation.ir,
+            "loop_fixture", SOL_IR_CALLABLE_FUNCTION);
+        CHECK(loop_callable != SOL_IR_NONE);
+        SolMir loop_left, loop_right;
+        sol_mir_init(&loop_left);
+        sol_mir_init(&loop_right);
+        SolDiagnostics loop_diagnostics;
+        sol_diagnostics_init(&loop_diagnostics);
+        SolMirLowerOutcome loop_outcome = loop_callable == SOL_IR_NONE
+            ? SOL_MIR_LOWER_FAILED
+            : sol_mir_lower_callable(&loop_compilation.ir, loop_callable,
+                &loop_left, &loop_diagnostics);
+        sol_diagnostics_free(&loop_diagnostics);
+        CHECK(loop_outcome == SOL_MIR_LOWER_SUCCEEDED);
+        if (loop_outcome == SOL_MIR_LOWER_SUCCEEDED) {
+            CHECK(sol_mir_validate(&loop_compilation.ir, &loop_left, NULL));
+            CHECK(loop_left.loop_count != 0);
+            if (loop_left.loop_count != 0) {
+                const SolMirLoop *witness = &loop_left.loops[0];
+                fprintf(stderr,
+                    "canonical active-fields real-loop witness "
+                    "callable=%zu rows=%zu obligations=(%zu,%zu) "
+                    "span=(%zu,%zu)\n",
+                    (size_t)loop_callable, loop_left.loop_count,
+                    witness->obligations.offset, witness->obligations.count,
+                    witness->span.start, witness->span.end);
+                sol_diagnostics_init(&loop_diagnostics);
+                SolMirLowerOutcome loop_copy_outcome = sol_mir_lower_callable(
+                    &loop_compilation.ir, loop_callable, &loop_right,
+                    &loop_diagnostics);
+                sol_diagnostics_free(&loop_diagnostics);
+                CHECK(loop_copy_outcome == SOL_MIR_LOWER_SUCCEEDED);
+                bool loop_copy_valid = loop_copy_outcome
+                        == SOL_MIR_LOWER_SUCCEEDED
+                    && copy_mir_arena_bytes(&loop_right, &loop_left);
+                CHECK(loop_copy_outcome != SOL_MIR_LOWER_SUCCEEDED
+                    || loop_copy_valid);
+                if (loop_copy_valid
+                    && loop_right.loop_count == loop_left.loop_count) {
+                    check_mir_header_and_arena_fields(&loop_left, &loop_right);
+                    fprintf(stderr,
+                        "canonical active-fields real-loop field mutations "
+                        "completed rows=%zu fields=obligations-slice+span\n",
+                        loop_left.loop_count);
+                }
+            }
+        }
+        sol_mir_free(&loop_right);
+        sol_mir_free(&loop_left);
+    }
+    free_compilation(&loop_compilation);
+    free_e6(&compilation, &package);
 }
 
 static void test_e6_closures_and_determinism(void) {
@@ -1262,18 +2414,36 @@ static void test_malformed_owner(void) {
     free_compilation(&compilation);
 }
 
-int main(void) {
-    SOL_TEST_RUN(test_e6_closures_and_determinism());
-    SOL_TEST_RUN(test_recursion_references_and_unreachable());
-    SOL_TEST_RUN(test_evidence_and_callbacks());
-    SOL_TEST_RUN(test_callback_source_limitations());
-    SOL_TEST_RUN(test_callback_producer_discovery_limits());
-    SOL_TEST_RUN(test_import_policy_and_lifecycle());
-    SOL_TEST_RUN(test_predicate_proof_and_handler_relations());
-    SOL_TEST_RUN(test_derived_bodyful_capability_is_transactionally_unsupported());
-    SOL_TEST_RUN(test_source_backed_method_meter());
-    SOL_TEST_RUN(test_source_backed_capability_meter());
-    SOL_TEST_RUN(test_malformed_owner());
+int main(int argc, char **argv) {
+    const char *selected = NULL;
+    if (argc == 3 && !strcmp(argv[1], "--canonical-case")) {
+        selected = argv[2];
+    } else if (argc != 1) {
+        return 2;
+    }
+    if (selected != NULL) {
+        if (!strcmp(selected, "representation")) {
+            SOL_TEST_RUN(test_canonical_representation());
+        } else if (!strcmp(selected, "active-fields")) {
+            SOL_TEST_RUN(test_canonical_active_fields());
+        } else {
+            return 2;
+        }
+    } else {
+        SOL_TEST_RUN(test_e6_closures_and_determinism());
+        SOL_TEST_RUN(test_recursion_references_and_unreachable());
+        SOL_TEST_RUN(test_evidence_and_callbacks());
+        SOL_TEST_RUN(test_callback_source_limitations());
+        SOL_TEST_RUN(test_callback_producer_discovery_limits());
+        SOL_TEST_RUN(test_import_policy_and_lifecycle());
+        SOL_TEST_RUN(test_predicate_proof_and_handler_relations());
+        SOL_TEST_RUN(test_derived_bodyful_capability_is_transactionally_unsupported());
+        SOL_TEST_RUN(test_source_backed_method_meter());
+        SOL_TEST_RUN(test_source_backed_capability_meter());
+        SOL_TEST_RUN(test_malformed_owner());
+        SOL_TEST_RUN(test_canonical_representation());
+        SOL_TEST_RUN(test_canonical_active_fields());
+    }
     if (failures != 0) {
         fprintf(stderr, "%d MIR program test(s) failed\n", failures);
         return 1;
@@ -1282,4 +2452,4 @@ int main(void) {
     return 0;
 }
 #undef main
-SOL_TEST_ENTRY("mir_program")
+SOL_TEST_ARGV_ENTRY("mir_program")

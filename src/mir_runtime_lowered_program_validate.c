@@ -10,9 +10,16 @@
  * builder meter.  The scope is installed only after the raw owner pointers
  * have been checked and is restored by the single exit path below. */
 static _Thread_local SolMirRuntimeLoweredWorkMeter *active_validation_meter;
-static bool validation_tick(void) {
+static _Thread_local SolMirRuntimeLoweredWorkMeter *active_build_cost_meter;
+static _Thread_local bool active_build_cost_emits_demands;
+static bool validation_only_tick(void) {
     return !active_validation_meter
         || sol_mir_runtime_lowered_tick(active_validation_meter);
+}
+static bool validation_tick(void) {
+    if (!validation_only_tick()) return false;
+    return !active_build_cost_meter
+        || sol_mir_runtime_lowered_tick(active_build_cost_meter);
 }
 
 static bool bad(SolDiagnostics *diagnostics, const char *message) {
@@ -151,6 +158,18 @@ static size_t image_for_block(const SolMirMaterialization *materialization, size
     }
     return SOL_MIR_RUNTIME_NONE;
 }
+/* Builder demand emission reuses the image already stored in its drafted row.
+ * This independent replay must recover that value from authenticated source
+ * slices; meter the lookup to validation only, never to builder work. */
+static size_t image_for_block_validation_only(
+    const SolMirMaterialization *materialization, size_t block) {
+    for (size_t image = 0; image < materialization->image_count
+            && validation_only_tick(); ++image) {
+        SolMirPlanSlice slice = materialization->images[image].blocks;
+        if (block >= slice.offset && block - slice.offset < slice.count) return image;
+    }
+    return SOL_MIR_RUNTIME_NONE;
+}
 static size_t image_for_instruction(const SolMirMaterialization *materialization, size_t instruction) {
     for (size_t image = 0; image < materialization->image_count && validation_tick(); ++image) {
         SolMirPlanSlice slice = materialization->images[image].instructions;
@@ -189,9 +208,16 @@ static bool expected_value_plan_for_recipe(const SolMirRuntimeValues *values, So
 static bool expected_demand_add(DemandReader *reader, const SolMirRuntimeValues *values,
     SolMirRecipeId recipe, uint32_t wanted) {
     if (recipe == SOL_MIR_RECIPE_NONE) return true;
+    if (reader->count == SIZE_MAX) return false;
     size_t value_plan;
     if (!expected_value_plan_for_recipe(values, recipe, &value_plan)
         || (reader->owner && reader->count >= reader->owner->recipe_demand_count)) return false;
+    /* Producer demand_add has one explicit work tick after its value-plan
+     * lookup.  During the cost-only schedule pass, account for that tick and
+     * for the emission-only value-facility lookup; census deliberately omits
+     * the latter. */
+    if (active_build_cost_meter && !validation_tick()) return false;
+    if (active_build_cost_emits_demands) (void)value_facilities(values, value_plan);
     if (reader->owner) {
         const SolMirRuntimeLoweredRecipeDemand *row = &reader->owner->recipe_demands[reader->count];
         if (!present(row->state) || row->recipe != recipe || row->value_plan != value_plan
@@ -573,7 +599,8 @@ static bool image_instruction_event_producer(const SolMirMaterialization *materi
         *producer = SOL_MIR_RUNTIME_CLEANUP_PRODUCER_SUPPLEMENTAL_ALLOCATION; return true;
     }
     if (input->kind == SOL_MIR_INST_PATTERN_VALUE) for (size_t i = 0;
-            i < operations->pattern_extraction_count; ++i) {
+            i < operations->pattern_extraction_count
+                && (!active_build_cost_meter || validation_only_tick()); ++i) {
         const SolMirOperationPatternExtraction *plan = &operations->pattern_extractions[i];
         if (plan->instruction == instruction && copy_requires_runtime(plan->copy_kind)
             && plan->result_recipe < values->allocation_plan_count
@@ -826,6 +853,7 @@ typedef struct {
     SOL_MIR_RUNTIME_LOWERED_TABLES(EXPECTED_MEMBER)
 #undef EXPECTED_MEMBER
     size_t owned_bytes;
+    size_t host_grant_slot_work;
 } LoweredExpectedCardinalities;
 static bool expected_cardinalities(const SolMirRuntimeConventions *conventions,
     const SolMirRuntimeValues *values, const SolMirRuntimeCleanup *cleanup,
@@ -833,7 +861,8 @@ static bool expected_cardinalities(const SolMirRuntimeConventions *conventions,
     LoweredExpectedCardinalities *expected) {
     const SolMirMaterialization *materialization = &conventions->concrete->materialization;
     const SolMirOperations *operations = &conventions->concrete->operations;
-    size_t cleanup_total, semantic_total, grants = 0, bytes = 0, table_bytes;
+    size_t cleanup_total, semantic_total, grants = 0, grant_slot_work = 0;
+    size_t bytes = 0, table_bytes;
     if (!expected_totals(cleanup, operations, &cleanup_total, &semantic_total)) return false;
     for (size_t i = 0; i < host_abi->requirement_count && validation_tick(); ++i) {
         bool prior = false;
@@ -843,7 +872,11 @@ static bool expected_cardinalities(const SolMirRuntimeConventions *conventions,
             if (left->entry == right->entry && left->root == right->root
                 && left->operation == right->operation) { prior = true; break; }
         }
-        if (!prior && !add_size(&grants, 1)) return false;
+        if (!prior) {
+            size_t slot_search = grants;
+            if (!add_size(&slot_search, 1) || !add_size(&grant_slot_work, slot_search)
+                || !add_size(&grants, 1)) return false;
+        }
     }
     DemandReader demands = {NULL, 0};
     for (size_t i = 0; i < materialization->instruction_count && validation_tick(); ++i)
@@ -879,7 +912,8 @@ static bool expected_cardinalities(const SolMirRuntimeConventions *conventions,
         .recipes = values->recipe_operation_count,
         .value_plans = values->recipe_operation_count, .recipe_demands = demands.count,
         .cleanup_failures = cleanup_total, .host_requirements = host_abi->requirement_count,
-        .host_grants = grants, .host_incidences = host_abi->requirement_count,
+        .host_grants = grants, .host_grant_slot_work = grant_slot_work,
+        .host_incidences = host_abi->requirement_count,
         .handler_frames = handler_abi->frame_count,
         .handler_markers = handler_abi->exit_marker_count,
         .handler_exits = handler_abi->cleanup_exit_count,
@@ -909,6 +943,341 @@ static bool expected_owner_header(const SolMirRuntimeLoweredProgram *owner,
     return owner->usage.owned_bytes == expected->owned_bytes
         && expected->owned_bytes <= owner->limits.max_owned_bytes;
 }
+
+typedef struct {
+    size_t build_scratch_bytes;
+    size_t build_work;
+    size_t census_work;
+    size_t draft_scan_work;
+    size_t draft_allocation_work;
+    size_t persistent_work;
+} LoweredExpectedBuildUsage;
+
+/* Cost-only replay of the successful builder schedule, reading authenticated
+ * predecessors and expected cardinalities, never supplied Usage or drafted rows.
+ * Phase ledger: 347-357 is the four-pass demand census; 740 is the grant census
+ * (requirement plus earlier-requirement prefix). 768-789 covers image rows,
+ * pre-operation searches, image-edge sources/incidence, predicate rows/edge
+ * sources/incidence. 791-795 is the second demand traversal (including the
+ * emission-only value-facility scans). 796-935 covers provenance/semantic,
+ * call/signature/import/recipe, cleanup, host-grant slot/incidence, and handler
+ * rows. 665-695/936-972 are represented only by the checked scalar formula and
+ * two seal costs; no copy, allocation, or seal is replayed here.
+ * Builder asymmetries are intentional: census resolves every image block while
+ * its drafted-row demand emission already has the image; independent replay
+ * resolves that emission image from authenticated block slices and charges only
+ * validation work. Initial host-grant matching at 874-877 is unmetered, and
+ * pattern-producer lookup is unmetered in BUILDwork but its validator replay is
+ * validation-metered. Other source-level lookups use the same visited-prefix/
+ * full-scan semantics as the builder. Reconstructed builder ticks count against
+ * both private schedule accounting and validation work; validator-only lookups
+ * count only against validation work. The builder's active_build_meter is never
+ * read or changed. */
+static bool build_cost_demand_pass(DemandReader *reader,
+    const SolMirRuntimeConventions *conventions, const SolMirRuntimeValues *values,
+    const SolMirRuntimeCleanup *cleanup, const SolMirMaterialization *materialization,
+    const SolMirOperations *operations) {
+    for (size_t i = 0; i < materialization->instruction_count && validation_tick(); ++i)
+        if (!expected_image_instruction_demands(reader, materialization, operations,
+                values, cleanup, i)) return false;
+    for (size_t i = 0; i < materialization->block_count && validation_tick(); ++i) {
+        size_t image = image_for_block(materialization, i);
+        if (image == SOL_MIR_RUNTIME_LOWERED_NONE
+            || !expected_image_terminator_demands(reader, conventions, values,
+                materialization, operations, image, i)) return false;
+    }
+    for (size_t i = 0; i < operations->predicate_instruction_count && validation_tick(); ++i)
+        if (!expected_predicate_instruction_demands(reader, operations, values, i)) return false;
+    for (size_t i = 0; i < operations->predicate_block_count && validation_tick(); ++i)
+        if (!expected_predicate_terminator_demands(reader, conventions, values,
+                operations, operations->predicate_blocks[i].body, i)) return false;
+    return true;
+}
+
+static bool build_cost_draft_scan(const SolMirRuntimeConventions *conventions,
+    const SolMirRuntimeValues *values, const SolMirRuntimeCleanup *cleanup,
+    const SolMirRuntimeHostAbi *host_abi, const SolMirRuntimeHandlerAbi *handler_abi,
+    const LoweredExpectedCardinalities *expected, size_t *demand_count) {
+    const SolMirMaterialization *materialization = &conventions->concrete->materialization;
+    const SolMirOperations *operations = &conventions->concrete->operations;
+    DemandReader emitted = {NULL, 0};
+    for (size_t i = 0; i < materialization->instruction_count && validation_tick(); ++i) {
+        const SolMirMaterializedInstruction *input = &materialization->instructions[i];
+        size_t image = image_for_instruction(materialization, i);
+        SolMirRuntimeLoweredDemandDescriptor descriptor_value;
+        SolMirRuntimeCleanupProducerKind producer;
+        if (image == SOL_MIR_RUNTIME_LOWERED_NONE
+            || !image_instruction_descriptor(input->kind, &descriptor_value)) return false;
+        (void)image_instruction_semantic(materialization, operations, i);
+        if (image_instruction_event_producer(materialization, operations, values, i, &producer))
+            (void)cleanup_event_for(cleanup, SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION,
+                image, input->block, i, true, producer);
+        (void)cleanup_step_event_for(cleanup, SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION,
+            image, input->block, i);
+        (void)image_instruction_facilities(operations, values, i, input->kind,
+            descriptor_value.facilities);
+    }
+    for (size_t i = 0; i < materialization->block_count && validation_tick(); ++i) {
+        const SolMirMaterializedTerminator *term = &materialization->blocks[i].terminator;
+        size_t image = image_for_block(materialization, i);
+        SolMirRuntimeLoweredDemandDescriptor descriptor_value;
+        if (image == SOL_MIR_RUNTIME_LOWERED_NONE
+            || !image_terminator_descriptor(term->kind, &descriptor_value)) return false;
+        (void)image_terminator_semantic(materialization, operations, i);
+        (void)cleanup_event_for(cleanup, SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR,
+            image, i, SOL_MIR_RUNTIME_LOWERED_NONE, true,
+            image_terminator_event_producer(term->kind));
+        (void)cleanup_step_event_for(cleanup, SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR,
+            image, i, SOL_MIR_RUNTIME_NONE);
+        if (term->kind == SOL_MIR_TERM_INVOKE) {
+            size_t call = image_call_for_block(conventions, image, i);
+            if (call == SOL_MIR_RUNTIME_NONE) return false;
+            (void)import_for_call(conventions, &conventions->calls[call]);
+        }
+        if (term->kind == SOL_MIR_TERM_INVOKE
+            && term->callable_site != SOL_MIR_MATERIALIZED_NONE) {
+            (void)cleanup_pre_operation_event_for(cleanup,
+                SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_INVOKE_CALLABLE, image, i,
+                SOL_MIR_RUNTIME_NONE, term->callable_site,
+                SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CALLABLE_CONSTRUCTION);
+        } else if (term->kind == SOL_MIR_TERM_PROPAGATE) {
+            for (size_t plan = 0; plan < operations->propagation_count && validation_tick(); ++plan)
+                if (operations->propagations[plan].image == image
+                    && operations->propagations[plan].block == i
+                    && operations->propagations[plan].residual_recipe
+                        < values->allocation_plan_count
+                    && values->allocation_plans[operations->propagations[plan].residual_recipe].kind
+                        != SOL_MIR_RUNTIME_ALLOCATION_PLAN_NONE)
+                    (void)cleanup_pre_operation_event_for(cleanup,
+                        SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_PROPAGATE_RESIDUAL,
+                        image, i, plan, SOL_MIR_RUNTIME_NONE,
+                        SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PROPAGATION_RESIDUAL);
+        }
+    }
+    for (size_t i = 0; i < materialization->edge_count && validation_tick(); ++i) {
+        size_t source, ordinal;
+        (void)image_for_block(materialization, materialization->edges[i].block);
+        if (!image_edge_source(materialization, i, &source, &ordinal)) return false;
+    }
+    for (size_t block = 0; block < materialization->block_count && validation_tick(); ++block)
+        for (size_t edge = 0; edge < materialization->edge_count && validation_tick(); ++edge) {
+            (void)block; (void)edge;
+        }
+    for (size_t i = 0; i < operations->predicate_body_count && validation_tick(); ++i) { }
+    for (size_t i = 0; i < operations->predicate_instruction_count && validation_tick(); ++i) {
+        const SolMirPredicateInstruction *input = &operations->predicate_instructions[i];
+        (void)predicate_instruction_semantic(materialization, operations, i);
+        (void)cleanup_event_for(cleanup, SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION,
+            operations->predicate_blocks[input->block].body, input->block, i, true,
+            predicate_instruction_event_producer(input, values));
+        (void)cleanup_step_event_for(cleanup,
+            SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION,
+            operations->predicate_blocks[input->block].body, input->block, i);
+    }
+    for (size_t i = 0; i < operations->predicate_block_count && validation_tick(); ++i) {
+        const SolMirPredicateTerminator *term = &operations->predicate_blocks[i].terminator;
+        (void)predicate_terminator_semantic(materialization, operations, i);
+        (void)cleanup_event_for(cleanup, SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR,
+            operations->predicate_blocks[i].body,
+            i, SOL_MIR_RUNTIME_NONE, true, predicate_terminator_event_producer(term));
+        (void)cleanup_step_event_for(cleanup,
+            SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR,
+            operations->predicate_blocks[i].body, i, SOL_MIR_RUNTIME_NONE);
+        if (term->kind == SOL_MIR_PREDICATE_TERM_INVOKE) {
+            size_t call = predicate_call_for_block(conventions,
+                operations->predicate_blocks[i].body, i);
+            if (call == SOL_MIR_RUNTIME_NONE) return false;
+            (void)import_for_call(conventions, &conventions->calls[call]);
+        }
+    }
+    for (size_t i = 0; i < operations->predicate_edge_count && validation_tick(); ++i) {
+        size_t source, ordinal;
+        if (!predicate_edge_source(operations, i, &source, &ordinal)) return false;
+    }
+    /* Builder 789 constructs both predicate incidence tables by visiting each
+     * predicate block and every edge. These P + P*E successful BUILD ticks are
+     * distinct from edge-source resolution and precede demand emission. */
+    for (size_t block = 0; block < operations->predicate_block_count && validation_tick(); ++block)
+        for (size_t edge = 0; edge < operations->predicate_edge_count && validation_tick(); ++edge) {
+            (void)block; (void)edge;
+        }
+
+    /* Builder 791-795 emits instruction, terminator, and predicate demands in
+     * that order. Its outer row ticks contribute to BUILDwork; the source-image
+     * lookup needed by this row-only replay consumes validation budget only. */
+    active_build_cost_emits_demands = true;
+    bool demand_ok = true;
+    for (size_t i = 0; i < materialization->instruction_count && validation_tick(); ++i)
+        if (!expected_image_instruction_demands(&emitted, materialization, operations,
+                values, cleanup, i)) { demand_ok = false; break; }
+    for (size_t i = 0; demand_ok && i < materialization->block_count
+            && validation_tick(); ++i) {
+        size_t image = image_for_block_validation_only(materialization, i);
+        if (image == SOL_MIR_RUNTIME_NONE
+            || !expected_image_terminator_demands(&emitted, conventions,
+                values, materialization, operations, image, i)) {
+            demand_ok = false;
+            break;
+        }
+    }
+    for (size_t i = 0; demand_ok && i < operations->predicate_instruction_count
+            && validation_tick(); ++i)
+        if (!expected_predicate_instruction_demands(&emitted, operations, values, i))
+            demand_ok = false;
+    for (size_t i = 0; demand_ok && i < operations->predicate_block_count
+            && validation_tick(); ++i)
+        if (!expected_predicate_terminator_demands(&emitted, conventions, values,
+                operations, operations->predicate_blocks[i].body, i)) demand_ok = false;
+    active_build_cost_emits_demands = false;
+    if (!demand_ok || emitted.count != expected->recipe_demands) return false;
+    *demand_count = emitted.count;
+
+    for (size_t i = 0; i < operations->provenance_count && validation_tick(); ++i) { }
+    for (size_t i = 0; i < expected->semantic_plans && validation_tick(); ++i) { }
+    for (size_t i = 0; i < conventions->call_count && validation_tick(); ++i) {
+        const SolMirRuntimeCall *call = &conventions->calls[i];
+        (void)import_for_call(conventions, call);
+        (void)bound_environment_import_for_call(conventions, call);
+        (void)entry_for_call(conventions, call);
+    }
+    for (size_t i = 0; i < conventions->signature_count && validation_tick(); ++i) { }
+    for (size_t i = 0; i < conventions->import_count && validation_tick(); ++i) { }
+    for (size_t i = 0; i < values->recipe_operation_count && validation_tick(); ++i) {
+        (void)value_facilities(values, i);
+        (void)value_demand(conventions, values, cleanup, operations, i);
+    }
+    for (size_t i = 0; i < cleanup->event_count && validation_tick(); ++i) { }
+    for (size_t i = 0; i < cleanup->action_count && validation_tick(); ++i)
+        (void)handler_frame_for_cleanup_action(handler_abi, i);
+    for (size_t i = 0; i < cleanup->transition_count && validation_tick(); ++i) { }
+    for (size_t i = 0; i < cleanup->supplemental_site_count && validation_tick(); ++i) { }
+    for (size_t i = 0; i < cleanup->drop_path_count && validation_tick(); ++i) { }
+
+    for (size_t i = 0; i < host_abi->requirement_count && validation_tick(); ++i) { }
+    /* Each first-seen grant g causes an empty-slot search through g present
+     * entries and the first empty entry: g+1 producer ticks.  The independent
+     * expected-cardinality census derives this sum from authenticated tuples. */
+    for (size_t i = 0; i < expected->host_grant_slot_work && validation_tick(); ++i) { }
+    for (size_t grant = 0; grant < expected->host_grants && validation_tick(); ++grant)
+        for (size_t requirement = 0; requirement < host_abi->requirement_count
+                && validation_tick(); ++requirement) { }
+    for (size_t i = 0; i < handler_abi->frame_count && validation_tick(); ++i) { }
+    for (size_t i = 0; i < handler_abi->exit_marker_count && validation_tick(); ++i) { }
+    for (size_t i = 0; i < handler_abi->cleanup_exit_count && validation_tick(); ++i) { }
+    return !(active_validation_meter && active_validation_meter->exhausted)
+        && !(active_build_cost_meter && active_build_cost_meter->exhausted);
+}
+
+static bool checked_build_cost_formula(size_t owned_bytes, size_t coverage,
+    size_t grants, size_t rows, size_t nonempty_tables, size_t table_families,
+    size_t census_work, size_t draft_scan_work, size_t *scratch_bytes,
+    size_t *draft_allocation_work, size_t *persistent_work, size_t *build_work) {
+    size_t coverage_bytes, grant_bytes, scratch, seal_work, seal_words;
+    const size_t base_owned_bytes = owned_bytes;
+    size_t draft_allocations = nonempty_tables, persistent = nonempty_tables;
+    size_t total = census_work;
+    if (!mul_size(coverage, sizeof(unsigned char), &coverage_bytes)
+        || !mul_size(grants, sizeof(size_t), &grant_bytes)
+        || !add_size(&owned_bytes, coverage_bytes)
+        || !add_size(&owned_bytes, grant_bytes)) return false;
+    scratch = owned_bytes;
+    if (!mul_size(table_families, 5, &seal_words)
+        || !add_size(&seal_words, 22)
+        || !add_size(&seal_words, base_owned_bytes)) return false;
+    seal_work = seal_words;
+    size_t double_seal;
+    if (!mul_size(seal_work, 2, &double_seal)
+        || !add_size(&persistent, rows)
+        || !add_size(&persistent, double_seal)
+        || (coverage && !add_size(&draft_allocations, 1))
+        || (grants && !add_size(&draft_allocations, 1))
+        || !add_size(&total, draft_scan_work)
+        || !add_size(&total, draft_allocations)
+        || !add_size(&total, persistent)) return false;
+    *scratch_bytes = scratch;
+    *draft_allocation_work = draft_allocations;
+    *persistent_work = persistent;
+    *build_work = total;
+    return true;
+}
+
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+bool sol_mir_runtime_lowered_program_test_build_cost_formula(size_t owned_bytes,
+    size_t coverage, size_t grants, size_t rows, size_t nonempty_tables,
+    size_t table_families, size_t census_work, size_t draft_scan_work,
+    size_t *scratch_bytes, size_t *build_work) {
+    size_t draft_allocation_work, persistent_work;
+    if (!scratch_bytes || !build_work) return false;
+    return checked_build_cost_formula(owned_bytes, coverage, grants, rows,
+        nonempty_tables, table_families, census_work, draft_scan_work,
+        scratch_bytes, &draft_allocation_work, &persistent_work, build_work);
+}
+#endif
+
+static bool reconstruct_build_usage(const SolMirRuntimeLoweredProgram *owner,
+    const LoweredExpectedCardinalities *expected, LoweredExpectedBuildUsage *usage) {
+    SolMirRuntimeLoweredWorkMeter schedule = {SIZE_MAX, 0, false};
+    SolMirRuntimeLoweredWorkMeter *previous_schedule = active_build_cost_meter;
+    bool previous_emits_demands = active_build_cost_emits_demands;
+    active_build_cost_meter = &schedule;
+    active_build_cost_emits_demands = false;
+    size_t census_work = 0, demand_count = 0;
+    const SolMirMaterialization *materialization = &owner->conventions->concrete->materialization;
+    const SolMirOperations *operations = &owner->conventions->concrete->operations;
+    DemandReader census = {NULL, 0};
+    bool ok = build_cost_demand_pass(&census, owner->conventions, owner->values,
+        owner->cleanup, materialization, operations);
+    size_t grants = 0;
+    for (size_t i = 0; ok && i < owner->host_abi->requirement_count && validation_tick(); ++i) {
+        const SolMirRuntimeHostRequirement *input = &owner->host_abi->requirements[i];
+        bool prior = false;
+        for (size_t j = 0; j < i && validation_tick(); ++j) {
+            const SolMirRuntimeHostRequirement *earlier = &owner->host_abi->requirements[j];
+            if (earlier->entry == input->entry && earlier->root == input->root
+                && earlier->operation == input->operation) { prior = true; break; }
+        }
+        if (!prior) {
+            if (grants == SIZE_MAX) { ok = false; break; }
+            ++grants;
+        }
+    }
+    if (census.count != expected->recipe_demands || grants != expected->host_grants
+        || (active_validation_meter && active_validation_meter->exhausted)
+        || schedule.exhausted) ok = false;
+    census_work = schedule.used;
+    if (ok) ok = build_cost_draft_scan(owner->conventions, owner->values, owner->cleanup,
+        owner->host_abi, owner->handler_abi, expected, &demand_count);
+    if (schedule.used < census_work) ok = false;
+    size_t draft_scan_work = ok ? schedule.used - census_work : 0;
+    active_build_cost_meter = previous_schedule;
+    active_build_cost_emits_demands = previous_emits_demands;
+    if (!ok || schedule.exhausted
+        || (active_validation_meter && active_validation_meter->exhausted)) return false;
+
+    size_t table_families = 0, rows = 0, nonempty_tables = 0, coverage = 0;
+#define COST_TOTAL(member,type,singular) \
+    if (!add_size(&table_families, 1) || !add_size(&rows, expected->member)) return false; \
+    if (expected->member && !add_size(&nonempty_tables, 1)) return false;
+    SOL_MIR_RUNTIME_LOWERED_TABLES(COST_TOTAL)
+#undef COST_TOTAL
+    if (demand_count != expected->recipe_demands
+        || !add_size(&coverage, materialization->instruction_count)
+        || !add_size(&coverage, materialization->block_count)
+        || !add_size(&coverage, operations->predicate_instruction_count)
+        || !add_size(&coverage, operations->predicate_block_count)
+        || !add_size(&coverage, operations->predicate_edge_count)) return false;
+    size_t build_scratch_bytes, draft_allocation_work, persistent_work, build_work;
+    if (!checked_build_cost_formula(expected->owned_bytes, coverage,
+            expected->host_grants, rows, nonempty_tables, table_families,
+            census_work, draft_scan_work, &build_scratch_bytes,
+            &draft_allocation_work, &persistent_work, &build_work)
+        || build_scratch_bytes > owner->limits.max_build_scratch_bytes
+        || build_work > owner->limits.max_build_work) return false;
+    *usage = (LoweredExpectedBuildUsage){build_scratch_bytes, build_work,
+        census_work, draft_scan_work, draft_allocation_work, persistent_work};
+    return true;
+}
+
 static SolMirRuntimeArenaVisit raw_owner_preflight(const SolMirRuntimeLoweredProgram *owner) {
     RawRange local[] = {
         {owner, 1, sizeof *owner},
@@ -1022,7 +1391,11 @@ SolMirRuntimeLoweredProgramBuildOutcome sol_mir_runtime_lowered_program_internal
     SolMirRuntimeArenaVisit alias_visit = raw_owner_preflight(owner);
     if (alias_visit == SOL_MIR_RUNTIME_ARENA_VISIT_EXHAUSTED) goto resource_exhausted;
     size_t render_bytes, render_scratch_bytes;
-    if (alias_visit != SOL_MIR_RUNTIME_ARENA_VISIT_OK || !raw_owner_slices(owner)
+    if (alias_visit != SOL_MIR_RUNTIME_ARENA_VISIT_OK || !raw_owner_slices(owner)) goto malformed;
+    LoweredExpectedBuildUsage build_usage;
+    if (!reconstruct_build_usage(owner, &cardinalities, &build_usage)
+        || owner->usage.build_scratch_bytes != build_usage.build_scratch_bytes
+        || owner->usage.build_work != build_usage.build_work
         || !validation_scratch_size(owner, &validation_scratch_bytes)
         || owner->usage.validation_scratch_bytes != validation_scratch_bytes
         || validation_scratch_bytes > owner->limits.max_validation_scratch_bytes

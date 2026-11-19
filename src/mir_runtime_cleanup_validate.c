@@ -188,6 +188,11 @@ bool sol_mir_runtime_cleanup_test_alias_work(const SolMirRuntimeCleanup *cleanup
 #endif
 
 typedef enum { DEAD, UNINITIALIZED, INITIALIZED, MAYBE } IndependentStorage;
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+size_t sol_mir_runtime_cleanup_internal_test_independent_storage_size(void) {
+    return sizeof(IndependentStorage);
+}
+#endif
 typedef enum { INDEPENDENT_HOLE_ABSENT, INDEPENDENT_HOLE_MUST, INDEPENDENT_HOLE_MAY } IndependentHole;
 typedef struct {
     const SolMirMaterialization *m; const SolMirMaterializedImage *image;
@@ -379,7 +384,7 @@ static bool apply_terminator_temps(const IndependentReplay *r, const SolMirMater
     *depth -= consumed;
     return true;
 }
-static bool compute_states(IndependentReplay*r,ValidationWorkspace*w,size_t *work) { size_t entry=r->image->entry-r->image->blocks.offset;if(entry>=r->blocks)return false;r->known[entry]=1;bool changed=true;size_t pass=0,limit=r->blocks?(r->blocks*(r->locals+r->places+1)+1):1;while(changed&&pass++<limit){if(!METER())return false;changed=false;for(size_t b=0;b<r->blocks;b++){if(!METER())return false;if(!r->known[b])continue;if(!meter_work(work))return false;size_t mark=w->used;IndependentStorage *s=workspace_take(w,r->locals,sizeof *s);unsigned char*h=workspace_take(w,r->places,sizeof *h);size_t *tmp=workspace_take(w,r->width,sizeof *tmp),*tmpo=workspace_take(w,r->width,sizeof *tmpo),*sn=workspace_take(w,r->width,sizeof *sn),*sc=workspace_take(w,r->width,sizeof *sc),*re=workspace_take(w,r->width,sizeof *re),*ha=workspace_take(w,r->width,sizeof *ha);if((r->locals&&!s)||(r->places&&!h)||!tmp||!tmpo||!sn||!sc||!re||!ha){w->used=mark;return false;}if(r->locals)memcpy(s,st(r,b),r->locals*sizeof*s);if(r->places)memcpy(h,ho(r,b),r->places);size_t td=r->td[b],sd=r->sd[b],cd=r->cd[b],rd=r->rd[b],hd=r->hd[b];memcpy(tmp,ss(r->temps,r,b),td*sizeof*tmp);memcpy(tmpo,ss(r->temp_scopes,r,b),td*sizeof*tmpo);memcpy(sn,ss(r->snaps,r,b),sd*sizeof*sn);memcpy(sc,ss(r->scopes,r,b),cd*sizeof*sc);memcpy(re,ss(r->regions,r,b),rd*sizeof*re);memcpy(ha,ss(r->handlers,r,b),hd*sizeof*ha);const SolMirMaterializedBlock *bl=&r->m->blocks[r->image->blocks.offset+b];bool ok=true;for(size_t i=0;i<bl->instructions.count&&ok;i++){if(!meter_work(work)){ok=false;break;}ok=apply_instruction(r,&r->m->instructions[bl->instructions.offset+i],s,h,tmp,tmpo,&td,sn,&sd,sc,&cd,re,&rd,ha,&hd);}if(ok)ok=apply_terminator_temps(r,&bl->terminator,tmp,&td);size_t es[3],en=edges(&bl->terminator,es);for(size_t q=0;q<en&&ok;q++){if(!meter_work(work)){ok=false;break;}if(es[q]>=r->m->edge_count){ok=false;break;}size_t dest=r->m->edges[es[q]].block-r->image->blocks.offset;if(dest>=r->blocks){ok=false;break;}if(!r->known[dest]){r->known[dest]=1;if(r->locals)memcpy(st(r,dest),s,r->locals*sizeof*s);if(r->places)memcpy(ho(r,dest),h,r->places);r->td[dest]=td;r->sd[dest]=sd;r->cd[dest]=cd;r->rd[dest]=rd;r->hd[dest]=hd;memcpy(ss(r->temps,r,dest),tmp,td*sizeof*tmp);memcpy(ss(r->temp_scopes,r,dest),tmpo,td*sizeof*tmpo);memcpy(ss(r->snaps,r,dest),sn,sd*sizeof*sn);memcpy(ss(r->scopes,r,dest),sc,cd*sizeof*sc);memcpy(ss(r->regions,r,dest),re,rd*sizeof*re);memcpy(ss(r->handlers,r,dest),ha,hd*sizeof*ha);changed=true;}else {if(!meter_work(work)){ok=false;break;}ok=merge_storage(st(r,dest),s,r->locals,&changed);for(size_t p=0;p<r->places;p++){if(!METER()){ok=false;break;}unsigned char a=ho(r,dest)[p], incoming=h[p], x=a==incoming?a:INDEPENDENT_HOLE_MAY;changed|=x!=a;ho(r,dest)[p]=x;}ok=ok&&stack_equal(ss(r->temps,r,dest),r->td[dest],tmp,td)&&stack_equal(ss(r->temp_scopes,r,dest),r->td[dest],tmpo,td)&&stack_equal(ss(r->snaps,r,dest),r->sd[dest],sn,sd)&&stack_equal(ss(r->scopes,r,dest),r->cd[dest],sc,cd)&&stack_equal(ss(r->regions,r,dest),r->rd[dest],re,rd)&&stack_equal(ss(r->handlers,r,dest),r->hd[dest],ha,hd);}}
+static bool compute_states(IndependentReplay*r,ValidationWorkspace*w,size_t *work) { size_t entry=r->image->entry-r->image->blocks.offset;if(entry>=r->blocks)return false;r->known[entry]=1;bool changed=true;size_t pass=0,limit=r->blocks?(r->blocks*(r->locals+r->places+1)+1):1;while(changed&&pass++<limit){if(!METER())return false;changed=false;for(size_t b=0;b<r->blocks;b++){if(!METER())return false;if(!r->known[b])continue;if(!meter_work(work))return false;size_t mark=w->used;IndependentStorage *s=workspace_take(w,r->locals,sizeof *s);unsigned char*h=workspace_take(w,r->places,sizeof *h);size_t *tmp=workspace_take(w,r->width,sizeof *tmp),*tmpo=workspace_take(w,r->width,sizeof *tmpo),*sn=workspace_take(w,r->width,sizeof *sn),*sc=workspace_take(w,r->width,sizeof *sc),*re=workspace_take(w,r->width,sizeof *re),*ha=workspace_take(w,r->width,sizeof *ha);if((r->locals&&!s)||(r->places&&!h)||!tmp||!tmpo||!sn||!sc||!re||!ha){w->used=mark;return false;}if(r->locals)memcpy(s,st(r,b),r->locals*sizeof*s);if(r->places)memcpy(h,ho(r,b),r->places);size_t td=r->td[b],sd=r->sd[b],cd=r->cd[b],rd=r->rd[b],hd=r->hd[b];memcpy(tmp,ss(r->temps,r,b),td*sizeof*tmp);memcpy(tmpo,ss(r->temp_scopes,r,b),td*sizeof*tmpo);memcpy(sn,ss(r->snaps,r,b),sd*sizeof*sn);memcpy(sc,ss(r->scopes,r,b),cd*sizeof*sc);memcpy(re,ss(r->regions,r,b),rd*sizeof*re);memcpy(ha,ss(r->handlers,r,b),hd*sizeof*ha);const SolMirMaterializedBlock *bl=&r->m->blocks[r->image->blocks.offset+b];bool ok=true;for(size_t i=0;i<bl->instructions.count&&ok;i++){if(!meter_work(work)){ok=false;break;}ok=apply_instruction(r,&r->m->instructions[bl->instructions.offset+i],s,h,tmp,tmpo,&td,sn,&sd,sc,&cd,re,&rd,ha,&hd);}if(ok)ok=apply_terminator_temps(r,&bl->terminator,tmp,&td);size_t es[3],en=edges(&bl->terminator,es);for(size_t q=0;q<en&&ok;q++){if(!meter_work(work)){ok=false;break;}if(es[q]>=r->m->edge_count){ok=false;break;}size_t dest=r->m->edges[es[q]].block-r->image->blocks.offset;if(dest>=r->blocks){ok=false;break;}if(!r->known[dest]){r->known[dest]=1;if(r->locals)memcpy(st(r,dest),s,r->locals*sizeof*s);if(r->places)memcpy(ho(r,dest),h,r->places);r->td[dest]=td;r->sd[dest]=sd;r->cd[dest]=cd;r->rd[dest]=rd;r->hd[dest]=hd;memcpy(ss(r->temps,r,dest),tmp,td*sizeof*tmp);memcpy(ss(r->temp_scopes,r,dest),tmpo,td*sizeof*tmpo);memcpy(ss(r->snaps,r,dest),sn,sd*sizeof*sn);memcpy(ss(r->scopes,r,dest),sc,cd*sizeof*sc);memcpy(ss(r->regions,r,dest),re,rd*sizeof*re);memcpy(ss(r->handlers,r,dest),ha,hd*sizeof*ha);changed=true;}else {if(!meter_work(work)){ok=false;break;}ok=merge_storage(r->locals != 0 ? st(r,dest) : NULL,s,r->locals,&changed);for(size_t p=0;p<r->places;p++){if(!METER()){ok=false;break;}unsigned char a=ho(r,dest)[p], incoming=h[p], x=a==incoming?a:INDEPENDENT_HOLE_MAY;changed|=x!=a;ho(r,dest)[p]=x;}ok=ok&&stack_equal(ss(r->temps,r,dest),r->td[dest],tmp,td)&&stack_equal(ss(r->temp_scopes,r,dest),r->td[dest],tmpo,td)&&stack_equal(ss(r->snaps,r,dest),r->sd[dest],sn,sd)&&stack_equal(ss(r->scopes,r,dest),r->cd[dest],sc,cd)&&stack_equal(ss(r->regions,r,dest),r->rd[dest],re,rd)&&stack_equal(ss(r->handlers,r,dest),r->hd[dest],ha,hd);}}
 w->used=mark;if(!ok)return false;}}return !changed; }
 static SolMirRuntimeCleanupProducerKind independent_producer(
     const SolMirRuntimeCleanup *owner, const SolMirRuntimeCleanupEvent *event) {
@@ -423,6 +428,292 @@ static SolMirRuntimeCleanupProducerKind independent_producer(
             : SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_ARITHMETIC;
     return SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL;
 }
+/* Enum fields are matched against the declared domain by representation,
+ * before any typed read of an owner-supplied tag. This also rejects an
+ * identical but unsupported tag in both operands. */
+static bool cleanup_enum_pair_equal(const void *left, const void *right,
+    const void *domain, size_t width, size_t count) {
+    const unsigned char *values = domain;
+    for (size_t i = 0; i < count; ++i) {
+        const void *value = values + i * width;
+        if (memcmp(left, value, width) == 0
+            && memcmp(right, value, width) == 0) return true;
+    }
+    return false;
+}
+
+#define CLEANUP_ENUM_PAIR(type, left, right, ...) \
+    cleanup_enum_pair_equal((left), (right), (const type[]){__VA_ARGS__}, \
+        sizeof(type), sizeof((const type[]){__VA_ARGS__}) / sizeof(type))
+
+static bool cleanup_bool_read(const bool *field, bool *value) {
+    const bool valid_false = false;
+    const bool valid_true = true;
+    if (memcmp(field, &valid_false, sizeof(valid_false)) == 0) {
+        *value = false;
+        return true;
+    }
+    if (memcmp(field, &valid_true, sizeof(valid_true)) == 0) {
+        *value = true;
+        return true;
+    }
+    return false;
+}
+
+static bool cleanup_bool_pair_equal(const bool *left, const bool *right) {
+    bool left_value, right_value;
+    return cleanup_bool_read(left, &left_value)
+        && cleanup_bool_read(right, &right_value)
+        && left_value == right_value;
+}
+
+static bool cleanup_source_equal(const SolMirRuntimeSource *left,
+    const SolMirRuntimeSource *right) {
+    return left->file == right->file && left->start == right->start
+        && left->end == right->end;
+}
+
+static bool cleanup_slice_equal(const SolMirRuntimeSlice *left,
+    const SolMirRuntimeSlice *right) {
+    return left->offset == right->offset && left->count == right->count;
+}
+
+static bool cleanup_event_equal(const SolMirRuntimeCleanupEvent *left,
+    const SolMirRuntimeCleanupEvent *right) {
+    return CLEANUP_ENUM_PAIR(SolMirRuntimeCleanupEventKind, &left->kind,
+            &right->kind, SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_INSTRUCTION,
+            SOL_MIR_RUNTIME_CLEANUP_EVENT_IMAGE_TERMINATOR,
+            SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_INSTRUCTION,
+            SOL_MIR_RUNTIME_CLEANUP_EVENT_PREDICATE_TERMINATOR)
+        && CLEANUP_ENUM_PAIR(SolMirRuntimeCleanupPhase, &left->phase,
+            &right->phase, SOL_MIR_RUNTIME_CLEANUP_PHASE_AT_OPERATION,
+            SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_INVOKE_CALLABLE,
+            SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_PROPAGATE_RESIDUAL,
+            SOL_MIR_RUNTIME_CLEANUP_PHASE_PRE_STEP)
+        && CLEANUP_ENUM_PAIR(SolMirRuntimeCleanupOrigin, &left->origin,
+            &right->origin, SOL_MIR_RUNTIME_CLEANUP_ORIGIN_EXPLICIT,
+            SOL_MIR_RUNTIME_CLEANUP_ORIGIN_IMPLICIT)
+        && left->owner == right->owner && left->block == right->block
+        && left->operation == right->operation
+        && left->semantic_site == right->semantic_site
+        && cleanup_source_equal(&left->source, &right->source)
+        && left->inherited_failure_site == right->inherited_failure_site
+        && left->supplemental_site == right->supplemental_site
+        && cleanup_slice_equal(&left->actions, &right->actions)
+        && cleanup_slice_equal(&left->transitions, &right->transitions)
+        && CLEANUP_ENUM_PAIR(SolMirRuntimeCleanupProducerKind,
+            &left->producer, &right->producer,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CONTROL,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_ARITHMETIC,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_INVOKE,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_PANIC,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_NO_MATCH,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_IMAGE_UNREACHABLE,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PREDICATE_ARITHMETIC,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PREDICATE_INVOKE,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PREDICATE_NO_MATCH,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PREDICATE_RESULT,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_SUPPLEMENTAL_ALLOCATION,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_CALLABLE_CONSTRUCTION,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_PROPAGATION_RESIDUAL,
+            SOL_MIR_RUNTIME_CLEANUP_PRODUCER_STEP_METER)
+        && cleanup_bool_pair_equal(&left->captures_failure_detail,
+            &right->captures_failure_detail)
+        && CLEANUP_ENUM_PAIR(SolMirRuntimeFailureDetailKind,
+            &left->capture_detail_kind, &right->capture_detail_kind,
+            SOL_MIR_RUNTIME_FAILURE_DETAIL_NONE,
+            SOL_MIR_RUNTIME_FAILURE_DETAIL_PANIC_TEXT,
+            SOL_MIR_RUNTIME_FAILURE_DETAIL_HOST_BYTES);
+}
+
+static bool cleanup_action_equal_mode(const SolMirRuntimeCleanupAction *left,
+    const SolMirRuntimeCleanupAction *right, bool compare_drop_path) {
+    const unsigned allowed_flags = SOL_MIR_RUNTIME_CLEANUP_ACTION_NORMAL_ONLY
+        | SOL_MIR_RUNTIME_CLEANUP_ACTION_FAILURE_ONLY
+        | SOL_MIR_RUNTIME_CLEANUP_ACTION_GUARDED;
+    return CLEANUP_ENUM_PAIR(SolMirRuntimeCleanupActionKind, &left->kind,
+            &right->kind, SOL_MIR_RUNTIME_CLEANUP_ACTION_WRITEBACK,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_CHECK_CONTRACT,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_TEMPORARY,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_SCOPE,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_REGION,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_HANDLER,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PARAMETER,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE)
+        && (left->flags & ~allowed_flags) == 0
+        && (right->flags & ~allowed_flags) == 0
+        && left->flags == right->flags && left->target == right->target
+        && left->recipe == right->recipe
+        && (!compare_drop_path || left->drop_path == right->drop_path);
+}
+
+static bool cleanup_action_kind_has_path(
+    const SolMirRuntimeCleanupActionKind *kind) {
+    const SolMirRuntimeCleanupActionKind drop_place
+        = SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE;
+    const SolMirRuntimeCleanupActionKind drop_parameter
+        = SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PARAMETER;
+    return CLEANUP_ENUM_PAIR(SolMirRuntimeCleanupActionKind, kind, kind,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_WRITEBACK,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_CHECK_CONTRACT,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_TEMPORARY,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_SCOPE,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_REGION,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_EXIT_HANDLER,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_SNAPSHOT,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PARAMETER,
+            SOL_MIR_RUNTIME_CLEANUP_ACTION_PROPAGATE_FAILURE)
+        && (memcmp(kind, &drop_place, sizeof(drop_place)) == 0
+            || memcmp(kind, &drop_parameter, sizeof(drop_parameter)) == 0);
+}
+
+static bool cleanup_drop_path_equal(const SolMirRuntimeCleanupDropPath *left,
+    const SolMirRuntimeCleanupDropPath *right) {
+    return left->root == right->root && left->place == right->place
+        && cleanup_slice_equal(&left->holes, &right->holes)
+        && left->recipe == right->recipe
+        && CLEANUP_ENUM_PAIR(SolMirRuntimeCleanupDropLiveness,
+            &left->liveness, &right->liveness,
+            SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE,
+            SOL_MIR_RUNTIME_CLEANUP_DROP_CONDITIONAL);
+}
+
+static bool cleanup_transition_core_equal(
+    const SolMirRuntimeCleanupTransition *left,
+    const SolMirRuntimeCleanupTransition *right) {
+    return left->event == right->event
+        && CLEANUP_ENUM_PAIR(SolMirRuntimeCleanupOutcome, &left->outcome,
+            &right->outcome, SOL_MIR_RUNTIME_CLEANUP_OUTCOME_NORMAL,
+            SOL_MIR_RUNTIME_CLEANUP_OUTCOME_FAILURE,
+            SOL_MIR_RUNTIME_CLEANUP_OUTCOME_EXIT)
+        && left->continuation == right->continuation
+        && cleanup_slice_equal(&left->actions, &right->actions)
+        && cleanup_bool_pair_equal(&left->primary_failure_wins,
+            &right->primary_failure_wins);
+}
+
+static bool cleanup_transition_metadata_equal(
+    const SolMirRuntimeCleanupTransition *left,
+    const SolMirRuntimeCleanupTransition *right) {
+    return CLEANUP_ENUM_PAIR(SolMirRuntimeCleanupEdgeRole,
+            &left->edge_role, &right->edge_role,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_GOTO,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_TRUE,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_BRANCH_FALSE,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_NORMAL,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_CALL_FAILURE,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_SATISFIED,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_VIOLATION,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_REFINED_FAILURE,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_PROPAGATE_VALUE,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_PROPAGATE_RESIDUAL,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_SATISFIED,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_VIOLATION,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_CONTRACT_FAILURE,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_RETURN,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_TERMINAL_FAILURE,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_PRE_OPERATION_READY,
+            SOL_MIR_RUNTIME_CLEANUP_EDGE_STEP_FAILURE)
+        && left->source_edge == right->source_edge
+        && left->destination == right->destination
+        && CLEANUP_ENUM_PAIR(SolMirRuntimeCleanupFailureSource,
+            &left->failure_source, &right->failure_source,
+            SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_NONE,
+            SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_INHERITED_P31,
+            SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_SUPPLEMENTAL_P33,
+            SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_PENDING,
+            SOL_MIR_RUNTIME_CLEANUP_FAILURE_SOURCE_LOCAL_OR_PENDING)
+        && left->failure_site == right->failure_site
+        && left->failure_mask == right->failure_mask
+        && CLEANUP_ENUM_PAIR(SolContractClauseKind, &left->contract_phase,
+            &right->contract_phase, SOL_CONTRACT_REQUIRES,
+            SOL_CONTRACT_ENSURES)
+        && CLEANUP_ENUM_PAIR(SolContractOutcomeKind,
+            &left->contract_outcome, &right->contract_outcome,
+            SOL_CONTRACT_OUTCOME_ALWAYS, SOL_CONTRACT_OUTCOME_SUCCESS,
+            SOL_CONTRACT_OUTCOME_FAILURE);
+}
+
+static bool cleanup_transition_metadata_matches(
+    const SolMirRuntimeCleanupTransition *actual,
+    SolMirRuntimeCleanupEdgeRole edge_role, size_t source_edge,
+    size_t destination, SolMirRuntimeCleanupFailureSource failure_source,
+    size_t failure_site, uint32_t failure_mask,
+    SolContractClauseKind contract_phase,
+    SolContractOutcomeKind contract_outcome) {
+    SolMirRuntimeCleanupTransition expected = {
+        .edge_role = edge_role, .source_edge = source_edge,
+        .destination = destination, .failure_source = failure_source,
+        .failure_site = failure_site, .failure_mask = failure_mask,
+        .contract_phase = contract_phase, .contract_outcome = contract_outcome,
+    };
+    return cleanup_transition_metadata_equal(actual, &expected);
+}
+
+static bool cleanup_supplemental_equal(
+    const SolMirRuntimeCleanupSupplementalSite *left,
+    const SolMirRuntimeCleanupSupplementalSite *right) {
+    return left->event == right->event
+        && cleanup_source_equal(&left->source, &right->source)
+        && left->allowed_codes == right->allowed_codes;
+}
+
+static bool cleanup_usage_equal(const SolMirRuntimeCleanupUsage *left,
+    const SolMirRuntimeCleanupUsage *right) {
+    return left->events == right->events && left->actions == right->actions
+        && left->transitions == right->transitions
+        && left->supplemental_sites == right->supplemental_sites
+        && left->drop_paths == right->drop_paths
+        && left->owned_bytes == right->owned_bytes
+        && left->build_scratch_bytes == right->build_scratch_bytes
+        && left->build_work == right->build_work
+        && left->validation_scratch_bytes == right->validation_scratch_bytes
+        && left->validation_work == right->validation_work;
+}
+
+#ifdef SOL_MIR_PLAN_TEST_HOOKS
+bool sol_mir_runtime_cleanup_internal_test_row_equal(unsigned kind,
+    const void *left, const void *right) {
+    if (left == NULL || right == NULL) return false;
+#define CLEANUP_ALIGNED(pointer, type) ((uintptr_t)(pointer) % _Alignof(type) == 0)
+    switch (kind) {
+        case SOL_MIR_RUNTIME_CLEANUP_TEST_ROW_EVENT:
+            return CLEANUP_ALIGNED(left, SolMirRuntimeCleanupEvent)
+                && CLEANUP_ALIGNED(right, SolMirRuntimeCleanupEvent)
+                && cleanup_event_equal(left, right);
+        case SOL_MIR_RUNTIME_CLEANUP_TEST_ROW_ACTION:
+            return CLEANUP_ALIGNED(left, SolMirRuntimeCleanupAction)
+                && CLEANUP_ALIGNED(right, SolMirRuntimeCleanupAction)
+                && cleanup_action_equal_mode(left, right, true);
+        case SOL_MIR_RUNTIME_CLEANUP_TEST_ROW_DROP_PATH:
+            return CLEANUP_ALIGNED(left, SolMirRuntimeCleanupDropPath)
+                && CLEANUP_ALIGNED(right, SolMirRuntimeCleanupDropPath)
+                && cleanup_drop_path_equal(left, right);
+        case SOL_MIR_RUNTIME_CLEANUP_TEST_ROW_TRANSITION:
+            return CLEANUP_ALIGNED(left, SolMirRuntimeCleanupTransition)
+                && CLEANUP_ALIGNED(right, SolMirRuntimeCleanupTransition)
+                && cleanup_transition_core_equal(left, right)
+                && cleanup_transition_metadata_equal(left, right);
+        case SOL_MIR_RUNTIME_CLEANUP_TEST_ROW_SUPPLEMENTAL_SITE:
+            return CLEANUP_ALIGNED(left, SolMirRuntimeCleanupSupplementalSite)
+                && CLEANUP_ALIGNED(right, SolMirRuntimeCleanupSupplementalSite)
+                && cleanup_supplemental_equal(left, right);
+        case SOL_MIR_RUNTIME_CLEANUP_TEST_ROW_USAGE:
+            return CLEANUP_ALIGNED(left, SolMirRuntimeCleanupUsage)
+                && CLEANUP_ALIGNED(right, SolMirRuntimeCleanupUsage)
+                && cleanup_usage_equal(left, right);
+        default:
+            return false;
+    }
+#undef CLEANUP_ALIGNED
+}
+#endif
+
+#undef CLEANUP_ENUM_PAIR
+
 static bool sink_event(IndependentSink *s, const SolMirRuntimeCleanupEvent *event) {
     if (s->have_event || s->event_index >= s->owner->event_count) return false;
     s->current_event = *event;
@@ -435,7 +726,8 @@ static bool sink_action(IndependentSink *s, SolMirRuntimeCleanupActionKind kind,
     if (s->action_index >= s->owner->action_count) return false;
     SolMirRuntimeCleanupAction expected = {.kind=kind,.flags=flags,.target=target,.recipe=recipe,
         .drop_path=SOL_MIR_RUNTIME_NONE};
-    if (memcmp(&expected, &s->owner->actions[s->action_index], sizeof(expected)) != 0) return false;
+    if (!cleanup_action_equal_mode(&expected,
+            &s->owner->actions[s->action_index], true)) return false;
     ++s->action_index;
     if (!add(&s->count.actions, 1)) return false;
     return meter_work(s->work);
@@ -497,26 +789,24 @@ static bool sink_drop_action(IndependentSink *s, SolMirRuntimeCleanupActionKind 
     size_t path = s->count.drop_paths;
     SolMirRuntimeCleanupAction expected = {kind, flags, target, recipe,
         s->check_drop_paths ? path : SOL_MIR_RUNTIME_NONE};
-    if (s->owner->actions[s->action_index].kind != expected.kind
-        || s->owner->actions[s->action_index].flags != expected.flags
-        || s->owner->actions[s->action_index].target != expected.target
-        || s->owner->actions[s->action_index].recipe != expected.recipe
-        || (s->check_drop_paths && s->owner->actions[s->action_index].drop_path
-            != expected.drop_path)) return false;
+    if (!cleanup_action_equal_mode(&expected,
+            &s->owner->actions[s->action_index], s->check_drop_paths)) return false;
     if (s->check_drop_paths) {
         if (path >= s->owner->drop_path_count) return false;
         SolMirRuntimeCleanupDropPath main = {root, place, {path + 1, holes_count}, recipe,
             (flags & SOL_MIR_RUNTIME_CLEANUP_ACTION_GUARDED) ? SOL_MIR_RUNTIME_CLEANUP_DROP_CONDITIONAL
                 : SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE};
-        if (memcmp(&main, &s->owner->drop_paths[path], sizeof(main)) != 0) return false;
+        if (!cleanup_drop_path_equal(&main, &s->owner->drop_paths[path])) return false;
         for (size_t i = 0; i < holes_count; ++i) {
             size_t hole = selected_hole_at(r, holes, place, i);
             if (hole == SOL_MIR_RUNTIME_NONE) return false;
             unsigned char state = holes[hole - r->image->places.offset];
             SolMirRuntimeCleanupDropPath expected_hole = {root, hole, {0, 0}, recipe,
                 state == INDEPENDENT_HOLE_MUST ? SOL_MIR_RUNTIME_CLEANUP_DROP_DEFINITE : SOL_MIR_RUNTIME_CLEANUP_DROP_CONDITIONAL};
-            if (path + 1 + i >= s->owner->drop_path_count
-                || memcmp(&expected_hole, &s->owner->drop_paths[path + 1 + i], sizeof(expected_hole)) != 0) return false;
+            size_t hole_path = path + 1 + i;
+            if (hole_path >= s->owner->drop_path_count
+                || !cleanup_drop_path_equal(&expected_hole,
+                    &s->owner->drop_paths[hole_path])) return false;
         }
     }
     ++s->action_index;
@@ -526,19 +816,23 @@ static bool sink_drop_action(IndependentSink *s, SolMirRuntimeCleanupActionKind 
 static bool sink_transition(IndependentSink *s, SolMirRuntimeCleanupEventId event,
     SolMirRuntimeCleanupOutcome outcome, size_t edge, size_t offset) {
     if (s->transition_index >= s->owner->transition_count || offset > s->action_index) return false;
-    SolMirRuntimeCleanupTransition expected = s->owner->transitions[s->transition_index];
-    expected.event = event; expected.outcome = outcome; expected.continuation = edge;
-    expected.actions = (SolMirRuntimeSlice){offset, s->action_index - offset};
-    expected.primary_failure_wins = true;
-    if (memcmp(&expected, &s->owner->transitions[s->transition_index], sizeof(expected)) != 0)
-        return false;
+    SolMirRuntimeCleanupTransition expected = {
+        .event = event,
+        .outcome = outcome,
+        .continuation = edge,
+        .actions = {offset, s->action_index - offset},
+        .primary_failure_wins = true,
+    };
+    if (!cleanup_transition_core_equal(&expected,
+            &s->owner->transitions[s->transition_index])) return false;
     ++s->transition_index;
     return add(&s->count.transitions, 1) && meter_work(s->work);
 }
 static bool sink_supplemental(IndependentSink *s,
     const SolMirRuntimeCleanupSupplementalSite *site) {
     if (s->supplemental_index >= s->owner->supplemental_site_count
-        || memcmp(site, &s->owner->supplemental_sites[s->supplemental_index], sizeof(*site)) != 0)
+        || !cleanup_supplemental_equal(site,
+            &s->owner->supplemental_sites[s->supplemental_index]))
         return false;
     ++s->supplemental_index;
     return add(&s->count.supplemental_sites, 1) && meter_work(s->work);
@@ -547,8 +841,8 @@ static bool sink_finish_event(IndependentSink *s, size_t id) {
     if (!s->have_event || id != s->event_index) return false;
     s->current_event.actions.count = s->action_index - s->current_event.actions.offset;
     s->current_event.transitions.count = s->transition_index - s->current_event.transitions.offset;
-    if (memcmp(&s->current_event, &s->owner->events[s->event_index],
-            sizeof(s->current_event)) != 0) return false;
+    if (!cleanup_event_equal(&s->current_event,
+            &s->owner->events[s->event_index])) return false;
     ++s->event_index;
     s->have_event = false;
     return true;
@@ -1792,11 +2086,9 @@ static bool validation_metadata(const SolMirRuntimeCleanup *cleanup) {
                 failure_site = SOL_MIR_RUNTIME_NONE;
                 mask = 0;
             }
-            if (t->source_edge != t->continuation || t->destination != destination
-                || t->edge_role != role
-                || t->failure_source != failure_source || t->failure_site != failure_site
-                || t->failure_mask != mask || t->contract_phase != phase
-                || t->contract_outcome != outcome) return false;
+            if (!cleanup_transition_metadata_matches(t, role, t->continuation,
+                    destination, failure_source, failure_site, mask, phase, outcome))
+                return false;
         }
     }
     return true;
@@ -1862,8 +2154,7 @@ SolMirRuntimeCleanupBuildOutcome sol_mir_runtime_cleanup_internal_validate(
         }
     for (size_t i = 0; i < cleanup->action_count; ++i) {
         const SolMirRuntimeCleanupAction *a = &cleanup->actions[i];
-        if ((a->kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PLACE
-                || a->kind == SOL_MIR_RUNTIME_CLEANUP_ACTION_DROP_PARAMETER)
+        if (cleanup_action_kind_has_path(&a->kind)
             ? a->drop_path >= cleanup->drop_path_count : a->drop_path != SOL_MIR_RUNTIME_NONE) {
             validation_bad(diagnostics, "runtime cleanup action path is invalid");
             return SOL_MIR_RUNTIME_CLEANUP_BUILD_INTERNAL_FAILED;
@@ -1920,7 +2211,7 @@ SolMirRuntimeCleanupBuildOutcome sol_mir_runtime_cleanup_internal_validate(
         validation_bad(diagnostics, "runtime cleanup validation resource limit exceeded");
         return SOL_MIR_RUNTIME_CLEANUP_BUILD_RESOURCE_EXHAUSTED;
     }
-    if (!matches || memcmp(&expected_usage, &cleanup->usage, sizeof(expected_usage)) != 0) {
+    if (!matches || !cleanup_usage_equal(&expected_usage, &cleanup->usage)) {
         validation_bad(diagnostics, "runtime cleanup CFG replay does not match owner arenas");
         return SOL_MIR_RUNTIME_CLEANUP_BUILD_INTERNAL_FAILED;
     }

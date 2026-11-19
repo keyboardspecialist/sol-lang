@@ -12,5 +12,8 @@ void *sol_mir_runtime_lowered_program_internal_validation_scratch(size_t,size_t)
 /* Full fresh validation and the original uncached key computation/row emitter. */
 bool sol_mir_runtime_lowered_program_test_render_reference(
     FILE *, const SolMirRuntimeLoweredProgram *);
+bool sol_mir_runtime_lowered_program_test_build_cost_formula(
+    size_t, size_t, size_t, size_t, size_t, size_t, size_t, size_t,
+    size_t *, size_t *);
 #endif
 #endif
